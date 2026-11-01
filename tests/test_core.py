@@ -1,3 +1,4 @@
+import json
 from datetime import date
 
 import pytest
@@ -129,6 +130,28 @@ def test_apply_rejects_unknown_field(conn):
     tid = upsert_task(conn, task(id=None))
     res = batches.apply(conn, [{"task_id": tid, "op": "set", "fields": {"score": 99}}], "ui", TODAY)
     assert res["applied"] == 0 and res["skipped"][0]["why"].startswith("field score")
+
+
+# --- notion import ---------------------------------------------------------------------------
+
+def _page(task_id, name, status="Next", created="2026-10-30T00:00:00.000Z"):
+    return {"id": f"page-{task_id}", "created_time": created, "last_edited_time": created, "properties": {
+        "Name": {"title": [{"plain_text": name}]}, "Task ID": {"unique_id": {"prefix": "Task", "number": task_id}},
+        "Status": {"select": {"name": status}}, "Project": {"select": {"name": "LARK"}}, "Mentions": {"number": 1},
+        "Source Key": {"rich_text": [{"plain_text": f"plaud:x:{task_id}"}]}}}
+
+
+def test_new_only_sync_never_overwrites_existing_rows(conn, cfg, tmp_path):
+    from factotum.importers.notion_tasks import run
+    upsert_task(conn, task(id=2, name="existing, kept by Robert", source_key="plaud:x:2", last_reviewed_at="2026-10-31"))
+    conn.commit()
+    dump = tmp_path / "pages.json"
+    dump.write_text(json.dumps([_page(2, "existing, renamed in Notion"), _page(5, "brand new from a recording")]))
+    res = run(conn, cfg, apply=True, from_json=str(dump), new_only=True, today=TODAY, out=lambda *_: None)
+    assert res["total"] == 1 and res["skipped_existing"] == 1
+    rows = {r["id"]: r for r in map(dict, conn.execute("SELECT id, name, status, last_reviewed_at FROM tasks"))}
+    assert rows[2]["name"] == "existing, kept by Robert" and rows[2]["last_reviewed_at"] == "2026-10-31"
+    assert rows[5]["status"] == "open" and rows[5]["last_reviewed_at"] is None  # surfaces as New in Review
 
 
 # --- notion parsing --------------------------------------------------------------------------

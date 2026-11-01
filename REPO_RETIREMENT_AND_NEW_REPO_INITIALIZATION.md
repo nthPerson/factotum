@@ -48,6 +48,10 @@ Secrets go in `.env` only. `config/factotum.yaml` is a copy of the example with 
    ~10 last call, ~20 soft faded, ~80 undated faded, ~30 undated keep. If a bucket looks wrong,
    adjust `lifecycle.classify_import`, not the data.
 2. `--apply`. Then `python -m factotum score` and `python -m factotum review` as sanity checks.
+   Same day: add an hourly cron entry for `python -m factotum import-notion --new-only --apply`
+   so rows plaud-sync keeps creating in Notion reach the store until phase 3; remove it at the
+   phase 3 cutover. Tell Robert the `plaud-sync-planner` skill is read-only from now on
+   (SPEC.md §15).
 3. `sudo cp deploy/factotum.service /etc/systemd/system/ && sudo systemctl enable --now factotum`.
    Open http://127.0.0.1:8750, then https://factotum.nthperson.dev through Access.
 4. **Gate:** Robert does one Review session, applies the batch, and says whether the cap, the

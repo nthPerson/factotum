@@ -2,7 +2,13 @@
 
     python -m factotum import-notion --dry-run          # bucket report, writes nothing
     python -m factotum import-notion --apply            # writes tasks with the classified statuses
+    python -m factotum import-notion --new-only --apply # interim sync: only rows whose Task ID is above
+                                                        # the store's highest; existing rows are untouched
     python -m factotum import-notion --from-json x.json # same, from a saved API dump (for tests / offline)
+
+`--new-only` exists for the window between the one-time import and the phase 3 cutover, while
+plaud-sync still creates task rows in Notion. Run it from cron (hourly is plenty); it never
+overwrites a row the store already has, so Review decisions survive.
 
 Uses the Notion REST API with an internal integration token (NOTION_TOKEN). The integration must
 be connected to the Tasks database (docs/SETUP.md §5). Tries the 2025-09 data-source endpoint
@@ -32,10 +38,12 @@ def _headers(version: str) -> dict:
     return {"Authorization": f"Bearer {token}", "Notion-Version": version, "Content-Type": "application/json"}
 
 
-def fetch_all(cfg: dict) -> list[dict]:
-    """Page through every row of the Tasks data source. Returns raw Notion page objects."""
+def fetch_all(cfg: dict, min_id_exclusive: int | None = None) -> list[dict]:
+    """Page through every row of the Tasks data source. Returns raw Notion page objects.
+    With `min_id_exclusive`, asks Notion for rows whose Task ID is greater than it."""
     ds = C.get(cfg, "sinks.notion_tasks_mirror.data_source_id")
     db = C.get(cfg, "sinks.notion_tasks_mirror.database_id")
+    task_id_prop = (C.get(cfg, "sinks.notion_tasks_mirror.properties", {}) or {}).get("task_id", "Task ID")
     attempts = [
         (f"{NOTION}/data_sources/{ds}/query", "2025-09-03"),
         (f"{NOTION}/databases/{db}/query", "2022-06-28"),
@@ -47,7 +55,9 @@ def fetch_all(cfg: dict) -> list[dict]:
         try:
             with httpx.Client(timeout=60) as client:
                 while True:
-                    body = {"page_size": 100}
+                    body: dict = {"page_size": 100}
+                    if min_id_exclusive is not None:
+                        body["filter"] = {"property": task_id_prop, "unique_id": {"greater_than": min_id_exclusive}}
                     if cursor:
                         body["start_cursor"] = cursor
                     r = client.post(url, headers=_headers(version), json=body)
@@ -148,22 +158,36 @@ def parse_page(page: dict, props_cfg: dict | None = None) -> dict:
 
 # --- the import ------------------------------------------------------------------------------
 
-def run(conn, cfg: dict, *, apply: bool, from_json: str | None = None, today: date | None = None, out=print) -> dict:
+def run(conn, cfg: dict, *, apply: bool, from_json: str | None = None, new_only: bool = False,
+        today: date | None = None, out=print) -> dict:
     today = today or date.today()
-    pages = json.load(open(from_json, encoding="utf-8")) if from_json else fetch_all(cfg)
+    max_id = int(conn.execute("SELECT COALESCE(MAX(id), 0) FROM tasks").fetchone()[0]) if new_only else None
+    if from_json:
+        pages = json.load(open(from_json, encoding="utf-8"))
+    else:
+        pages = fetch_all(cfg, min_id_exclusive=max_id)
     props_cfg = C.get(cfg, "sinks.notion_tasks_mirror.properties", {}) or {}
     counts: Counter[str] = Counter()
     by_bucket: dict[str, list[dict]] = {b: [] for b, _ in IMPORT_BUCKETS}
     parsed = []
+    skipped_existing = 0
     for page in pages:
         t = parse_page(page, props_cfg)
+        if new_only and (t["id"] is None or t["id"] <= max_id):
+            skipped_existing += 1  # the store already has it (or it has no id); never overwrite
+            continue
         bucket, new_status = classify_import(t, today, cfg)
         t["_bucket"], t["_new_status"] = bucket, new_status
         counts[bucket] += 1
         by_bucket[bucket].append(t)
         parsed.append(t)
 
-    out(f"Imported {len(parsed)} rows from Notion ({'dry run' if not apply else 'APPLYING'}), as of {today}:\n")
+    mode = "dry run" if not apply else "APPLYING"
+    if new_only:
+        out(f"New-only sync: store's highest Task ID is {max_id}; {len(parsed)} newer rows found, "
+            f"{skipped_existing} existing rows left untouched ({mode}).\n")
+    else:
+        out(f"Imported {len(parsed)} rows from Notion ({mode}), as of {today}:\n")
     for bucket, desc in IMPORT_BUCKETS:
         out(f"  {counts[bucket]:4d}  {bucket:16s} {desc}")
     open_after = sum(1 for t in parsed if t["_new_status"] == "open")
@@ -194,4 +218,4 @@ def run(conn, cfg: dict, *, apply: bool, from_json: str | None = None, today: da
                 add_link(conn, tid, "plaud_note", n, "Plaud note (Notion page id)")
         conn.commit()
         out(f"\nWrote {len(parsed)} tasks.")
-    return {"counts": dict(counts), "open_after": open_after, "total": len(parsed)}
+    return {"counts": dict(counts), "open_after": open_after, "total": len(parsed), "skipped_existing": skipped_existing}

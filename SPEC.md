@@ -289,8 +289,16 @@ classified statuses (`lifecycle.classify_import`):
 | dated_keep | dated, not yet due, or recently past | keep |
 | closed | Done/Dropped | history |
 
-Then Review sessions at the usual cap until the New bucket is empty (estimate from the sample:
-30 to 40 rows, three evenings). Top starts empty; the first brief suggests five. Faded and
+Rows outside `hard_last_call` and `undated_keep` are marked reviewed on import day, so only
+those two buckets surface as New. Then Review sessions at the usual cap until the New bucket is
+empty (estimate from the sample: 30 to 40 rows, three evenings).
+
+**The interim window.** Between import day and the phase 3 cutover, plaud-sync keeps creating
+task rows in Notion. `import-notion --new-only --apply` pulls only rows whose Task ID is above
+the store's highest and never touches existing rows, so Review decisions survive; run it hourly
+from cron until phase 3, then delete the cron entry. Any edit made to the Notion Tasks DB by
+hand or by the old `plaud-sync-planner` skill after import day is invisible to Factotum: from
+that day the skill is read-only (see §15). Top starts empty; the first brief suggests five. Faded and
 lapsed rows stay searchable and come back on any new mention, so a wrong fade costs nothing.
 The old Command Log relations are not imported; task history lives in `changes` from now on.
 
@@ -324,7 +332,18 @@ link; every batch is undoable; sinks are write-only.
 6. **Mirror and cleanup:** Notion tasks mirror live, retire the Today page and Command Log,
    archive plaud-sync, point the two Claude Code skills at the API.
 
-## 15. Open questions
+## 15. Claude Code skills
+
+`plaud-sync-planner` and `plaud-sync-ops` (installed in Claude Code and claude.ai) keep working
+unchanged until import day. From import day the planner skill is **read-only** (the Notion
+Tasks DB is a mirror; writes there are lost); task edits go through the Factotum UI. In phase 5
+both are replaced by `factotum-planner` and `factotum-ops` under `skills/` here: the planner
+skill uses the same `factotum mcp` server Chat uses, extended with write tools that *stage a
+batch* rather than write directly, so the tray rule holds from a skill too. For Claude Code on
+mf-pc that server is local stdio; for claude.ai it is exposed as a streamable-HTTP route behind
+the tunnel with a Cloudflare Access service token and added as a custom connector.
+
+## 16. Open questions
 
 - Hostname: `factotum.nthperson.dev` (recommended) or `plaud-sync.nthperson.dev`.
 - Review cap 15 and the 3-day fade warning: right sizes to start?

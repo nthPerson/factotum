@@ -1,7 +1,7 @@
 """CLI entry point.
 
     python -m factotum init-db
-    python -m factotum import-notion [--dry-run | --apply] [--from-json FILE]
+    python -m factotum import-notion [--dry-run | --apply] [--new-only] [--from-json FILE]
     python -m factotum serve [--host H] [--port P]
     python -m factotum score            # print the open list with scores (sanity check)
     python -m factotum review           # print today's review queue
@@ -25,6 +25,7 @@ def main(argv: list[str] | None = None) -> int:
     g = p.add_mutually_exclusive_group()
     g.add_argument("--dry-run", action="store_true", default=True)
     g.add_argument("--apply", action="store_true")
+    p.add_argument("--new-only", action="store_true", help="only rows whose Task ID is above the store's highest; never overwrites")
     p.add_argument("--from-json")
     p = sub.add_parser("serve")
     p.add_argument("--host")
@@ -45,7 +46,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"database ready at {C.db_path()}")
     elif a.cmd == "import-notion":
         from .importers.notion_tasks import run
-        run(conn, ecfg, apply=a.apply, from_json=a.from_json, today=today)
+        run(conn, ecfg, apply=a.apply, from_json=a.from_json, new_only=a.new_only, today=today)
     elif a.cmd == "serve":
         import uvicorn
         from .api import create_app
