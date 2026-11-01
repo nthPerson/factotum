@@ -23,11 +23,11 @@ taxonomy:
     - { name: GEOG 582,                    area: Academics, weight: high }
     - { name: COMPE 510,                   area: Academics, weight: high }
     - { name: BDA 696,                     area: Academics, weight: high }
-    - { name: SCIBER-CT,                   area: Academics, weight: high }
+    - { name: SCIBER-CT,                   area: Academics, weight: high,   never_fade: true }
     - { name: DiCE Lab,                    area: Research,  weight: high }
     - { name: Caltrans,                    area: Research,  weight: high }
-    - { name: Evidential Deep Learning,    area: Research,  weight: high }
-    - { name: FAMAIL,                      area: Research,  weight: low,    never_fade: true }
+    - { name: Evidential Deep Learning,    area: Research,  weight: high,   never_fade: true }
+    - { name: FAMAIL,                      area: Research,  weight: low  }
     - { name: ZIP Launchpad,               area: Work,      weight: high }
     - { name: Car Sounds,                  area: Work,      weight: medium }
     - { name: LARK,                        area: Work,      weight: medium }
