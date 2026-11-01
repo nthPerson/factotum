@@ -1,0 +1,23 @@
+# secrets and per-install config
+.env
+config/factotum.yaml
+config/google-credentials.json
+config/google-token.json
+
+# runtime
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+runs/
+*.log
+
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+build/
+dist/

@@ -1,0 +1,188 @@
+"""HTTP API + static UI (SPEC.md §9). Phase 1 surface:
+
+  GET  /api/tasks?status=open|all        tasks with computed score/priority/tier/fade/last-call
+  GET  /api/tasks/{id}                   one task with links, reminders, recent changes
+  POST /api/commands  {text}             parse the grammar → changes (nothing applied)
+  POST /api/batches/apply {source, changes}   the one write path
+  POST /api/batches/{id}/undo
+  GET  /api/review                       the review queue (read-only in phase 1; decisions go through batches)
+  GET  /api/settings · PUT /api/settings  Settings-tab overrides (whitelisted keys), accounts
+  GET  /api/stats
+"""
+from __future__ import annotations
+
+import json
+from datetime import date
+from pathlib import Path
+from typing import Any
+
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
+from . import batches, commands, config as C, lifecycle, scoring
+from .db import connect, get_settings, get_task, init_db, rows, seed_accounts, set_setting
+from .dates import parse_date
+
+WEB = Path(__file__).resolve().parent / "web"
+
+
+class ApplyBody(BaseModel):
+    source: str = "ui"
+    changes: list[dict[str, Any]]
+
+
+class CommandBody(BaseModel):
+    text: str
+
+
+class SettingsBody(BaseModel):
+    values: dict[str, Any] = {}
+    accounts: list[dict[str, Any]] | None = None
+
+
+def create_app(cfg: dict | None = None, db_path: str | None = None) -> FastAPI:
+    cfg = cfg or C.load()
+    conn = connect(db_path or C.db_path())
+    init_db(conn)
+    seed_accounts(conn, C.get(cfg, "sources.mail.seed_accounts", []))
+    app = FastAPI(title="Factotum", version="0.1.0")
+
+    def eff_cfg() -> dict:
+        return C.effective(cfg, get_settings(conn))
+
+    def decorate(t: dict, today: date, ecfg: dict) -> dict:
+        s, pr, reasons = scoring.score(t, today, ecfg)
+        t["score"], t["priority"], t["score_reasons"] = s, pr, reasons
+        t["tier"] = lifecycle.tier(t)
+        t["longterm_effective"] = lifecycle.is_long_term(t, ecfg)
+        fa = lifecycle.fade_at(t, ecfg)
+        lc = lifecycle.last_call_at(t, ecfg)
+        t["fade_at"] = fa.isoformat() if fa else None
+        t["last_call_at"] = lc.isoformat() if lc else None
+        t["days_until_due"] = (parse_date(t["due"]) - today).days if t.get("due") and parse_date(t["due"]) else None
+        return t
+
+    @app.get("/api/tasks")
+    def list_tasks(status: str = "open", project: str | None = None):
+        today = date.today()
+        ecfg = eff_cfg()
+        sql = "SELECT * FROM tasks"
+        params: tuple = ()
+        if status != "all":
+            sql += " WHERE status = ?"
+            params = (status,)
+        if project:
+            sql += (" AND" if params else " WHERE") + " project = ?"
+            params += (project,)
+        out = [decorate(t, today, ecfg) for t in rows(conn, sql + " ORDER BY COALESCE(due, '9999'), id", params)]
+        links = rows(conn, "SELECT task_id, kind, ref, label, account FROM links")
+        rem = rows(conn, "SELECT task_id, id, fire_at, label, status FROM reminders WHERE status IN ('pending','snoozed')")
+        by_l: dict[int, list] = {}
+        for l in links:
+            by_l.setdefault(l["task_id"], []).append(l)
+        by_r: dict[int, list] = {}
+        for r in rem:
+            by_r.setdefault(r["task_id"], []).append(r)
+        for t in out:
+            t["links"] = by_l.get(t["id"], [])
+            t["reminders"] = by_r.get(t["id"], [])
+        return {"today": today.isoformat(), "tasks": out, "projects": C.project_names(ecfg),
+                "top_cap": C.get(ecfg, "lifecycle.top_cap", 7)}
+
+    @app.get("/api/tasks/{task_id}")
+    def get_one(task_id: int):
+        t = get_task(conn, task_id)
+        if not t:
+            raise HTTPException(404)
+        decorate(t, date.today(), eff_cfg())
+        t["links"] = rows(conn, "SELECT * FROM links WHERE task_id = ?", (task_id,))
+        t["reminders"] = rows(conn, "SELECT * FROM reminders WHERE task_id = ?", (task_id,))
+        t["mentions_log"] = rows(conn, "SELECT * FROM mentions WHERE task_id = ? ORDER BY at DESC LIMIT 20", (task_id,))
+        t["changes"] = rows(conn, "SELECT c.*, b.source, b.applied_at FROM changes c JOIN batches b ON b.id = c.batch_id WHERE c.task_id = ? ORDER BY c.id DESC LIMIT 30", (task_id,))
+        return t
+
+    @app.post("/api/commands")
+    def parse_command(body: CommandBody):
+        ch = commands.parse(body.text, date.today())
+        if ch is None:
+            return JSONResponse({"is_command": False, "changes": []})
+        return {"is_command": True, "changes": ch}
+
+    @app.post("/api/batches/apply")
+    def apply_batch(body: ApplyBody):
+        try:
+            return batches.apply(conn, body.changes, body.source, date.today())
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+    @app.post("/api/batches/{batch_id}/undo")
+    def undo_batch(batch_id: int):
+        try:
+            return batches.undo(conn, batch_id)
+        except KeyError:
+            raise HTTPException(404)
+
+    @app.get("/api/review")
+    def review():
+        today = date.today()
+        ecfg = eff_cfg()
+        st = get_settings(conn)
+        last = parse_date(st.get("state.last_review_at"))
+        open_tasks = [decorate(t, today, ecfg) for t in rows(conn, "SELECT * FROM tasks WHERE status = 'open'")]
+        q = lifecycle.build_review_queue(open_tasks, today, ecfg, last)
+        return {"today": today.isoformat(), "last_review_at": st.get("state.last_review_at"),
+                "cap": C.get(ecfg, "lifecycle.review_cap", 15), "labels": lifecycle.REVIEW_LABELS, "items": q}
+
+    @app.post("/api/review/finish")
+    def finish_review():
+        set_setting(conn, "state.last_review_at", date.today().isoformat())
+        conn.commit()
+        return {"ok": True}
+
+    @app.get("/api/settings")
+    def settings():
+        st = get_settings(conn)
+        ecfg = C.effective(cfg, st)
+        return {
+            "config_file": cfg.get("_path"),
+            "keys": C.SETTINGS_KEYS,
+            "overrides": {k: v for k, v in st.items() if k in C.SETTINGS_KEYS},
+            "effective": {k: C.get(ecfg, k) for k in C.SETTINGS_KEYS},
+            "projects": C.get(ecfg, "taxonomy.projects", []),
+            "accounts": [dict(a, roles=json.loads(a["roles_json"])) for a in rows(conn, "SELECT * FROM accounts ORDER BY id")],
+            "sources": {k: {"enabled": C.get(ecfg, f"sources.{k}.enabled")} for k in ("plaud", "canvas", "mail", "calendar")},
+            "sinks": {k: {"enabled": C.get(ecfg, f"sinks.{k}.enabled")} for k in ("notion_notes", "notion_tasks_mirror")},
+        }
+
+    @app.put("/api/settings")
+    def put_settings(body: SettingsBody):
+        for k, v in body.values.items():
+            if k not in C.SETTINGS_KEYS:
+                raise HTTPException(400, f"{k} is not a Settings key; edit {cfg.get('_path')} instead")
+            set_setting(conn, k, v)
+        if body.accounts is not None:
+            conn.execute("DELETE FROM accounts")
+            for a in body.accounts:
+                if not a.get("address"):
+                    continue
+                conn.execute("INSERT INTO accounts (address, display, enabled, roles_json) VALUES (?, ?, ?, ?)",
+                             (a["address"].strip(), a.get("display"), 1 if a.get("enabled", True) else 0, json.dumps(a.get("roles", []))))
+        conn.commit()
+        return settings()
+
+    @app.get("/api/stats")
+    def stats():
+        by = {r["status"]: r["n"] for r in rows(conn, "SELECT status, COUNT(*) n FROM tasks GROUP BY status")}
+        cost = rows(conn, "SELECT COALESCE(SUM(cost_usd),0) c FROM runs WHERE started_at >= date('now','-7 days')")[0]["c"]
+        return {"by_status": by, "cost_7d_usd": cost}
+
+    @app.get("/")
+    def index():
+        return FileResponse(WEB / "index.html")
+
+    app.mount("/static", StaticFiles(directory=str(WEB)), name="static")
+    app.state.conn = conn
+    app.state.cfg = cfg
+    return app

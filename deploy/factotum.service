@@ -1,0 +1,18 @@
+[Unit]
+Description=Factotum task triage service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=robert
+WorkingDirectory=/home/robert/factotum
+EnvironmentFile=/home/robert/factotum/.env
+Environment=HOME=/home/robert
+# The venv interpreter, never system python (same lesson as plaud-sync).
+ExecStart=/home/robert/factotum/.venv/bin/python -m factotum serve
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

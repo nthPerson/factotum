@@ -1,0 +1,169 @@
+# Factotum configuration — copy to config/factotum.yaml and edit.
+#
+# This file is the whole "shape" of one person's workflow: their projects and weights, which
+# inputs are on, which sinks are on, when to be reminded. Secrets never go here; they go in
+# .env (see .env.example). Values under `lifecycle`, `notify` and the `enabled` flags can also be
+# changed from the Settings tab, which stores overrides in the database; the Settings tab names
+# this file so a new user knows where the defaults live.
+
+owner:
+  name: Robert
+  timezone: America/Los_Angeles
+  # addresses that identify the owner (used by the mail sweep to recognise sent replies)
+  emails:
+    - rashe7414@sdsu.edu
+    - robertashe2.0@gmail.com
+    - nthperson.dev@gmail.com
+
+taxonomy:
+  areas: [Personal, Academics, Work, Research]
+  # weight: high | medium | low  (see scoring.project_weights)
+  projects:
+    - { name: BDA M.S.,                    area: Academics, weight: high,   never_fade: true }
+    - { name: GEOG 582,                    area: Academics, weight: high }
+    - { name: COMPE 510,                   area: Academics, weight: high }
+    - { name: BDA 696,                     area: Academics, weight: high }
+    - { name: SCIBER-CT,                   area: Academics, weight: high }
+    - { name: DiCE Lab,                    area: Research,  weight: high }
+    - { name: Caltrans,                    area: Research,  weight: high }
+    - { name: Evidential Deep Learning,    area: Research,  weight: high }
+    - { name: FAMAIL,                      area: Research,  weight: low,    never_fade: true }
+    - { name: ZIP Launchpad,               area: Work,      weight: high }
+    - { name: Car Sounds,                  area: Work,      weight: medium }
+    - { name: LARK,                        area: Work,      weight: medium }
+    - { name: Construction Diagram/Doc AI, area: Work,      weight: low }
+    - { name: Plaud Sync,                  area: Personal,  weight: medium }
+    - { name: Personal,                    area: Personal,  weight: high }
+    - { name: Unknown,                     area: Work,      weight: medium }
+  efforts: [XS, S, M, L]
+
+lifecycle:
+  fade_days: 21          # undated backlog fades after this many quiet days
+  fade_warn_days: 3      # shows in Review this many days before fading
+  last_call_days: 7      # hard deadlines this far past due get one Last call, then lapse
+  top_cap: 7             # soft cap on the Top rail
+  review_cap: 15         # max items per Review session
+  resurrect_on_mention: true
+
+scoring:
+  project_weights: { high: 15, medium: 5, low: 0 }
+  hard: { overdue: 100, today: 90, d2: 80, d7: 60, d14: 40, later: 20 }
+  soft_penalty: 15
+  soft_overdue: { start: 70, decay_per_day: 5, floor: 25 }
+  undated: 15
+  undated_longterm: 10
+  mention_bonus: 5
+  mention_cap: 15
+  owed_bonus: 10
+  quick_win: { efforts: [XS, S], within_days: 3, bonus: 5 }
+  start_now: { efforts: [L], within_days: 7, bonus: 10 }
+  manual: { P0_floor: 85, P1_floor: 65, P3_cap: 40 }
+  bands: { P0: 80, P1: 60, P2: 35 }
+
+sources:
+  plaud:
+    enabled: true
+    trigger_account: nthperson.dev@gmail.com   # IMAP creds in .env
+    from_filter: plaud.ai
+    subject_prefix: "[Plaud-AutoFlow]"
+    cli: plaud                                  # @plaud-ai/cli on PATH
+    extraction:
+      max_undated_per_recording: 3
+  canvas:
+    enabled: true
+    base_url: https://sdsu.instructure.com
+    days_back: 7
+    days_ahead: 90
+    course_map: { GEOG582: GEOG 582, COMPE510: COMPE 510, BDA696: BDA 696, SCIBER-CT: SCIBER-CT }
+    effort_by_type: { Quiz: S, Discussion: S, Assignment: M, Project: L }
+    skip_title_prefixes: ["Attendance:"]
+    skip_context_patterns: ["*Arts & Letters*", "*EOP, Outreach*", "*Student Tech*"]
+  mail:
+    enabled: true
+    provider: mailbird            # mailbird | none
+    url: https://127.0.0.1:52000/mcp
+    tls_verify: false             # Mailbird uses a self-signed certificate on loopback
+    sweep_minutes: 20
+    # accounts are managed in Settings → Accounts (table `accounts`); these seed it on first run
+    seed_accounts:
+      - { address: rashe7414@sdsu.edu,      display: SDSU,     roles: [monitor] }
+      - { address: robertashe2.0@gmail.com, display: Personal, roles: [monitor, brief_recipient] }
+      - { address: nthperson.dev@gmail.com, display: Dev,      roles: [monitor, plaud_trigger] }
+    allow: ["*@sdsu.edu", "*@*.sdsu.edu", "*@instructure.com", "*@*.instructure.com", "*"]
+    deny:
+      - "sdsuathletics@engage.ticketmaster.com"
+      - "*San Diego State Athletics*"
+      - "police@comms.sdsu.edu"
+      - "*Student Health Services*"
+      - "sdsubookstore@comms.sdsu.edu"
+      - "whp@comms.sdsu.edu"
+      - "vpforsacd@comms.sdsu.edu"
+      - "president@comms.sdsu.edu"
+      - "awongnickerson@comms.sdsu.edu"
+      - "gradlife-sdsu.edu@shared1.ccsend.com"
+      - "*Arts & Letters Homeroom*"
+  calendar:
+    enabled: false                # turn on in Settings once credentials exist (docs/SETUP.md §6)
+    provider: google              # google | none
+    credentials_file: config/google-credentials.json   # OAuth "Desktop app" client, downloaded from Google Cloud
+    token_file: config/google-token.json               # written by `python -m factotum google-auth`
+    calendar_id: primary
+    days_ahead: 14
+
+sinks:
+  notion_notes:
+    enabled: true
+    # 🎙️ Plaud Synced Notes — database id and data source id (both appear in Notion URLs / API)
+    database_id: 61e12e128c7f473b94f22641d8a36260
+    data_source_id: bbc6c9aa-a96b-4501-a41a-8bd1b5a75866
+    source_link_prefix: https://web.plaud.ai/file/
+  notion_tasks_mirror:
+    enabled: true                 # one-way mirror of every task row; never read back. Toggle in Settings.
+    database_id: b1c52e69d3924aea8962bee32440ffbe
+    data_source_id: be0b1624-4ea6-43dd-acc2-3a828a8ab07e
+    # property names in the Notion Tasks database, in case a user's differ
+    properties:
+      title: Name
+      task_id: Task ID
+      status: Status
+      project: Project
+      area: Area
+      due: Due
+      hard: Hard deadline
+      effort: Effort
+      source: Source
+      source_key: Source Key
+      source_link: Source Link
+      context: Context
+      why_now: Why now
+      score: Score
+      priority: Priority
+      mentions: Mentions
+      completed: Completed
+      waiting_on: Waiting On
+      calendar_event: Calendar Event
+      notes_relation: Notes
+    status_map: { open: Next, done: Done, dropped: Dropped, faded: Dropped, lapsed: Dropped }
+
+notify:
+  ntfy:
+    enabled: true
+    server: https://ntfy.sh
+    topic: ""                     # e.g. factotum-7f3a9c2e (docs/SETUP.md §4); token in .env
+  review_time: "19:30"
+  snooze_presets: ["30m", "1h", "tomorrow 9am"]
+  morning_brief:
+    enabled: true
+    time: "06:30"
+    to: robertashe2.0+planner@gmail.com
+
+claude:
+  binary: claude
+  models: { sync_file: sonnet, planner_morning: sonnet, chat_turn: sonnet }
+  budgets_usd: { sync_file: 1.00, planner_morning: 0.75, chat_turn: 0.60 }
+  timeouts_s: { sync_file: 600, planner_morning: 480, chat_turn: 240 }
+
+server:
+  host: 127.0.0.1
+  port: 8750
+  public_url: https://factotum.nthperson.dev
