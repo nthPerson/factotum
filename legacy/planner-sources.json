@@ -1,0 +1,59 @@
+{
+  "_comment": "Source configuration for planner.py. Email patterns are case-insensitive globs tested against BOTH the bare address and the full 'Display Name <address>' header, so a sender can be denied by name when its address is shared (Canvas announcements all come from notifications@instructure.com). Allow is applied first, then deny. No secrets here; CANVAS_ICS_URL lives in .env.",
+  "email": {
+    "lookback_days": 3,
+    "allow": [
+      "*@sdsu.edu",
+      "*@*.sdsu.edu",
+      "*@instructure.com",
+      "*@*.instructure.com"
+    ],
+    "deny": [
+      "sdsuathletics@engage.ticketmaster.com",
+      "*San Diego State Athletics*",
+      "police@comms.sdsu.edu",
+      "*Student Health Services*",
+      "sdsubookstore@comms.sdsu.edu",
+      "whp@comms.sdsu.edu",
+      "vpforsacd@comms.sdsu.edu",
+      "president@comms.sdsu.edu",
+      "awongnickerson@comms.sdsu.edu",
+      "gradlife-sdsu.edu@shared1.ccsend.com",
+      "*Arts & Letters Homeroom*"
+    ],
+    "max_messages_per_run": 25
+  },
+  "canvas": {
+    "days_back": 7,
+    "days_ahead": 90,
+    "skip_title_prefixes": [
+      "Attendance:"
+    ],
+    "course_map": {
+      "GEOG582": "GEOG 582",
+      "COMPE510": "COMPE 510",
+      "BDA696": "BDA 696",
+      "SCIBER-CT": "SCIBER-CT"
+    },
+    "effort_by_type": {
+      "Quiz": "S",
+      "Discussion": "S",
+      "Assignment": "M",
+      "Project": "L"
+    },
+    "skip_context_patterns": [
+      "*Arts & Letters*",
+      "*EOP, Outreach*",
+      "*Student Tech*"
+    ],
+    "_comment": "skip_context_patterns: Canvas courses/homerooms whose items and announcements are ignored (globs on context_name). Course announcements from real courses and the SDSU Graduate Students homeroom are kept."
+  },
+  "commands": {
+    "_comment": "Mail FROM these addresses to the watcher inbox is treated as planner commands (done/defer/drop/add ...). NOTIFY_EMAIL is always included.",
+    "senders": [
+      "rashe7414@sdsu.edu",
+      "robertashe2.0@gmail.com"
+    ],
+    "subject_prefix": "[planner]"
+  }
+}

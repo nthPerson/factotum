@@ -1,0 +1,20 @@
+[Unit]
+Description=Plaud -> Notion/Calendar sync watcher (IMAP IDLE)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Must be the same user that ran `claude login` and `claude mcp add ...`,
+# so the Max credentials and MCP OAuth tokens are available to the headless run.
+User=robert
+WorkingDirectory=/home/robert/plaud-sync
+EnvironmentFile=/home/robert/plaud-sync/.env
+# HOME is normally set from User=, but set it explicitly if `claude` can't find its config:
+Environment=HOME=/home/robert
+ExecStart=/home/robert/plaud-sync/.venv/bin/python /home/robert/plaud-sync/plaud_watcher.py
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target

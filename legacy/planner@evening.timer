@@ -1,0 +1,10 @@
+[Unit]
+Description=Evening planner check-in (16:00)
+
+[Timer]
+OnCalendar=*-*-* 16:00:00
+Persistent=true
+Unit=planner@evening.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,14 @@
+[Unit]
+Description=Planner run (%i): ingest Canvas/email, rank tasks, write the Notion Today page, email the brief
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Same user/HOME as plaud-sync: headless claude -p inherits robert's login and MCP OAuth tokens.
+User=robert
+WorkingDirectory=/home/robert/plaud-sync
+EnvironmentFile=/home/robert/plaud-sync/.env
+Environment=HOME=/home/robert
+ExecStart=/home/robert/plaud-sync/.venv/bin/python /home/robert/plaud-sync/planner.py --mode %i
+TimeoutStartSec=1500

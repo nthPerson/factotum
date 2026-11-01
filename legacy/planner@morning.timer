@@ -1,0 +1,10 @@
+[Unit]
+Description=Morning planner brief (06:30)
+
+[Timer]
+OnCalendar=*-*-* 06:30:00
+Persistent=true
+Unit=planner@morning.service
+
+[Install]
+WantedBy=timers.target
