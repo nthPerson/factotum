@@ -118,7 +118,9 @@ A service account also works if you share the calendar with its address; set
 You already run `cloudflared` for `claude-context.nthperson.dev`. Two ways; A is simpler if the
 existing tunnel runs as a service on this machine.
 
-**A. Add a public hostname to the existing tunnel** (Zero Trust dashboard):
+**A. Add a public hostname to the existing tunnel** (Zero Trust dashboard). On mf-pc this is the
+only option that applies: `cloudflared.service` runs `tunnel run` with a token and has no local
+`config.yml`, so ingress rules live in the dashboard, not on disk:
 Networks → Tunnels → your tunnel → Public Hostname → **Add a public hostname** → subdomain
 `factotum`, domain `nthperson.dev`, service type HTTP, URL `localhost:8750`. With mirrored
 networking the Windows-side connector reaches the WSL port at localhost. Save.
