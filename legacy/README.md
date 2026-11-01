@@ -15,3 +15,17 @@ later phases port, kept next to the code that replaces them:
 | `*.service`, `*.timer` | reference only | what to disable on lark-server at each cutover |
 
 Delete this directory in phase 6 when plaud-sync is archived.
+
+## Known weaknesses to fix in the port, not to copy
+
+An automated review of these copies (2026-11-01) flagged three things. They do not run here, but
+the ports must not inherit them:
+
+- `plaud_watcher.py` trusts the IMAP `FROM` search as sender identity. The phase 3 trigger must
+  parse the `From` header and require an exact, case-insensitive match on the configured Plaud
+  sender, and treat the subject and any link in the mail as untrusted data in the prompt
+  (delimited, never interpolated as instructions). The email command channel is retired, so
+  `COMMAND_SENDERS` has no successor.
+- `planner.py` pastes mail bodies and announcements straight into a tool-enabled Claude prompt.
+  The phase 4 bundle must mark every mail excerpt as untrusted data, keep the allowlist to
+  read-only tools (SPEC.md §8.2), and route anything destructive through the tray.
