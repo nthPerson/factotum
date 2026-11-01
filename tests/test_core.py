@@ -100,6 +100,33 @@ def test_import_classifier_buckets(cfg):
     assert lifecycle.classify_import(task(due=None, legacy_status="Waiting"), TODAY, cfg) == ("waiting_keep", "open")
 
 
+def test_import_last_call_ignores_sync_created_calendar_events(cfg):
+    # plaud-sync put every dated extraction on the calendar, so for imported rows an event is only a
+    # user signal when the task itself came from the calendar; everything else rides on mentions
+    past = dict(due="2026-09-30", hard=1, mentions=1, calendar_event="https://calendar.google.com/x")
+    assert lifecycle.classify_import(task(source="Plaud", **past), TODAY, cfg) == ("hard_lapsed", "lapsed")
+    assert lifecycle.classify_import(task(source="Calendar", **past), TODAY, cfg) == ("hard_last_call", "open")
+
+
+def test_import_single_mention_quiet_clock_starts_at_creation(cfg):
+    # the old planner rewrote Why now / Score on every open row, so Notion's last_edited_time is not
+    # a human signal; a row mentioned once was mentioned when it was created
+    row = dict(due=None, mentions=1, created_at="2026-09-20T00:00:00+00:00", edited_at="2026-10-30T00:00:00+00:00")
+    assert lifecycle.classify_import(task(**row), TODAY, cfg) == ("undated_faded", "faded")
+    assert lifecycle.classify_import(task(**dict(row, created_at="2026-10-20T00:00:00+00:00")), TODAY, cfg) == ("undated_keep", "open")
+
+
+def _mention_page(mentions, created="2026-09-20T00:00:00.000Z", edited="2026-10-30T00:00:00.000Z"):
+    return {"id": "p", "created_time": created, "last_edited_time": edited, "properties": {
+        "Name": {"title": [{"plain_text": "x"}]}, "Task ID": {"unique_id": {"prefix": "Task", "number": 9}},
+        "Status": {"select": {"name": "Next"}}, "Mentions": {"number": mentions}}}
+
+
+def test_parse_page_single_mention_anchors_fade_clock_at_creation():
+    assert parse_page(_mention_page(1))["last_mention_at"] == "2026-09-20T00:00:00.000Z"
+    assert parse_page(_mention_page(2))["last_mention_at"] == "2026-10-30T00:00:00.000Z"
+
+
 # --- commands --------------------------------------------------------------------------------
 
 def test_command_grammar():
@@ -154,7 +181,40 @@ def test_new_only_sync_never_overwrites_existing_rows(conn, cfg, tmp_path):
     assert rows[5]["status"] == "open" and rows[5]["last_reviewed_at"] is None  # surfaces as New in Review
 
 
+def test_new_only_sync_duplicate_of_a_stored_key_keeps_the_stored_row_as_owner(conn, cfg, tmp_path):
+    from factotum.importers.notion_tasks import run
+    upsert_task(conn, task(id=2, name="already here", source_key="gcal:abc"))
+    conn.commit()
+    f = tmp_path / "pages.json"
+    f.write_text(json.dumps([_notion_row(5, "re-created by the old sync", "Next", "gcal:abc")]))
+    run(conn, cfg, apply=True, from_json=str(f), new_only=True, today=TODAY, out=lambda *_: None)
+    rows = {r["id"]: r for r in conn.execute("SELECT id, source_key FROM tasks")}
+    assert rows[2]["source_key"] == "gcal:abc" and rows[5]["source_key"] is None
+    assert conn.execute("SELECT ref FROM links WHERE task_id = 5 AND kind = 'task'").fetchone()[0] == "2"
+
+
 # --- notion parsing --------------------------------------------------------------------------
+
+def _notion_row(task_id, name, status, source_key, created="2026-09-20T00:00:00.000Z"):
+    return {"id": f"page-{task_id}", "created_time": created, "last_edited_time": created, "properties": {
+        "Name": {"title": [{"plain_text": name}]}, "Task ID": {"unique_id": {"prefix": "Task", "number": task_id}},
+        "Status": {"select": {"name": status}}, "Source Key": {"rich_text": [{"plain_text": source_key}]},
+        "Mentions": {"number": 1}}}
+
+
+def test_import_duplicate_source_keys_keep_every_row_and_the_key_on_the_open_one(conn, cfg, tmp_path):
+    # plaud-sync produced a few rows with the same Source Key; the store's UNIQUE constraint must not
+    # lose either row, and the key stays on the row that is still open
+    from factotum.importers.notion_tasks import run
+    f = tmp_path / "pages.json"
+    f.write_text(json.dumps([_notion_row(241, "Register", "Dropped", "gcal:abc"), _notion_row(30, "Register", "Next", "gcal:abc", created="2026-10-25T00:00:00.000Z")]))
+    out = []
+    run(conn, cfg, apply=True, from_json=str(f), today=TODAY, out=out.append)
+    rows = {r["id"]: r for r in conn.execute("SELECT id, source_key FROM tasks")}
+    assert set(rows) == {30, 241}
+    assert rows[30]["source_key"] == "gcal:abc" and rows[241]["source_key"] is None
+    assert any("duplicate source key" in line for line in out)
+
 
 def test_parse_notion_page():
     page = {

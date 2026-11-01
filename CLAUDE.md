@@ -82,6 +82,10 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
   `check_auth()` pre-flight into the runner in phase 3, and always log envelope `result`.
 - **Restarting mid-run loses that recording** (2026-09-16). Before `systemctl restart factotum`,
   check `journalctl -u factotum -n 5` for a Claude run in flight and wait for it.
+- **In the Notion Tasks DB, `Calendar Event` and `last_edited_time` are automation artefacts**
+  (2026-11-01): plaud-sync created an event for every dated task and its planner rewrote `Why now`
+  and `Score` on every open row, so neither says anything about the user. The import classifier
+  uses mentions, source and creation date instead (SPEC §12).
 - **Notion SQL queries are metered; the REST API is not.** Nothing here uses the MCP query
   tool.
 - **Mailbird's MCP is on the Windows host** at `https://127.0.0.1:52000/mcp`, self-signed TLS,

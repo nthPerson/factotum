@@ -146,7 +146,9 @@ def parse_page(page: dict, props_cfg: dict | None = None) -> dict:
         "calendar_event": (g("calendar_event", "Calendar Event") or {}).get("url"),
         "notion_page_id": page.get("id"),
     }
-    task["last_mention_at"] = task["edited_at"]
+    # one mention = the creating one, so the fade clock starts at creation; with more, the last
+    # edit is the best proxy for the last mention (the old sync bumped both together)
+    task["last_mention_at"] = task["created_at"] if task["mentions"] <= 1 else task["edited_at"]
     if task["source"] == "Canvas" and task["source_link"]:
         task["canvas_id"] = task["source_link"].rstrip("/").split("/")[-1]
     notes = g("notes_relation", "Notes") or {}
@@ -157,6 +159,33 @@ def parse_page(page: dict, props_cfg: dict | None = None) -> dict:
 
 
 # --- the import ------------------------------------------------------------------------------
+
+def _resolve_duplicate_source_keys(conn, parsed: list[dict]) -> list[str]:
+    """plaud-sync left a few rows sharing a Source Key, and the store's UNIQUE constraint needs one
+    owner per key. A row already in the store keeps its key; among imported rows the one that stays
+    open keeps it, then the highest id. The others lose the key and get a `task` link to the owner.
+    Returns report lines."""
+    lines: list[str] = []
+    groups: dict[str, list[dict]] = {}
+    for t in parsed:
+        if t.get("source_key"):
+            groups.setdefault(t["source_key"], []).append(t)
+    for key, group in groups.items():
+        stored = conn.execute("SELECT id FROM tasks WHERE source_key = ?", (key,)).fetchone()
+        owner_id = stored[0] if stored and all(t["id"] != stored[0] for t in group) else None
+        if owner_id is None:
+            group.sort(key=lambda t: (t.get("_new_status") == "open", t.get("id") or 0), reverse=True)
+            if len(group) < 2:
+                continue
+            owner_id, losers = group[0]["id"], group[1:]
+        else:
+            losers = group
+        for t in losers:
+            t["source_key"], t["_dup_of"] = None, owner_id
+        lines.append(f"duplicate source key {key!r}: kept on Task-{owner_id}, removed from "
+                     + ", ".join(f"Task-{t['id']}" for t in losers))
+    return lines
+
 
 def run(conn, cfg: dict, *, apply: bool, from_json: str | None = None, new_only: bool = False,
         today: date | None = None, out=print) -> dict:
@@ -182,6 +211,8 @@ def run(conn, cfg: dict, *, apply: bool, from_json: str | None = None, new_only:
         by_bucket[bucket].append(t)
         parsed.append(t)
 
+    dup_lines = _resolve_duplicate_source_keys(conn, parsed)
+
     mode = "dry run" if not apply else "APPLYING"
     if new_only:
         out(f"New-only sync: store's highest Task ID is {max_id}; {len(parsed)} newer rows found, "
@@ -193,6 +224,8 @@ def run(conn, cfg: dict, *, apply: bool, from_json: str | None = None, new_only:
     open_after = sum(1 for t in parsed if t["_new_status"] == "open")
     out(f"\n  open before: {sum(1 for t in parsed if t['status'] == 'open')}   open after: {open_after}   "
         f"new in Review: {counts['undated_keep'] + counts['hard_last_call']}")
+    for line in dup_lines:
+        out(f"  {line}")
     for bucket in ("hard_last_call", "undated_keep"):
         if by_bucket[bucket]:
             out(f"\n  {bucket} ({len(by_bucket[bucket])}):")
@@ -210,8 +243,11 @@ def run(conn, cfg: dict, *, apply: bool, from_json: str | None = None, new_only:
             if t["_bucket"] not in ("hard_last_call", "undated_keep"):
                 t["last_reviewed_at"] = today.isoformat()
             notes = t.pop("_notes", [])
+            dup_of = t.pop("_dup_of", None)
             t.pop("_bucket", None); t.pop("_new_status", None)
             tid = upsert_task(conn, t)
+            if dup_of is not None:
+                add_link(conn, tid, "task", str(dup_of), "duplicate source key in import")
             if t.get("notion_page_id"):
                 add_link(conn, tid, "notion_page", t["notion_page_id"], "Notion task row")
             for n in notes:

@@ -122,10 +122,10 @@ def expire(tasks: list[dict], today: date, cfg: dict) -> list[tuple[int, str, st
 IMPORT_BUCKETS = [
     ("canvas_future", "Canvas-sourced, due in the future → keep open; Canvas closes it"),
     ("hard_lapsed", "Hard, past due > last_call_days, few mentions → lapsed"),
-    ("hard_last_call", "Hard, past due, ≥3 mentions or a calendar event → keep, Last call"),
+    ("hard_last_call", "Hard, past due, ≥3 mentions or calendar-sourced → keep, Last call"),
     ("soft_faded", "Soft, past due > 14 d → faded"),
-    ("undated_faded", "Undated, 1 mention, no edit in fade_days → faded"),
-    ("undated_keep", "Undated, ≥2 mentions or edited recently → keep, New in Review"),
+    ("undated_faded", "Undated, 1 mention, created ≥ fade_days ago → faded"),
+    ("undated_keep", "Undated, ≥2 mentions or created recently → keep, New in Review"),
     ("waiting_keep", "Waiting → keep; the mail sweep flips it on reply"),
     ("dated_keep", "Dated, not yet due → keep"),
     ("closed", "Done/Dropped in Notion → imported as history"),
@@ -150,7 +150,10 @@ def classify_import(task: dict, today: date, cfg: dict) -> tuple[str, str]:
             return "dated_keep", OPEN
         if task.get("hard"):
             if -d > last_call:
-                if mentions >= 3 or task.get("calendar_event"):
+                # A calendar event counts as a user signal only when the task itself came from the
+                # calendar: the old sync put every dated extraction on the calendar automatically.
+                user_event = bool(task.get("calendar_event")) and task.get("source") == "Calendar"
+                if mentions >= 3 or user_event:
                     return "hard_last_call", OPEN
                 return "hard_lapsed", "lapsed"
             return "dated_keep", OPEN
@@ -159,8 +162,10 @@ def classify_import(task: dict, today: date, cfg: dict) -> tuple[str, str]:
         return "dated_keep", OPEN
     if is_long_term(task, cfg):
         return "undated_keep", OPEN
-    edited = parse_date(task.get("edited_at")) or parse_date(task.get("created_at")) or today
-    quiet = (today - edited).days
-    if mentions <= 1 and quiet >= fade_days:
+    # A row mentioned once was mentioned when it was created, so its quiet clock starts there.
+    # Notion's last_edited_time is not a human signal: the old planner rewrote Why now / Score on
+    # every open row.
+    created = parse_date(task.get("created_at")) or today
+    if mentions <= 1 and (today - created).days >= fade_days:
         return "undated_faded", "faded"
     return "undated_keep", OPEN

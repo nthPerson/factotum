@@ -280,14 +280,21 @@ classified statuses (`lifecycle.classify_import`):
 | Bucket | Rule | Result |
 |---|---|---|
 | canvas_future | Canvas-sourced, due in the future | keep open; Canvas closes it |
-| hard_lapsed | hard, past due > 7 d, < 3 mentions, no calendar event | lapsed |
-| hard_last_call | hard, past due > 7 d, ≥ 3 mentions or a calendar event | keep; Last call in Review |
+| hard_lapsed | hard, past due > 7 d, < 3 mentions, not calendar-sourced | lapsed |
+| hard_last_call | hard, past due > 7 d, ≥ 3 mentions or calendar-sourced | keep; Last call in Review |
 | soft_faded | soft, past due > 14 d | faded |
-| undated_faded | undated, 1 mention, no edit in 21 d | faded |
-| undated_keep | undated, ≥ 2 mentions or edited recently, or long-term | keep; New in Review |
+| undated_faded | undated, 1 mention, created ≥ 21 d ago | faded |
+| undated_keep | undated, ≥ 2 mentions or created < 21 d ago, or long-term | keep; New in Review |
 | waiting_keep | Status Waiting | keep; the first mail sweep flips any that got replies |
 | dated_keep | dated, not yet due, or recently past | keep |
 | closed | Done/Dropped | history |
+
+Two Notion columns are deliberately not signals here, because plaud-sync wrote them itself: it put
+every dated extraction on the calendar, so `Calendar Event` only counts when the task *came from*
+the calendar; and its planner rewrote `Why now` / `Score` on every open row, so `last_edited_time`
+says nothing about the user. A row mentioned once was mentioned when it was created, and that is
+where its fade clock starts (measured 2026-11-01: 274 open rows → 108 open, 71 in Review, versus
+137 / 100 with the naive rules).
 
 Rows outside `hard_last_call` and `undated_keep` are marked reviewed on import day, so only
 those two buckets surface as New. Then Review sessions at the usual cap until the New bucket is
