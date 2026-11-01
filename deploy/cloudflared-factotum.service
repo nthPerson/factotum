@@ -1,0 +1,17 @@
+[Unit]
+Description=Cloudflare tunnel for Factotum (factotum.nthperson.dev -> 127.0.0.1:8750)
+After=network-online.target factotum.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Runs as the owner so it can read ~/.cloudflared/{config.yml,<tunnel-id>.json}. A separate unit on
+# purpose: `cloudflared service install` would overwrite an existing cloudflared.service on this host.
+User=robert
+Environment=TUNNEL_EDGE_IP_VERSION=4
+ExecStart=/usr/bin/cloudflared --no-autoupdate --config /home/robert/.cloudflared/config.yml tunnel run
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

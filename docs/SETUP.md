@@ -125,21 +125,34 @@ Networks → Tunnels → your tunnel → Public Hostname → **Add a public host
 `factotum`, domain `nthperson.dev`, service type HTTP, URL `localhost:8750`. With mirrored
 networking the Windows-side connector reaches the WSL port at localhost. Save.
 
-**B. A separate tunnel** (if you want it isolated):
+**B. A separate tunnel** (what mf-pc uses; the host's existing `cloudflared.service` belongs to
+another product and must not be touched):
 ```bash
-cloudflared tunnel login
-cloudflared tunnel create factotum
+cloudflared tunnel login                                  # browser; writes ~/.cloudflared/cert.pem
+cloudflared tunnel create factotum                        # writes ~/.cloudflared/<tunnel-id>.json
 cloudflared tunnel route dns factotum factotum.nthperson.dev
 cat > ~/.cloudflared/config.yml <<EOF
 tunnel: factotum
-credentials-file: /home/robert/.cloudflared/<tunnel-id>.json
+credentials-file: /home/robert/.cloudflared/<tunnel-id>.json   # paste the real id from the create step
 ingress:
   - hostname: factotum.nthperson.dev
     service: http://localhost:8750
   - service: http_status:404
 EOF
-sudo cloudflared service install && sudo systemctl enable --now cloudflared
+cloudflared tunnel --config ~/.cloudflared/config.yml run      # foreground check first (Ctrl-C after)
+sudo cp deploy/cloudflared-factotum.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now cloudflared-factotum
 ```
+Never run `cloudflared service install` on a host that already has a `cloudflared.service`: it
+overwrites that unit (it also fails under `sudo` because it looks for the config in root's home).
+The repo unit runs as the owner with an explicit `--config`.
+
+If the hostname answers **530 / error 1033** while the foreground run logs "Registered tunnel
+connection", `cloudflared tunnel info factotum` from a second shell shows the edge's view. "does not
+have any active connection" there means the connector registers but the edge discards it; upgrade
+`cloudflared` (`sudo apt install --only-upgrade cloudflared`) and retry, or convert the tunnel to
+remote management in the dashboard (Networks → Tunnels → factotum → Configure → Migrate) and run it
+with the dashboard token like the host's existing tunnel does.
 
 **Access policy** (either way): Zero Trust → Access → Applications → **Add an application** →
 Self-hosted → name Factotum, session duration 1 month, domain `factotum.nthperson.dev` → Identity
