@@ -135,7 +135,7 @@ code the user types and says.
 - **Backlog**: undated, not long-term. `fade_days` (default **21**) after `last_mention_at` with
   no edit → *Fading* in Review (`fade_warn_days` before) → then `faded`.
 - **Long-term** flag: exempt from fading. Per task, by voice, or by default for projects marked
-  `never_fade` in config (seed: BDA M.S., FAMAIL).
+  `never_fade` in config (seed: BDA M.S., SCIBER-CT, Evidential Deep Learning).
 
 **Resurrection.** A new mention of a faded or lapsed task reopens it, bumps `mentions`, resets
 the clock, and flags it *Back* in Review.
