@@ -28,7 +28,7 @@ cp config/factotum.example.yaml config/factotum.yaml   # edit projects, accounts
 .venv/bin/python -m factotum import-notion --dry-run   # bucket report, writes nothing
 .venv/bin/python -m factotum import-notion --apply
 .venv/bin/python -m factotum serve                     # http://127.0.0.1:8750
-.venv/bin/pytest                                       # 15 tests, no network
+.venv/bin/pytest                                       # 14 tests, no network
 ```
 
 ## Adapting it to your own workflow
