@@ -111,7 +111,8 @@ tasks(id, name, project, area, status,            -- open|done|dropped|faded|lap
       context, why_now, score, priority, manual_priority, mentions, last_mention_at,
       created_at, edited_at, completed_at, closed_by,     -- user|canvas|mail-evidence|fade|lapse|voice|chat|import
       snoozed_until, last_reviewed_at, calendar_event, notion_page_id, canvas_id)
-reminders(id, task_id, fire_at, label, status, ntfy_seq, token, created_by)
+reminders(id, task_id, fire_at, label, repeat, status, ntfy_seq, token, created_by)
+          -- repeat: NULL|daily|weekdays|weekly|monthly; status: pending|sent|snoozed|done|cancelled
 links(id, task_id, kind, ref, label, account, created_at, last_seen_at)
           -- kind: plaud_note|notion_page|canvas|mail_thread|mail_message|calendar|task
 mentions(id, task_id, source_kind, source_ref, at)       -- append-only; resets the fade clock
@@ -270,6 +271,12 @@ Keyboard: `j k d x s t l e`; Review `d k s x`.
   up to three `view` actions (*Snooze 1 h*, *Done*, *Open*) pointing at `/r/<token>?…`, since
   `http` actions cannot carry an Access session. Tokens are single use, 24 h.
 - Review push: daily at `notify.review_time`; skipped when reviewed today or the queue is empty.
+- **Setting one.** "Set reminder" on a Review card and in a row's details: date-time, optional
+  label, once or daily / weekdays / weekly / monthly. It is a staged change (`add_reminder`) under
+  its own key, so it rides in the same batch as the decision without replacing it, Keep, Later or
+  even Drop; undoing the batch cancels it. A reminder fires whatever the task's status is: a
+  dropped task can still carry a "check anyway" nudge. When a repeating reminder fires, the
+  scheduler marks it sent and inserts the next occurrence as a new pending row (phase 2).
 - Voice: "add X due next week, remind me tomorrow afternoon" → a task plus one reminder.
 - The morning brief lists reminders firing today, so email and push agree.
 

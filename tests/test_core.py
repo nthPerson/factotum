@@ -201,6 +201,50 @@ def test_new_only_sync_duplicate_of_a_stored_key_keeps_the_stored_row_as_owner(c
     assert conn.execute("SELECT ref FROM links WHERE task_id = 5 AND kind = 'task'").fetchone()[0] == "2"
 
 
+# --- reminders ------------------------------------------------------------------------------
+
+def _rem(conn, task_id=1):
+    return [dict(r) for r in conn.execute("SELECT * FROM reminders WHERE task_id = ? ORDER BY id", (task_id,))]
+
+
+def test_batch_add_reminder_and_undo_cancels_it(conn, cfg):
+    upsert_task(conn, task(id=1)); conn.commit()
+    res = batches.apply(conn, [{"task_id": 1, "op": "add_reminder", "fields": {"fire_at": "2026-11-03T09:00", "label": "Call Reza", "repeat": "weekly"}}], "review", TODAY)
+    assert res["applied"] == 1 and not res["skipped"]
+    r = _rem(conn)
+    assert len(r) == 1 and r[0]["status"] == "pending" and r[0]["repeat"] == "weekly" and r[0]["created_by"] == "review"
+    batches.undo(conn, res["batch_id"])
+    assert _rem(conn)[0]["status"] == "cancelled"
+
+
+def test_add_reminder_validates_fire_at_and_repeat(conn, cfg):
+    upsert_task(conn, task(id=1)); conn.commit()
+    res = batches.apply(conn, [
+        {"task_id": 1, "op": "add_reminder", "fields": {"label": "no time"}},
+        {"task_id": 1, "op": "add_reminder", "fields": {"fire_at": "2026-11-03T09:00", "repeat": "fortnightly"}},
+    ], "ui", TODAY)
+    assert res["applied"] == 0 and len(res["skipped"]) == 2 and not _rem(conn)
+
+
+def test_reminder_rides_with_a_decision_on_the_same_task_even_a_drop(conn, cfg):
+    upsert_task(conn, task(id=1)); conn.commit()
+    res = batches.apply(conn, [
+        {"task_id": 1, "op": "drop"},
+        {"task_id": 1, "op": "add_reminder", "fields": {"fire_at": "2026-11-03T09:00", "label": "check anyway"}},
+    ], "review", TODAY)
+    assert res["applied"] == 2
+    assert conn.execute("SELECT status FROM tasks WHERE id = 1").fetchone()[0] == "dropped"
+    assert _rem(conn)[0]["status"] == "pending" and _rem(conn)[0]["repeat"] is None
+
+
+def test_init_db_adds_repeat_column_to_an_old_reminders_table(tmp_path):
+    c = connect(tmp_path / "old.db")
+    c.executescript("CREATE TABLE reminders (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL REFERENCES tasks(id), fire_at TEXT NOT NULL, label TEXT,"
+                    " status TEXT NOT NULL DEFAULT 'pending', ntfy_seq TEXT, token TEXT, created_by TEXT, created_at TEXT NOT NULL);")  # pre-`repeat` shape
+    init_db(c)
+    assert "repeat" in {r[1] for r in c.execute("PRAGMA table_info(reminders)")}
+
+
 # --- notion parsing --------------------------------------------------------------------------
 
 def _notion_row(task_id, name, status, source_key, created="2026-09-20T00:00:00.000Z"):

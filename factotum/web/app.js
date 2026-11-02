@@ -10,7 +10,7 @@
   let settings = null;      // /api/settings payload
   let staged = new Map();   // task id -> {op, fields, label}
   let lastBatch = null;
-  let ui = { tab: 'today', focus: null, sel: new Set(), open: new Set(), reviewIdx: 0, laterOpen: false, reviewPaused: false, rvNote: { id: null, text: '' } };
+  let ui = { tab: 'today', focus: null, sel: new Set(), open: new Set(), reviewIdx: 0, laterOpen: false, reviewPaused: false, rvNote: { id: null, text: '' }, remOpen: null };
   try { const h = location.hash.replace('#', ''); if (TABS.includes(h)) ui.tab = h; } catch (_) {}
   try { const s = JSON.parse(localStorage.getItem('factotum.staged') || '[]'); staged = new Map(s); } catch (_) {}
 
@@ -57,9 +57,40 @@
     render();
   }
 
+  // ---------- reminders ----------
+  // A reminder is staged under its own key, so it rides in the same batch as the task's decision
+  // (Keep, Later, even Drop) without replacing it.
+  const REPEATS = [['', 'once'], ['daily', 'every day'], ['weekdays', 'weekdays'], ['weekly', 'every week'], ['monthly', 'every month']];
+  function defaultFireAt() { const d = TODAY(); d.setDate(d.getDate() + 1); return d.toISOString().slice(0, 10) + 'T09:00'; }
+  function reminderForm(id) {
+    const st = staged.get(id + ':r');
+    if (st) return `<div class="remform"><span class="chip rem">⏰ staged: ${esc(st.label)}</span><button class="btn small" data-rem-clear="${id}">Remove</button></div>`;
+    if (ui.remOpen !== id) return `<button class="btn small" data-rem-open="${id}">⏰ Set reminder</button>`;
+    return `<div class="remform" data-rem-form="${id}">
+      <input type="datetime-local" data-f="fire_at" value="${defaultFireAt()}" aria-label="When">
+      <select data-f="repeat" aria-label="Repeat">${REPEATS.map(([v, l]) => `<option value="${v}">${l}</option>`).join('')}</select>
+      <input type="text" data-f="label" placeholder="Label (optional)" aria-label="Label">
+      <button class="btn small" data-rem-add="${id}">Add</button><button class="btn small" data-rem-cancel="${id}">Cancel</button></div>`;
+  }
+  function stageReminder(id) {
+    const f = document.querySelector(`[data-rem-form="${id}"]`); if (!f) return;
+    const fire_at = f.querySelector('[data-f=fire_at]').value, repeat = f.querySelector('[data-f=repeat]').value, label = f.querySelector('[data-f=label]').value.trim();
+    if (!fire_at) { toast('Pick a date and time'); return; }
+    const fields = { fire_at, label: label || null, repeat: repeat || null };
+    staged.set(id + ':r', { task_id: id, op: 'add_reminder', fields, label: `remind ${fmtWhen(fire_at)}${repeat ? ' · ' + repeat : ''}${label ? ' · ' + label : ''}` });
+    try { localStorage.setItem('factotum.staged', JSON.stringify([...staged])); } catch (_) {}
+    ui.remOpen = null; render();
+  }
+  function wireReminders(root) {
+    root.querySelectorAll('[data-rem-open]').forEach(b => b.onclick = () => { ui.remOpen = +b.dataset.remOpen; render(); });
+    root.querySelectorAll('[data-rem-cancel]').forEach(b => b.onclick = () => { ui.remOpen = null; render(); });
+    root.querySelectorAll('[data-rem-add]').forEach(b => b.onclick = () => stageReminder(+b.dataset.remAdd));
+    root.querySelectorAll('[data-rem-clear]').forEach(b => b.onclick = () => { staged.delete(+b.dataset.remClear + ':r'); try { localStorage.setItem('factotum.staged', JSON.stringify([...staged])); } catch (_) {} render(); });
+  }
+
   // ---------- staging ----------
   function stage(id, op, fields, label) {
-    staged.set(id, { op, fields: fields || {}, label });
+    staged.set(id, { task_id: id, op, fields: fields || {}, label });
     try { localStorage.setItem('factotum.staged', JSON.stringify([...staged])); } catch (_) {}
     render();
   }
@@ -80,7 +111,7 @@
     (ops[kind] || (() => {}))();
   }
   async function applyAll() {
-    const changes = [...staged].map(([task_id, s]) => ({ task_id, op: s.op, fields: s.fields }));
+    const changes = [...staged.values()].map(s => ({ task_id: s.task_id, op: s.op, fields: s.fields }));
     if (!changes.length) return;
     try {
       const res = await api('/api/batches/apply', { method: 'POST', body: JSON.stringify({ source: ui.tab === 'review' ? 'review' : 'ui', changes }) });
@@ -179,13 +210,14 @@
         <dl><dt>Source</dt><dd>${esc(x.source || '?')}${x.account ? ' · ' + esc(x.account) : ''} · ${x.mentions} mention${x.mentions === 1 ? '' : 's'} · created ${esc((x.created_at || '').slice(0, 10))}${x.legacy_status ? ' · was ' + esc(x.legacy_status) : ''}</dd>
             <dt>Links</dt><dd class="links">${srcLink}${links || (srcLink ? '' : '<span class="code">none</span>')}</dd>
             <dt>Lifecycle</dt><dd>${x.tier}${x.fade_at ? ' · fades ' + x.fade_at : ''}${x.last_call_at ? ' · last call ' + x.last_call_at : ''}${x.snoozed_until ? ' · snoozed until ' + x.snoozed_until : ''}</dd>
-            <dt>Reminders</dt><dd>${(x.reminders || []).map(r => `<span class="chip rem">${fmtWhen(r.fire_at)} ${esc(r.label || '')}</span>`).join(' ') || '<span class="code">phase 2</span>'}</dd></dl>
+            <dt>Reminders</dt><dd>${(x.reminders || []).map(r => `<span class="chip rem">${fmtWhen(r.fire_at)}${r.repeat ? ' · ' + esc(r.repeat) : ''} ${esc(r.label || '')}</span>`).join(' ') || '<span class="code">none</span>'}</dd></dl>
         <div class="actions">
           <button class="btn small" data-act="done" data-id="${x.id}">Done</button>
           <button class="btn small" data-act="drop" data-id="${x.id}">Drop</button>
           <button class="btn small" data-act="snooze" data-id="${x.id}">Snooze to tomorrow</button>
           <button class="btn small" data-act="top" data-id="${x.id}">${x.top_rank ? 'Unpin' : 'Pin to Top'}</button>
           <button class="btn small" data-act="longterm" data-id="${x.id}">${x.longterm ? 'Clear long-term' : 'Mark long-term'}</button>
+          ${reminderForm(x.id)}
           <span class="spacer"></span>
           <button class="btn small" disabled title="Phase 5">✉ Search related emails</button>
         </div></div></div>`;
@@ -225,7 +257,7 @@
   // One page of the queue. Ids already staged in the tray are excluded server-side, so a page is
   // always `cap` fresh items and the counter counts this page only.
   async function loadReview() {
-    const exclude = [...staged.keys()].join(',');
+    const exclude = [...staged.keys()].filter(k => typeof k === 'number').join(',');
     review = await api('/api/review' + (exclude ? '?exclude=' + exclude : ''));
     if (review.total === undefined) review.total = review.items.length;   // older server
     ui.reviewIdx = 0; ui.reviewPaused = false; ui.laterOpen = false; render();
@@ -257,7 +289,7 @@
         <div class="links">${x.source_link ? `<a href="${esc(x.source_link)}" target="_blank" rel="noopener">${x.source === 'Plaud' ? 'Plaud note' : 'Source'}</a>` : ''}</div>
         <div class="big"><button class="done" data-rv="done">Done <kbd>d</kbd></button><button data-rv="keep">Keep <kbd>k</kbd></button><button class="later" data-rv="later">Later <kbd>s</kbd></button><button class="drop" data-rv="drop">Drop <kbd>x</kbd></button></div>
         <div class="later-menu ${ui.laterOpen ? 'on' : ''}"><span class="hint">Comes back on:</span><button class="btn small" data-rv="tomorrow">Tomorrow</button><button class="btn small" data-rv="fri">Friday</button><button class="btn small" data-rv="nextweek">Next week</button><input type="date" id="rv-date" min="${data.today}" aria-label="Pick a date"></div>
-        <div class="extra"><button class="btn small" data-rv="top">★ Pin to Top</button><button class="btn small" data-rv="longterm">Mark long-term (never fades)</button></div>
+        <div class="extra"><button class="btn small" data-rv="top">★ Pin to Top</button><button class="btn small" data-rv="longterm">Mark long-term (never fades)</button>${reminderForm(x.id)}</div>
       </div>
       <div class="note">Keep = no change; the item will not be asked about again until something changes. Later = hidden until the date you pick, then back in Review and Today. Decisions stage into the tray; Apply writes them all at once.</div></div>`;
   }
@@ -303,7 +335,7 @@
     const n = staged.size;
     document.getElementById('tray').classList.toggle('on', n > 0);
     document.getElementById('tray-count').textContent = `${n} change${n === 1 ? '' : 's'}`;
-    document.getElementById('tray-list').textContent = [...staged.entries()].map(([id, s]) => `Task-${id} ${s.label}`).join(' · ');
+    document.getElementById('tray-list').textContent = [...staged.values()].map(s => `Task-${s.task_id} ${s.label}`).join(' · ');
   }
 
   // ---------- wiring ----------
@@ -316,7 +348,7 @@
         if (e.shiftKey) { ui.sel.has(id) ? ui.sel.delete(id) : ui.sel.add(id); } else { ui.focus = id; }
         render();
       });
-      r.querySelector('input[type=checkbox]').addEventListener('change', e => { if (e.target.checked) stage(id, 'done', {}, 'done'); else { staged.delete(id); render(); } });
+      r.querySelector('input[type=checkbox]').addEventListener('change', e => { if (e.target.checked) stage(id, 'done', {}, 'done'); else { staged.delete(id); try { localStorage.setItem('factotum.staged', JSON.stringify([...staged])); } catch (_) {} render(); } });
       r.querySelector('[data-chev]').addEventListener('click', () => { ui.open.has(id) ? ui.open.delete(id) : ui.open.add(id); render(); });
       r.querySelector('.main').setAttribute('draggable', 'true');
       r.querySelector('.main').addEventListener('dragstart', e => e.dataTransfer.setData('text/plain', String(id)));
@@ -339,6 +371,7 @@
     const rd = document.getElementById('rv-date'); if (rd) rd.onchange = () => reviewAct('date', rd.value);
     const rn = document.getElementById('rv-note'); if (rn) rn.oninput = () => { ui.rvNote = { id: +rn.closest('.card').dataset.id, text: rn.value }; };
     const rm = document.getElementById('review-more'); if (rm) rm.onclick = () => loadReview();
+    wireReminders(panel);
     const cmdGo = document.getElementById('cmd-go'); if (cmdGo) cmdGo.onclick = () => { const i = document.getElementById('cmd'); const v = i.value.trim(); i.value = ''; sendPrompt(v); };
     const cmd = document.getElementById('cmd'); if (cmd) cmd.addEventListener('keydown', e => { if (e.key === 'Enter') { const v = cmd.value.trim(); cmd.value = ''; sendPrompt(v); } e.stopPropagation(); });
     document.getElementById('tray-apply').onclick = applyAll;

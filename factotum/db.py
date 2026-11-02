@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS reminders (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   task_id INTEGER NOT NULL REFERENCES tasks(id),
   fire_at TEXT NOT NULL, label TEXT,
+  repeat TEXT,                                   -- NULL|daily|weekdays|weekly|monthly
   status TEXT NOT NULL DEFAULT 'pending',        -- pending|sent|snoozed|done|cancelled
   ntfy_seq TEXT, token TEXT, created_by TEXT, created_at TEXT NOT NULL
 );
@@ -104,8 +105,18 @@ def connect(path: str | Path) -> sqlite3.Connection:
     return conn
 
 
+# Columns added after a table first shipped. CREATE TABLE IF NOT EXISTS leaves an existing table
+# alone, so init_db adds these to databases created before them.
+MIGRATIONS = {"reminders": {"repeat": "TEXT"}}
+
+
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    for table, cols in MIGRATIONS.items():
+        have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        for col, decl in cols.items():
+            if col not in have:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
     conn.commit()
 
 

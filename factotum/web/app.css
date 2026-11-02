@@ -166,3 +166,7 @@ section.group h3.crit { color: var(--crit); } section.group h3.warn { color: var
 .settings td input[type=text] { width: 100%; }
 .note { font-size: 12px; color: var(--muted); border-left: 3px solid var(--line); padding-left: 10px; margin: 14px 0; }
 .note code { font-family: var(--mono); font-size: 12px; }
+
+.remform { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; width: 100%; }
+.remform input, .remform select { font: inherit; font-size: 13px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-2); color: var(--fg); }
+.remform input[type=text] { flex: 1; min-width: 120px; }

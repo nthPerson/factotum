@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import date
+from datetime import date, datetime
 
 from .db import get_task, now_iso
 
@@ -14,12 +14,29 @@ SETTABLE = {
     "waiting_on", "manual_priority", "snoozed_until", "top_rank", "longterm", "legacy_status",
     "last_reviewed_at", "why_now", "calendar_event",
 }
-OPS = {"set", "done", "drop", "reopen", "pin_top", "unpin", "keep", "longterm", "fade", "lapse"}
+OPS = {"set", "done", "drop", "reopen", "pin_top", "unpin", "keep", "longterm", "fade", "lapse", "add_reminder"}
+REPEATS = {"daily", "weekdays", "weekly", "monthly"}
 
 
 def _next_top_rank(conn: sqlite3.Connection) -> int:
     r = conn.execute("SELECT COALESCE(MAX(top_rank), 0) FROM tasks WHERE status = 'open'").fetchone()[0]
     return int(r) + 1
+
+
+def _reminder_fields(change: dict) -> dict:
+    """Validate an add_reminder change → {fire_at, label, repeat}. Raises ValueError."""
+    f = change.get("fields") or {}
+    fire_at = f.get("fire_at")
+    if not fire_at:
+        raise ValueError("a reminder needs fire_at")
+    try:
+        datetime.fromisoformat(str(fire_at))
+    except ValueError:
+        raise ValueError(f"fire_at {fire_at!r} is not an ISO date-time")
+    repeat = f.get("repeat") or None
+    if repeat is not None and repeat not in REPEATS:
+        raise ValueError(f"repeat must be one of {sorted(REPEATS)}, not {repeat!r}")
+    return {"fire_at": str(fire_at), "label": (f.get("label") or None), "repeat": repeat}
 
 
 def _resolve(conn: sqlite3.Connection, change: dict, today: date, closed_by: str) -> dict:
@@ -65,6 +82,21 @@ def apply(conn: sqlite3.Connection, changes: list[dict], source: str, today: dat
         if not task:
             skipped.append({"task_id": ch.get("task_id"), "why": "no such task"})
             continue
+        if ch.get("op") == "add_reminder":
+            # A reminder is a row of its own, not a task field, so it rides beside any decision on
+            # the same task (Keep, Later, even Drop) and is cancelled by the batch's undo.
+            try:
+                rf = _reminder_fields(ch)
+            except ValueError as e:
+                skipped.append({"task_id": task["id"], "why": str(e)})
+                continue
+            cur.execute("INSERT INTO reminders (task_id, fire_at, label, repeat, status, created_by, created_at) VALUES (?, ?, ?, ?, 'pending', ?, ?)",
+                        (task["id"], rf["fire_at"], rf["label"], rf["repeat"], source, now_iso()))
+            rid = cur.lastrowid
+            cur.execute("INSERT INTO changes (batch_id, task_id, field, old, new) VALUES (?, ?, 'reminder', NULL, ?)", (batch_id, task["id"], json.dumps(dict(rf, id=rid))))
+            undo.append({"task_id": task["id"], "reminder_id": rid})
+            applied += 1
+            continue
         try:
             fields = _resolve(conn, ch, today, closed_by)
         except ValueError as e:
@@ -93,7 +125,10 @@ def undo(conn: sqlite3.Connection, batch_id: int) -> dict:
         return {"batch_id": batch_id, "restored": 0, "already": True}
     restored = 0
     for u in json.loads(b["undo_json"] or "[]"):
-        conn.execute(f"UPDATE tasks SET {u['field']} = ?, edited_at = ? WHERE id = ?", (u["old"], now_iso(), u["task_id"]))
+        if "reminder_id" in u:
+            conn.execute("UPDATE reminders SET status = 'cancelled' WHERE id = ?", (u["reminder_id"],))
+        else:
+            conn.execute(f"UPDATE tasks SET {u['field']} = ?, edited_at = ? WHERE id = ?", (u["old"], now_iso(), u["task_id"]))
         restored += 1
     conn.execute("UPDATE batches SET undone_at = ? WHERE id = ?", (now_iso(), batch_id))
     conn.commit()
