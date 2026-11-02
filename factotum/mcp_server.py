@@ -698,57 +698,118 @@ def _discord_guild(ctx: Context, args: dict) -> dict:
 
 
 def _discord_channels(ctx: Context, gid: str) -> list[dict]:
+    """Text channels and forums of a server, in Discord's order (one request per run)."""
     from . import discord
     key = ("discord-channels", gid)
     if key not in ctx._slack:
         chans = ctx.discord_client().get(f"/guilds/{gid}/channels")
-        ctx._slack[key] = sorted([c for c in chans if discord.is_text(c)], key=lambda c: (c.get("position") or 0, str(c.get("name"))))
+        ctx._slack[key] = sorted([c for c in chans if discord.is_text(c) or discord.is_forum(c)], key=lambda c: (c.get("position") or 0, str(c.get("name"))))
+    return ctx._slack[key]
+
+
+def _discord_threads(ctx: Context, gid: str) -> list[dict]:
+    """The server's active threads (forum posts among them), one request per run."""
+    from . import discord
+    key = ("discord-threads", gid)
+    if key not in ctx._slack:
+        try:
+            ctx._slack[key] = list((ctx.discord_client().get(f"/guilds/{gid}/threads/active") or {}).get("threads") or [])
+        except discord.DiscordError as e:                    # no threads permission: the channels still work; search says so
+            ctx._slack[key], ctx._slack[("discord-threads-error", gid)] = [], str(e)
     return ctx._slack[key]
 
 
 def _discord_channel_id(ctx: Context, gid: str, channel: str) -> dict:
+    """A channel or forum by name or id; a thread by id (its parent is attached as `parent`)."""
+    from . import discord
     ch = str(channel or "").strip().lstrip("#")
     if not ch:
         raise ToolError("channel is required (a name or an id)")
     chans = _discord_channels(ctx, gid)
     hit = [c for c in chans if c["id"] == ch] or [c for c in chans if str(c.get("name") or "").lower() == ch.lower()]
-    if not hit:
-        raise ToolError(f"no text channel {channel!r} in that server; known: " + ", ".join(str(c.get("name")) for c in chans[:40]))
-    return hit[0]
+    if hit:
+        return hit[0]
+    by_id = {c["id"]: c for c in chans}
+    th = next((t for t in _discord_threads(ctx, gid) if t.get("id") == ch), None)    # an active thread, by id
+    if th is None and " " not in ch:                                                # an archived one: ask Discord
+        try:
+            th = ctx.discord_client().get(f"/channels/{ch}")
+        except discord.DiscordError:
+            th = None
+    if th and discord.is_thread(th) and str(th.get("guild_id") or gid) == gid:
+        return dict(th, parent=by_id.get(str(th.get("parent_id"))))
+    raise ToolError(f"no channel or thread {channel!r} in that server; known: " + ", ".join(str(c.get("name")) for c in chans[:40]) + " — threads by id, from discord_threads")
 
 
-def _discord_msg(m: dict, channel: str | None = None) -> dict:
+def _discord_msg(m: dict, channel: str | None = None, thread: str | None = None) -> dict:
     a = m.get("author") or {}
     out = {"id": m.get("id"), "at": str(m.get("timestamp") or "")[:19], "from": a.get("global_name") or a.get("username") or a.get("id") or "?",
            "text": _cut(m.get("content"), 1200)}
     if channel:
         out["channel"] = channel
+    if thread:
+        out["thread"] = thread
     if m.get("attachments"):
         out["attachments"] = [str(x.get("filename") or "") for x in m["attachments"]][:10]
     return out
 
 
-@tool("discord_channels", "The text channels of a Discord server named in the config: id, name, topic.", {"server": {"type": "string"}})
+def _discord_thread_row(t: dict, by_id: dict) -> dict:
+    meta = t.get("thread_metadata") or {}
+    parent = by_id.get(str(t.get("parent_id")) or "") or {}
+    return {"id": t.get("id"), "name": _cut(t.get("name"), 120), "channel": parent.get("name"), "forum_post": bool(parent and int(parent.get("type", 0)) in (15, 16)),
+            "archived": bool(meta.get("archived")), "messages": t.get("message_count"), "last_at": str(meta.get("archive_timestamp") or t.get("last_message_at") or "")[:19] or None}
+
+
+@tool("discord_channels", "The text channels and forums of a Discord server named in the config: id, name, kind (text|forum), topic. A forum's posts are threads: list them with discord_threads.",
+      {"server": {"type": "string"}})
 def discord_channels(ctx: Context, args: dict) -> dict:
+    from . import discord
     g = _discord_guild(ctx, args)
-    return {"server": g["name"], "channels": [{"id": c["id"], "name": c.get("name"), "topic": _cut(c.get("topic"), 120)} for c in _discord_channels(ctx, g["id"])][:200]}
+    return {"server": g["name"], "channels": [{"id": c["id"], "name": c.get("name"), "kind": "forum" if discord.is_forum(c) else "text", "topic": _cut(c.get("topic"), 120)}
+                                              for c in _discord_channels(ctx, g["id"])][:200]}
 
 
-@tool("discord_messages", "The newest messages of one Discord text channel (name or id), newest first: who, when, text.",
+@tool("discord_threads", "The active threads of a Discord server (forum posts are threads): id, name, the channel or forum they live in, message count. "
+      "`channel` narrows to one channel; `archived: true` adds that channel's archived threads (newest first). Read one with discord_messages and its id.",
+      {"server": {"type": "string"}, "channel": {"type": "string"}, "archived": {"type": "boolean"}, "limit": {"type": "integer"}})
+def discord_threads(ctx: Context, args: dict) -> dict:
+    from . import discord
+    g = _discord_guild(ctx, args)
+    chans = _discord_channels(ctx, g["id"])
+    by_id = {c["id"]: c for c in chans}
+    want = _discord_channel_id(ctx, g["id"], args.get("channel")) if args.get("channel") else None
+    threads = [t for t in _discord_threads(ctx, g["id"]) if want is None or str(t.get("parent_id")) == want["id"]]
+    if args.get("archived"):
+        if want is None:
+            raise ToolError("archived threads are per channel: say which channel (or forum)")
+        try:
+            threads += (ctx.discord_client().get(f"/channels/{want['id']}/threads/archived/public", {"limit": 25}) or {}).get("threads") or []
+        except discord.DiscordError as e:
+            raise ToolError(f"#{want.get('name')}: {e}")
+    return {"server": g["name"], "threads": [_discord_thread_row(t, by_id) for t in threads][:_int(args, "limit", 50, 1, 200)]}
+
+
+@tool("discord_messages", "The newest messages of one Discord text channel (name or id) or thread (id, from discord_threads), newest first: who, when, text.",
       {"server": {"type": "string"}, "channel": {"type": "string"}, "limit": {"type": "integer"}, "before": {"type": "string", "description": "a message id, to page back"}}, ["channel"])
 def discord_messages(ctx: Context, args: dict) -> dict:
     from . import discord
     g = _discord_guild(ctx, args)
     c = _discord_channel_id(ctx, g["id"], args.get("channel"))
+    if discord.is_forum(c):
+        raise ToolError(f"#{c.get('name')} is a forum: its posts are threads, which hold the messages. discord_threads lists them; then read one by id.")
     try:
         ms = ctx.discord_client().get(f"/channels/{c['id']}/messages", {"limit": _int(args, "limit", 25, 1, 100), "before": _str(args, "before", None, 30)})
     except discord.DiscordError as e:
         raise ToolError(f"#{c.get('name')}: {e}")
-    return {"server": g["name"], "channel": c.get("name"), "messages": [_discord_msg(m) for m in ms][:100]}
+    out = {"server": g["name"], "channel": c.get("name"), "messages": [_discord_msg(m) for m in ms][:100]}
+    if discord.is_thread(c):
+        out["channel"], out["thread"] = (c.get("parent") or {}).get("name"), c.get("name")
+    return out
 
 
 @tool("discord_search", "Find recent messages in a Discord server that mention a phrase (Discord has no search for bots: the newest messages of each text "
-      "channel are read and filtered). Optionally only some channels.",
+      "channel and active thread are read and filtered, bounded). Optionally only some channels (or forums, whose posts are then scanned).",
       {"server": {"type": "string"}, "query": {"type": "string"}, "channels": {"type": "array", "items": {"type": "string"}}, "per_channel": {"type": "integer"}, "limit": {"type": "integer"}}, ["query"])
 def discord_search(ctx: Context, args: dict) -> dict:
     from . import discord
@@ -757,20 +818,27 @@ def discord_search(ctx: Context, args: dict) -> dict:
     if not q:
         raise ToolError("query is required")
     chans = _discord_channels(ctx, g["id"])
+    by_id = {c["id"]: c for c in chans}
     wanted = [str(x).lstrip("#").lower() for x in (args.get("channels") or []) if x]
     if wanted:
         chans = [c for c in chans if c["id"] in wanted or str(c.get("name") or "").lower() in wanted]
+    threads = [t for t in _discord_threads(ctx, g["id"]) if str(t.get("parent_id")) in {c["id"] for c in chans}]
+    texts = [c for c in chans if discord.is_text(c)][:12]
+    threads = threads[:12]
     per = _int(args, "per_channel", 100, 10, 100)
     hits, skipped = [], []
-    for c in chans[:12]:
+    for c, thread in [(c, None) for c in texts] + [(t, t.get("name")) for t in threads]:
         try:
             ms = ctx.discord_client().get(f"/channels/{c['id']}/messages", {"limit": per})
         except discord.DiscordError as e:
-            skipped.append(f"#{c.get('name')}: {e}")
+            skipped.append(f"#{(by_id.get(str(c.get('parent_id'))) or c).get('name')}{' › ' + thread if thread else ''}: {e}")
             continue
-        hits += [_discord_msg(m, c.get("name")) for m in ms if q in str(m.get("content") or "").lower()]
+        chan_name = (by_id.get(str(c.get("parent_id"))) or {}).get("name") if thread else c.get("name")
+        hits += [_discord_msg(m, chan_name, thread) for m in ms if q in str(m.get("content") or "").lower()]
     hits.sort(key=lambda h: h["at"], reverse=True)
-    return {"server": g["name"], "channels_read": min(len(chans), 12), "matches": hits[:_int(args, "limit", 30, 1, 100)], "skipped": skipped}
+    if ctx._slack.get(("discord-threads-error", g["id"])):
+        skipped.append("threads: " + ctx._slack[("discord-threads-error", g["id"])])
+    return {"server": g["name"], "channels_read": len(texts), "threads_read": len(threads), "matches": hits[:_int(args, "limit", 30, 1, 100)], "skipped": skipped}
 
 
 # ---- JSON-RPC ---------------------------------------------------------------------------------

@@ -184,10 +184,14 @@ sources:
       - "*Arts & Letters Homeroom*"
   slack:
     enabled: false                # Chat and the skills can search and read; never post. Toggle in Settings.
-    workspaces:                   # one entry per workspace; the token lives in .env under the name token_env gives
-      - { name: DiCE Lab,   token_env: SLACK_TOKEN_DICE }
-      - { name: Car Sounds, token_env: SLACK_TOKEN_CARSOUNDS }
-      - { name: LARK dev,   token_env: SLACK_TOKEN_LARK }
+    sweep_minutes: 20             # the mention sweep: @-mentions of you since the last pass become Review items (Settings can override)
+    lookback_days: 2              # how far the first pass of a workspace looks back
+    max_channels: 40              # joined channels read per workspace per pass (one page of history each)
+    workspaces:                   # one entry per workspace; the token lives in .env under the name token_env gives;
+                                  # `project` is where a task created from a mention files; `channels: [..]` limits the sweep
+      - { name: DiCE Lab,   token_env: SLACK_TOKEN_DICE,      project: DiCE Lab }
+      - { name: Car Sounds, token_env: SLACK_TOKEN_CARSOUNDS, project: Car Sounds }
+      - { name: LARK dev,   token_env: SLACK_TOKEN_LARK,      project: LARK }
   discord:
     enabled: false                # one bot (DISCORD_BOT_TOKEN in .env) invited to each server below; read-only
     guilds:                       # server ids: Discord → User Settings → Advanced → Developer Mode, then right-click the server → Copy Server ID

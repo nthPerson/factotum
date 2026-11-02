@@ -18,9 +18,11 @@ for each of the rows the user should look at first (at most 15), saying why toda
 deadline, the person expecting it, the evidence, or the effort. Skip rows with nothing to say.
 {{rows}}
 
-# 3. Evidence the mail sweep collected (evidence <id> | kind | account | task | excerpt)
+# 3. Evidence the sweeps collected (evidence <id> | kind | account | task | excerpt)
 A sent message to the person a task is owed to, a reply from someone a task waits on, a thread that
-moved, a confirmation or an invitation. Judge each one: does it prove a task is done, moved, or
+moved, a confirmation or an invitation; a Slack message that @-mentions the user (kind
+slack_mention; `account` is the workspace; one on a task names it, one with no task may describe
+work nobody has filed). Judge each one: does it prove a task is done, moved, or
 answered? Does it describe a new deadline or appointment that has no task? Cite its id in a
 proposal, or dismiss it, or leave it.
 {{candidates}}

@@ -353,16 +353,19 @@
   // A planner create with no task behind it: one card, Create or Dismiss (the dismissal is a batch
   // change like any other, so the Log tab undoes it).
   function suggestionCard(sg, n) {
+    const slack = sg.kind === 'slack_mention';
+    const link = slack && sg.fields && sg.fields.source_link;
     return `<div class="review">
-      <div class="progress"><span>${n} suggestion${n === 1 ? '' : 's'} from the planner</span><div class="track"></div></div>
+      <div class="progress"><span>${n} suggestion${n === 1 ? '' : 's'} from the planner and Slack</span><div class="track"></div></div>
       <div class="card" data-sugg="${sg.id}">
-        <div class="why new">Planner suggests</div>
-        <h2>${esc(sg.label.replace(/^create:\s*/i, ''))}</h2>
+        <div class="why new">${slack ? 'Mentioned in Slack' : 'Planner suggests'}</div>
+        <h2>${esc(slack ? (sg.fields && sg.fields.name) || sg.label : sg.label.replace(/^create:\s*/i, ''))}</h2>
         ${sg.reason ? `<p class="ctx">${esc(sg.reason)}</p>` : ''}
-        <p class="hint">${sg.at ? 'Suggested ' + new Date(sg.at).toLocaleDateString([], { month: 'short', day: 'numeric' }) : ''}</p>
+        <p class="hint">${sg.at ? (slack ? 'Posted ' : 'Suggested ') + new Date(sg.at).toLocaleDateString([], { month: 'short', day: 'numeric' }) : ''}${slack && sg.fields && sg.fields.project ? ` · files under ${esc(sg.fields.project)}` : ''}</p>
+        ${link ? `<div class="links"><a href="${esc(link)}" target="_blank" rel="noopener">Open in Slack</a></div>` : ''}
         <div class="big"><button class="done" data-sugg-create="${sg.id}">Create task</button><button class="drop" data-sugg-dismiss="${sg.id}">Dismiss</button></div>
       </div>
-      <div class="note">Create makes an open task (source Planner) that shows as New in Review; Dismiss stages a change you can undo from the Log tab.</div></div>`;
+      <div class="note">Create makes an open task (source ${slack ? 'Slack, the message linked' : 'Planner'}) that shows as New in Review; Dismiss stages a change you can undo from the Log tab.</div></div>`;
   }
   function stageJudge(evidenceId, taskId, verdict, label) { stageExtra('e:' + evidenceId, taskId, 'judge_evidence', { evidence_id: evidenceId, verdict }, label); }
   // ---------- Chat (SPEC §8.3) ----------
@@ -530,7 +533,7 @@
       ${f('sources.canvas.enabled', 'Canvas', 'New items become hard-deadline tasks, submitted ones close.', bool('sources.canvas.enabled') + ' &nbsp; every ' + num('sources.canvas.sweep_minutes', 5, 1440) + ' min')}
       ${f('sources.mail.enabled', 'Email via Mailbird', 'Replies flip Waiting, sent mail closes reply tasks, invitations and confirmations feed the planner.', bool('sources.mail.enabled') + ' &nbsp; every ' + num('sources.mail.sweep_minutes', 5, 1440) + ' min')}
       ${f('sources.calendar.enabled', 'Google Calendar', 'Needs config/google-credentials.json (docs/SETUP.md §6).', bool('sources.calendar.enabled') + ' &nbsp; every ' + num('sources.calendar.sweep_minutes', 5, 1440) + ' min &nbsp; calendar id ' + text('sources.calendar.calendar_id', '160px'))}
-      ${f('sources.slack.enabled', 'Slack', 'Chat can search and read the workspaces named in the config file (docs/SETUP.md §12); tokens in .env.', bool('sources.slack.enabled'))}
+      ${f('sources.slack.enabled', 'Slack', 'Chat can search and read the workspaces named in the config file (docs/SETUP.md §12); tokens in .env. The sweep turns @-mentions of you into Review items.', bool('sources.slack.enabled') + ' &nbsp; every ' + num('sources.slack.sweep_minutes', 5, 1440) + ' min')}
       ${f('sources.discord.enabled', 'Discord', 'Chat can list channels and read recent messages in the servers named in the config file (docs/SETUP.md §13).', bool('sources.discord.enabled'))}
       <h3>Email accounts</h3>
       <table><tr><td class="code">address</td><td class="code">label</td><td class="code">roles (monitor, plaud_trigger, brief_recipient)</td><td class="code">on</td><td></td></tr>${accounts}</table>
@@ -617,7 +620,7 @@
     panel.querySelectorAll('[data-pending-dismiss]').forEach(b => b.onclick = async () => {
       try { await api(`/api/proposals/${b.dataset.pendingDismiss}/dismiss`, { method: 'POST' }); await load(); toast('Dismissed'); } catch (e) { toast('Dismiss failed: ' + e.message); }
     });
-    panel.querySelectorAll('[data-sugg-dismiss]').forEach(b => b.onclick = () => { stageJudge(+b.dataset.suggDismiss, null, 'dismissed', 'planner suggestion dismissed'); });
+    panel.querySelectorAll('[data-sugg-dismiss]').forEach(b => b.onclick = () => { stageJudge(+b.dataset.suggDismiss, null, 'dismissed', 'suggestion dismissed'); });
     panel.querySelectorAll('[data-sugg-create]').forEach(b => b.onclick = async () => {
       const id = +b.dataset.suggCreate;
       try { const r = await api(`/api/review/suggestions/${id}/create`, { method: 'POST' }); const sg = (review.suggestions || []).find(x => x.id === id); if (sg) sg.created = r.task_id; toast(`Created Task-${r.task_id} · it shows as New in Review`); await load(); }

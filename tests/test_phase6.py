@@ -423,3 +423,171 @@ def test_mirror_notes_relation_ignores_plaud_recording_ids_and_task_ids_repush_r
     assert [p for p, _ in fake.pages("PATCH")] == ["/v1/pages/p395"] and len(fake.pages("POST")) == 1
     assert fake.pages("PATCH")[0][1]["properties"]["Notes"] == {"relation": [{"id": "40ceb306511081c4b511c37681343d3a"}]}
     assert one(conn, "SELECT notion_page_id FROM tasks WHERE id = 396")["notion_page_id"] == "page-1"
+
+
+class FakeDiscordThreads(FakeDiscord):
+    """A server with a forum, an active thread under #general, a forum post and an archived thread."""
+    def transport(self):
+        inner = super().transport()
+
+        def handler(req: httpx.Request):
+            p = req.url.path
+            self.calls.append((req.method, p, dict(req.url.params), req.headers.get("Authorization")))
+            if p == "/api/v10/guilds/G1/channels":
+                return httpx.Response(200, json=[{"id": "CH1", "name": "general", "type": 0, "position": 0, "topic": "t"}, {"id": "CH2", "name": "voice", "type": 2},
+                                                 {"id": "F1", "name": "ideas", "type": 15, "position": 2, "topic": "forum"}])
+            if p == "/api/v10/guilds/G1/threads/active":
+                return httpx.Response(200, json={"threads": [{"id": "T1", "name": "Deploy plan", "type": 11, "parent_id": "CH1", "message_count": 3, "thread_metadata": {"archived": False}},
+                                                             {"id": "T2", "name": "Sensor ideas", "type": 11, "parent_id": "F1", "message_count": 1, "thread_metadata": {"archived": False}}]})
+            if p == "/api/v10/channels/CH1/threads/archived/public":
+                return httpx.Response(200, json={"threads": [{"id": "T0", "name": "Old plan", "type": 11, "parent_id": "CH1", "message_count": 9, "thread_metadata": {"archived": True, "archive_timestamp": "2026-10-01T00:00:00+00:00"}}], "has_more": False})
+            if p == "/api/v10/channels/T1":
+                return httpx.Response(200, json={"id": "T1", "name": "Deploy plan", "type": 11, "parent_id": "CH1", "guild_id": "G1"})
+            if p == "/api/v10/channels/T1/messages":
+                return httpx.Response(200, json=[{"id": "M5", "author": {"id": "U9", "username": "max"}, "content": "deploy step two", "timestamp": "2026-11-02T10:00:00.000000+00:00"}])
+            if p == "/api/v10/channels/T2/messages":
+                return httpx.Response(200, json=[{"id": "M6", "author": {"id": "U9", "username": "max"}, "content": "sensor data idea", "timestamp": "2026-11-02T11:00:00.000000+00:00"}])
+            if p == "/api/v10/channels/F1/messages":
+                return httpx.Response(400, json={"message": "Cannot execute action on this channel type", "code": 50024})
+            return inner.handler(req)
+        return httpx.MockTransport(handler)
+
+
+def test_discord_forums_and_threads_are_listed_read_and_searched(conn, cfg, tmp_path, monkeypatch):
+    """Forums (type 15/16) are channels whose posts are threads; discord_threads lists a server's active
+    threads (and a channel's archived ones on request), discord_messages reads a thread by id, and
+    discord_search scans active threads beside the text channels."""
+    from factotum import discord, mcp_server as M
+    cfg["sources"]["discord"] = {"enabled": True, "guilds": [{"name": "LARK dev", "id": "G1"}]}
+    monkeypatch.setenv("DISCORD_BOT_TOKEN", "bot-token")
+    fake = FakeDiscordThreads()
+    ctx = M.Context(conn, cfg, run_dir=tmp_path, discord=lambda token: discord.Client(token, transport=fake.transport()))
+    chans = json.loads(_text(_rpc(ctx, 1, "tools/call", {"name": "discord_channels", "arguments": {"server": "lark"}})))
+    assert [(c["name"], c["kind"]) for c in chans["channels"]] == [("general", "text"), ("ideas", "forum")]
+    th = json.loads(_text(_rpc(ctx, 2, "tools/call", {"name": "discord_threads", "arguments": {"server": "lark"}})))
+    assert [(t["name"], t["channel"], t["archived"]) for t in th["threads"]] == [("Deploy plan", "general", False), ("Sensor ideas", "ideas", False)]
+    th = json.loads(_text(_rpc(ctx, 3, "tools/call", {"name": "discord_threads", "arguments": {"server": "lark", "channel": "general", "archived": True}})))
+    assert [t["name"] for t in th["threads"]] == ["Deploy plan", "Old plan"] and th["threads"][1]["id"] == "T0"
+    msgs = json.loads(_text(_rpc(ctx, 4, "tools/call", {"name": "discord_messages", "arguments": {"server": "lark", "channel": "T1"}})))
+    assert msgs["channel"] == "general" and msgs["thread"] == "Deploy plan" and msgs["messages"][0]["text"] == "deploy step two"
+    forum = _rpc(ctx, 5, "tools/call", {"name": "discord_messages", "arguments": {"server": "lark", "channel": "ideas"}})
+    assert forum["result"]["isError"] and "discord_threads" in _text(forum)
+    hits = json.loads(_text(_rpc(ctx, 6, "tools/call", {"name": "discord_search", "arguments": {"server": "lark", "query": "deploy"}})))
+    assert hits["threads_read"] == 2 and sorted(((h["channel"], h.get("thread")) for h in hits["matches"]), key=str) == [("general", "Deploy plan"), ("general", None)]
+    hits = json.loads(_text(_rpc(ctx, 7, "tools/call", {"name": "discord_search", "arguments": {"server": "lark", "query": "sensor", "channels": ["ideas"]}})))
+    assert [(h["channel"], h["thread"]) for h in hits["matches"]] == [("ideas", "Sensor ideas")]
+    assert not any(c[1] == "/api/v10/channels/F1/messages" for c in fake.calls)      # a forum has no messages of its own: never asked
+
+
+# --- the Slack mention sweep ---------------------------------------------------------------------
+
+class FakeSlackSweep:
+    """One workspace: the token's user is U1; #general has a mention naming Task-42, a mention with no
+    task, and the user's own message; #papers is quiet; #random is not joined."""
+    def __init__(self):
+        self.calls = []
+
+    def transport(self):
+        def handler(req: httpx.Request):
+            method = req.url.path.rsplit("/", 1)[-1]
+            params = dict(httpx.QueryParams(req.content.decode()))
+            self.calls.append((method, params))
+            if method == "auth.test":
+                return httpx.Response(200, json={"ok": True, "team": "DiCE Lab", "url": "https://dice.slack.com/", "user": "robert", "user_id": "U1"})
+            if method == "conversations.list":
+                return httpx.Response(200, json={"ok": True, "channels": [{"id": "C1", "name": "general", "is_member": True}, {"id": "C2", "name": "papers", "is_member": True},
+                                                                            {"id": "C3", "name": "random", "is_member": False}], "response_metadata": {"next_cursor": ""}})
+            if method == "conversations.history":
+                if params["channel"] != "C1" or float(params.get("oldest") or 0) >= 1793536050.0001:
+                    return httpx.Response(200, json={"ok": True, "messages": []})
+                return httpx.Response(200, json={"ok": True, "messages": [
+                    {"ts": "1793536050.000100", "user": "U2", "text": "<@U1> lunch tomorrow?"},
+                    {"ts": "1793536000.000100", "user": "U2", "text": "<@U1> can you send the slides for Task-42 by Friday?", "reply_count": 1, "thread_ts": "1793536000.000100"},
+                    {"ts": "1793535000.000100", "user": "U1", "text": "<@U2> done"},
+                    {"ts": "1793534000.000100", "user": "U3", "text": "no mention here"}]})
+            if method == "users.info":
+                return httpx.Response(200, json={"ok": True, "user": {"id": params["user"], "real_name": {"U2": "Max M", "U1": "Robert"}.get(params["user"], params["user"])}})
+            return httpx.Response(200, json={"ok": False, "error": f"unknown_method {method}"})
+        return httpx.MockTransport(handler)
+
+
+def _sweep_cfg(cfg):
+    cfg["sources"]["slack"] = {"enabled": True, "sweep_minutes": 20, "lookback_days": 2, "workspaces": [{"name": "DiCE Lab", "token_env": "SLACK_TOKEN_DICE", "project": "DiCE Lab"}]}
+    return cfg
+
+
+def test_slack_sweep_turns_mentions_into_evidence_and_task_mentions(conn, cfg, monkeypatch):
+    from datetime import datetime
+    from factotum import lifecycle, slack, slack_sweep
+    from factotum.db import get_settings
+    from factotum.mail_sweep import review_flags
+    _sweep_cfg(cfg)
+    monkeypatch.setenv("SLACK_TOKEN_DICE", "xoxp-dice")
+    upsert_task(conn, task(id=42, name="Slides for Max", mentions=1, last_mention_at="2026-10-01")); conn.commit()
+    fake = FakeSlackSweep()
+    now = datetime(2026, 11, 2, 9, 0)
+    out = slack_sweep.sweep(conn, cfg, now, clients=lambda tok: slack.Client(tok, transport=fake.transport()))
+    assert out and "2 mention" in out and "1 on a task" in out
+    assert {c["channel"] for m, c in fake.calls if m == "conversations.history"} == {"C1", "C2"}           # joined channels only
+    ev = rows(conn, "SELECT * FROM evidence ORDER BY id")
+    assert [(e["kind"], e["task_id"], e["account"]) for e in ev] == [("slack_mention", None, "DiCE Lab"), ("slack_mention", 42, "DiCE Lab")]
+    on_task = ev[1]
+    assert on_task["ref"] == "https://dice.slack.com/archives/C1/p1793536000000100" and on_task["label"].startswith("#general · Max M") and "@Robert can you send" in on_task["excerpt"]
+    t = one(conn, "SELECT mentions, last_mention_at FROM tasks WHERE id = 42")
+    assert t["mentions"] == 2 and t["last_mention_at"].startswith("2026-11-01")                             # ts 1793536000 → 2026-11-01T11:06:40Z
+    assert one(conn, "SELECT ref, account FROM links WHERE task_id = 42 AND kind = 'slack_message'")["account"] == "DiCE Lab"
+    assert review_flags(conn)[42] == {"mentioned": True} and "mentioned" in lifecycle.REVIEW_LABELS
+    assert lifecycle.review_reasons(one(conn, "SELECT * FROM tasks WHERE id = 42"), TODAY, cfg, None, {"mentioned": True})[0] == "mentioned"
+    assert get_settings(conn)["state.slack_sweep.last_ts.DiCE Lab"] == "1793536050.000100"
+    # the next pass starts at the watermark and finds nothing new; the first pass looked back lookback_days
+    assert fake.calls[2][1].get("oldest") and float(fake.calls[2][1]["oldest"]) < 1793536000
+    assert slack_sweep.sweep(conn, cfg, now, clients=lambda tok: slack.Client(tok, transport=fake.transport())) is None
+    assert [c for m, c in fake.calls if m == "conversations.history" and c["channel"] == "C1"][-1]["oldest"] == "1793536050.000100"
+    assert len(rows(conn, "SELECT * FROM evidence")) == 2
+
+
+def test_review_shows_a_slack_mention_as_a_suggestion_and_creates_the_task_from_it(cfg, tmp_path, monkeypatch):
+    from datetime import datetime
+    from fastapi.testclient import TestClient
+    from factotum import slack, slack_sweep
+    from factotum.api import create_app
+    _sweep_cfg(cfg)
+    monkeypatch.setenv("SLACK_TOKEN_DICE", "xoxp-dice")
+    app = create_app(cfg, db_path=str(tmp_path / "api.db"))
+    conn = app.state.conn
+    upsert_task(conn, task(id=42, name="Slides for Max")); conn.commit()
+    fake = FakeSlackSweep()
+    slack_sweep.sweep(conn, cfg, datetime(2026, 11, 2, 9, 0), clients=lambda tok: slack.Client(tok, transport=fake.transport()))
+    client = TestClient(app)
+    r = client.get("/api/review").json()
+    sg = [s for s in r["suggestions"] if s["kind"] == "slack_mention"]
+    assert len(sg) == 1 and sg[0]["fields"]["name"] == "lunch tomorrow?" and sg[0]["label"].startswith("#general · Max M") and sg[0]["fields"]["project"] == "DiCE Lab"
+    tid = client.post(f"/api/review/suggestions/{sg[0]['id']}/create", json={}).json()["task_id"]
+    t = one(conn, "SELECT * FROM tasks WHERE id = ?", (tid,))
+    assert t["source"] == "Slack" and t["project"] == "DiCE Lab" and t["source_link"] == "https://dice.slack.com/archives/C1/p1793536050000100" and t["name"] == "lunch tomorrow?"
+    assert "Max M in #general (DiCE Lab)" in t["context"] and one(conn, "SELECT 1 AS x FROM links WHERE task_id = ? AND kind = 'slack_message'", (tid,))
+    assert one(conn, "SELECT verdict FROM evidence WHERE id = ?", (sg[0]["id"],))["verdict"] == "applied"
+    assert not [s for s in client.get("/api/review").json()["suggestions"] if s["kind"] == "slack_mention"]
+
+
+def test_scheduler_runs_the_slack_sweep_on_its_interval_when_slack_is_on(conn, cfg):
+    from datetime import datetime
+    from factotum.scheduler import Scheduler
+    from factotum.db import set_setting
+    _sweep_cfg(cfg)
+    for k in ("notify.ntfy.enabled", "notify.morning_brief.enabled", "sources.canvas.enabled", "sources.mail.enabled", "sources.calendar.enabled", "sinks.notion_tasks_mirror.enabled"):
+        set_setting(conn, k, False)
+    set_setting(conn, "state.last_run.expire", "2026-11-02"); set_setting(conn, "state.last_run.review_push", "2026-11-02"); conn.commit()
+    calls = []
+
+    class FakeSweep:
+        @staticmethod
+        def sweep_job(c, ecfg, now):
+            calls.append(now); return "2 mentions"
+    s = Scheduler(cfg, conn, push=lambda *a, **k: None, slack=FakeSweep)
+    assert any(d.startswith("slack_sweep") for d in s.tick(datetime(2026, 11, 2, 10, 0)))
+    s.tick(datetime(2026, 11, 2, 10, 10)); s.tick(datetime(2026, 11, 2, 10, 21))
+    assert len(calls) == 2
+    set_setting(conn, "sources.slack.enabled", False); conn.commit()
+    s.tick(datetime(2026, 11, 2, 10, 45))
+    assert len(calls) == 2

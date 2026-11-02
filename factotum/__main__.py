@@ -98,7 +98,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dry-run", action="store_true", help="run Claude and print the JSON; write nothing")
     p.add_argument("--send", action="store_true", help="also send the brief with the verdict")
     p = sub.add_parser("sweep", help="run one sweep now")
-    p.add_argument("which", choices=["mail", "canvas", "calendar"])
+    p.add_argument("which", choices=["mail", "canvas", "calendar", "slack"])
     sub.add_parser("slack-check", help="each configured Slack workspace: token present, auth.test, how many channels it sees")
     sub.add_parser("discord-check", help="the Discord bot: who it is, the servers it is in vs the config, text channels per configured server")
     p = sub.add_parser("mirror", help="push task rows to the Notion Tasks database (one-way); default: rows edited since the last pass")
@@ -127,17 +127,17 @@ def main(argv: list[str] | None = None) -> int:
         from .api import create_app
         app = create_app(cfg)
         if not a.no_scheduler:
-            from . import brief, canvas, gcal, mail_sweep, notify, notion_mirror, planner
+            from . import brief, canvas, gcal, mail_sweep, notify, notion_mirror, planner, slack_sweep
             from .scheduler import Scheduler
             # its own connection: the API holds one, and SQLite serialises writers with busy_timeout
-            Scheduler(cfg, connect(C.db_path()), push=notify.publish, mailer=brief.smtp_mailer, calendar=gcal, canvas=canvas, mail=mail_sweep, planner=planner, mirror=notion_mirror).start()
+            Scheduler(cfg, connect(C.db_path()), push=notify.publish, mailer=brief.smtp_mailer, calendar=gcal, canvas=canvas, mail=mail_sweep, planner=planner, mirror=notion_mirror, slack=slack_sweep).start()
             _start_plaud_trigger(cfg)
         uvicorn.run(app, host=a.host or C.get(cfg, "server.host", "127.0.0.1"), port=a.port or int(C.get(cfg, "server.port", 8750)))
     elif a.cmd == "tick":
         from . import brief, gcal, notify
-        from . import canvas, mail_sweep, notion_mirror, planner
+        from . import canvas, mail_sweep, notion_mirror, planner, slack_sweep
         from .scheduler import Scheduler
-        did = Scheduler(cfg, conn, push=notify.publish, mailer=brief.smtp_mailer, calendar=gcal, canvas=canvas, mail=mail_sweep, planner=planner, mirror=notion_mirror).tick()
+        did = Scheduler(cfg, conn, push=notify.publish, mailer=brief.smtp_mailer, calendar=gcal, canvas=canvas, mail=mail_sweep, planner=planner, mirror=notion_mirror, slack=slack_sweep).tick()
         print("\n".join(did) if did else "nothing due")
     elif a.cmd == "brief":
         from . import brief, gcal
@@ -340,9 +340,9 @@ def main(argv: list[str] | None = None) -> int:
                 print(brief.send(conn, ecfg, today, brief.smtp_mailer, gcal, planner=res))
     elif a.cmd == "sweep":
         from datetime import datetime as _dt
-        from . import canvas, gcal, mail_sweep
+        from . import canvas, gcal, mail_sweep, slack_sweep
         now = _dt.now()
-        mod = {"mail": mail_sweep, "canvas": canvas, "calendar": gcal}[a.which]
+        mod = {"mail": mail_sweep, "canvas": canvas, "calendar": gcal, "slack": slack_sweep}[a.which]
         print(mod.sweep_job(conn, ecfg, now) or "nothing to do")
     elif a.cmd == "calendar-check":
         from datetime import datetime, timedelta

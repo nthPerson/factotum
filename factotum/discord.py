@@ -6,10 +6,12 @@ refuse, so nothing here can ever send, react or edit. Reading message content ne
     guilds(cfg)                  -> [{name, id}] from config
     find_guild(cfg, name)        -> the config entry (case-insensitive, prefix allowed)
     Client(token).get(path, params) -> JSON (raises DiscordError on a non-2xx)
-    is_text(channel)             -> text-like channel types only (text, announcement, threads)
+    is_text(channel)             -> channel types that hold messages (text, announcement, threads)
+    is_forum(channel)            -> forum / media channels: their posts are threads, they hold no messages
+    is_thread(channel)           -> a thread (its parent_id names the channel or forum it lives in)
 
 Discord has no message search for bots: `discord_search` in mcp_server reads the newest messages
-of each text channel (bounded) and filters them here.
+of each text channel and active thread (bounded) and filters them here.
 """
 from __future__ import annotations
 
@@ -23,6 +25,8 @@ from . import config as C
 API = "https://discord.com/api/v10"
 USER_AGENT = "Factotum (https://github.com/nthPerson/factotum, 0.6)"
 TEXT_TYPES = {0, 5, 10, 11, 12}          # guild text, announcement, announcement thread, public thread, private thread
+THREAD_TYPES = {10, 11, 12}
+FORUM_TYPES = {15, 16}                   # forum, media: each post is a thread
 
 
 class DiscordError(Exception):
@@ -58,6 +62,14 @@ def token() -> str:
 
 def is_text(ch: dict) -> bool:
     return int(ch.get("type", -1)) in TEXT_TYPES
+
+
+def is_forum(ch: dict) -> bool:
+    return int(ch.get("type", -1)) in FORUM_TYPES
+
+
+def is_thread(ch: dict) -> bool:
+    return int(ch.get("type", -1)) in THREAD_TYPES
 
 
 class Client:

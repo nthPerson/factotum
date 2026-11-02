@@ -6,7 +6,7 @@
   POST /api/batches/apply {source, changes}   the one write path
   POST /api/batches/{id}/undo
   GET  /api/review?exclude=1,2           one page of the review queue + total, each card's pending evidence, planner suggestions
-  POST /api/review/suggestions/{id}/create   the task a planner suggestion describes (evidence judged applied)
+  POST /api/review/suggestions/{id}/create   the task a suggestion describes: a planner create or a Slack mention (evidence judged applied)
   GET  /api/settings · PUT /api/settings  Settings-tab overrides (whitelisted keys), accounts
   GET  /api/stats
   GET  /api/log                          recent batches with their changes, and the Claude runs with cost
@@ -68,6 +68,9 @@ class CreateBody(BaseModel):
 
 class DraftOpenBody(BaseModel):
     draft: dict[str, Any]
+
+
+SUGGESTION_KINDS = ("proposal", "slack_mention")      # evidence with no task that Review offers as a Create / Dismiss card
 
 
 def _page(title: str, text: str, base: str, undo: bool = False) -> str:
@@ -194,7 +197,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         from .mail_sweep import review_flags
         flags = review_flags(conn)
         full = lifecycle.build_review_queue(open_tasks, today, ecfg, last, flags_by_id=flags, cap=10**9)
-        pending = rows(conn, "SELECT id, task_id, kind, ref, label, excerpt, at FROM evidence WHERE judged_at IS NULL ORDER BY id")
+        pending = rows(conn, "SELECT id, task_id, kind, ref, account, label, excerpt, at FROM evidence WHERE judged_at IS NULL ORDER BY id")
         by_task: dict[int, list] = {}
         for e in pending:
             if e["task_id"] is not None:
@@ -208,8 +211,10 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         for i in full:
             i["flags"] = flags.get(i["task"]["id"], {})
             i["evidence"] = by_task.get(i["task"]["id"], [])      # judged in the same batch as the decision; a proposal's change can be accepted
-        # Planner creates with no task (an announcement, a hunch): suggestion cards with Create / Dismiss.
-        suggestions = [{"id": e["id"], "label": e["label"], "reason": e["excerpt"], "at": e["at"], "fields": _suggestion_fields(e)} for e in pending if e["task_id"] is None and e["kind"] == "proposal"]
+        # Planner creates with no task (an announcement, a hunch) and Slack mentions naming no task:
+        # suggestion cards with Create / Dismiss.
+        suggestions = [{"id": e["id"], "kind": e["kind"], "label": e["label"], "reason": e["excerpt"], "at": e["at"], "fields": _suggestion_fields(ecfg, e)}
+                       for e in pending if e["task_id"] is None and e["kind"] in SUGGESTION_KINDS]
         cap = int(C.get(ecfg, "lifecycle.review_cap", 15))
         page = full[:cap]
         if page:
@@ -222,8 +227,14 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         return {"today": today.isoformat(), "last_review_at": st.get("state.last_review_at"),
                 "cap": cap, "total": len(full), "labels": lifecycle.REVIEW_LABELS, "items": page, "suggestions": suggestions}
 
-    def _suggestion_fields(e: dict) -> dict:
-        """The planner's cleaned fields for an uncited create (evidence.ref); older rows have only a label."""
+    def _suggestion_fields(ecfg: dict, e: dict) -> dict:
+        """What Create would make: the planner's fields for an uncited create (evidence.ref holds
+        them; older rows have only a label), or for a Slack mention the message's text as the name,
+        the workspace's project and the permalink as context and source link."""
+        if e["kind"] == "slack_mention":
+            ws = next((w for w in (C.get(ecfg, "sources.slack.workspaces", []) or []) if str(w.get("name") or "").strip() == (e.get("account") or "")), {})
+            name = str(e.get("label") or "").split(": ", 1)[-1].strip()[:80] or "(untitled)"
+            return {"name": name, "project": ws.get("project"), "context": f"{e.get('excerpt') or ''}\n{e.get('ref') or ''}".strip(), "source_link": e.get("ref")}
         try:
             d = json.loads(e["ref"]) if e.get("ref") else {}
         except ValueError:
@@ -235,25 +246,32 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
 
     @app.post("/api/review/suggestions/{evidence_id}/create")
     def create_suggestion(evidence_id: int):
-        """Create the task a planner suggestion describes (its label is "create: <name>" and its
-        reason the planner's text). An upsert by source_key, so a second tap returns the same id;
-        the evidence is judged `applied`. Like every creation, not a batch (SPEC §12 precedent)."""
-        from .db import now_iso, upsert_task
-        e = rows(conn, "SELECT * FROM evidence WHERE id = ? AND kind = 'proposal' AND task_id IS NULL", (evidence_id,))
+        """Create the task a suggestion describes: a planner create (label "create: <name>", the
+        planner's reason) or a Slack mention with no task (source Slack, the message linked). An
+        upsert by source_key, so a second tap returns the same id; the evidence is judged `applied`.
+        Like every creation, not a batch (SPEC §12 precedent)."""
+        from .db import add_link, now_iso, upsert_task
+        e = rows(conn, f"SELECT * FROM evidence WHERE id = ? AND kind IN ({','.join('?' * len(SUGGESTION_KINDS))}) AND task_id IS NULL", (evidence_id, *SUGGESTION_KINDS))
         if not e:
             raise HTTPException(404, "no such suggestion")
         e = e[0]
-        key = f"planner-suggestion:{evidence_id}"
+        is_slack = e["kind"] == "slack_mention"
+        key = f"{'slack-mention' if is_slack else 'planner-suggestion'}:{evidence_id}"
         ex = rows(conn, "SELECT id FROM tasks WHERE source_key = ?", (key,))
         if ex:
             return {"task_id": ex[0]["id"]}
         if e["judged_at"]:
             raise HTTPException(404, "this suggestion was already judged")
         from .sync_file import _clean_task_fields
-        f = _clean_task_fields(eff_cfg(), _suggestion_fields(e))
+        ecfg = eff_cfg()
+        want = _suggestion_fields(ecfg, e)
+        f = _clean_task_fields(ecfg, want)
         now = now_iso()
-        tid = upsert_task(conn, dict(f, status="open", source="Planner", source_key=key, context=f.get("context") or (e["excerpt"] or None),
+        tid = upsert_task(conn, dict(f, status="open", source="Slack" if is_slack else "Planner", source_key=key, source_link=want.get("source_link"),
+                                     account=e.get("account") if is_slack else None, context=f.get("context") or (e["excerpt"] or None),
                                      mentions=1, last_mention_at=date.today().isoformat(), created_at=now, edited_at=now))
+        if is_slack and e.get("ref"):
+            add_link(conn, tid, "slack_message", e["ref"], label=str(e.get("label") or "")[:120], account=e.get("account"))
         conn.execute("UPDATE evidence SET judged_at = ?, verdict = 'applied' WHERE id = ?", (now, evidence_id))
         conn.commit()
         return {"task_id": tid}

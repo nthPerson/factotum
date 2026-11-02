@@ -201,6 +201,8 @@ def review_flags(conn: sqlite3.Connection) -> dict[int, dict]:
     for e in rows(conn, "SELECT task_id, kind, label FROM evidence WHERE judged_at IS NULL AND task_id IS NOT NULL"):
         if e["kind"] in ("thread_updated", "reply_from_waiting", "maybe_reply_from_waiting"):
             out.setdefault(int(e["task_id"]), {})["thread_updated"] = True
+        elif e["kind"] == "slack_mention":
+            out.setdefault(int(e["task_id"]), {})["mentioned"] = True
         elif e["kind"] == "proposal":
             out.setdefault(int(e["task_id"]), {})["planner"] = e["label"]
     return out
