@@ -5,7 +5,11 @@
     python -m factotum serve [--host H] [--port P]
     python -m factotum score            # print the open list with scores (sanity check)
     python -m factotum review           # print today's review queue
-    python -m factotum expire [--apply] # fade / lapse what is due to expire
+    python -m factotum expire [--apply] # fade / lapse what is due to expire (only rows Review has shown)
+    python -m factotum tick             # run one scheduler tick now (reminders, daily jobs that are due)
+    python -m factotum brief [--send]   # print today's brief (text), or send it
+    python -m factotum google-auth [--manual]   # one-time Google consent (docs/SETUP.md §6)
+    python -m factotum calendar-check   # print the next 7 days of events
 """
 from __future__ import annotations
 
@@ -30,6 +34,13 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("serve")
     p.add_argument("--host")
     p.add_argument("--port", type=int)
+    p.add_argument("--no-scheduler", action="store_true", help="API and UI only (a second instance next to the service)")
+    sub.add_parser("tick")
+    p = sub.add_parser("brief")
+    p.add_argument("--send", action="store_true")
+    p = sub.add_parser("google-auth")
+    p.add_argument("--manual", action="store_true", help="paste the redirect URL instead of a local callback")
+    sub.add_parser("calendar-check")
     sub.add_parser("score")
     sub.add_parser("review")
     p = sub.add_parser("expire")
@@ -50,7 +61,37 @@ def main(argv: list[str] | None = None) -> int:
     elif a.cmd == "serve":
         import uvicorn
         from .api import create_app
-        uvicorn.run(create_app(cfg), host=a.host or C.get(cfg, "server.host", "127.0.0.1"), port=a.port or int(C.get(cfg, "server.port", 8750)))
+        app = create_app(cfg)
+        if not a.no_scheduler:
+            from . import brief, gcal, notify
+            from .scheduler import Scheduler
+            # its own connection: the API holds one, and SQLite serialises writers with busy_timeout
+            Scheduler(cfg, connect(C.db_path()), push=notify.publish, mailer=brief.smtp_mailer, calendar=gcal).start()
+        uvicorn.run(app, host=a.host or C.get(cfg, "server.host", "127.0.0.1"), port=a.port or int(C.get(cfg, "server.port", 8750)))
+    elif a.cmd == "tick":
+        from . import brief, gcal, notify
+        from .scheduler import Scheduler
+        did = Scheduler(cfg, conn, push=notify.publish, mailer=brief.smtp_mailer, calendar=gcal).tick()
+        print("\n".join(did) if did else "nothing due")
+    elif a.cmd == "brief":
+        from . import brief, gcal
+        if a.send:
+            print(brief.send(conn, ecfg, today, brief.smtp_mailer, gcal))
+        else:
+            print(brief.build(conn, ecfg, today)["text"])
+    elif a.cmd == "google-auth":
+        from . import gcal
+        path = gcal.authorize(ecfg, manual=a.manual)
+        print(f"token written to {path}")
+        for e in gcal.events(ecfg, __import__("datetime").datetime.now(), __import__("datetime").datetime.now() + __import__("datetime").timedelta(days=7))[:10]:
+            print(f"  {e['start']:<16} {e['summary'] or '(no title)'}{'  · accepted' if e['self_status'] == 'accepted' else ''}")
+    elif a.cmd == "calendar-check":
+        from datetime import datetime, timedelta
+        from . import gcal
+        evs = gcal.events(ecfg, datetime.now(), datetime.now() + timedelta(days=7))
+        for e in evs:
+            print(f"  {e['start']:<16} {e['summary'] or '(no title)'}{'  · accepted' if e['self_status'] == 'accepted' else ''}")
+        print(f"{len(evs)} events in the next 7 days")
     elif a.cmd == "score":
         for t in rows(conn, "SELECT * FROM tasks WHERE status = 'open' ORDER BY COALESCE(due,'9999'), id"):
             s, pr, why = scoring.score(t, today, ecfg)

@@ -47,7 +47,7 @@ class Scheduler:
             self._daily("morning_brief", C.get(ecfg, "notify.morning_brief.time", "06:30"), now, st, did, lambda: self._brief(ecfg, today))
         self._daily("review_push", C.get(ecfg, "notify.review_time", "19:30"), now, st, did, lambda: self._review_push(ecfg, today, st))
         if C.get(ecfg, "sources.calendar.enabled") and self.calendar:
-            self._every("calendar_sweep", int(C.get(ecfg, "sources.calendar.sweep_minutes", 30)), now, st, did, lambda: self.calendar(self.conn, ecfg, now))
+            self._every("calendar_sweep", int(C.get(ecfg, "sources.calendar.sweep_minutes", 30)), now, st, did, lambda: self.calendar.sweep_job(self.conn, ecfg, now))
         return did
 
     def _reminders(self, ecfg: dict, now: datetime, did: list[str]) -> None:

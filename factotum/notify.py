@@ -48,4 +48,4 @@ def publish(cfg: dict, title: str, body: str, *, click: str | None = None, actio
 
 def _ascii(s: str) -> str:
     """HTTP headers are Latin-1 at best; ntfy reads them as UTF-8 only via the JSON API. Keep titles plain."""
-    return s.encode("ascii", "ignore").decode() or "Factotum"
+    return "".join(ch for ch in s.encode("ascii", "ignore").decode() if ch.isprintable()).strip() or "Factotum"

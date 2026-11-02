@@ -89,8 +89,8 @@ def fire(conn: sqlite3.Connection, cfg: dict, now_local: datetime, push) -> list
         if r.get("repeat"):
             conn.execute("INSERT INTO reminders (task_id, fire_at, label, repeat, status, created_by, created_at) VALUES (?, ?, ?, ?, 'pending', ?, ?)",
                          (r["task_id"], next_occurrence(r["fire_at"], r["repeat"]), r.get("label"), r["repeat"], r.get("created_by") or "repeat", now_iso()))
+        conn.commit()   # per reminder: a failure on the next push must not roll this one back into pending (it was delivered)
         sent.append({"reminder_id": r["id"], "task_id": r["task_id"], "msg_id": msg_id, "task_name": r["task_name"]})
-    conn.commit()
     return sent
 
 

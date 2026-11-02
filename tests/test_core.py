@@ -522,3 +522,88 @@ def test_scheduler_expires_as_an_automation_batch_and_fires_due_reminders(conn, 
     assert {"expire", "reminder"} <= kinds
     s.tick(datetime(2026, 11, 1, 9, 1))
     assert len(push.sent) == 1 and conn.execute("SELECT COUNT(*) FROM runs WHERE kind = 'expire'").fetchone()[0] == 1
+
+
+# --- phase 2: the morning brief ---------------------------------------------------------------
+
+def test_morning_brief_lists_the_sections_the_spec_names(conn, cfg):
+    from factotum import brief
+    upsert_task(conn, task(id=1, name="Finish the Caltrans memo", top_rank=1))
+    upsert_task(conn, task(id=2, name="Submit GEOG lab", due="2026-11-01", hard=1))
+    upsert_task(conn, task(id=3, name="Call Reza"))
+    upsert_task(conn, task(id=4, name="COMPE project proposal", due="2026-11-05", hard=1))
+    upsert_task(conn, task(id=5, name="Quiz 3", status="done", closed_by="canvas", completed_at="2026-10-31"))
+    upsert_task(conn, task(id=6, name="Letter from Prof. Lee", legacy_status="Waiting", waiting_on="Prof. Lee"))
+    upsert_task(conn, task(id=7, name="Old thing", due="2026-10-20", hard=1))
+    conn.commit()
+    batches.apply(conn, [{"task_id": 3, "op": "add_reminder", "fields": {"fire_at": "2026-11-01T14:00", "label": "before 3pm"}}], "ui", TODAY)
+    conn.execute("UPDATE batches SET applied_at = '2026-10-31T20:00:00+00:00'")
+    batches.apply(conn, [{"task_id": 5, "op": "set", "fields": {"name": "Quiz 3"}}], "ui", TODAY)   # no-op, keeps ids simple
+    conn.execute("INSERT INTO changes (batch_id, task_id, field, old, new) VALUES (1, 5, 'status', '\"open\"', '\"done\"')"); conn.commit()
+    b = brief.build(conn, cfg, TODAY, events=[{"summary": "Lab meeting", "start": "2026-11-01T10:00", "end": "2026-11-01T11:00", "all_day": False}])
+    h = b["html"]
+    for heading, name in [("Top", "Finish the Caltrans memo"), ("Due today", "Submit GEOG lab"), ("Reminders today", "Call Reza"),
+                          ("Hard deadlines this week", "COMPE project proposal"), ("Closed since yesterday", "Quiz 3"),
+                          ("Waiting on", "Prof. Lee"), ("Overdue", "Old thing"), ("Calendar", "Lab meeting")]:
+        assert heading in h and name in h, heading
+    assert "canvas" in h                       # who closed it
+    assert b["subject"].startswith("Factotum") and "1 due today" in b["subject"]
+    assert "Finish the Caltrans memo" in b["text"]
+
+
+def test_brief_send_uses_the_configured_recipient_and_reports(conn, cfg):
+    from factotum import brief
+    upsert_task(conn, task(id=1, name="x", due="2026-11-01")); conn.commit()
+    got = {}
+    def mailer(cfg_, to, subject, text, html): got.update(to=to, subject=subject)
+    summary = brief.send(conn, cfg, TODAY, mailer, calendar=None)
+    assert got["to"] == C.get(cfg, "notify.morning_brief.to") and "1 due today" in got["subject"] and got["to"] in summary
+
+
+def test_smtp_settings_fall_back_to_the_imap_account(monkeypatch):
+    from factotum import brief
+    for k in ("SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASSWORD"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("IMAP_USER", "me@gmail.com"); monkeypatch.setenv("IMAP_PASSWORD", "app-pw")
+    s = brief.smtp_settings()
+    assert s == {"host": "smtp.gmail.com", "port": 465, "user": "me@gmail.com", "password": "app-pw"}
+    monkeypatch.setenv("SMTP_USER", "other@x.org"); monkeypatch.setenv("SMTP_PORT", "587")
+    assert brief.smtp_settings()["user"] == "other@x.org" and brief.smtp_settings()["port"] == 587
+
+
+# --- phase 2: the calendar ---------------------------------------------------------------------
+
+def test_calendar_fetch_parses_google_events(cfg):
+    import httpx
+    from factotum import gcal
+    items = {"items": [
+        {"id": "ev1", "summary": "Lab meeting", "htmlLink": "https://cal/ev1", "start": {"dateTime": "2026-11-01T10:00:00-07:00"}, "end": {"dateTime": "2026-11-01T11:00:00-07:00"},
+         "attendees": [{"email": "robertashe2.0@gmail.com", "self": True, "responseStatus": "accepted"}]},
+        {"id": "ev2", "summary": "Conference", "start": {"date": "2026-11-03"}, "end": {"date": "2026-11-05"}},
+    ]}
+    seen = {}
+    def handler(req):
+        seen["url"] = str(req.url); seen["auth"] = req.headers.get("authorization")
+        return httpx.Response(200, json=items)
+    evs = gcal.fetch_events(cfg, "tok", datetime(2026, 11, 1), datetime(2026, 11, 8), transport=httpx.MockTransport(handler))
+    assert seen["auth"] == "Bearer tok" and "calendars/primary/events" in seen["url"] and "singleEvents=true" in seen["url"]
+    assert evs[0] == {"id": "ev1", "summary": "Lab meeting", "start": "2026-11-01T10:00", "end": "2026-11-01T11:00", "all_day": False, "self_status": "accepted", "link": "https://cal/ev1"}
+    assert evs[1]["all_day"] is True and evs[1]["start"] == "2026-11-03" and evs[1]["self_status"] is None
+
+
+def test_calendar_sweep_closes_only_accepted_events_that_have_passed(conn, cfg):
+    from factotum import gcal
+    from factotum.db import add_link
+    for i in (1, 2, 3, 4):
+        upsert_task(conn, task(id=i, name=f"t{i}", due="2026-10-31", hard=1))
+    add_link(conn, 1, "calendar", "ev1", "accepted, passed"); add_link(conn, 2, "calendar", "ev2", "not accepted")
+    add_link(conn, 3, "calendar", "ev3", "future"); conn.commit()
+    events = [{"id": "ev1", "summary": "a", "start": "2026-10-31T10:00", "end": "2026-10-31T11:00", "all_day": False, "self_status": "accepted", "link": None},
+              {"id": "ev2", "summary": "b", "start": "2026-10-31T10:00", "end": "2026-10-31T11:00", "all_day": False, "self_status": None, "link": None},
+              {"id": "ev3", "summary": "c", "start": "2026-11-09T10:00", "end": "2026-11-09T11:00", "all_day": False, "self_status": "accepted", "link": None}]
+    summary = gcal.sweep(conn, cfg, events, datetime(2026, 11, 1, 8, 0))
+    st = {r[0]: (r[1], r[2]) for r in conn.execute("SELECT id, status, closed_by FROM tasks")}
+    assert st[1] == ("done", "calendar") and st[2][0] == "open" and st[3][0] == "open" and st[4][0] == "open"
+    assert "Task-1" in summary
+    assert conn.execute("SELECT source FROM batches ORDER BY id DESC LIMIT 1").fetchone()[0] == "automation"
+    assert gcal.sweep(conn, cfg, events, datetime(2026, 11, 1, 9, 0)) is None     # nothing new

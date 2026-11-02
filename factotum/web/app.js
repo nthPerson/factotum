@@ -334,8 +334,8 @@
         ${b.changes.map(c => `<div class="logc"><span class="code">Task-${c.task_id}</span> <span class="name">${esc(c.task_name || '')}</span> <span class="f">${esc(c.field)}</span> ${val(c.old)} → ${val(c.new)}</div>`).join('')}
       </div>`).join('') || '<div class="empty">No batches yet.</div>';
     const runs = logData.runs.length ? `<table class="runs"><tr><th>Run</th><th>Started</th><th>Took</th><th>Cost</th><th>Result</th></tr>${logData.runs.map(r => `<tr class="${r.ok ? '' : 'bad'}"><td>${esc(r.kind)}</td><td>${when(r.started_at)}</td><td>${r.duration_ms ? Math.round(r.duration_ms / 1000) + ' s' : ''}</td><td>${r.cost_usd != null ? '$' + Number(r.cost_usd).toFixed(2) : ''}</td><td>${esc(r.error || r.summary || (r.ok ? 'ok' : ''))}</td></tr>`).join('')}</table>`
-      : '<div class="note">No Claude runs yet; they start in phase 3 (recordings) and phase 4 (the morning planner). Each run lands here with its cost; Settings shows the 7-day total.</div>';
-    return `<div class="log"><h3>Changes</h3>${batches}<h3>Claude runs</h3>${runs}</div>`;
+      : '<div class="note">Nothing has run yet. Reminders, the review push, the expire pass and the morning brief land here when they do something (cost $0.00); Claude runs with their cost start in phase 3.</div>';
+    return `<div class="log"><h3>Changes</h3>${batches}<h3>Runs · automations and Claude</h3>${runs}</div>`;
   }
   async function loadSettings() { settings = await api('/api/settings'); render(); }
   function renderSettings() {
