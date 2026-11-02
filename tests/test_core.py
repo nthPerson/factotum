@@ -607,3 +607,15 @@ def test_calendar_sweep_closes_only_accepted_events_that_have_passed(conn, cfg):
     assert "Task-1" in summary
     assert conn.execute("SELECT source FROM batches ORDER BY id DESC LIMIT 1").fetchone()[0] == "automation"
     assert gcal.sweep(conn, cfg, events, datetime(2026, 11, 1, 9, 0)) is None     # nothing new
+
+
+def test_manual_consent_accepts_the_http_localhost_address_google_redirects_to():
+    """oauthlib refuses `http://` in the pasted address; the local-server flow rewrites the scheme and
+    the manual flow must too. A bare code (the user copied only `code=...`) is passed as the code."""
+    from factotum import gcal
+    pasted = "http://localhost:8765/?state=abc&code=4/0AUn6Hd8_x&scope=https://www.googleapis.com/auth/calendar.events"
+    assert gcal.manual_token_kwargs(pasted) == {"authorization_response": "https://localhost:8765/?state=abc&code=4/0AUn6Hd8_x&scope=https://www.googleapis.com/auth/calendar.events"}
+    assert gcal.manual_token_kwargs("  https://localhost:8765/?code=x  ") == {"authorization_response": "https://localhost:8765/?code=x"}
+    assert gcal.manual_token_kwargs("4/0AUn6Hd8_x") == {"code": "4/0AUn6Hd8_x"}
+    with pytest.raises(ValueError):
+        gcal.manual_token_kwargs("")

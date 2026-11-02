@@ -81,7 +81,7 @@
     try { localStorage.setItem('factotum.staged', JSON.stringify([...staged])); } catch (_) {}
     render();
   }
-  function stageDue(id, due) { stageExtra(id + ':due', id, 'set', { due: due || null }, due ? 'due ' + due : 'due cleared'); }
+  function stageDue(id, due) { stageExtra(id + ':due', id, 'set', { due: due || null }, due ? 'due ' + due : 'due cleared'); toast('Due date staged · press Apply in the tray to save it'); }
   function dueForm(id, current) {
     const st = staged.get(id + ':due');
     if (st) return `<span class="chip staged">${esc(st.label)}</span><button class="btn small" data-due-clear="${id}">Undo</button>`;
@@ -103,6 +103,7 @@
     staged.set(id + ':r', { task_id: id, op: 'add_reminder', fields, label: `remind ${fmtWhen(fire_at)}${repeat ? ' · ' + repeat : ''}${label ? ' · ' + label : ''}` });
     try { localStorage.setItem('factotum.staged', JSON.stringify([...staged])); } catch (_) {}
     ui.remOpen = null; render();
+    toast('Reminder staged · press Apply in the tray to save it');
   }
   function wireReminders(root) {
     root.querySelectorAll('[data-rem-open]').forEach(b => b.onclick = () => { ui.remOpen = +b.dataset.remOpen; render(); });

@@ -105,6 +105,10 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
 - **Mailbird's MCP is on the Windows host** at `https://127.0.0.1:52000/mcp`, self-signed TLS,
   bearer token in `.env`. From WSL it is reachable only with mirrored networking. TLS
   verification is off for that loopback URL only, never globally.
+- **A `cp` of `data/factotum.db` is stale** (2026-11-01): the DB runs in WAL mode and the service
+  holds the log open, so the main file can lag hours behind `factotum.db-wal`. Copy it with
+  `sqlite3.Connection.backup` (or `VACUUM INTO`), never `cp`; a copy made the wrong way shows
+  "No open tasks" and sends you chasing a UI bug.
 - **ntfy.sh caps delay at 3 days and 250 messages/day.** The service owns the reminder
   schedule and publishes at fire time; never hand ntfy a far-future delay.
 

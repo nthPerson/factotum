@@ -131,18 +131,23 @@ differently for you, the old names are in brackets. Use the search box at the to
    the file on the WSL side as `~/factotum/config/google-credentials.json` (git-ignored). From
    Windows the WSL path is `\\wsl$\Ubuntu\home\robert\factotum\config\`. Do not create a
    "Web application" client: its redirect rules break the local flow with `redirect_uri_mismatch`.
-6. **Consent once, from WSL:**
+6. **Consent once, from WSL.** Use the paste-back flow; it works whether or not the Windows
+   browser can reach a port inside WSL:
    ```bash
-   cd ~/factotum && .venv/bin/python -m factotum google-auth
+   cd ~/factotum && .venv/bin/python -m factotum google-auth --manual
    ```
-   It opens the Windows browser (or prints a URL to paste). Sign in with the calendar account.
-   Google shows **"Google hasn't verified this app"** because the app is yours and unreviewed:
-   click **Advanced** → **Go to Factotum (unsafe)** → tick the calendar permissions → Continue.
-   The browser lands on a "The authentication flow has completed" page; the command writes
-   `config/google-token.json` and prints the next few events as a check. If the browser cannot
-   reach the localhost page (it happens on some VPNs), run
-   `python -m factotum google-auth --manual`, which prints the URL and asks you to paste back the
-   address bar of the page you land on, even if that page says the site cannot be reached.
+   It prints a long `https://accounts.google.com/...` URL. Open it in any browser and sign in
+   with the calendar account. Google shows **"Google hasn't verified this app"** because the app
+   is yours and unreviewed: click **Advanced** → **Go to Factotum (unsafe)** → tick both calendar
+   permissions → Continue. The browser then tries to open `http://localhost:8765/?state=...&code=...`
+   and shows "This site can't be reached"; that is expected. Copy the whole address from the
+   address bar and paste it at the `Pasted address:` prompt (pasting just the `code=` value also
+   works). The command writes `config/google-token.json`. The code in that address is single-use
+   and expires after a few minutes, so if the paste fails, run the command again for a fresh URL.
+
+   Without `--manual` the command starts a tiny web server on a random port, opens the browser and
+   catches the redirect itself. On WSL the browser often cannot reach that port, so prefer
+   `--manual`.
 7. **Avoid the 7-day expiry.** While the consent screen is in *Testing*, Google expires the
    token after 7 days and Factotum would then stop reading your calendar and ask you to run
    `google-auth` again. Switch it to production: Google Auth Platform → **Audience** →

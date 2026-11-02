@@ -33,6 +33,20 @@ def paths(cfg: dict) -> tuple[Path, Path]:
     return p("sources.calendar.credentials_file", "config/google-credentials.json"), p("sources.calendar.token_file", "config/google-token.json")
 
 
+def manual_token_kwargs(pasted: str) -> dict:
+    """What `--manual` hands to fetch_token. Google redirects to `http://localhost:8765/?code=...`,
+    and oauthlib refuses any non-https response URL (RFC 6749); the local-server flow rewrites the
+    scheme the same way (google_auth_oauthlib.flow.run_local_server). A bare code is accepted too."""
+    s = pasted.strip()
+    if not s:
+        raise ValueError("nothing pasted")
+    if "://" not in s:
+        return {"code": s}
+    if s.startswith("http://"):
+        s = "https://" + s[len("http://"):]
+    return {"authorization_response": s}
+
+
 def authorize(cfg: dict, manual: bool = False) -> Path:
     """Run the one-time consent flow and write the token file. Returns its path."""
     from google_auth_oauthlib.flow import InstalledAppFlow
@@ -44,7 +58,7 @@ def authorize(cfg: dict, manual: bool = False) -> Path:
         flow.redirect_uri = "http://localhost:8765/"
         url, _ = flow.authorization_url(access_type="offline", prompt="consent")
         print(f"\nOpen this URL in any browser, consent, then paste the address of the page you land on\n(even if it says the site cannot be reached):\n\n{url}\n")
-        flow.fetch_token(authorization_response=input("Pasted address: ").strip())
+        flow.fetch_token(**manual_token_kwargs(input("Pasted address: ")))
         creds = flow.credentials
     else:
         creds = flow.run_local_server(port=0, access_type="offline", prompt="consent", open_browser=True,
