@@ -4,3 +4,4 @@ pyyaml>=6.0
 httpx>=0.27
 python-dotenv>=1.0
 pytest>=8
+google-auth-oauthlib>=1.2
