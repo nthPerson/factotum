@@ -87,7 +87,7 @@ def locate(cfg: dict, subject: str, received_date: str, run_=subprocess.run) -> 
     words = sorted((w for w in re.findall(r"[A-Za-z][A-Za-z\-']{4,}", title)), key=len, reverse=True)
     keywords += words[:2]
     # The subject is attacker-controlled mail text: never let it start a CLI flag.
-    keywords = [k for k in (kw.lstrip("-").strip() for kw in keywords) if k]
+    keywords = [k for k in (re.sub(r"^[\s\-]+", "", kw) for kw in keywords) if k and not k.startswith("-")]
     for kw in keywords:
         recs = [r for r in parse_search(_run(cfg, ["search", kw, "--from", lo, "--to", hi, "--max", "50"], run_)) if lo <= r.date <= hi]
         if not recs:

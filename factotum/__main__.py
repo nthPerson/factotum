@@ -14,11 +14,32 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from datetime import date
 
 from . import batches, config as C, lifecycle, scoring
 from .db import connect, get_settings, init_db, rows
+
+
+def _start_plaud_trigger(cfg: dict) -> None:
+    """The IMAP IDLE thread (SPEC.md §6 "Plaud"): its own connection, the effective config re-read per mail."""
+    from . import plaud_trigger, sync_file
+    tconn = connect(C.db_path())
+    if not C.get(C.effective(cfg, get_settings(tconn)), "sources.plaud.enabled", False):
+        print("plaud trigger: sources.plaud.enabled is off")
+        return
+    imap = plaud_trigger.imap_settings()
+    if not imap:
+        print("plaud trigger: IMAP_USER / IMAP_PASSWORD not set; not started")
+        return
+
+    def handle(subject: str, received: str) -> dict:
+        ecfg = C.effective(cfg, get_settings(tconn))
+        res = sync_file.run(tconn, ecfg, subject=subject, received=received)
+        print("sync-file:", res.get("line") or res.get("error"))
+        return res
+    plaud_trigger.PlaudTrigger(cfg, tconn, handle, account=imap["user"]).start(imap)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -41,6 +62,13 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("google-auth")
     p.add_argument("--manual", action="store_true", help="paste the redirect URL instead of a local callback")
     sub.add_parser("calendar-check")
+    p = sub.add_parser("sync-file", help="sync one Plaud recording now (phase 3)")
+    p.add_argument("plaud_id", nargs="?", help="recording id (plaud today / plaud search); or give --subject")
+    p.add_argument("--subject", help="the Plaud mail subject, located within a day of --received (default today)")
+    p.add_argument("--received", help="ISO date-time the mail arrived")
+    p.add_argument("--dry-run", action="store_true", help="run Claude and print the JSON; write nothing")
+    sub.add_parser("claude-check", help="one tiny headless Claude call: is the login alive?")
+    sub.add_parser("plaud-check", help="the Plaud CLI, its login, today's recordings, and the trigger mailbox")
     sub.add_parser("score")
     sub.add_parser("review")
     p = sub.add_parser("expire")
@@ -67,6 +95,7 @@ def main(argv: list[str] | None = None) -> int:
             from .scheduler import Scheduler
             # its own connection: the API holds one, and SQLite serialises writers with busy_timeout
             Scheduler(cfg, connect(C.db_path()), push=notify.publish, mailer=brief.smtp_mailer, calendar=gcal).start()
+            _start_plaud_trigger(cfg)
         uvicorn.run(app, host=a.host or C.get(cfg, "server.host", "127.0.0.1"), port=a.port or int(C.get(cfg, "server.port", 8750)))
     elif a.cmd == "tick":
         from . import brief, gcal, notify
@@ -85,6 +114,43 @@ def main(argv: list[str] | None = None) -> int:
         print(f"token written to {path}")
         for e in gcal.events(ecfg, __import__("datetime").datetime.now(), __import__("datetime").datetime.now() + __import__("datetime").timedelta(days=7))[:10]:
             print(f"  {e['start']:<16} {e['summary'] or '(no title)'}{'  · accepted' if e['self_status'] == 'accepted' else ''}")
+    elif a.cmd == "sync-file":
+        from . import sync_file
+        if not a.plaud_id and not a.subject:
+            raise SystemExit("give a recording id or --subject")
+        res = sync_file.run(conn, ecfg, subject=a.subject, received=a.received, plaud_id=a.plaud_id, dry_run=a.dry_run, today=today)
+        if not res["ok"]:
+            raise SystemExit(f"failed: {res['error']}")
+        if a.dry_run:
+            print(json.dumps(res["data"], indent=1, ensure_ascii=False))
+            print(f"\n(dry run · ${res['cost_usd']:.2f} · prompt and result kept under data/runs/{res['rec']['id']}/)")
+        else:
+            print(res["line"], f"· ${res['cost_usd']:.2f}")
+    elif a.cmd == "claude-check":
+        from .claude import runner
+        r = runner.run(ecfg, "check", 'Reply with exactly the JSON object {"ok": true} and nothing else.', timeout_s=120)
+        if r.ok and r.data == {"ok": True}:
+            print(f"claude is logged in (model {C.get(ecfg, 'claude.models.check', 'haiku')}, {r.duration_ms} ms, ${r.cost_usd:.4f})")
+        else:
+            raise SystemExit(f"claude check failed: {r.error}\nRun `claude` once as this user and log in, then try again.")
+    elif a.cmd == "plaud-check":
+        import subprocess
+        from . import plaud, plaud_trigger
+        try:
+            out = subprocess.run([C.get(ecfg, "sources.plaud.cli", "plaud"), "today"], capture_output=True, text=True, timeout=90)
+            print(out.stdout.strip() or out.stderr.strip())
+        except FileNotFoundError:
+            raise SystemExit("plaud CLI not on PATH (docs/SETUP.md §2)")
+        imap = plaud_trigger.imap_settings()
+        if not imap:
+            raise SystemExit("IMAP_USER / IMAP_PASSWORD not set: the trigger cannot start (docs/SETUP.md §8)")
+        from imapclient import IMAPClient
+        with IMAPClient(imap["host"], port=int(imap["port"]), use_uid=True, ssl=True) as server:
+            server.login(imap["user"], imap["password"])
+            server.select_folder(imap["folder"], readonly=True)
+            f = C.get(ecfg, "sources.plaud.from_filter", "plaud.ai")
+            n = len(server.search(["FROM", f])); u = len(server.search(["UNSEEN", "FROM", f]))
+            print(f"trigger mailbox {imap['user']}/{imap['folder']}: {n} mails from {f}, {u} unseen (an unseen one is processed at the next service start)")
     elif a.cmd == "calendar-check":
         from datetime import datetime, timedelta
         from . import gcal

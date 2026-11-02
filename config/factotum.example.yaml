@@ -141,7 +141,8 @@ sources:
   plaud:
     enabled: true
     trigger_account: nthperson.dev@gmail.com   # IMAP creds in .env
-    from_filter: plaud.ai
+    from_filter: plaud.ai                       # IMAP search narrowing (substring)
+    sender: no-reply@plaud.ai                   # the parsed From address must equal this; the subject is data
     subject_prefix: "[Plaud-AutoFlow]"
     cli: plaud                                  # @plaud-ai/cli on PATH
     extraction:
@@ -237,8 +238,9 @@ notify:
 
 claude:
   binary: claude
-  models: { sync_file: sonnet, planner_morning: sonnet, chat_turn: sonnet }
-  budgets_usd: { sync_file: 1.00, planner_morning: 0.75, chat_turn: 0.60 }
+  models: { sync_file: sonnet, planner_morning: sonnet, chat_turn: sonnet, check: haiku }
+  budgets_usd: { sync_file: 1.00, planner_morning: 0.75, chat_turn: 0.60, check: 0.05 }
+  timeouts_s: { sync_file: 600 }
   timeouts_s: { sync_file: 600, planner_morning: 480, chat_turn: 240 }
 
 server:

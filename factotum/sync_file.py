@@ -19,7 +19,9 @@ from . import batches, config as C
 from .db import now_iso, rows
 
 PROMPT = C.ROOT / "prompts" / "sync-file.md"
+RUNS_DIR = C.ROOT / "data" / "runs"
 SLICE_CAP = 150
+RETRY_DELAY_S = 120
 
 
 def taxonomy_text(cfg: dict) -> str:
@@ -37,12 +39,20 @@ def taxonomy_text(cfg: dict) -> str:
     return "\n".join(out)
 
 
+def slice_rows(conn: sqlite3.Connection, cap: int = SLICE_CAP) -> list[dict]:
+    """The rows a run may reference: every open task, then recently faded or lapsed ones (a new
+    mention resurrects them, SPEC.md §5), capped."""
+    return rows(conn, "SELECT id, name, project, due, hard, waiting_on, top_rank, status FROM tasks "
+                      "WHERE status = 'open' OR (status IN ('faded', 'lapsed') AND completed_at >= date('now', '-60 days')) "
+                      "ORDER BY status = 'open' DESC, top_rank IS NULL, top_rank, score DESC, id DESC LIMIT ?", (cap,))
+
+
 def open_rows_text(conn: sqlite3.Connection, cap: int = SLICE_CAP) -> str:
-    rs = rows(conn, "SELECT id, name, project, due, hard, waiting_on, top_rank FROM tasks WHERE status = 'open' "
-                    "ORDER BY top_rank IS NULL, top_rank, score DESC, id DESC LIMIT ?", (cap,))
     lines = []
-    for r in rs:
+    for r in slice_rows(conn, cap):
         bits = [f"Task-{r['id']}", r["project"] or "—"]
+        if r["status"] != "open":
+            bits.append(r["status"])
         if r["due"]:
             bits.append(f"due {str(r['due'])[:16]}" + (" hard" if r["hard"] else ""))
         if r["waiting_on"]:
@@ -126,7 +136,8 @@ def _ref_index(ref) -> int | None:
     return int(m.group(1)) if m else None
 
 
-def apply_result(conn: sqlite3.Connection, cfg: dict, rec: dict, data: dict, today: date, *, calendar=None, source: str = "plaud") -> dict:
+def apply_result(conn: sqlite3.Connection, cfg: dict, rec: dict, data: dict, today: date, *, calendar=None, source: str = "plaud",
+                 allowed_ids: set[int] | None = None) -> dict:
     """Write what the run decided: new rows (upsert by source_key), one batch for every change to
     an existing row (updates, voice instructions, reminders, calendar links) so the Log tab's Undo
     reverts the recording in one tap, mentions and links on every row touched. `calendar` is a
@@ -144,6 +155,12 @@ def apply_result(conn: sqlite3.Connection, cfg: dict, rec: dict, data: dict, tod
     changes: list[dict] = []
     undated = 0
     n = 0
+
+    def _target(tid):
+        row = get_task(conn, int(tid)) if isinstance(tid, (int, float, str)) and str(tid).isdigit() else None
+        if row and allowed_ids is not None and row["id"] not in allowed_ids:
+            return None
+        return row
     for i, t in enumerate(data.get("tasks") or []):
         if not isinstance(t, dict):
             continue
@@ -151,7 +168,7 @@ def apply_result(conn: sqlite3.Connection, cfg: dict, rec: dict, data: dict, tod
         f = _clean_task_fields(cfg, t)
         if op == "update":
             tid = t.get("id")
-            row = get_task(conn, int(tid)) if isinstance(tid, (int, float, str)) and str(tid).isdigit() else None
+            row = _target(tid)
             if not row:
                 unresolved.append(f"update of unknown Task-{tid}: {t.get('name') or ''}".strip())
                 by_index[i] = None
@@ -167,7 +184,9 @@ def apply_result(conn: sqlite3.Connection, cfg: dict, rec: dict, data: dict, tod
             unresolved.append(f"task #{n} skipped: no name")
             by_index[i] = None
             continue
-        key = str(t.get("source_key") or f"plaud:{rec_id}:{n}")
+        key = str(t.get("source_key") or "")
+        if not key.startswith(f"plaud:{rec_id}:"):     # only this recording's keys; anything else is the model wandering
+            key = f"plaud:{rec_id}:{n}"
         existing = conn.execute("SELECT id, status FROM tasks WHERE source_key = ?", (key,)).fetchone()
         if existing:   # the same recording synced twice: update, never a twin
             tid = int(existing[0])
@@ -193,7 +212,7 @@ def apply_result(conn: sqlite3.Connection, cfg: dict, rec: dict, data: dict, tod
             continue
         op, tid, fields = ins.get("op"), ins.get("task_id"), dict(ins.get("fields") or {})
         ev = str(ins.get("evidence") or "")[:300]
-        row = get_task(conn, int(tid)) if isinstance(tid, (int, float, str)) and str(tid).isdigit() else None
+        row = _target(tid)
         if op not in INSTRUCTION_OPS or not row:
             unresolved.append(f"{op or 'instruction'} on Task-{tid}: {'unknown task' if not row else 'unknown op'} ({ev})")
             continue
@@ -241,8 +260,8 @@ def apply_result(conn: sqlite3.Connection, cfg: dict, rec: dict, data: dict, tod
         if not isinstance(r, dict):
             continue
         tid = by_index.get(_ref_index(r.get("task_ref"))) if r.get("task_ref") else r.get("task_id")
-        if not tid or not get_task(conn, int(tid)):
-            unresolved.append(f"reminder {r.get('label') or r.get('fire_at')}: no task to attach to")
+        if not tid or not (tid in created or _target(tid)):
+            unresolved.append(f"reminder {r.get('label') or r.get('fire_at')}: no task to attach to" + (f" (Task-{tid} is not one this run may touch)" if tid else ""))
             continue
         changes.append({"task_id": int(tid), "op": "add_reminder", "fields": {"fire_at": r.get("fire_at"), "label": r.get("label"), "repeat": r.get("repeat")}})
         reminders += 1
@@ -262,7 +281,7 @@ def apply_result(conn: sqlite3.Connection, cfg: dict, rec: dict, data: dict, tod
             continue
         events += 1
         tid = by_index.get(_ref_index(ev.get("task_ref"))) if ev.get("task_ref") else ev.get("task_id")
-        if tid and get_task(conn, int(tid)):
+        if tid and (tid in created or _target(tid)):
             add_link(conn, int(tid), "calendar", str(made.get("id")), label=str(ev["title"])[:120])
             if made.get("link"):
                 changes.append({"task_id": int(tid), "op": "set", "fields": {"calendar_event": made["link"]}})
@@ -275,3 +294,124 @@ def apply_result(conn: sqlite3.Connection, cfg: dict, rec: dict, data: dict, tod
     conn.commit()
     return {"created": created, "updated": list(dict.fromkeys(updated)), "applied": applied, "reminders": reminders, "events": events,
             "unresolved": unresolved, "batch_id": res["batch_id"], "task_ids": list(dict.fromkeys(created + touched))}
+
+
+# --- the whole run (SPEC.md §6 "Plaud"): fetch, ask, write, log, alert ---------------------------
+
+def _calendar_writer(cfg: dict):
+    """create_event bound to the stored token, deduplicated by title and day; None when the calendar is off."""
+    if not C.get(cfg, "sources.calendar.enabled", False):
+        return None
+    from . import gcal
+
+    def make(ev: dict):
+        token = gcal.access_token(cfg)
+        day = str(ev.get("start") or "")[:10]
+        d0 = datetime.fromisoformat(day)
+        for e in gcal.fetch_events(cfg, token, d0, d0 + timedelta(days=1)):
+            if (e.get("summary") or "").strip().lower() == str(ev.get("title") or "").strip().lower():
+                return {"id": e["id"], "link": e.get("link")}      # already there: link it, do not duplicate
+        return gcal.create_event(cfg, token, ev)
+    return make
+
+
+def _alert(cfg: dict):
+    """Failure alert: ntfy when enabled, else the brief's mailbox."""
+    from . import brief, notify
+
+    def send(title: str, body: str):
+        if notify.enabled(cfg):
+            notify.publish(cfg, title, body[:1500], tags=["warning"], priority=4)
+        elif C.get(cfg, "notify.morning_brief.to"):
+            brief.smtp_mailer(cfg, C.get(cfg, "notify.morning_brief.to"), title, body, f"<pre>{html.escape(body)}</pre>")
+    return send
+
+
+def run(conn: sqlite3.Connection, cfg: dict, *, subject: str | None, received: str | None, plaud_id: str | None = None, dry_run: bool = False,
+        today: date | None = None, runner=None, plaud_run=None, notes=None, calendar="auto", alert=None, sleep=None, retry_delay_s: int | None = None) -> dict:
+    """Sync one recording. Locates it from the mail subject (or takes `plaud_id`), pulls the two
+    files, runs Claude once (one retry on any failure), applies the JSON, writes the note page,
+    logs the run. A failure alerts and writes nothing. Returns {"ok", "rec", "summary", …}."""
+    import subprocess
+    import time as _time
+    from . import plaud
+    from .claude import runner as _runner
+    from .db import add_link, log_run
+    today = today or date.today()
+    runner = runner or _runner.run
+    plaud_run = plaud_run or subprocess.run
+    sleep = sleep or _time.sleep
+    alert = alert or _alert(cfg)
+    delay = RETRY_DELAY_S if retry_delay_s is None else retry_delay_s
+    started = _time.monotonic()
+    label = subject or plaud_id or "?"
+
+    def fail(why: str, cost: float = 0.0) -> dict:
+        log_run(conn, "sync-file", int((_time.monotonic() - started) * 1000), ok=False, summary=label[:200], error=why[:1000], cost_usd=cost)
+        conn.commit()
+        alert(f"Plaud sync failed: {label[:80]}", f"{why}\n\nRe-run: python -m factotum sync-file {plaud_id or '<id>'}")
+        return {"ok": False, "error": why, "rec": None}
+    try:
+        if plaud_id:
+            d = plaud.details(cfg, plaud_id, run_=plaud_run)
+            rec = {"id": d["id"], "name": d.get("name") or plaud_id, "start_at": d.get("start_at"), "date": (d.get("start_at") or d.get("created_at") or "")[:10]}
+        else:
+            found = plaud.locate(cfg, subject or "", (received or today.isoformat())[:10], run_=plaud_run)
+            if not found:
+                return fail(f"no Plaud recording matches the subject within a day of the mail: {subject!r}")
+            d = plaud.details(cfg, found.id, run_=plaud_run)
+            rec = {"id": found.id, "name": d.get("name") or found.name, "start_at": d.get("start_at"), "date": found.date}
+        workdir = Path(RUNS_DIR) / rec["id"]
+        files = plaud.fetch_files(cfg, rec["id"], workdir, run_=plaud_run)
+    except plaud.PlaudError as e:
+        return fail(f"plaud: {e}")
+    allowed = {r["id"] for r in slice_rows(conn)}
+    prompt = build_prompt(cfg, conn, rec, subject or rec["name"], received or "", files, today)
+    (workdir / "prompt.md").write_text(prompt, encoding="utf-8")
+    cost = 0.0
+    res = None
+    for attempt in (1, 2):
+        res = runner(cfg, "sync_file", prompt, allowed_tools=["Read"], workdir=workdir)
+        cost += res.cost_usd
+        (workdir / f"result-{attempt}.txt").write_text(res.result_text or "", encoding="utf-8")
+        if res.ok and isinstance(res.data, dict) and isinstance(res.data.get("tasks", []), list):
+            break
+        why = res.error or "unexpected JSON shape"
+        log_run(conn, "sync-file", res.duration_ms, ok=False, summary=f"attempt {attempt}: {label[:160]}", error=why[:1000], cost_usd=res.cost_usd)
+        conn.commit()
+        if attempt == 1 and not res.auth_failed:
+            sleep(delay)
+            continue
+        return fail(("auth: " if res.auth_failed else "") + why, 0.0)
+    data = res.data
+    if dry_run:
+        log_run(conn, "sync-file", res.duration_ms, ok=True, summary=f"dry run: {rec['name'][:120]} → {len(data.get('tasks') or [])} tasks, {len(data.get('instructions') or [])} instructions", cost_usd=res.cost_usd)
+        conn.commit()
+        return {"ok": True, "rec": rec, "data": data, "prompt": prompt, "cost_usd": cost}
+    cal = _calendar_writer(cfg) if calendar == "auto" else calendar
+    summary = apply_result(conn, cfg, rec, data, today, calendar=cal, allowed_ids=allowed)
+    note_url = None
+    note_err = None
+    if C.get(cfg, "sinks.notion_notes.enabled", True):
+        notes = notes or (lambda cfg, rec, note, transcript, **kw: __import__("factotum.notion_notes", fromlist=["upsert"]).upsert(cfg, rec, note, transcript, **kw))
+        page_ids = [r["notion_page_id"] for r in rows(conn, f"SELECT notion_page_id FROM tasks WHERE id IN ({','.join('?' * len(summary['task_ids']))}) AND notion_page_id IS NOT NULL", tuple(summary["task_ids"]))] if summary["task_ids"] else []
+        extra = []
+        applied_lines = [f"{i.get('op')} Task-{i.get('task_id')}: {i.get('evidence') or ''}"[:200] for i in (data.get("instructions") or []) if isinstance(i, dict)]
+        if applied_lines:
+            extra.append(("Instructions applied", applied_lines))
+        if summary["unresolved"]:
+            extra.append(("Unresolved", summary["unresolved"]))
+        try:
+            note_url = notes(cfg, rec, data.get("note") or {}, files.transcript.read_text(encoding="utf-8", errors="replace"), task_page_ids=page_ids, extra_sections=extra)
+            for tid in summary["task_ids"]:
+                add_link(conn, tid, "note_page", note_url, label=str(rec.get("name") or "")[:120])
+            conn.commit()
+        except Exception as e:   # the tasks are in; the page can be re-synced
+            note_err = f"note page: {type(e).__name__}: {e}"[:300]
+            summary["unresolved"].append(note_err)
+    line = (f"{rec['name'][:80]}: {len(summary['created'])} created, {len(summary['updated'])} updated, {summary['applied']} instructions, "
+            f"{summary['reminders']} reminders, {summary['events']} events, {len(summary['unresolved'])} unresolved"
+            + (f"; note: {note_url}" if note_url else "") + (f"; batch {summary['batch_id']}" if summary["batch_id"] else ""))
+    log_run(conn, "sync-file", int((_time.monotonic() - started) * 1000), ok=True, summary=line[:1000], error=note_err, cost_usd=cost)
+    conn.commit()
+    return {"ok": True, "rec": rec, "summary": summary, "note_url": note_url, "cost_usd": cost, "line": line}
