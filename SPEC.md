@@ -394,8 +394,9 @@ link; every batch is undoable; sinks are write-only.
 3. **Plaud port (built 2026-11-01):** IMAP trigger, CLI fetch, `sync-file` run with the new bar,
    Notion notes sink, voice verbs incl. reminders and tiers. In parallel with plaud-sync until the
    first few recordings look right, then stop it (both write the note page; only Factotum writes
-   tasks, so the interim `--new-only` cron is already gone). *Gate: a recording made after the
-   restart lands as tasks within a minute of Plaud's mail, with its note page and a run row.*
+   tasks, so the interim `--new-only` cron is already gone). *Gate passed 2026-11-01 22:58: a
+   recording made after the restart landed as a task 25 s after Plaud's mail, with its note page
+   and a run row; plaud-sync disabled on lark-server the same night.*
 4. **Mail + Canvas + planner:** Mailbird client and sweep, Canvas sweep, `planner-morning`.
    Retire forwarding and the old timers.
 5. **Chat:** `factotum mcp`, chat turns, email search, drafts, proposals UI.
