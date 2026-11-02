@@ -24,20 +24,55 @@ DEFAULT_AUTHSERV = "mx.google.com"
 
 
 def _dom_ok(value: str, domain: str) -> bool:
-    return value.strip().strip('"').lower().lstrip("@") == domain
+    return value.strip().lower().lstrip("@") == domain
 
 
-def _strip_comments(text: str) -> str:
-    """RFC 5322 comments, nested, can hold semicolons and fake results; drop them before splitting."""
-    out, depth = [], 0
-    for ch in text:
+def _statements(text: str) -> list[list[str]] | None:
+    """Tokenize an Authentication-Results value (RFC 8601 over RFC 5322): statements split on ';'
+    and tokens on whitespace, both only outside quoted-strings and comments; comments (nested)
+    are dropped; a quoted-string yields its content with backslash escapes resolved. Returns None
+    when quotes or parentheses do not balance: such a header proves nothing."""
+    stmts, toks, tok = [], [], []
+    depth, quoted, esc = 0, False, False
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        i += 1
+        if quoted:
+            if esc:
+                tok.append(ch); esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                quoted = False
+            else:
+                tok.append(ch)
+            continue
+        if depth:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            continue
         if ch == "(":
             depth += 1
-        elif ch == ")" and depth:
-            depth -= 1
-        elif not depth:
-            out.append(ch)
-    return "".join(out)
+        elif ch == '"':
+            quoted = True
+        elif ch == ";":
+            if tok:
+                toks.append("".join(tok)); tok = []
+            stmts.append(toks); toks = []
+        elif ch.isspace():
+            if tok:
+                toks.append("".join(tok)); tok = []
+        else:
+            tok.append(ch)
+    if quoted or depth:
+        return None
+    if tok:
+        toks.append("".join(tok))
+    stmts.append(toks)
+    return stmts
 
 
 def authenticated(headers, authserv: str, domain: str) -> bool:
@@ -45,7 +80,8 @@ def authenticated(headers, authserv: str, domain: str) -> bool:
     e.g. mx.google.com) shows dkim=pass or dmarc=pass for exactly `domain`. Only the topmost such
     header counts: the receiving server prepends its own and (RFC 8601 §5) removes any arriving
     header that claims its name, so a sender can forge From and append headers of its own, but not
-    the first one. Comments are stripped first; a quoted-string is treated as its content."""
+    the first one. The value is tokenized with quoted-strings and comments honoured; an unbalanced
+    header is rejected."""
     get_all = getattr(headers, "get_all", None)
     values = (get_all("Authentication-Results") or []) if get_all else (headers.get("Authentication-Results") or [])
     if isinstance(values, str):
@@ -53,12 +89,10 @@ def authenticated(headers, authserv: str, domain: str) -> bool:
     if not values:
         return False
     domain = domain.lower()
-    raw = _strip_comments(" ".join(str(values[0]).split()))
-    parts = [x.strip() for x in raw.split(";")]
-    if not parts or not parts[0] or parts[0].split()[0].lower() != authserv.lower():
+    stmts = _statements(" ".join(str(values[0]).split()))
+    if not stmts or not stmts[0] or stmts[0][0].lower() != authserv.lower():
         return False
-    for clause in parts[1:]:
-        toks = clause.split()
+    for toks in stmts[1:]:
         if not toks:
             continue
         method = toks[0].lower()

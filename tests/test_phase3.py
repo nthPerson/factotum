@@ -457,3 +457,9 @@ def test_trigger_fails_closed_without_a_configured_sender(cfg, conn):
     assert plaud_trigger.authenticated({"Authentication-Results": [ok, "evil.example; dkim=fail"]}, "mx.google.com", "plaud.ai")
     assert not plaud_trigger.authenticated({"Authentication-Results": ["evil.example; dkim=pass header.i=@plaud.ai", ok]}, "mx.google.com", "plaud.ai")
     assert not plaud_trigger.authenticated({"Authentication-Results": ['mx.google.com; dkim=fail header.i="@plaud.ai" (dkim=pass header.i=@plaud.ai)']}, "mx.google.com", "plaud.ai")
+    # quoted-strings: a '(' or ';' inside quotes is text, an escaped quote does not end the string, unbalanced input is rejected
+    assert not plaud_trigger.authenticated({"Authentication-Results": ['mx.google.com; dkim=fail header.i="x;dkim=pass header.i=@plaud.ai" header.d=evil.com']}, "mx.google.com", "plaud.ai")
+    assert not plaud_trigger.authenticated({"Authentication-Results": ['mx.google.com; dkim=pass header.i="@plaud.ai\\" header.d=evil.com"']}, "mx.google.com", "plaud.ai")
+    assert plaud_trigger.authenticated({"Authentication-Results": ['mx.google.com; dkim=pass header.i="@plaud.ai" header.s="a(b"']}, "mx.google.com", "plaud.ai")
+    assert not plaud_trigger.authenticated({"Authentication-Results": ['mx.google.com; dkim=pass header.i=@plaud.ai (unbalanced']}, "mx.google.com", "plaud.ai")
+    assert not plaud_trigger.authenticated({"Authentication-Results": ['mx.google.com; dkim=pass header.i="@plaud.ai']}, "mx.google.com", "plaud.ai")
