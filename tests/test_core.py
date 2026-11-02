@@ -371,12 +371,12 @@ def test_review_carries_pending_evidence_and_planner_suggestions(cfg, tmp_path):
     assert "planner" in item["reasons"] and "thread_updated" in item["reasons"] and [e["id"] for e in item["evidence"]] == [11, 12]
     assert item["evidence"][0]["change"] == {"task_id": 4, "op": "set", "fields": {"due": "2026-11-05"}} and item["evidence"][1]["change"] is None
     assert [s["id"] for s in page["suggestions"]] == [13] and page["suggestions"][0]["label"].startswith("create") and page["suggestions"][0]["reason"] == "appointment mail Nov 12"
-    r = client.post("/api/review/suggestions/13/create").json()
+    r = client.post("/api/review/suggestions/13/create", json={}).json()
     t = c.execute("SELECT * FROM tasks WHERE id = ?", (r["task_id"],)).fetchone()
     assert t["name"] == "Go to the dentist" and t["source"] == "Planner" and t["source_key"] == "planner-suggestion:13"
     assert c.execute("SELECT verdict FROM evidence WHERE id = 13").fetchone()[0] == "applied"
-    assert client.post("/api/review/suggestions/13/create").json()["task_id"] == r["task_id"]        # idempotent
-    assert client.post("/api/review/suggestions/14/create").status_code == 404
+    assert client.post("/api/review/suggestions/13/create", json={}).json()["task_id"] == r["task_id"]        # idempotent
+    assert client.post("/api/review/suggestions/14/create", json={}).status_code == 404
     assert client.get("/api/review").json()["suggestions"] == []
     # the decision batch carries the judgments; the flag is gone afterwards
     res = client.post("/api/batches/apply", json={"source": "review", "changes": [{"task_id": 4, "op": "keep"}, {"task_id": 4, "op": "judge_evidence", "fields": {"evidence_id": 11, "verdict": "reviewed"}}, {"task_id": None, "op": "judge_evidence", "fields": {"evidence_id": 12, "verdict": "reviewed"}}]}).json()

@@ -98,7 +98,7 @@ def attached_rows(conn: sqlite3.Connection, cfg: dict, ids: list[int], today: da
 
 
 def _tools_text() -> str:
-    return "\n".join(f"- `{t['name']}`: {t['description'].split('.')[0]}." for t in mcp_server.TOOLS)
+    return "\n".join(f"- `{t['name']}`: {t['description'].split('.')[0]}." for t in mcp_server.TOOLS if not t.get("skill_only"))
 
 
 def build_prompt(cfg: dict, conn: sqlite3.Connection, text: str, attached_ids: list[int], today: date, *, canned: str | None = None,

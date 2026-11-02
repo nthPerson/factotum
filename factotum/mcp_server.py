@@ -22,7 +22,7 @@ import re
 import sqlite3
 import sys
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -49,17 +49,22 @@ class Context:
     mail: object = None                      # factory → client with .call / .call_write
     writer: object = None                    # factory → a writable connection, for stage_changes only (skills); None in chat turns
     today: date | None = None
+    allowed: set | None = None               # tool names this context serves; None = every tool (chat turns pass their own --allowedTools)
+    slack: object = None                     # factory(token) → slack.Client (tests)
+    discord: object = None                   # factory(token) → discord.Client (tests)
     tool_log: list = field(default_factory=list)
     _mail: object = field(default=None, repr=False)
     _accounts: dict | None = field(default=None, repr=False)
     _folders: dict | None = field(default=None, repr=False)
+    _slack: dict = field(default_factory=dict, repr=False)      # token → client; (token, user id) → name; token → {channel name: id}
+    _discord: object = field(default=None, repr=False)
 
     def __post_init__(self):
         self.conn.execute("PRAGMA query_only = 1")
-        self.run_dir = Path(self.run_dir) if self.run_dir else None
-        if self.run_dir:
-            self.run_dir.mkdir(parents=True, exist_ok=True)
+        self.run_dir = Path(self.run_dir) if self.run_dir else None      # created lazily by record(): an HTTP request that reads nothing leaves no directory
         self.today = self.today or date.today()
+        if self.allowed is not None:
+            self.allowed = set(self.allowed)
 
     def mail_client(self):
         if not C.get(self.cfg, "sources.mail.enabled", False):
@@ -101,8 +106,32 @@ class Context:
 
     def record(self, name: str, obj: dict) -> None:
         if self.run_dir:
+            self.run_dir.mkdir(parents=True, exist_ok=True)
             with open(self.run_dir / f"{name}.jsonl", "a", encoding="utf-8") as f:
                 f.write(json.dumps(obj) + "\n")
+
+    # ---- Slack / Discord, one client per token per run ----
+    def slack_client(self, token: str):
+        if token not in self._slack:
+            from . import slack
+            self._slack[token] = (self.slack or (lambda t: slack.Client(t)))(token)
+        return self._slack[token]
+
+    def slack_name(self, token: str, uid: str) -> str:
+        key = (token, uid)
+        if key not in self._slack:
+            try:
+                u = self.slack_client(token).call("users.info", {"user": uid}).get("user") or {}
+                self._slack[key] = str(u.get("real_name") or u.get("name") or uid)
+            except Exception:   # noqa: BLE001 — a name we cannot resolve stays an id
+                self._slack[key] = uid
+        return self._slack[key]
+
+    def discord_client(self):
+        if self._discord is None:
+            from . import discord
+            self._discord = (self.discord or (lambda t: discord.Client(t)))(discord.token())
+        return self._discord
 
 
 def seen_threads(run_dir: Path | str) -> dict[str, dict]:
@@ -452,6 +481,35 @@ def plaud_summary(ctx: Context, args: dict) -> dict:
 
 
 STAGE_OPS = {"set", "done", "drop", "pin_top", "longterm", "add_reminder"}
+PRIORITIES = {"P0", "P1", "P2", "P3"}
+
+
+def _extra_fields(fields: dict) -> dict:
+    """The three settable fields sync_file's cleaner does not cover, each validated."""
+    out = {}
+    if "snoozed_until" in fields:
+        v = fields["snoozed_until"]
+        if v is not None:
+            try:
+                datetime.fromisoformat(str(v))
+            except ValueError:
+                raise ToolError(f"snoozed_until {v!r} is not an ISO date")
+            v = str(v)[:16]
+        out["snoozed_until"] = v
+    if "manual_priority" in fields:
+        v = fields["manual_priority"]
+        if v is not None and str(v).upper() not in PRIORITIES:
+            raise ToolError(f"manual_priority must be one of {sorted(PRIORITIES)} or null, not {v!r}")
+        out["manual_priority"] = None if v is None else str(v).upper()
+    if "longterm" in fields:
+        v = fields["longterm"]
+        if isinstance(v, bool) or v in (0, 1):
+            out["longterm"] = 1 if v else 0
+        elif isinstance(v, str) and v.strip().lower() in ("0", "1", "true", "false", "yes", "no"):
+            out["longterm"] = 1 if v.strip().lower() in ("1", "true", "yes") else 0
+        else:
+            raise ToolError(f"longterm must be true or false, not {v!r}")
+    return out
 
 
 @tool("stage_changes", "Stage task changes for the user to apply: ONE batch the Factotum tray shows with Apply / Dismiss. Nothing changes "
@@ -482,9 +540,10 @@ def stage_changes(ctx: Context, args: dict) -> dict:
         fields = dict(ch.get("fields") or {})
         if op == "set":
             f = _clean_task_fields(ctx.cfg, fields)
-            for k in ("manual_priority", "snoozed_until", "longterm"):
-                if k in fields:
-                    f[k] = fields[k]
+            try:
+                f.update(_extra_fields(fields))
+            except ToolError as e:
+                rejected.append(f"#{i}: {e}"); continue
             if not f:
                 rejected.append(f"#{i}: nothing settable in {sorted(fields)}"); continue
             kept.append({"task_id": tid, "op": "set", "fields": f})
@@ -511,6 +570,202 @@ def stage_changes(ctx: Context, args: dict) -> dict:
     ctx.record("proposals", {"proposal_id": pid, "staged": len(kept)})
     return {"proposal_id": pid, "staged": len(kept), "rejected": rejected,
             "note": "Staged, not applied: the user sees this batch in Factotum's tray and taps Apply (or Dismiss). Tell them so."}
+
+
+# ---- Slack (read-only; SPEC §6) ----------------------------------------------------------------
+
+def _slack_ws(ctx: Context, args: dict):
+    from . import slack
+    if not C.get(ctx.cfg, "sources.slack.enabled", False):
+        raise ToolError("Slack is off (Settings → Slack); nothing can be read")
+    try:
+        w = slack.find_workspace(ctx.cfg, args.get("workspace"))
+    except slack.SlackError as e:
+        raise ToolError(str(e))
+    return w, os.environ[w["token_env"]]
+
+
+def _slack_channels(ctx: Context, token: str) -> dict:
+    key = (token, "channels")
+    if key not in ctx._slack:
+        out, cursor = {}, None
+        for _ in range(5):
+            r = ctx.slack_client(token).call("conversations.list", {"types": "public_channel,private_channel", "exclude_archived": "true", "limit": 200, "cursor": cursor})
+            for c in r.get("channels") or []:
+                out[c["id"]] = c
+            cursor = ((r.get("response_metadata") or {}).get("next_cursor") or "") or None
+            if not cursor:
+                break
+        ctx._slack[key] = out
+    return ctx._slack[key]
+
+
+def _slack_channel_id(ctx: Context, token: str, channel: str) -> str:
+    ch = str(channel or "").strip().lstrip("#")
+    if not ch:
+        raise ToolError("channel is required (a name or an id)")
+    chans = _slack_channels(ctx, token)
+    if ch in chans:
+        return ch
+    hit = [c for c in chans.values() if str(c.get("name") or "").lower() == ch.lower()]
+    if not hit:
+        raise ToolError(f"no channel {channel!r} the token can see; known: " + ", ".join(sorted(str(c.get("name")) for c in chans.values())[:40]))
+    return hit[0]["id"]
+
+
+def _slack_msg(ctx: Context, token: str, m: dict, chans: dict | None = None) -> dict:
+    from . import slack
+    names = {}
+    for uid in {m.get("user"), *slack._MENTION.findall(str(m.get("text") or ""))} - {None}:
+        names[uid] = ctx.slack_name(token, uid)
+    out = {"ts": m.get("ts"), "at": slack.ts_iso(m.get("ts")), "from": names.get(m.get("user")) or m.get("username") or m.get("user") or "?",
+           "text": _cut(slack.render(m.get("text"), names), 1200)}
+    if m.get("reply_count"):
+        out["replies"] = int(m["reply_count"])
+    if m.get("thread_ts"):
+        out["thread_ts"] = m["thread_ts"]
+    if isinstance(m.get("channel"), dict):
+        out["channel"] = m["channel"].get("name") or m["channel"].get("id")
+    if m.get("permalink"):
+        out["permalink"] = m["permalink"]
+    return out
+
+
+@tool("slack_channels", "The channels a Slack workspace's token can see: id, name, members, topic. Workspaces are named in the config; say which.",
+      {"workspace": {"type": "string"}})
+def slack_channels(ctx: Context, args: dict) -> dict:
+    w, token = _slack_ws(ctx, args)
+    chans = _slack_channels(ctx, token)
+    return {"workspace": w["name"], "channels": [{"id": c["id"], "name": c.get("name"), "members": c.get("num_members"), "topic": _cut((c.get("topic") or {}).get("value"), 120)}
+                                                 for c in sorted(chans.values(), key=lambda c: str(c.get("name")))][:200]}
+
+
+@tool("slack_history", "The newest messages of one Slack channel (name or id), newest first: who, when, text (mentions resolved), reply count and thread_ts for threads.",
+      {"workspace": {"type": "string"}, "channel": {"type": "string"}, "limit": {"type": "integer"}, "days_back": {"type": "integer"}}, ["channel"])
+def slack_history(ctx: Context, args: dict) -> dict:
+    w, token = _slack_ws(ctx, args)
+    cid = _slack_channel_id(ctx, token, args.get("channel"))
+    params = {"channel": cid, "limit": _int(args, "limit", 20, 1, 100)}
+    days = _int(args, "days_back", None, 1, 365)
+    if days:
+        params["oldest"] = str((datetime.now(timezone.utc) - timedelta(days=days)).timestamp())
+    r = ctx.slack_client(token).call("conversations.history", params)
+    return {"workspace": w["name"], "channel": cid, "messages": [_slack_msg(ctx, token, m) for m in (r.get("messages") or [])[:100]]}
+
+
+@tool("slack_thread", "The replies of one Slack thread (its channel and the parent's thread_ts), oldest first.",
+      {"workspace": {"type": "string"}, "channel": {"type": "string"}, "thread_ts": {"type": "string"}, "limit": {"type": "integer"}}, ["channel", "thread_ts"])
+def slack_thread(ctx: Context, args: dict) -> dict:
+    w, token = _slack_ws(ctx, args)
+    cid = _slack_channel_id(ctx, token, args.get("channel"))
+    ts = _str(args, "thread_ts", "", 40)
+    if not re.fullmatch(r"\d+\.\d+", ts or ""):
+        raise ToolError("thread_ts looks like 1762000000.000100")
+    r = ctx.slack_client(token).call("conversations.replies", {"channel": cid, "ts": ts, "limit": _int(args, "limit", 50, 1, 200)})
+    return {"workspace": w["name"], "channel": cid, "thread_ts": ts, "messages": [_slack_msg(ctx, token, m) for m in (r.get("messages") or [])[:200]]}
+
+
+@tool("slack_search", "Search a Slack workspace's messages (needs that workspace's USER token): `in:#channel from:@name before:2026-11-01` modifiers work. "
+      "Returns matches with channel, who, when, text and permalink.",
+      {"query": {"type": "string"}, "workspace": {"type": "string"}, "limit": {"type": "integer"}}, ["query"])
+def slack_search(ctx: Context, args: dict) -> dict:
+    w, token = _slack_ws(ctx, args)
+    q = _str(args, "query", "", 300)
+    if not q:
+        raise ToolError("query is required")
+    r = ctx.slack_client(token).call("search.messages", {"query": q, "count": _int(args, "limit", 15, 1, 50), "sort": "timestamp", "sort_dir": "desc"})
+    ms = (r.get("messages") or {})
+    return {"workspace": w["name"], "total": ms.get("total"), "matches": [_slack_msg(ctx, token, m) for m in (ms.get("matches") or [])[:50]]}
+
+
+# ---- Discord (read-only; SPEC §6) --------------------------------------------------------------
+
+def _discord_guild(ctx: Context, args: dict) -> dict:
+    from . import discord
+    if not C.get(ctx.cfg, "sources.discord.enabled", False):
+        raise ToolError("Discord is off (Settings → Discord); nothing can be read")
+    try:
+        g = discord.find_guild(ctx.cfg, args.get("server"))
+        ctx.discord_client()
+    except discord.DiscordError as e:
+        raise ToolError(str(e))
+    return g
+
+
+def _discord_channels(ctx: Context, gid: str) -> list[dict]:
+    from . import discord
+    key = ("discord-channels", gid)
+    if key not in ctx._slack:
+        chans = ctx.discord_client().get(f"/guilds/{gid}/channels")
+        ctx._slack[key] = sorted([c for c in chans if discord.is_text(c)], key=lambda c: (c.get("position") or 0, str(c.get("name"))))
+    return ctx._slack[key]
+
+
+def _discord_channel_id(ctx: Context, gid: str, channel: str) -> dict:
+    ch = str(channel or "").strip().lstrip("#")
+    if not ch:
+        raise ToolError("channel is required (a name or an id)")
+    chans = _discord_channels(ctx, gid)
+    hit = [c for c in chans if c["id"] == ch] or [c for c in chans if str(c.get("name") or "").lower() == ch.lower()]
+    if not hit:
+        raise ToolError(f"no text channel {channel!r} in that server; known: " + ", ".join(str(c.get("name")) for c in chans[:40]))
+    return hit[0]
+
+
+def _discord_msg(m: dict, channel: str | None = None) -> dict:
+    a = m.get("author") or {}
+    out = {"id": m.get("id"), "at": str(m.get("timestamp") or "")[:19], "from": a.get("global_name") or a.get("username") or a.get("id") or "?",
+           "text": _cut(m.get("content"), 1200)}
+    if channel:
+        out["channel"] = channel
+    if m.get("attachments"):
+        out["attachments"] = [str(x.get("filename") or "") for x in m["attachments"]][:10]
+    return out
+
+
+@tool("discord_channels", "The text channels of a Discord server named in the config: id, name, topic.", {"server": {"type": "string"}})
+def discord_channels(ctx: Context, args: dict) -> dict:
+    g = _discord_guild(ctx, args)
+    return {"server": g["name"], "channels": [{"id": c["id"], "name": c.get("name"), "topic": _cut(c.get("topic"), 120)} for c in _discord_channels(ctx, g["id"])][:200]}
+
+
+@tool("discord_messages", "The newest messages of one Discord text channel (name or id), newest first: who, when, text.",
+      {"server": {"type": "string"}, "channel": {"type": "string"}, "limit": {"type": "integer"}, "before": {"type": "string", "description": "a message id, to page back"}}, ["channel"])
+def discord_messages(ctx: Context, args: dict) -> dict:
+    from . import discord
+    g = _discord_guild(ctx, args)
+    c = _discord_channel_id(ctx, g["id"], args.get("channel"))
+    try:
+        ms = ctx.discord_client().get(f"/channels/{c['id']}/messages", {"limit": _int(args, "limit", 25, 1, 100), "before": _str(args, "before", None, 30)})
+    except discord.DiscordError as e:
+        raise ToolError(f"#{c.get('name')}: {e}")
+    return {"server": g["name"], "channel": c.get("name"), "messages": [_discord_msg(m) for m in ms][:100]}
+
+
+@tool("discord_search", "Find recent messages in a Discord server that mention a phrase (Discord has no search for bots: the newest messages of each text "
+      "channel are read and filtered). Optionally only some channels.",
+      {"server": {"type": "string"}, "query": {"type": "string"}, "channels": {"type": "array", "items": {"type": "string"}}, "per_channel": {"type": "integer"}, "limit": {"type": "integer"}}, ["query"])
+def discord_search(ctx: Context, args: dict) -> dict:
+    from . import discord
+    g = _discord_guild(ctx, args)
+    q = (_str(args, "query", "", 200) or "").strip().lower()
+    if not q:
+        raise ToolError("query is required")
+    chans = _discord_channels(ctx, g["id"])
+    wanted = [str(x).lstrip("#").lower() for x in (args.get("channels") or []) if x]
+    if wanted:
+        chans = [c for c in chans if c["id"] in wanted or str(c.get("name") or "").lower() in wanted]
+    per = _int(args, "per_channel", 100, 10, 100)
+    hits, skipped = [], []
+    for c in chans[:12]:
+        try:
+            ms = ctx.discord_client().get(f"/channels/{c['id']}/messages", {"limit": per})
+        except discord.DiscordError as e:
+            skipped.append(f"#{c.get('name')}: {e}")
+            continue
+        hits += [_discord_msg(m, c.get("name")) for m in ms if q in str(m.get("content") or "").lower()]
+    hits.sort(key=lambda h: h["at"], reverse=True)
+    return {"server": g["name"], "channels_read": min(len(chans), 12), "matches": hits[:_int(args, "limit", 30, 1, 100)], "skipped": skipped}
 
 
 # ---- JSON-RPC ---------------------------------------------------------------------------------
@@ -540,7 +795,7 @@ def dispatch(ctx: Context, msg) -> dict | None:
     if method == "ping":
         return _ok(id_, {})
     if method == "tools/list":
-        return _ok(id_, {"tools": [{k: t[k] for k in ("name", "description", "inputSchema")} for t in TOOLS]})
+        return _ok(id_, {"tools": [{k: t[k] for k in ("name", "description", "inputSchema")} for t in TOOLS if ctx.allowed is None or t["name"] in ctx.allowed]})
     if method == "tools/call":
         name = str(params.get("name") or "")
         args = params.get("arguments") or {}
@@ -548,6 +803,9 @@ def dispatch(ctx: Context, msg) -> dict | None:
         if t is None:
             ctx.tool_log.append((name, False))
             return _ok(id_, _tool_result(f"unknown tool {name!r}", True))
+        if ctx.allowed is not None and name not in ctx.allowed:
+            ctx.tool_log.append((name, False))
+            return _ok(id_, _tool_result(f"{name} is not available in this run", True))
         if not isinstance(args, dict):
             ctx.tool_log.append((name, False))
             return _ok(id_, _tool_result("arguments must be an object", True))
@@ -594,6 +852,7 @@ def serve_stdio() -> None:
     # a skill's server (Claude Code's own `claude mcp add`, no run dir) may stage proposals.
     run_dir = os.environ.get("FACTOTUM_RUN_DIR") or None
     writer = None if run_dir else (lambda: connect(C.db_path()))
-    ctx = Context(conn, cfg, run_dir=run_dir or (C.ROOT / "data" / "runs" / "skill" / date.today().isoformat()), writer=writer)
+    # one directory per skill process: "seen this run" (what a reply draft may answer) never spans sessions
+    ctx = Context(conn, cfg, run_dir=run_dir or (C.ROOT / "data" / "runs" / "skill" / f"{date.today().isoformat()}-{os.getpid()}"), writer=writer)
     print(f"factotum mcp: {len(TOOLS)} tools, db {C.db_path()}, {'skill (may stage)' if writer else 'chat turn'}", file=sys.stderr, flush=True)
     serve(ctx, sys.stdin, sys.stdout)

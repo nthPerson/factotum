@@ -99,6 +99,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--send", action="store_true", help="also send the brief with the verdict")
     p = sub.add_parser("sweep", help="run one sweep now")
     p.add_argument("which", choices=["mail", "canvas", "calendar"])
+    sub.add_parser("slack-check", help="each configured Slack workspace: token present, auth.test, how many channels it sees")
+    sub.add_parser("discord-check", help="the Discord bot: who it is, the servers it is in vs the config, text channels per configured server")
     p = sub.add_parser("mirror", help="push task rows to the Notion Tasks database (one-way); default: rows edited since the last pass")
     p.add_argument("--all", action="store_true", help="every row (the first pass after enabling the mirror)")
     p.add_argument("--dry-run", action="store_true", help="count what would be pushed, write nothing")
@@ -255,6 +257,54 @@ def main(argv: list[str] | None = None) -> int:
         for it in items:
             row = conn.execute("SELECT id, status FROM tasks WHERE source_key = ?", (it["key"],)).fetchone()
             print(f"  {it['due'] or 'undated':16} {it['state']:15} {it['project']:12} {it['name'][:50]:50} {'Task-%d %s' % (row[0], row[1]) if row else 'NEW'}")
+    elif a.cmd == "slack-check":
+        import os
+        from . import slack
+        ws = slack.workspaces(ecfg)
+        if not ws:
+            raise SystemExit("no workspaces under sources.slack.workspaces (config/factotum.yaml; docs/SETUP.md §12)")
+        print(f"Slack {'on' if C.get(ecfg, 'sources.slack.enabled') else 'OFF (Settings → Slack)'}; {len(ws)} workspace(s) configured")
+        for w in ws:
+            if not w["ok"]:
+                print(f"  {w['name']:20} ✗ {w['why']}"); continue
+            client = slack.Client(os.environ[w["token_env"]])
+            try:
+                me = client.call("auth.test")
+                chans = client.call("conversations.list", {"types": "public_channel,private_channel", "exclude_archived": "true", "limit": 200}).get("channels") or []
+                try:
+                    client.call("search.messages", {"query": "a", "count": 1}); search = "search ok (user token)"
+                except slack.SlackError as e:
+                    search = "no search: " + str(e).split(": ", 1)[-1][:80]
+                print(f"  {w['name']:20} ✓ team {me.get('team')} as {me.get('user')} · {len(chans)} channels · {search}")
+            except slack.SlackError as e:
+                print(f"  {w['name']:20} ✗ {e}")
+            finally:
+                client.close()
+    elif a.cmd == "discord-check":
+        from . import discord
+        gs = discord.guilds(ecfg)
+        client = discord.Client(discord.token())
+        try:
+            me = client.get("/users/@me")
+            mine = {g["id"]: g["name"] for g in client.get("/users/@me/guilds")}
+            print(f"Discord {'on' if C.get(ecfg, 'sources.discord.enabled') else 'OFF (Settings → Discord)'}; bot {me.get('username')} is in {len(mine)} server(s); {len(gs)} configured")
+            for g in gs:
+                if g["id"] not in mine:
+                    print(f"  {g['name']:20} ✗ the bot is not in server {g['id']} (invite it: docs/SETUP.md §13)"); continue
+                chans = [c for c in client.get(f"/guilds/{g['id']}/channels") if discord.is_text(c)]
+                probe = ""
+                if chans:
+                    try:
+                        ms = client.get(f"/channels/{chans[0]['id']}/messages", {"limit": 1})
+                        probe = " · content " + ("readable" if (ms and ms[0].get("content")) else "EMPTY: enable the Message Content intent") if ms else " · no messages in #" + str(chans[0].get("name"))
+                    except discord.DiscordError as e:
+                        probe = f" · cannot read #{chans[0].get('name')}: {e}"
+                print(f"  {g['name']:20} ✓ as {mine[g['id']]} · {len(chans)} text channels{probe}")
+            for gid, name in mine.items():
+                if gid not in {g["id"] for g in gs}:
+                    print(f"  (bot is also in {name!r}, id {gid}, not in the config)")
+        finally:
+            client.close()
     elif a.cmd == "mirror":
         from . import notion_mirror
         if not C.get(ecfg, "sinks.notion_tasks_mirror.enabled") and not a.dry_run:

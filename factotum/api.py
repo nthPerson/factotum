@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import queue
 import threading
+import uuid
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -87,6 +88,16 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
 
     def eff_cfg() -> dict:
         return C.effective(cfg, get_settings(conn))
+
+    @app.middleware("http")
+    async def json_only_mutations(request: Request, call_next):
+        """Every state-changing /api call carries application/json (the UI's helper always sets it).
+        A cross-site form or a bare fetch cannot, so a body-less POST (undo, apply a proposal, finish
+        review) is never a browser "simple request" that rides on the Access cookie."""
+        if request.url.path.startswith("/api/") and request.method not in ("GET", "HEAD", "OPTIONS"):
+            if not (request.headers.get("content-type") or "").lower().startswith("application/json"):
+                return JSONResponse({"detail": "send Content-Type: application/json"}, status_code=415)
+        return await call_next(request)
 
     def decorate(t: dict, today: date, ecfg: dict) -> dict:
         s, pr, reasons = scoring.score(t, today, ecfg)
@@ -422,8 +433,17 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
             return JSONResponse(mcp_server._err(None, -32700, "parse error"))
         db = db_path or C.db_path()
         reader = connect(db)
+        ecfg = eff_cfg()
+        # Reads and stage_changes by default; drafts (a leaked token must not fill Mailbird with drafts)
+        # and the Plaud subprocess only when server.mcp_http_tools opts in (a list of names, or "all").
+        allowed = C.get(ecfg, "server.mcp_http_tools")
+        if allowed == "all":
+            allowed = None
+        elif not isinstance(allowed, list):
+            allowed = {t["name"] for t in mcp_server.TOOLS} - {"mail_draft_reply", "mail_draft_new", "plaud_search", "plaud_summary"}
         try:
-            ctx = mcp_server.Context(reader, eff_cfg(), run_dir=C.ROOT / "data" / "runs" / "mcp-http" / date.today().isoformat(), writer=lambda: connect(db))
+            ctx = mcp_server.Context(reader, ecfg, run_dir=C.ROOT / "data" / "runs" / "mcp-http" / date.today().isoformat() / uuid.uuid4().hex[:12],
+                                     writer=lambda: connect(db), allowed=allowed)
             if isinstance(msg, list):
                 out = [r for r in (mcp_server.dispatch(ctx, m) for m in msg) if r is not None]
                 return JSONResponse(out) if out else JSONResponse(None, status_code=202)

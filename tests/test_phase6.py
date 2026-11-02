@@ -162,14 +162,14 @@ def test_stage_changes_writes_a_pending_proposal_that_the_tray_applies_or_dismis
     pend = client.get("/api/proposals").json()["proposals"]
     assert len(pend) == 1 and pend[0]["label"].startswith("Max replied") and pend[0]["source"] == "skill" and [ch["op"] for ch in pend[0]["changes"]] == ["done", "set", "add_reminder"]
     assert pend[0]["changes"][1]["fields"] == {"due": "2026-11-05", "due_is_datetime": 0, "context": "Max wants them Thursday"}
-    r = client.post(f"/api/proposals/{pend[0]['id']}/apply").json()
+    r = client.post(f"/api/proposals/{pend[0]['id']}/apply", json={}).json()
     assert r["applied"] == 3 and one(c, "SELECT status, closed_by FROM tasks WHERE id = 5")["closed_by"] == "skill"
     assert one(c, "SELECT source FROM batches WHERE id = ?", (r["batch_id"],))["source"] == "skill" and client.get("/api/proposals").json()["proposals"] == []
-    assert client.post(f"/api/proposals/{pend[0]['id']}/apply").status_code == 409              # already applied
+    assert client.post(f"/api/proposals/{pend[0]['id']}/apply", json={}).status_code == 409              # already applied
     # a second proposal, dismissed
     json.loads(_text(_rpc(ctx, 3, "tools/call", {"name": "stage_changes", "arguments": {"changes": [{"task_id": 6, "op": "drop"}]}})))
     pid = client.get("/api/proposals").json()["proposals"][0]["id"]
-    assert client.post(f"/api/proposals/{pid}/dismiss").json()["ok"] and client.get("/api/proposals").json()["proposals"] == []
+    assert client.post(f"/api/proposals/{pid}/dismiss", json={}).json()["ok"] and client.get("/api/proposals").json()["proposals"] == []
     assert one(c, "SELECT status FROM tasks WHERE id = 6")["status"] == "open"
     # the reader connection stayed read-only
     with pytest.raises(Exception):
@@ -197,5 +197,159 @@ def test_http_mcp_route_needs_the_bearer_token_and_speaks_jsonrpc(cfg, tmp_path,
     assert r.status_code == 200 and json.loads(r.json()["result"]["content"][0]["text"])["tasks"][0]["id"] == 7
     assert client.get("/mcp", headers=h).status_code == 405
     assert client.post("/mcp", content=b"not json", headers=dict(h, **{"Content-Type": "application/json"})).json()["error"]["code"] == -32700
+    # the HTTP route serves reads and stage_changes; drafts and the Plaud subprocess only when the config opts in
+    names = {t["name"] for t in client.post("/mcp", json={"jsonrpc": "2.0", "id": 3, "method": "tools/list"}, headers=h).json()["result"]["tools"]}
+    assert "tasks_query" in names and "stage_changes" in names and "mail_search" in names and not {"mail_draft_reply", "mail_draft_new", "plaud_search", "plaud_summary"} & names
+    r = client.post("/mcp", json={"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "mail_draft_new", "arguments": {}}}, headers=h).json()
+    assert r["result"]["isError"] and "not available" in r["result"]["content"][0]["text"]
     monkeypatch.delenv("FACTOTUM_MCP_TOKEN")
     assert client.post("/mcp", json=init, headers=h).status_code == 404                        # no token configured: the route is off
+
+
+def test_state_changing_api_posts_need_a_json_content_type(cfg, tmp_path):
+    """A body-less POST (undo, apply a proposal, finish review) must not be a browser "simple request":
+    the UI always sends application/json, a cross-site form or fetch without it cannot."""
+    from fastapi.testclient import TestClient
+    from factotum.api import create_app
+    app = create_app(cfg, db_path=str(tmp_path / "api.db"))
+    client = TestClient(app)
+    assert client.post("/api/review/finish", headers={"Content-Type": "text/plain"}).status_code == 415
+    assert client.post("/api/review/finish", data={"a": "b"}).status_code == 415
+    assert client.post("/api/review/finish", headers={"Content-Type": "application/json"}).status_code == 200
+    assert client.post("/api/review/finish", json={}).status_code == 200
+    assert client.get("/api/tasks").status_code == 200
+
+
+def test_stage_changes_validates_the_fields_the_cleaner_does_not(cfg, tmp_path):
+    from factotum import mcp_server as M
+    from factotum.db import connect, init_db
+    w = connect(tmp_path / "s.db"); init_db(w); upsert_task(w, task(id=1)); w.commit()
+    ctx = M.Context(connect(tmp_path / "s.db"), cfg, run_dir=tmp_path / "r", writer=lambda: connect(tmp_path / "s.db"))
+    res = json.loads(_text(_rpc(ctx, 1, "tools/call", {"name": "stage_changes", "arguments": {"changes": [
+        {"task_id": 1, "op": "set", "fields": {"snoozed_until": "2026-11-09"}},
+        {"task_id": 1, "op": "set", "fields": {"snoozed_until": "next tuesday"}},
+        {"task_id": 1, "op": "set", "fields": {"manual_priority": "P1"}},
+        {"task_id": 1, "op": "set", "fields": {"manual_priority": "urgent"}},
+        {"task_id": 1, "op": "set", "fields": {"longterm": "yes"}},
+        {"task_id": 1, "op": "set", "fields": {"longterm": None}}]}})))
+    assert res["staged"] == 3 and len(res["rejected"]) == 3
+    kept = json.loads(one(w, "SELECT changes_json FROM proposals")["changes_json"])
+    assert [c["fields"] for c in kept] == [{"snoozed_until": "2026-11-09"}, {"manual_priority": "P1"}, {"longterm": 1}]
+
+
+# --- Slack and Discord read tools --------------------------------------------------------------
+
+def _slack_cfg(cfg):
+    cfg["sources"]["slack"] = {"enabled": True, "workspaces": [{"name": "DiCE Lab", "token_env": "SLACK_TOKEN_DICE"}, {"name": "Car Sounds", "token_env": "SLACK_TOKEN_CAR"}]}
+    return cfg
+
+
+class FakeSlack:
+    def __init__(self):
+        self.calls = []
+
+    def transport(self):
+        def handler(req: httpx.Request):
+            method = req.url.path.rsplit("/", 1)[-1]
+            params = dict(req.url.params) if req.method == "GET" else dict(httpx.QueryParams(req.content.decode()))
+            self.calls.append((method, req.headers.get("Authorization"), params))
+            if method == "auth.test":
+                return httpx.Response(200, json={"ok": True, "team": "DiCE Lab", "user": "robert", "user_id": "U1"})
+            if method == "conversations.list":
+                return httpx.Response(200, json={"ok": True, "channels": [{"id": "C1", "name": "general", "is_member": True, "num_members": 9, "topic": {"value": "chatter"}},
+                                                                            {"id": "C2", "name": "papers", "is_member": True, "num_members": 4, "topic": {"value": ""}}], "response_metadata": {"next_cursor": ""}})
+            if method == "conversations.history":
+                return httpx.Response(200, json={"ok": True, "messages": [{"ts": "1762000000.000100", "user": "U2", "text": "Draft due <@U1> by Friday " + "x" * 3000, "reply_count": 2, "thread_ts": "1762000000.000100"},
+                                                                            {"ts": "1761990000.000100", "user": "U1", "text": "ok"}]})
+            if method == "conversations.replies":
+                return httpx.Response(200, json={"ok": True, "messages": [{"ts": "1762000000.000100", "user": "U2", "text": "Draft due"}, {"ts": "1762000100.000100", "user": "U1", "text": "will do"}]})
+            if method == "search.messages":
+                if params.get("query", "").startswith("fail"):
+                    return httpx.Response(200, json={"ok": False, "error": "not_allowed_token_type"})
+                return httpx.Response(200, json={"ok": True, "messages": {"total": 1, "matches": [{"ts": "1762000000.000100", "user": "U2", "username": "max", "text": "Draft due by Friday",
+                                                                                                   "channel": {"id": "C1", "name": "general"}, "permalink": "https://dice.slack.com/archives/C1/p1762000000000100"}]}})
+            if method == "users.info":
+                return httpx.Response(200, json={"ok": True, "user": {"id": params["user"], "name": "max" if params["user"] == "U2" else "robert", "real_name": "Max M" if params["user"] == "U2" else "Robert"}})
+            if method == "chat.postMessage":
+                raise AssertionError("a write reached the network")
+            return httpx.Response(200, json={"ok": False, "error": f"unknown_method {method}"})
+        return httpx.MockTransport(handler)
+
+
+def test_slack_client_is_read_only_and_the_tools_resolve_workspaces_names_and_threads(conn, cfg, monkeypatch, tmp_path):
+    from factotum import mcp_server as M, slack
+    _slack_cfg(cfg)
+    monkeypatch.setenv("SLACK_TOKEN_DICE", "xoxp-dice"); monkeypatch.delenv("SLACK_TOKEN_CAR", raising=False)
+    fake = FakeSlack()
+    ws = slack.workspaces(cfg)
+    assert [(w["name"], w["ok"]) for w in ws] == [("DiCE Lab", True), ("Car Sounds", False)] and "SLACK_TOKEN_CAR" in ws[1]["why"]
+    client = slack.Client("xoxp-dice", transport=fake.transport())
+    with pytest.raises(slack.SlackError):
+        client.call("chat.postMessage", {"channel": "C1", "text": "hi"})
+    assert client.call("auth.test")["team"] == "DiCE Lab" and fake.calls[-1][1] == "Bearer xoxp-dice"
+    ctx = M.Context(conn, cfg, run_dir=tmp_path, slack=lambda token: slack.Client(token, transport=fake.transport()))
+    chans = json.loads(_text(_rpc(ctx, 1, "tools/call", {"name": "slack_channels", "arguments": {"workspace": "dice"}})))
+    assert [c["name"] for c in chans["channels"]] == ["general", "papers"] and chans["workspace"] == "DiCE Lab"
+    hist = json.loads(_text(_rpc(ctx, 2, "tools/call", {"name": "slack_history", "arguments": {"workspace": "DiCE Lab", "channel": "general", "limit": 5}})))
+    assert hist["messages"][0]["from"] == "Max M" and "@Robert" in hist["messages"][0]["text"] and len(hist["messages"][0]["text"]) < 1500 and hist["messages"][0]["replies"] == 2
+    assert hist["messages"][0]["at"].startswith("2025-11-01") and hist["messages"][0]["thread_ts"] == "1762000000.000100"
+    assert sum(1 for m, _, _ in fake.calls if m == "users.info") == 2                         # resolved once per user per run
+    th = json.loads(_text(_rpc(ctx, 3, "tools/call", {"name": "slack_thread", "arguments": {"workspace": "DiCE Lab", "channel": "C1", "thread_ts": "1762000000.000100"}})))
+    assert [m["from"] for m in th["messages"]] == ["Max M", "Robert"]
+    hits = json.loads(_text(_rpc(ctx, 4, "tools/call", {"name": "slack_search", "arguments": {"query": "draft", "workspace": "DiCE Lab"}})))
+    assert hits["matches"][0]["channel"] == "general" and hits["matches"][0]["permalink"].startswith("https://dice.slack.com")
+    nope = _rpc(ctx, 5, "tools/call", {"name": "slack_search", "arguments": {"query": "fail", "workspace": "DiCE Lab"}})
+    assert nope["result"]["isError"] and "user token" in _text(nope)
+    assert _rpc(ctx, 6, "tools/call", {"name": "slack_channels", "arguments": {"workspace": "Car Sounds"}})["result"]["isError"]
+    assert _rpc(ctx, 7, "tools/call", {"name": "slack_channels", "arguments": {"workspace": "nowhere"}})["result"]["isError"]
+    cfg["sources"]["slack"]["enabled"] = False
+    off = _rpc(ctx, 8, "tools/call", {"name": "slack_channels", "arguments": {"workspace": "DiCE Lab"}})
+    assert off["result"]["isError"] and "Settings" in _text(off)
+
+
+class FakeDiscord:
+    def __init__(self):
+        self.calls = []
+
+    def transport(self):
+        def handler(req: httpx.Request):
+            self.calls.append((req.method, req.url.path, dict(req.url.params), req.headers.get("Authorization")))
+            p = req.url.path
+            if p == "/api/v10/users/@me":
+                return httpx.Response(200, json={"id": "B1", "username": "factotum-bot"})
+            if p == "/api/v10/users/@me/guilds":
+                return httpx.Response(200, json=[{"id": "G1", "name": "LARK dev"}, {"id": "G2", "name": "Elsewhere"}])
+            if p == "/api/v10/guilds/G1/channels":
+                return httpx.Response(200, json=[{"id": "CH1", "name": "general", "type": 0, "position": 0, "topic": "t"}, {"id": "CH2", "name": "voice", "type": 2}, {"id": "CH3", "name": "dev", "type": 0, "position": 1}])
+            if p.startswith("/api/v10/channels/") and p.endswith("/messages"):
+                cid = p.split("/")[4]
+                if cid == "CH3":
+                    return httpx.Response(403, json={"message": "Missing Access", "code": 50001})
+                return httpx.Response(200, json=[{"id": "M2", "author": {"id": "U9", "username": "max", "global_name": "Max"}, "content": "Deploy LARK on Friday " + "y" * 3000, "timestamp": "2026-11-01T10:00:00.000000+00:00"},
+                                                 {"id": "M1", "author": {"id": "U1", "username": "robert"}, "content": "ok", "timestamp": "2026-10-31T10:00:00.000000+00:00"}])
+            if req.method != "GET":
+                raise AssertionError("a write reached the network")
+            return httpx.Response(404, json={"message": "nope"})
+        return httpx.MockTransport(handler)
+
+
+def test_discord_client_is_read_only_and_the_tools_list_channels_read_and_search(conn, cfg, monkeypatch, tmp_path):
+    from factotum import discord, mcp_server as M
+    cfg["sources"]["discord"] = {"enabled": True, "guilds": [{"name": "LARK dev", "id": "G1"}]}
+    monkeypatch.setenv("DISCORD_BOT_TOKEN", "bot-token")
+    fake = FakeDiscord()
+    client = discord.Client("bot-token", transport=fake.transport())
+    with pytest.raises(discord.DiscordError):
+        client.post("/channels/CH1/messages", {"content": "hi"})
+    assert client.get("/users/@me")["username"] == "factotum-bot" and fake.calls[-1][3] == "Bot bot-token"
+    ctx = M.Context(conn, cfg, run_dir=tmp_path, discord=lambda token: discord.Client(token, transport=fake.transport()))
+    chans = json.loads(_text(_rpc(ctx, 1, "tools/call", {"name": "discord_channels", "arguments": {"server": "lark"}})))
+    assert [c["name"] for c in chans["channels"]] == ["general", "dev"] and chans["server"] == "LARK dev"          # text channels only
+    msgs = json.loads(_text(_rpc(ctx, 2, "tools/call", {"name": "discord_messages", "arguments": {"server": "LARK dev", "channel": "general", "limit": 10}})))
+    assert msgs["messages"][0]["from"] == "Max" and msgs["messages"][0]["at"].startswith("2026-11-01") and len(msgs["messages"][0]["text"]) < 1500
+    hits = json.loads(_text(_rpc(ctx, 3, "tools/call", {"name": "discord_search", "arguments": {"server": "LARK dev", "query": "deploy"}})))
+    assert [h["channel"] for h in hits["matches"]] == ["general"] and hits["matches"][0]["text"].startswith("Deploy") and "dev" in hits["skipped"][0]
+    assert _rpc(ctx, 4, "tools/call", {"name": "discord_channels", "arguments": {"server": "Elsewhere"}})["result"]["isError"]     # not in the config
+    monkeypatch.delenv("DISCORD_BOT_TOKEN")
+    ctx2 = M.Context(conn, cfg, run_dir=tmp_path)
+    assert "DISCORD_BOT_TOKEN" in _text(_rpc(ctx2, 5, "tools/call", {"name": "discord_channels", "arguments": {"server": "LARK dev"}}))

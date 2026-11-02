@@ -182,6 +182,16 @@ sources:
       - "awongnickerson@comms.sdsu.edu"
       - "gradlife-sdsu.edu@shared1.ccsend.com"
       - "*Arts & Letters Homeroom*"
+  slack:
+    enabled: false                # Chat and the skills can search and read; never post. Toggle in Settings.
+    workspaces:                   # one entry per workspace; the token lives in .env under the name token_env gives
+      - { name: DiCE Lab,   token_env: SLACK_TOKEN_DICE }
+      - { name: Car Sounds, token_env: SLACK_TOKEN_CARSOUNDS }
+      - { name: LARK dev,   token_env: SLACK_TOKEN_LARK }
+  discord:
+    enabled: false                # one bot (DISCORD_BOT_TOKEN in .env) invited to each server below; read-only
+    guilds:                       # server ids: Discord → User Settings → Advanced → Developer Mode, then right-click the server → Copy Server ID
+      - { name: LARK dev, id: "000000000000000000" }
   calendar:
     enabled: false                # turn on in Settings once credentials exist (docs/SETUP.md §6)
     provider: google              # google | none
