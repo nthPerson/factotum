@@ -145,10 +145,13 @@ def properties(cfg: dict, t: dict, sch: dict[str, str], notes: list[str], today:
 
 
 def _pending(conn: sqlite3.Connection, all_rows: bool) -> list[dict]:
+    """Rows to push: creates first, in id order (Notion's own Task ID counter then keeps pace with
+    Factotum's ids for as long as nothing else creates rows there), then edits in edited_at order."""
     if all_rows:
-        return rows(conn, "SELECT * FROM tasks ORDER BY edited_at, id")
+        return rows(conn, "SELECT * FROM tasks ORDER BY id")
     wm = get_settings(conn).get("state.mirror.watermark") or ""
-    return rows(conn, "SELECT * FROM tasks WHERE notion_page_id IS NULL OR edited_at > ? ORDER BY edited_at, id", (wm,))
+    return (rows(conn, "SELECT * FROM tasks WHERE notion_page_id IS NULL ORDER BY id")
+            + rows(conn, "SELECT * FROM tasks WHERE notion_page_id IS NOT NULL AND edited_at > ? ORDER BY edited_at, id", (wm,)))
 
 
 def sweep(conn: sqlite3.Connection, cfg: dict, *, all_rows: bool = False, dry_run: bool = False, cap: int = 60, transport=None, pause: float | None = None) -> dict:
@@ -170,7 +173,7 @@ def sweep(conn: sqlite3.Connection, cfg: dict, *, all_rows: bool = False, dry_ru
     today = date.today()
     created = updated = 0
     failed: list[str] = []
-    last_edit = None
+    last_update_edit = None          # the watermark follows the edits, which are processed in edited_at order
     with httpx.Client(timeout=60, transport=transport) as client:
         for t in todo:
             props = properties(cfg, t, sch, note_ids(conn, t["id"]), today)
@@ -184,6 +187,7 @@ def sweep(conn: sqlite3.Connection, cfg: dict, *, all_rows: bool = False, dry_ru
                     if r.status_code != 200:
                         raise MirrorError(f"{r.status_code} {_message(r)}")
                     updated += 1
+                    last_update_edit = t["edited_at"]
                 else:
                     r = client.post(f"{NOTION}/pages", headers=_headers(version), json={"parent": parent, "properties": props})
                     if r.status_code != 200:
@@ -192,13 +196,14 @@ def sweep(conn: sqlite3.Connection, cfg: dict, *, all_rows: bool = False, dry_ru
                     created += 1
             except (MirrorError, httpx.HTTPError) as e:
                 failed.append(f"Task-{t['id']}: {e}"[:300])
-            last_edit = t["edited_at"]
+                if t.get("notion_page_id"):
+                    last_update_edit = t["edited_at"]      # a refused edit waits for its next edit or --all, not forever
             if pause:
                 time.sleep(pause)
-    if last_edit and not all_rows:
-        set_setting(conn, "state.mirror.watermark", last_edit)
-    elif all_rows:
+    if len(todo) == len(pend):       # everything pending went: the watermark is the newest edit seen (a create included)
         set_setting(conn, "state.mirror.watermark", max((t["edited_at"] for t in todo), default=""))
+    elif last_update_edit:
+        set_setting(conn, "state.mirror.watermark", last_update_edit)
     conn.commit()
     return {"created": created, "updated": updated, "failed": failed, "pending": len(_pending(conn, False))}
 

@@ -89,16 +89,17 @@ def test_mirror_sweep_creates_updates_since_the_watermark_caps_and_records_page_
     dry = NM.sweep(conn, cfg, dry_run=True, transport=fake.transport())
     assert dry["pending"] == 3 and fake.pages("POST") == [] and fake.pages("PATCH") == []
     res = NM.sweep(conn, cfg, cap=2, transport=fake.transport())
-    assert res["created"] == 1 and res["updated"] == 1 and res["pending"] == 1                      # cap hit: one left for the next pass
-    assert one(conn, "SELECT notion_page_id FROM tasks WHERE id = 3")["notion_page_id"] == "page-1"
+    # creates go first, in id order (Notion's Task ID counter keeps pace with Factotum's ids); the cap leaves the edit for the next pass
+    assert res["created"] == 2 and res["updated"] == 0 and res["pending"] == 1
+    assert one(conn, "SELECT notion_page_id FROM tasks WHERE id = 3")["notion_page_id"] == "page-1" and one(conn, "SELECT notion_page_id FROM tasks WHERE id = 4")["notion_page_id"] == "page-2"
     assert one(conn, "SELECT edited_at FROM tasks WHERE id = 3")["edited_at"] == "2026-10-05T00:00:00+00:00"     # storing the page id is not an edit
-    assert [p for p, _ in fake.pages("PATCH")] == ["/v1/pages/page-2"]
+    assert fake.pages("PATCH") == [] and get_settings(conn)["state.mirror.watermark"] == "2026-11-01T00:00:00+00:00"   # no edit pushed yet: the watermark stays
     create_body = fake.pages("POST")[0][1]
     assert create_body["parent"] == {"type": "data_source_id", "data_source_id": cfg["sinks"]["notion_tasks_mirror"]["data_source_id"]} and create_body["properties"]["Name"]["title"][0]["text"]["content"] == "Never mirrored"
     assert sum(1 for m, p, _, _ in fake.calls if m == "GET") == 1                                   # the schema once per sweep
     res2 = NM.sweep(conn, cfg, transport=fake.transport())
-    assert res2["created"] == 1 and res2["pending"] == 0 and one(conn, "SELECT notion_page_id FROM tasks WHERE id = 4")["notion_page_id"] == "page-2"
-    assert get_settings(conn)["state.mirror.watermark"] >= "2026-11-02T11:00:00+00:00"
+    assert res2["updated"] == 1 and res2["created"] == 0 and res2["pending"] == 0 and [p for p, _ in fake.pages("PATCH")] == ["/v1/pages/page-2"]
+    assert get_settings(conn)["state.mirror.watermark"] == "2026-11-02T11:00:00+00:00"              # everything went: the newest edit seen
     assert NM.sweep(conn, cfg, transport=fake.transport())["pending"] == 0
     # --all re-pushes every row; a row Notion refuses is reported, not fatal
     fake2 = FakeNotion(fail_update_for={"page-old"})
