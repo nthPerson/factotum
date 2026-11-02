@@ -71,7 +71,7 @@ def messages(conn: sqlite3.Connection, thread_id: int) -> list[dict]:
 # ---- the prompt ---------------------------------------------------------------------------------
 
 def allowed_tools() -> list[str]:
-    return [f"mcp__factotum__{t['name']}" for t in mcp_server.TOOLS]
+    return [f"mcp__factotum__{t['name']}" for t in mcp_server.TOOLS if not t.get("skill_only")]
 
 
 def mcp_servers(cfg: dict, run_dir: Path | str) -> dict:

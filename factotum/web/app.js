@@ -55,8 +55,10 @@
   function daysTo(iso) { return Math.round((startOfDay(new Date(iso + 'T12:00:00')) - startOfDay(TODAY())) / 86400000); }
 
   // ---------- loading ----------
+  let pending = [];           // batches a skill staged (/api/proposals): Apply or Dismiss, above every tab
   async function load() {
     data = await api('/api/tasks?status=open');
+    try { pending = (await api('/api/proposals')).proposals; } catch (_) { pending = []; }
     document.getElementById('today-label').textContent = '· ' + TODAY().toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
     render();
   }
@@ -170,7 +172,7 @@
     renderRail();
     const p = document.getElementById('panel');
     const fns = { today: renderToday, timeline: renderTimeline, projects: renderProjects, review: renderReview, chat: renderChat, log: renderLog, settings: renderSettings };
-    p.innerHTML = fns[ui.tab]();
+    p.innerHTML = pendingHtml() + fns[ui.tab]();
     document.querySelectorAll('#tabs button').forEach(b => b.setAttribute('aria-selected', b.dataset.tab === ui.tab));
     document.getElementById('n-today').textContent = openOnes().filter(x => x.due && fmtDue(x.due).days <= 1).length || '';
     document.getElementById('n-review').textContent = review && (review.total || (review.suggestions || []).length) ? review.total + (review.suggestions || []).filter(x => !x.created).length : '';
@@ -178,6 +180,12 @@
       ? `<span>Review at</span><span class="pill">${esc(settings.effective['notify.review_time'])}</span>` : '';
     renderTray();
     wire();
+  }
+  function pendingHtml() {
+    if (!pending.length) return '';
+    return pending.map(p => `<div class="pending" data-pending="${p.id}"><div class="phead"><span class="chip top">Staged by Claude Code</span><b>${esc(p.label || '')}</b><span class="hint" style="margin:0">${new Date(p.created_at).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</span></div>
+      <div class="plist">${p.changes.map(c => { const t = byId(c.task_id); return `<span class="chip">Task-${c.task_id}${t ? ' ' + esc(t.name.slice(0, 40)) : ''} · ${esc(c.op === 'set' ? Object.entries(c.fields || {}).filter(([k]) => k !== 'due_is_datetime').map(([k, v]) => `${k} ${v === null ? 'cleared' : String(v).slice(0, 40)}`).join(', ') : c.op === 'add_reminder' ? 'remind ' + fmtWhen(c.fields.fire_at) : c.op)}</span>`; }).join('')}</div>
+      <div class="pact"><button class="btn small primary" data-pending-apply="${p.id}">Apply ${p.changes.length} change${p.changes.length === 1 ? '' : 's'}</button><button class="btn small" data-pending-dismiss="${p.id}">Dismiss</button></div></div>`).join('');
   }
   function renderRail() {
     const top = openOnes().filter(x => x.top_rank).sort((a, b) => a.top_rank - b.top_rank);
@@ -583,6 +591,13 @@
       else if (c.op === 'add_reminder') stageExtra(tid + ':r', tid, 'add_reminder', c.fields, e.label);
       else stageExtra(`${tid}:c${eid}`, tid, 'set', c.fields || {}, e.label);
       stageJudge(eid, tid, 'applied', 'suggestion accepted'); toast('Suggestion staged · decide on the card, then Apply');
+    });
+    panel.querySelectorAll('[data-pending-apply]').forEach(b => b.onclick = async () => {
+      try { const r = await api(`/api/proposals/${b.dataset.pendingApply}/apply`, { method: 'POST' }); lastBatch = r.batch_id; review = null; logData = null; await load(); toast(`${r.applied} change${r.applied === 1 ? '' : 's'} applied` + (r.skipped.length ? ` · ${r.skipped.length} skipped` : ''), true); }
+      catch (e) { toast('Apply failed: ' + e.message); }
+    });
+    panel.querySelectorAll('[data-pending-dismiss]').forEach(b => b.onclick = async () => {
+      try { await api(`/api/proposals/${b.dataset.pendingDismiss}/dismiss`, { method: 'POST' }); await load(); toast('Dismissed'); } catch (e) { toast('Dismiss failed: ' + e.message); }
     });
     panel.querySelectorAll('[data-sugg-dismiss]').forEach(b => b.onclick = () => { stageJudge(+b.dataset.suggDismiss, null, 'dismissed', 'planner suggestion dismissed'); });
     panel.querySelectorAll('[data-sugg-create]').forEach(b => b.onclick = async () => {

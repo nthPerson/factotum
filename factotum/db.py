@@ -92,6 +92,11 @@ CREATE TABLE IF NOT EXISTS accounts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   address TEXT NOT NULL UNIQUE, display TEXT, enabled INTEGER NOT NULL DEFAULT 1, roles_json TEXT NOT NULL DEFAULT '[]'
 );
+CREATE TABLE IF NOT EXISTS proposals (             -- batches staged by a skill (SPEC §15): the tray applies or dismisses them
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source TEXT NOT NULL, label TEXT, changes_json TEXT NOT NULL, created_at TEXT NOT NULL,
+  applied_at TEXT, batch_id INTEGER, dismissed_at TEXT
+);
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY, value_json TEXT NOT NULL
 );

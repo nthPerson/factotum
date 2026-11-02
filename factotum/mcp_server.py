@@ -47,6 +47,7 @@ class Context:
     cfg: dict
     run_dir: Path | str | None = None
     mail: object = None                      # factory → client with .call / .call_write
+    writer: object = None                    # factory → a writable connection, for stage_changes only (skills); None in chat turns
     today: date | None = None
     tool_log: list = field(default_factory=list)
     _mail: object = field(default=None, repr=False)
@@ -135,9 +136,11 @@ def drafts_made(run_dir: Path | str) -> list[dict]:
 TOOLS: list[dict] = []
 
 
-def tool(name: str, description: str, properties: dict, required: list[str] = ()):
+def tool(name: str, description: str, properties: dict, required: list[str] = (), skill_only: bool = False):
+    """`skill_only` tools are served to skills (stdio from Claude Code, the HTTP route) but left out
+    of a chat turn's allowlist: a chat turn proposes in its JSON and the UI stages that."""
     def deco(fn):
-        TOOLS.append({"name": name, "description": description,
+        TOOLS.append({"name": name, "description": description, "skill_only": skill_only,
                       "inputSchema": {"type": "object", "properties": properties, "required": list(required), "additionalProperties": False}, "fn": fn})
         return fn
     return deco
@@ -448,6 +451,68 @@ def plaud_summary(ctx: Context, args: dict) -> dict:
     return {"recording_id": rid, "summary": text[:cap], "truncated": len(text) > cap}
 
 
+STAGE_OPS = {"set", "done", "drop", "pin_top", "longterm", "add_reminder"}
+
+
+@tool("stage_changes", "Stage task changes for the user to apply: ONE batch the Factotum tray shows with Apply / Dismiss. Nothing changes "
+      "until the user taps Apply, so say so. ops: set (fields: due, hard, effort, context, counterpart, waiting_on, project, name, "
+      "manual_priority, snoozed_until, longterm), done, drop, pin_top, longterm, add_reminder (fields: fire_at ISO, label, repeat daily|weekdays|weekly|monthly).",
+      {"changes": {"type": "array", "items": {"type": "object", "properties": {"task_id": {"type": "integer"}, "op": {"type": "string"}, "fields": {"type": "object"}}, "required": ["task_id", "op"]}},
+       "label": {"type": "string", "description": "one line saying what this batch does and why"}}, ["changes"], skill_only=True)
+def stage_changes(ctx: Context, args: dict) -> dict:
+    """The skills' only write: a `proposals` row, through a separate writable connection (the tool
+    connection stays query_only). Validated like a chat proposal: existing open rows, settable fields,
+    a well-formed reminder. The tray applies it as one batch (source `skill`) or dismisses it."""
+    if ctx.writer is None:
+        raise ToolError("staging is not available in this run (no writer); describe the changes to the user instead")
+    from . import batches
+    from .sync_file import _clean_task_fields
+    changes = args.get("changes")
+    if not isinstance(changes, list) or not changes:
+        raise ToolError("changes must be a non-empty list")
+    kept, rejected = [], []
+    for i, ch in enumerate(changes[:40]):
+        if not isinstance(ch, dict):
+            rejected.append(f"#{i}: not an object"); continue
+        op, tid = ch.get("op"), ch.get("task_id")
+        if op not in STAGE_OPS:
+            rejected.append(f"#{i}: op {op!r} is not one of {sorted(STAGE_OPS)}"); continue
+        if not isinstance(tid, int) or not one(ctx.conn, "SELECT 1 FROM tasks WHERE id = ?", (tid,)):
+            rejected.append(f"#{i}: no task {tid}"); continue
+        fields = dict(ch.get("fields") or {})
+        if op == "set":
+            f = _clean_task_fields(ctx.cfg, fields)
+            for k in ("manual_priority", "snoozed_until", "longterm"):
+                if k in fields:
+                    f[k] = fields[k]
+            if not f:
+                rejected.append(f"#{i}: nothing settable in {sorted(fields)}"); continue
+            kept.append({"task_id": tid, "op": "set", "fields": f})
+        elif op == "add_reminder":
+            try:
+                kept.append({"task_id": tid, "op": "add_reminder", "fields": batches._reminder_fields({"fields": fields})})
+            except ValueError as e:
+                rejected.append(f"#{i}: {e}")
+        else:
+            kept.append({"task_id": tid, "op": op, "fields": {}})
+    if not kept:
+        raise ToolError("nothing stageable: " + "; ".join(rejected)[:600])
+    label = _cut(args.get("label"), 200) or f"{len(kept)} change{'s' if len(kept) != 1 else ''} from a skill"
+    w = ctx.writer()
+    try:
+        cur = w.execute("INSERT INTO proposals (source, label, changes_json, created_at) VALUES ('skill', ?, ?, ?)", (label, json.dumps(kept, default=str), datetime.now().astimezone().replace(microsecond=0).isoformat()))
+        pid = int(cur.lastrowid)
+        w.commit()
+    finally:
+        try:
+            w.close()
+        except Exception:   # noqa: BLE001
+            pass
+    ctx.record("proposals", {"proposal_id": pid, "staged": len(kept)})
+    return {"proposal_id": pid, "staged": len(kept), "rejected": rejected,
+            "note": "Staged, not applied: the user sees this batch in Factotum's tray and taps Apply (or Dismiss). Tell them so."}
+
+
 # ---- JSON-RPC ---------------------------------------------------------------------------------
 
 def _err(id_, code: int, message: str) -> dict:
@@ -525,6 +590,10 @@ def serve_stdio() -> None:
     cfg = C.load()
     conn = connect(C.db_path())
     cfg = C.effective(cfg, get_settings(conn))
-    ctx = Context(conn, cfg, run_dir=os.environ.get("FACTOTUM_RUN_DIR") or None)
-    print(f"factotum mcp: {len(TOOLS)} tools, db {C.db_path()}", file=sys.stderr, flush=True)
+    # Chat turns set FACTOTUM_RUN_DIR and get no writer (their proposals travel in the run's JSON);
+    # a skill's server (Claude Code's own `claude mcp add`, no run dir) may stage proposals.
+    run_dir = os.environ.get("FACTOTUM_RUN_DIR") or None
+    writer = None if run_dir else (lambda: connect(C.db_path()))
+    ctx = Context(conn, cfg, run_dir=run_dir or (C.ROOT / "data" / "runs" / "skill" / date.today().isoformat()), writer=writer)
+    print(f"factotum mcp: {len(TOOLS)} tools, db {C.db_path()}, {'skill (may stage)' if writer else 'chat turn'}", file=sys.stderr, flush=True)
     serve(ctx, sys.stdin, sys.stdout)

@@ -14,6 +14,8 @@
   POST /api/chat/turn {thread_id|null, text, attached, canned}   one turn, streamed as server-sent events
   POST /api/chat/create {message_id, index}                 create the task a proposal describes
   POST /api/chat/drafts/open {draft}                        show a draft the run saved in Mailbird's window
+  GET  /api/proposals · POST /api/proposals/{id}/apply|dismiss   batches a skill staged (SPEC.md §15); Apply makes a batch
+  POST /mcp                                  `factotum mcp` over HTTP for a remote skill (bearer FACTOTUM_MCP_TOKEN)
 """
 from __future__ import annotations
 
@@ -24,7 +26,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from html import escape
 from fastapi.staticfiles import StaticFiles
@@ -359,6 +361,80 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
             return {"ok": True}
         except mailbird.MailbirdError as e:
             raise HTTPException(502, str(e))
+
+    # ---- Skills (SPEC.md §15): staged proposals and the HTTP MCP route -----------------------------
+    @app.get("/api/proposals")
+    def proposals():
+        out = []
+        for p in rows(conn, "SELECT * FROM proposals WHERE applied_at IS NULL AND dismissed_at IS NULL ORDER BY id"):
+            out.append({"id": p["id"], "source": p["source"], "label": p["label"], "created_at": p["created_at"], "changes": json.loads(p["changes_json"] or "[]")})
+        return {"proposals": out}
+
+    def _proposal(pid: int) -> dict:
+        p = rows(conn, "SELECT * FROM proposals WHERE id = ?", (pid,))
+        if not p:
+            raise HTTPException(404, "no such proposal")
+        if p[0]["applied_at"] or p[0]["dismissed_at"]:
+            raise HTTPException(409, "already " + ("applied" if p[0]["applied_at"] else "dismissed"))
+        return p[0]
+
+    @app.post("/api/proposals/{pid}/apply")
+    def proposal_apply(pid: int):
+        """The one write a skill can cause, and only by the user's tap: its staged changes become a
+        batch (source `skill`, undoable like any other)."""
+        from .db import now_iso
+        p = _proposal(pid)
+        try:
+            res = batches.apply(conn, json.loads(p["changes_json"] or "[]"), "skill", date.today())
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        conn.execute("UPDATE proposals SET applied_at = ?, batch_id = ? WHERE id = ?", (now_iso(), res["batch_id"], pid))
+        conn.commit()
+        return res
+
+    @app.post("/api/proposals/{pid}/dismiss")
+    def proposal_dismiss(pid: int):
+        from .db import now_iso
+        _proposal(pid)
+        conn.execute("UPDATE proposals SET dismissed_at = ? WHERE id = ?", (now_iso(), pid))
+        conn.commit()
+        return {"ok": True}
+
+    @app.post("/mcp")
+    async def mcp_http(request: Request):
+        """`factotum mcp` over streamable HTTP for a skill on another machine: one JSON-RPC message
+        (or a batch) per POST, answered as JSON; notifications get 202. Needs `Authorization: Bearer
+        $FACTOTUM_MCP_TOKEN`; with no token configured the route does not exist. Each request gets its
+        own read-only connection (the Context's query_only pragma must not touch the API's connection)
+        and a writer for stage_changes; sidecars go under data/runs/mcp-http/<day>."""
+        import hmac
+        import os
+        from . import mcp_server
+        token = os.environ.get("FACTOTUM_MCP_TOKEN") or ""
+        if not token:
+            raise HTTPException(404)
+        auth = request.headers.get("authorization") or ""
+        if not (auth.lower().startswith("bearer ") and hmac.compare_digest(auth[7:].strip(), token)):
+            raise HTTPException(401, "bad or missing bearer token")
+        try:
+            msg = json.loads(await request.body())
+        except ValueError:
+            return JSONResponse(mcp_server._err(None, -32700, "parse error"))
+        db = db_path or C.db_path()
+        reader = connect(db)
+        try:
+            ctx = mcp_server.Context(reader, eff_cfg(), run_dir=C.ROOT / "data" / "runs" / "mcp-http" / date.today().isoformat(), writer=lambda: connect(db))
+            if isinstance(msg, list):
+                out = [r for r in (mcp_server.dispatch(ctx, m) for m in msg) if r is not None]
+                return JSONResponse(out) if out else JSONResponse(None, status_code=202)
+            resp = mcp_server.dispatch(ctx, msg)
+        finally:
+            reader.close()
+        return JSONResponse(resp) if resp is not None else JSONResponse(None, status_code=202)
+
+    @app.get("/mcp")
+    def mcp_http_get():
+        raise HTTPException(405, "POST JSON-RPC messages here; no server-initiated stream")
 
     @app.get("/r/{token}")
     def reminder_action(token: str, a: str = "open"):

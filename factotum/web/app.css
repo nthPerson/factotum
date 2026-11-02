@@ -213,3 +213,10 @@ body.bulk-on main { padding-bottom: 190px; }
 .card .rvask { margin-top: 12px; } .card .rvask input { font-size: 13px; }
 .rvreply { margin-top: 8px; padding: 10px 12px; background: var(--surface-2); border-radius: 8px; font-size: 13px; }
 .rvreply p { margin: 0 0 6px; color: var(--fg); }
+
+/* A batch a skill staged (phase 6): above every tab until Apply or Dismiss */
+.pending { background: var(--top-soft); border: 1px solid var(--top); border-radius: 10px; padding: 10px 12px; margin-bottom: 14px; }
+.pending .phead { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 6px; }
+.pending .plist { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+.pending .plist .chip { background: var(--surface); color: var(--fg); white-space: normal; }
+.pending .pact { display: flex; gap: 8px; }

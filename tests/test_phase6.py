@@ -120,3 +120,82 @@ def test_scheduler_runs_the_mirror_on_its_interval_when_the_sink_is_on(conn, cfg
     cfg["sinks"]["notion_tasks_mirror"]["enabled"] = False
     s.tick(datetime(2026, 11, 2, 10, 30))
     assert len(calls) == 2
+
+
+# --- skills: staged proposals and the HTTP MCP route ---------------------------------------------
+
+def _rpc(ctx, id_, method, params=None):
+    from factotum import mcp_server as M
+    msg = {"jsonrpc": "2.0", "id": id_, "method": method}
+    if params is not None:
+        msg["params"] = params
+    return M.dispatch(ctx, msg)
+
+
+def _text(resp) -> str:
+    return "".join(c["text"] for c in resp["result"]["content"] if c["type"] == "text")
+
+
+def test_stage_changes_writes_a_pending_proposal_that_the_tray_applies_or_dismisses(cfg, tmp_path):
+    """A skill never writes task state: stage_changes validates like a chat proposal and records a
+    pending proposal; the UI's tray applies it as one batch (source skill) or dismisses it."""
+    from fastapi.testclient import TestClient
+    from factotum import chat, mcp_server as M
+    from factotum.api import create_app
+    from factotum.db import connect
+    app = create_app(cfg, db_path=str(tmp_path / "api.db"))
+    c = app.state.conn
+    upsert_task(c, task(id=5, name="Reply to Max")); upsert_task(c, task(id=6, name="Slides")); c.commit()
+    reader = connect(tmp_path / "api.db")
+    ctx = M.Context(reader, cfg, run_dir=tmp_path / "run", writer=lambda: connect(tmp_path / "api.db"))
+    assert "mcp__factotum__stage_changes" not in chat.allowed_tools()                      # chat turns propose in their JSON instead
+    assert any(t["name"] == "stage_changes" for t in _rpc(ctx, 1, "tools/list")["result"]["tools"])
+    res = json.loads(_text(_rpc(ctx, 2, "tools/call", {"name": "stage_changes", "arguments": {"label": "Max replied; slides are the next thing", "changes": [
+        {"task_id": 5, "op": "done"},
+        {"task_id": 6, "op": "set", "fields": {"due": "2026-11-05", "score": 99, "context": "Max wants them Thursday"}},
+        {"task_id": 6, "op": "add_reminder", "fields": {"fire_at": "2026-11-04T09:00", "label": "slides"}},
+        {"task_id": 999, "op": "done"},
+        {"task_id": 5, "op": "reopen"}]}})))
+    assert res["proposal_id"] and res["staged"] == 3 and len(res["rejected"]) == 2 and "Apply" in res["note"]
+    assert one(c, "SELECT status FROM tasks WHERE id = 5")["status"] == "open"              # nothing applied
+    client = TestClient(app)
+    pend = client.get("/api/proposals").json()["proposals"]
+    assert len(pend) == 1 and pend[0]["label"].startswith("Max replied") and pend[0]["source"] == "skill" and [ch["op"] for ch in pend[0]["changes"]] == ["done", "set", "add_reminder"]
+    assert pend[0]["changes"][1]["fields"] == {"due": "2026-11-05", "due_is_datetime": 0, "context": "Max wants them Thursday"}
+    r = client.post(f"/api/proposals/{pend[0]['id']}/apply").json()
+    assert r["applied"] == 3 and one(c, "SELECT status, closed_by FROM tasks WHERE id = 5")["closed_by"] == "skill"
+    assert one(c, "SELECT source FROM batches WHERE id = ?", (r["batch_id"],))["source"] == "skill" and client.get("/api/proposals").json()["proposals"] == []
+    assert client.post(f"/api/proposals/{pend[0]['id']}/apply").status_code == 409              # already applied
+    # a second proposal, dismissed
+    json.loads(_text(_rpc(ctx, 3, "tools/call", {"name": "stage_changes", "arguments": {"changes": [{"task_id": 6, "op": "drop"}]}})))
+    pid = client.get("/api/proposals").json()["proposals"][0]["id"]
+    assert client.post(f"/api/proposals/{pid}/dismiss").json()["ok"] and client.get("/api/proposals").json()["proposals"] == []
+    assert one(c, "SELECT status FROM tasks WHERE id = 6")["status"] == "open"
+    # the reader connection stayed read-only
+    with pytest.raises(Exception):
+        reader.execute("UPDATE tasks SET name = 'x' WHERE id = 6")
+    # a context without a writer refuses to stage
+    ctx2 = M.Context(connect(tmp_path / "api.db"), cfg, run_dir=tmp_path / "run2")
+    assert _rpc(ctx2, 4, "tools/call", {"name": "stage_changes", "arguments": {"changes": [{"task_id": 6, "op": "drop"}]}})["result"]["isError"]
+
+
+def test_http_mcp_route_needs_the_bearer_token_and_speaks_jsonrpc(cfg, tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from factotum.api import create_app
+    monkeypatch.setenv("FACTOTUM_MCP_TOKEN", "s3cret")
+    app = create_app(cfg, db_path=str(tmp_path / "api.db"))
+    upsert_task(app.state.conn, task(id=7, name="HTTP one")); app.state.conn.commit()
+    client = TestClient(app)
+    init = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}}}
+    assert client.post("/mcp", json=init).status_code == 401
+    assert client.post("/mcp", json=init, headers={"Authorization": "Bearer wrong"}).status_code == 401
+    h = {"Authorization": "Bearer s3cret"}
+    r = client.post("/mcp", json=init, headers=h)
+    assert r.status_code == 200 and r.json()["result"]["serverInfo"]["name"] == "factotum"
+    assert client.post("/mcp", json={"jsonrpc": "2.0", "method": "notifications/initialized"}, headers=h).status_code == 202
+    r = client.post("/mcp", json={"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "tasks_query", "arguments": {"q": "http"}}}, headers=h)
+    assert r.status_code == 200 and json.loads(r.json()["result"]["content"][0]["text"])["tasks"][0]["id"] == 7
+    assert client.get("/mcp", headers=h).status_code == 405
+    assert client.post("/mcp", content=b"not json", headers=dict(h, **{"Content-Type": "application/json"})).json()["error"]["code"] == -32700
+    monkeypatch.delenv("FACTOTUM_MCP_TOKEN")
+    assert client.post("/mcp", json=init, headers=h).status_code == 404                        # no token configured: the route is off
