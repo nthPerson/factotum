@@ -138,8 +138,16 @@ def create_app(cfg: dict | None = None, db_path: str | None = None) -> FastAPI:
         open_tasks = [decorate(t, today, ecfg) for t in rows(conn, "SELECT * FROM tasks WHERE status = 'open'") if t["id"] not in skip]
         full = lifecycle.build_review_queue(open_tasks, today, ecfg, last, cap=10**9)
         cap = int(C.get(ecfg, "lifecycle.review_cap", 15))
+        page = full[:cap]
+        if page:
+            # The automations only expire rows Review has shown (lifecycle.expire); this is the record.
+            ids = [i["task"]["id"] for i in page]
+            conn.execute(f"UPDATE tasks SET last_offered_at = ? WHERE id IN ({','.join('?' * len(ids))})", (today.isoformat(), *ids))
+            conn.commit()
+            for i in page:
+                i["task"]["last_offered_at"] = today.isoformat()
         return {"today": today.isoformat(), "last_review_at": st.get("state.last_review_at"),
-                "cap": cap, "total": len(full), "labels": lifecycle.REVIEW_LABELS, "items": full[:cap]}
+                "cap": cap, "total": len(full), "labels": lifecycle.REVIEW_LABELS, "items": page}
 
     @app.post("/api/review/finish")
     def finish_review():

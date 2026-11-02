@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   created_at TEXT NOT NULL, edited_at TEXT NOT NULL,
   completed_at TEXT, closed_by TEXT,
   snoozed_until TEXT, last_reviewed_at TEXT,
+  last_offered_at TEXT,                          -- last day a Review page showed this row (the automations only expire what was shown)
   calendar_event TEXT, notion_page_id TEXT, canvas_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
@@ -35,7 +36,8 @@ CREATE TABLE IF NOT EXISTS reminders (
   fire_at TEXT NOT NULL, label TEXT,
   repeat TEXT,                                   -- NULL|daily|weekdays|weekly|monthly
   status TEXT NOT NULL DEFAULT 'pending',        -- pending|sent|snoozed|done|cancelled
-  ntfy_seq TEXT, token TEXT, created_by TEXT, created_at TEXT NOT NULL
+  ntfy_seq TEXT, token TEXT, created_by TEXT, created_at TEXT NOT NULL,
+  sent_at TEXT                                   -- when it was pushed; the action token is valid 24 h from here
 );
 CREATE TABLE IF NOT EXISTS links (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -88,7 +90,7 @@ TASK_FIELDS = [
     "due", "due_is_datetime", "hard", "effort", "source", "source_key", "source_link", "account",
     "counterpart", "waiting_on", "waiting_since", "context", "why_now", "score", "priority",
     "manual_priority", "mentions", "last_mention_at", "created_at", "edited_at", "completed_at",
-    "closed_by", "snoozed_until", "last_reviewed_at", "calendar_event", "notion_page_id", "canvas_id",
+    "closed_by", "snoozed_until", "last_reviewed_at", "last_offered_at", "calendar_event", "notion_page_id", "canvas_id",
 ]
 
 
@@ -107,7 +109,7 @@ def connect(path: str | Path) -> sqlite3.Connection:
 
 # Columns added after a table first shipped. CREATE TABLE IF NOT EXISTS leaves an existing table
 # alone, so init_db adds these to databases created before them.
-MIGRATIONS = {"reminders": {"repeat": "TEXT"}}
+MIGRATIONS = {"reminders": {"repeat": "TEXT", "sent_at": "TEXT"}, "tasks": {"last_offered_at": "TEXT"}}
 
 
 def init_db(conn: sqlite3.Connection) -> None:

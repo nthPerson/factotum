@@ -57,7 +57,7 @@ def test_manual_p3_cap_yields_to_imminent_hard_deadline(cfg):
 # --- lifecycle -------------------------------------------------------------------------------
 
 def test_backlog_fades_after_21_quiet_days(cfg):
-    t = task(due=None, last_mention_at="2026-10-05")
+    t = task(due=None, last_mention_at="2026-10-05", last_offered_at="2026-10-25")   # shown in Review while fading
     assert lifecycle.fade_at(t, cfg) == date(2026, 10, 26)
     assert lifecycle.expire([t], TODAY, cfg) == [(1, "faded", "no mention since 2026-10-05")]
 
@@ -74,7 +74,7 @@ def test_top_never_expires(cfg):
 
 
 def test_hard_last_call_then_lapse(cfg):
-    t = task(due="2026-10-20", hard=1)  # 12 days past, last call at Oct 27
+    t = task(due="2026-10-20", hard=1, last_offered_at="2026-10-28")  # 12 days past, last call at Oct 27, shown since
     assert lifecycle.last_call_at(t, cfg) == date(2026, 10, 27)
     assert "last_call" in lifecycle.review_reasons(t, TODAY, cfg, None)
     assert lifecycle.expire([t], TODAY, cfg)[0][1] == "lapsed"
@@ -366,3 +366,47 @@ def test_log_lists_batches_with_their_changes_and_runs(cfg, tmp_path):
     assert b["source"] == "review" and b["undone_at"] is None
     assert b["changes"][0] == {"task_id": 1, "task_name": "Call Reza", "field": "due", "old": None, "new": "2026-11-05"}
     assert log["runs"][0]["kind"] == "sync-file" and log["runs"][0]["cost_usd"] == 0.37
+
+
+# --- phase 2: what the automations may expire ------------------------------------------------
+
+def test_expire_waits_until_review_has_shown_the_item(cfg):
+    # fade_at Oct 26, warning from Oct 23. Never shown in Review → the automation waits; shown
+    # during the warning window → fades; shown only before the window → still waits.
+    t = task(due=None, last_mention_at="2026-10-05")
+    assert lifecycle.expire([t], TODAY, cfg) == []
+    assert lifecycle.expire([dict(t, last_offered_at="2026-10-24")], TODAY, cfg)[0][1] == "faded"
+    assert lifecycle.expire([dict(t, last_offered_at="2026-10-10")], TODAY, cfg) == []
+    hard = task(due="2026-10-20", hard=1)   # last call Oct 27
+    assert lifecycle.expire([hard], TODAY, cfg) == []
+    assert lifecycle.expire([dict(hard, last_offered_at="2026-10-27")], TODAY, cfg)[0][1] == "lapsed"
+
+
+def test_a_review_decision_resets_the_quiet_clock(cfg):
+    # Keep on a fading item means "I still want this": it comes back as Fading in fade_days, not
+    # never (which is what a Keep that only suppressed the warning would have done)
+    t = task(due=None, last_mention_at="2026-10-05", last_reviewed_at="2026-10-28")
+    assert lifecycle.fade_at(t, cfg) == date(2026, 11, 18)
+    assert lifecycle.review_reasons(t, TODAY, cfg, None) == []
+
+
+def test_review_page_stamps_the_items_it_shows(cfg, tmp_path):
+    from fastapi.testclient import TestClient
+    from factotum.api import create_app
+    app = create_app(cfg, db_path=str(tmp_path / "api.db"))
+    c = app.state.conn
+    for i in range(1, 21):
+        upsert_task(c, task(id=i, due=None, created_at="2026-10-30T00:00:00+00:00", last_mention_at="2026-10-30"))
+    c.commit()
+    shown = {i["task"]["id"] for i in TestClient(app).get("/api/review").json()["items"]}
+    stamped = {r[0] for r in c.execute("SELECT id FROM tasks WHERE last_offered_at IS NOT NULL")}
+    assert stamped == shown and len(stamped) == 15
+
+
+def test_init_db_adds_phase2_columns_to_old_tables(tmp_path):
+    c = connect(tmp_path / "old.db")
+    c.executescript("CREATE TABLE tasks (id INTEGER PRIMARY KEY, name TEXT NOT NULL, project TEXT, status TEXT NOT NULL DEFAULT 'open', created_at TEXT NOT NULL, edited_at TEXT NOT NULL);"
+                    "CREATE TABLE reminders (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL, fire_at TEXT NOT NULL, label TEXT, repeat TEXT, status TEXT NOT NULL DEFAULT 'pending', ntfy_seq TEXT, token TEXT, created_by TEXT, created_at TEXT NOT NULL);")
+    init_db(c)
+    assert "last_offered_at" in {r[1] for r in c.execute("PRAGMA table_info(tasks)")}
+    assert "sent_at" in {r[1] for r in c.execute("PRAGMA table_info(reminders)")}

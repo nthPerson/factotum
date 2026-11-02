@@ -40,7 +40,10 @@ def fade_at(task: dict, cfg: dict) -> date | None:
     """Date on which an undated backlog task fades, or None if it never fades."""
     if tier(task) != "backlog" or is_long_term(task, cfg) or task.get("status") != OPEN:
         return None
-    anchor = parse_date(task.get("last_mention_at")) or parse_date(task.get("edited_at")) or parse_date(task.get("created_at"))
+    # A Review decision (Keep, Later) counts as attention: it restarts the quiet clock, so a kept
+    # item comes back as Fading in fade_days instead of lingering open and unseen.
+    anchors = [parse_date(task.get(k)) for k in ("last_mention_at", "last_reviewed_at")]
+    anchor = max((a for a in anchors if a), default=None) or parse_date(task.get("edited_at")) or parse_date(task.get("created_at"))
     if anchor is None:
         return None
     return anchor + timedelta(days=int(C.get(cfg, "lifecycle.fade_days", 21)))
@@ -110,18 +113,25 @@ def build_review_queue(tasks: list[dict], today: date, cfg: dict, last_review_at
 
 def expire(tasks: list[dict], today: date, cfg: dict) -> list[tuple[int, str, str]]:
     """Return (task_id, new_status, why) for tasks whose fade or last-call window has passed and
-    which were not kept in review. The scheduler applies these as an automation batch."""
+    which were not kept in review. The scheduler applies these as an automation batch.
+
+    Nothing expires unseen: a row must have been on a Review page (`last_offered_at`) on or after
+    the day its warning started (fade_at − fade_warn_days, or the last-call date). Until then the
+    row stays open and keeps appearing in Review, and the daily push keeps asking."""
     out = []
+    warn = timedelta(days=int(C.get(cfg, "lifecycle.fade_warn_days", 3)))
     for t in tasks:
         if t.get("status") != OPEN:
             continue
         reviewed = parse_date(t.get("last_reviewed_at"))
+        offered = parse_date(t.get("last_offered_at"))
         fa = fade_at(t, cfg)
-        if fa and today > fa and not (reviewed and reviewed >= fa - timedelta(days=int(C.get(cfg, "lifecycle.fade_warn_days", 3)))):
-            out.append((t["id"], "faded", f"no mention since {t.get('last_mention_at') or t.get('created_at')}"))
+        if fa and today > fa and not (reviewed and reviewed >= fa - warn):
+            if offered and offered >= fa - warn:
+                out.append((t["id"], "faded", f"no mention since {t.get('last_mention_at') or t.get('created_at')}"))
             continue
         lc = last_call_at(t, cfg)
-        if lc and today > lc and not (reviewed and reviewed >= lc):
+        if lc and today > lc and not (reviewed and reviewed >= lc) and offered and offered >= lc:
             out.append((t["id"], "lapsed", f"hard deadline {t.get('due')} passed, no evidence"))
     return out
 
