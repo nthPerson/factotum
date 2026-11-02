@@ -27,8 +27,8 @@ RETRY_AFTER = timedelta(hours=1)
 
 
 class Scheduler:
-    def __init__(self, cfg: dict, conn: sqlite3.Connection, push=notify.publish, mailer=None, calendar=None):
-        self.cfg, self.conn, self.push, self.mailer, self.calendar = cfg, conn, push, mailer, calendar
+    def __init__(self, cfg: dict, conn: sqlite3.Connection, push=notify.publish, mailer=None, calendar=None, canvas=None):
+        self.cfg, self.conn, self.push, self.mailer, self.calendar, self.canvas = cfg, conn, push, mailer, calendar, canvas
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._rem_error_at: datetime | None = None
@@ -48,6 +48,8 @@ class Scheduler:
         self._daily("review_push", C.get(ecfg, "notify.review_time", "19:30"), now, st, did, lambda: self._review_push(ecfg, today, st))
         if C.get(ecfg, "sources.calendar.enabled") and self.calendar:
             self._every("calendar_sweep", int(C.get(ecfg, "sources.calendar.sweep_minutes", 30)), now, st, did, lambda: self.calendar.sweep_job(self.conn, ecfg, now))
+        if C.get(ecfg, "sources.canvas.enabled") and self.canvas:
+            self._every("canvas_sweep", int(C.get(ecfg, "sources.canvas.sweep_minutes", 60)), now, st, did, lambda: self.canvas.sweep_job(self.conn, ecfg, now))
         return did
 
     def _reminders(self, ecfg: dict, now: datetime, did: list[str]) -> None:

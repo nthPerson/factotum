@@ -153,6 +153,7 @@ sources:
     base_url: https://sdsu.instructure.com
     days_back: 7
     days_ahead: 90
+    sweep_minutes: 60             # how often items are pulled and submitted ones closed
     course_map: { GEOG582: GEOG 582, COMPE510: COMPE 510, BDA696: BDA 696, SCIBER-CT: SCIBER-CT }
     effort_by_type: { Quiz: S, Discussion: S, Assignment: M, Project: L }
     skip_title_prefixes: ["Attendance:"]

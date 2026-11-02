@@ -105,16 +105,17 @@ def main(argv: list[str] | None = None) -> int:
         from .api import create_app
         app = create_app(cfg)
         if not a.no_scheduler:
-            from . import brief, gcal, notify
+            from . import brief, canvas, gcal, notify
             from .scheduler import Scheduler
             # its own connection: the API holds one, and SQLite serialises writers with busy_timeout
-            Scheduler(cfg, connect(C.db_path()), push=notify.publish, mailer=brief.smtp_mailer, calendar=gcal).start()
+            Scheduler(cfg, connect(C.db_path()), push=notify.publish, mailer=brief.smtp_mailer, calendar=gcal, canvas=canvas).start()
             _start_plaud_trigger(cfg)
         uvicorn.run(app, host=a.host or C.get(cfg, "server.host", "127.0.0.1"), port=a.port or int(C.get(cfg, "server.port", 8750)))
     elif a.cmd == "tick":
         from . import brief, gcal, notify
+        from . import canvas
         from .scheduler import Scheduler
-        did = Scheduler(cfg, conn, push=notify.publish, mailer=brief.smtp_mailer, calendar=gcal).tick()
+        did = Scheduler(cfg, conn, push=notify.publish, mailer=brief.smtp_mailer, calendar=gcal, canvas=canvas).tick()
         print("\n".join(did) if did else "nothing due")
     elif a.cmd == "brief":
         from . import brief, gcal
