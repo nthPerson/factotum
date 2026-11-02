@@ -18,11 +18,12 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from html import escape
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import batches, commands, config as C, lifecycle, scoring
+from . import batches, commands, config as C, lifecycle, reminders, scoring
 from .db import connect, get_settings, get_task, init_db, rows, seed_accounts, set_setting
 from .dates import parse_date
 
@@ -41,6 +42,15 @@ class CommandBody(BaseModel):
 class SettingsBody(BaseModel):
     values: dict[str, Any] = {}
     accounts: list[dict[str, Any]] | None = None
+
+
+def _page(title: str, text: str, base: str, undo: bool = False) -> str:
+    """Tiny phone-sized confirmation page for a reminder action."""
+    back = f"{base}/#today" if base else "/#today"
+    hint = ' Undo is in the Log tab.' if undo else ''
+    return (f'<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Factotum</title>'
+            f'<body style="font:16px system-ui;margin:0;padding:24px;background:#fafaf7;color:#1a1a1a"><h2 style="margin:0 0 8px">{escape(title)}</h2>'
+            f'<p style="color:#555">{escape(text)}{hint}</p><p><a href="{escape(back)}" style="color:#2a6">Open Factotum</a></p></body>')
 
 
 def create_app(cfg: dict | None = None, db_path: str | None = None) -> FastAPI:
@@ -208,6 +218,20 @@ def create_app(cfg: dict | None = None, db_path: str | None = None) -> FastAPI:
                 b["changes"] = by.get(b["id"], [])
         runs = rows(conn, "SELECT id, kind, started_at, duration_ms, cost_usd, ok, summary, error FROM runs ORDER BY id DESC LIMIT ?", (limit,))
         return {"batches": bs, "runs": runs}
+
+    @app.get("/r/{token}")
+    def reminder_action(token: str, a: str = "open"):
+        """The three buttons on a reminder push (SPEC.md §10). `view` links, so the phone's Access
+        session authorises them; the token is single use for done/snooze and expires after 24 h."""
+        base = str(C.get(cfg, "server.public_url", "")).rstrip("/")
+        try:
+            res = reminders.act(conn, eff_cfg(), token, a)
+        except reminders.TokenError as e:
+            return HTMLResponse(_page("Factotum", e.why, base), status_code=e.status)
+        if res["action"] == "open":
+            return RedirectResponse(f"{base}/#today" if base else "/#today")
+        what = {"done": "marked done", "snooze": f"snoozed; it fires again at {res.get('fire_at', '')[11:16]}"}[res["action"]]
+        return HTMLResponse(_page(f"Task-{res['task_id']} {what}", res["task_name"], base, undo=res["action"] == "done"))
 
     @app.get("/")
     def index():

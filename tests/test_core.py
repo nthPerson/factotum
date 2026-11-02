@@ -410,3 +410,73 @@ def test_init_db_adds_phase2_columns_to_old_tables(tmp_path):
     init_db(c)
     assert "last_offered_at" in {r[1] for r in c.execute("PRAGMA table_info(tasks)")}
     assert "sent_at" in {r[1] for r in c.execute("PRAGMA table_info(reminders)")}
+
+
+# --- phase 2: reminders fire through ntfy, actions come back through /r/<token> ----------------
+
+from datetime import datetime  # noqa: E402
+
+
+class FakePush:
+    """Stands in for notify.publish: records every message, returns a fake ntfy id."""
+    def __init__(self):
+        self.sent = []
+
+    def __call__(self, cfg, title, body, **kw):
+        self.sent.append(dict(kw, title=title, body=body))
+        return f"m{len(self.sent)}"
+
+
+def test_next_occurrence_of_a_repeating_reminder():
+    from factotum.reminders import next_occurrence
+    assert next_occurrence("2026-11-03T09:00", "daily") == "2026-11-04T09:00"
+    assert next_occurrence("2026-11-06T09:00", "weekdays") == "2026-11-09T09:00"   # Fri → Mon
+    assert next_occurrence("2026-11-03T09:00", "weekly") == "2026-11-10T09:00"
+    assert next_occurrence("2026-01-31T09:00", "monthly") == "2026-02-28T09:00"    # clamped to the month
+
+
+def test_due_reminders_fire_once_and_a_repeat_schedules_the_next(conn, cfg):
+    from factotum import reminders
+    upsert_task(conn, task(id=1, name="Call Reza", due="2026-11-05")); conn.commit()
+    batches.apply(conn, [{"task_id": 1, "op": "add_reminder", "fields": {"fire_at": "2026-11-03T09:00", "label": "before the meeting", "repeat": "weekly"}},
+                         {"task_id": 1, "op": "add_reminder", "fields": {"fire_at": "2026-11-03T18:00"}}], "ui", TODAY)
+    push = FakePush()
+    fired = reminders.fire(conn, cfg, datetime(2026, 11, 3, 9, 0, 30), push)
+    assert len(fired) == 1 and len(push.sent) == 1
+    m = push.sent[0]
+    assert m["title"] == "Call Reza" and "before the meeting" in m["body"] and "Nov 5" in m["body"]
+    assert [a["label"] for a in m["actions"]] == ["Snooze 1 h", "Done", "Open"] and all("/r/" in a["url"] for a in m["actions"])
+    rows_ = _rem(conn)
+    sent = [r for r in rows_ if r["status"] == "sent"]
+    assert len(sent) == 1 and sent[0]["sent_at"] and sent[0]["token"] and sent[0]["ntfy_seq"] == "m1"
+    nxt = [r for r in rows_ if r["status"] == "pending" and r["repeat"] == "weekly"]
+    assert len(nxt) == 1 and nxt[0]["fire_at"] == "2026-11-10T09:00" and nxt[0]["label"] == "before the meeting"
+    assert reminders.fire(conn, cfg, datetime(2026, 11, 3, 9, 1, 0), push) == [] and len(push.sent) == 1
+
+
+def test_reminder_action_links_are_single_use_and_expire(cfg, tmp_path):
+    from fastapi.testclient import TestClient
+    from factotum import reminders
+    from factotum.api import create_app
+    app = create_app(cfg, db_path=str(tmp_path / "api.db"))
+    c = app.state.conn
+    upsert_task(c, task(id=1, name="Call Reza")); upsert_task(c, task(id=2, name="Other")); c.commit()
+    batches.apply(c, [{"task_id": 1, "op": "add_reminder", "fields": {"fire_at": "2026-11-03T09:00"}},
+                      {"task_id": 2, "op": "add_reminder", "fields": {"fire_at": "2026-11-03T09:00"}}], "ui", TODAY)
+    reminders.fire(c, cfg, datetime(2026, 11, 3, 9, 0, 30), FakePush())
+    tok1, tok2 = [r["token"] for r in _rem(c, 1) + _rem(c, 2) if r["status"] == "sent"]
+    client = TestClient(app)
+    r = client.get(f"/r/{tok1}", params={"a": "done"})
+    assert r.status_code == 200 and "Task-1" in r.text
+    assert c.execute("SELECT status, closed_by FROM tasks WHERE id = 1").fetchone()[:] == ("done", "ntfy")
+    assert client.get(f"/r/{tok1}", params={"a": "done"}).status_code == 410          # used
+    assert client.get("/r/nope", params={"a": "done"}).status_code == 404
+    r = client.get(f"/r/{tok2}", params={"a": "snooze"})
+    assert r.status_code == 200
+    again = [x for x in _rem(c, 2) if x["status"] == "pending"]
+    from datetime import timedelta
+    drift = abs(datetime.fromisoformat(again[0]["fire_at"]) - (datetime.now() + timedelta(hours=1)))
+    assert len(again) == 1 and drift < timedelta(minutes=2) and again[0]["created_by"] == "ntfy"   # +1 h from the wall clock, not from the send time
+    c.execute("UPDATE reminders SET sent_at = '2026-10-01T00:00:00+00:00', token = 'old' WHERE id = 1"); c.commit()
+    assert client.get("/r/old", params={"a": "open"}).status_code == 410             # older than 24 h
+
