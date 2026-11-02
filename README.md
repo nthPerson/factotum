@@ -26,8 +26,10 @@ whose verdict and proposals lead the brief; Chat: one streamed headless run per 
 reads), proposals you stage into the tray, "Search related emails" and "Draft reply" on every row,
 a prompt field on the Review card; and phase 6: the one-way Notion tasks mirror, the two Claude
 Code skills on the same server (a skill stages a batch the tray applies), the server over HTTP
-behind a bearer token, and a phone layout. Retiring the old Notion pages and plaud-sync is a
-checklist in docs/SETUP.md §15.
+behind a bearer token, and a phone layout; then the Slack mention sweep (@-mentions of you become
+Review items), Discord forums and threads, and the claude.ai / Claude Desktop connector (Factotum
+is its own OAuth server for `/mcp`; the consent page lives behind Cloudflare Access). Retiring the
+old Notion pages and plaud-sync is a checklist in docs/SETUP.md §15.
 
 ## Quick start
 
@@ -40,7 +42,7 @@ cp config/factotum.example.yaml config/factotum.yaml   # edit projects, accounts
 .venv/bin/python -m factotum import-notion --apply
 .venv/bin/python -m factotum import-notion --new-only --apply   # hourly, until the old system stops writing
 .venv/bin/python -m factotum serve                     # http://127.0.0.1:8750
-.venv/bin/pytest                                       # 99 tests, no network
+.venv/bin/pytest                                       # 110 tests, no network
 ```
 
 ## Adapting it to your own workflow

@@ -34,6 +34,8 @@ cd /home/robert/factotum
 .venv/bin/python -m factotum calendar-check   # Google token
 .venv/bin/python -m factotum chat-check       # the MCP server over a pipe + one haiku run through it (~$0.002)
 .venv/bin/python -m factotum slack-check | discord-check   # when those sources are configured
+.venv/bin/python -m factotum sweep slack      # one mention sweep now (also mail | canvas | calendar)
+.venv/bin/python -m factotum connectors       # the claude.ai / Desktop connectors behind /mcp; --arm before approving a new one, --revoke ID
 .venv/bin/python -m factotum mirror --dry-run # rows the Notion mirror would push
 .venv/bin/python -m factotum tick             # one scheduler tick — ONLY with factotum.service stopped: two schedulers on one DB send the brief twice and fire reminders twice
 ```
@@ -53,6 +55,11 @@ cd /home/robert/factotum
   reproduces it; the cause is usually `PYTHONPATH` or a print to stdout before the protocol starts.
 - **`cp data/factotum.db` is stale** (WAL): copy with `sqlite3.Connection.backup` or `VACUUM INTO`.
 - **ntfy caps a delay at 3 days** and 250 messages a day; the service publishes at fire time.
+- **A plaud_note link may hold a Plaud id, not a Notion page** (2026-11-02): the mirror once pushed
+  one into the Notes relation and Notion 404'd three rows. `mirror --task 395 396 397` re-pushes
+  named rows once the cause is fixed; `mirror --all` is the heavy alternative.
+- **The consent page says "not expecting a new connector"**: tap "Allow a new connector" in Settings →
+  Connections first (10 minutes), then retry from claude.ai. A consent page nobody asked for is Deny.
 - **A reminder tap shows the message in ntfy** (no Click header since 2026-11-02); "Open" is one of
   its three buttons. `notify.ntfy.tap_opens_app: true` restores the old jump.
 
@@ -60,7 +67,8 @@ cd /home/robert/factotum
 
 | Changing… | Where |
 |---|---|
-| review time, fade days, sweep intervals, planner on/off, chat budget, sources and sinks on/off | Settings tab (stored in the DB; saves on change) |
+| review time, fade days, sweep intervals (Slack too), planner on/off, chat budget, sources and sinks on/off, the connector on/off, arming and revoking connectors | Settings tab (stored in the DB; saves on change) |
+| the Access team and AUD tag the consent page verifies, the callback allowlist, token lifetimes | `config/factotum.yaml` `server.oauth` (docs/SETUP.md §16) |
 | projects, weights, Canvas course map, mail allow/deny, Notion property names, Slack workspaces, Discord servers | `config/factotum.yaml` |
 | tokens and passwords (Notion, Mailbird, ntfy, Canvas, SMTP, IMAP, Slack, Discord, the MCP route) | `.env` — never print its values |
 | models, budgets, timeouts per run kind | `config/factotum.yaml` `claude:` (the chat budget also in Settings) |

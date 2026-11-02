@@ -332,6 +332,15 @@ and one line per workspace in `.env` (`SLACK_TOKEN_DICE=xoxp-…`). Check with
 `.venv/bin/python -m factotum slack-check`: each workspace's team, how many channels the token
 sees, and whether search works. Factotum never posts; the client refuses write methods.
 
+**The mention sweep.** With Slack on, every `sources.slack.sweep_minutes` (Settings → Slack) the
+joined channels of each workspace are read since the last pass and @-mentions of you become Review
+items: one that names `Task-N` flags that task ("Mentioned in Slack"); any other is a card with
+Create task / Dismiss, and the task files under the workspace's `project`. Per workspace you can set
+`project: DiCE Lab` and `channels: [general, papers]` (otherwise every channel the token's user has
+joined, up to `max_channels`). The first pass looks back `lookback_days` (2). Run one now with
+`.venv/bin/python -m factotum sweep slack`. The token's user must be a member of a channel for it
+to be read; DMs are not read.
+
 ## 13. Discord (optional, phase 6)
 
 Read-only, one bot for every server. https://discord.com/developers/applications → **New
@@ -349,7 +358,9 @@ sources:
       - { name: LARK dev, id: "123456789012345678" }
 ```
 `.venv/bin/python -m factotum discord-check` names the bot, lists the servers it is in against the
-config, and reads one message to confirm the intent is on.
+config, and reads one message to confirm the intent is on. Forums and threads need nothing more:
+*Read Message History* covers the active threads of every channel the bot can see (forum posts
+are threads); archived threads are listed per channel on request.
 
 ## 14. The skills and `factotum mcp` from elsewhere (phase 6)
 
@@ -374,9 +385,15 @@ the other machine:
 claude mcp add --transport http factotum https://factotum.nthperson.dev/mcp --header "Authorization: Bearer <token>"
 ```
 By default the route serves reads and `stage_changes`; to allow drafts or Plaud reads from there,
-set `server.mcp_http_tools` in the config to a list of tool names (or `all`). A claude.ai custom
-connector needs OAuth, which Factotum does not implement; that copy of the old skill is simply
-removed.
+set `server.mcp_http_tools` in the config to a list of tool names (or `all`).
+
+**Another machine (the thinkpad).** Claude Code reads `~/.claude/skills` on *that* machine and its
+own `claude mcp` list, so the two registrations above are per machine: clone the repo there (or
+copy `skills/factotum-planner` and `skills/factotum-ops`), symlink them into `~/.claude/skills`,
+and add the server over HTTP with the bearer token as shown. **Claude Desktop and claude.ai** do
+not read `~/.claude/skills` at all: their skills are the ones uploaded under Settings →
+Capabilities → Skills (zip each `skills/factotum-*` folder and upload it once; it then shows on
+every device signed into the account), and their tools come from a connector — see §16.
 
 ## 15. Retiring plaud-sync (the user's clicks)
 
@@ -396,3 +413,33 @@ Everything below is reversible or archival; nothing in Factotum depends on it.
    anyone touching the old repo.
 5. **Mirror**: `.venv/bin/python -m factotum mirror --all` once (about 400 requests, ~3 minutes);
    from then the scheduler keeps Notion current every `sinks.notion_tasks_mirror.sweep_minutes`.
+
+## 16. The claude.ai / Claude Desktop connector (OAuth)
+
+Factotum is its own OAuth server for `/mcp` (SPEC §15). Four steps, each once.
+
+1. **Config.** In `config/factotum.yaml` under `server.oauth`: `enabled: true` (or the toggle in
+   Settings → Connections), `access_team: <team>` (the `<team>` in `https://<team>.cloudflareaccess.com`,
+   shown under Zero Trust → Settings → Custom Pages) and `access_aud: <tag>` (Zero Trust → Access →
+   Applications → the Factotum application → Overview → **Application Audience (AUD) Tag**). The
+   consent page refuses to render until both are set: it verifies the signed assertion Access adds
+   to every request against the team's certificates, and a plain identity header is never trusted.
+   Restart the service.
+2. **Access bypass for the paths a connector's servers call** (they cannot log in to Access):
+   Zero Trust → Access → Applications → Add an application → Self-hosted, domain
+   `factotum.nthperson.dev`, one application per path with a policy of action **Bypass**, include
+   Everyone: `mcp`, `oauth/register`, `oauth/token`, `.well-known/oauth-protected-resource`,
+   `.well-known/oauth-protected-resource/mcp`, `.well-known/oauth-authorization-server`. These paths
+   are protected by the tokens themselves. **Never `oauth/authorize`**, and never a wildcard that
+   covers it: that page is where you approve a connector, and Access is its login.
+3. **Arm, then connect.** In Factotum → Settings → Connections tap **Allow a new connector**
+   (10 minutes). Then in claude.ai: Settings → Connectors → **Add custom connector** → name
+   Factotum, URL `https://factotum.nthperson.dev/mcp` → Connect (Claude Desktop shares the same
+   connectors). claude.ai registers itself, sends you to the consent page (your Access login, then
+   "Connect "Claude" to Factotum?" with the registration time), and you tap Allow. A consent page
+   that arrives when you did not just do this is someone else's: Deny.
+4. **Check and revoke.** Settings → Connections (or `.venv/bin/python -m factotum connectors`)
+   lists every connector, when it last spoke and its live tokens; Revoke kills them all at once.
+   The connector gets the same tools as the bearer route (reads and `stage_changes`; drafts and
+   Plaud only via `server.mcp_http_tools`), so a chat in claude.ai can read tasks and stage a batch
+   for your tray, never write one. Upload the skills (§14) so those chats know the recipes.

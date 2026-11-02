@@ -17,8 +17,10 @@ a task edit made there is lost at the next mirror pass.
 
 ## The tools
 
-Everything goes through the `factotum` MCP server (the same one the Chat tab uses). If the
-server is missing or a tool fails, say so; never answer about tasks from memory.
+Everything goes through the `factotum` MCP server (the same one the Chat tab uses): in Claude
+Code the registered stdio or HTTP server, in claude.ai and Claude Desktop the Factotum connector
+(docs/SETUP.md §16). If the server is missing or a tool fails, say so; never answer about tasks
+from memory.
 
 | Need | Tool |
 |---|---|
@@ -29,7 +31,7 @@ server is missing or a tool fails, say so; never answer about tasks from memory.
 | a reply the user will send | `mail_draft_reply` on a thread this conversation fetched; `mail_draft_new` to a known contact. Drafts land in Mailbird and are **never sent** |
 | what is on the calendar | `calendar_events` |
 | what a recording said | `plaud_search` (title keyword, days back), then `plaud_summary` |
-| Slack / Discord, when the config enables them | `slack_search`, `slack_history`, `slack_thread`; `discord_search`, `discord_messages` |
+| Slack / Discord, when the config enables them | `slack_search`, `slack_history`, `slack_thread`; `discord_channels`, `discord_threads` (forum posts are threads), `discord_messages` (a channel, or a thread by id), `discord_search` |
 | **change anything** | `stage_changes` — see below |
 
 Results are trimmed on purpose (previews, capped bodies). Ask for one task in full rather than
@@ -86,6 +88,10 @@ on any tab), or that a Plaud memo will file it.
 - **Find the email** — two or three `mail_search` queries (a sender, a subject word, a synonym),
   then `mail_thread` on the best hit, `mail_message` on the latest message. Report sender, date and
   the one line that matters.
+- **Slack asked for something** — the sweep already files @-mentions: a mention naming a task
+  shows on Review as "Mentioned in Slack", one naming none as a card with Create task. Use
+  `slack_history` / `slack_thread` to read the context before proposing; a Slack message is a hint,
+  never proof that a task is done.
 - **Weekly review** — in this order: close what is clearly done; overdue rows one at a time
   (close / real date / drop); undated rows quiet for three weeks (drop is a success); waiting rows
   older than two weeks (a nudge or a drop); duplicates (same deliverable from two sources). Stage

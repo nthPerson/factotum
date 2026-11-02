@@ -31,8 +31,12 @@ planner (`factotum/planner.py`); Chat (`factotum mcp` in `factotum/mcp_server.py
 (`factotum/notion_mirror.py`), the skills `skills/factotum-planner` and `skills/factotum-ops` on the
 same MCP server with `stage_changes` → `proposals` → the tray, `POST /mcp` behind a bearer token,
 Slack and Discord read tools (`factotum/slack.py`, `factotum/discord.py`), evidence verdicts as
-batch changes, planner suggestions on Review, the phone layout. Retiring the old Notion pages and
-plaud-sync is the user's checklist (SETUP §15). Update this paragraph when something lands.
+batch changes, planner suggestions on Review, the phone layout. Wave 7 (2026-11-02, after the
+restart): the Slack mention sweep (`factotum/slack_sweep.py`: @-mentions → evidence, "Mentioned in
+Slack" on Review, suggestion cards), Discord forums and threads (`discord_threads`), the claude.ai
+connector (`factotum/oauth.py`: Factotum as the OAuth server behind `/mcp`, consent behind Access
+with the JWT verified, arming from Settings → Connections), `mirror --task`. Retiring the old Notion
+pages and plaud-sync is the user's checklist (SETUP §15). Update this paragraph when something lands.
 
 ## Where things live
 
@@ -66,7 +70,9 @@ plaud-sync is the user's checklist (SETUP §15). Update this paragraph when some
 | the Notion tasks mirror: schema-typed properties, which rows, `factotum mirror` | SPEC §7 | `factotum/notion_mirror.py` (`properties`, `sweep`), `tasks.mirrored_at` |
 | a skill staging a batch, the tray banner, the HTTP MCP route and its allowlist | SPEC §15 | `factotum/mcp_server.py` (`stage_changes`, `Context.allowed`), `api.py` (`/api/proposals`, `/mcp`), `skills/` |
 | Slack / Discord read tools, workspaces and servers, tokens | SPEC §6 | `factotum/slack.py`, `factotum/discord.py`, `mcp_server.py` (`slack_*`, `discord_*`) |
-| verdicts on evidence (dismiss, accept, reviewed), planner suggestions on Review | SPEC §9 | `factotum/batches.py` (`judge_evidence`), `api.py` (`/api/review`, `/api/review/suggestions`) |
+| verdicts on evidence (dismiss, accept, reviewed), planner suggestions on Review | SPEC §9 | `factotum/batches.py` (`judge_evidence`), `api.py` (`/api/review`, `/api/review/suggestions`, `SUGGESTION_KINDS`) |
+| the Slack mention sweep, "Mentioned in Slack", a mention as a suggestion card | SPEC §6 "Slack" | `factotum/slack_sweep.py` (`sweep`), `lifecycle.REVIEW_ORDER`, `mail_sweep.review_flags`, `planner.NON_PROVING` |
+| the claude.ai connector: metadata, registration, consent gate, arming, tokens, `/mcp` auth | SPEC §15, SETUP §16 | `factotum/oauth.py` (`consent_identity`, `verify_access_jwt`, `armed`, `token`, `check_access`), `api.py` (`/oauth/*`, `/api/connectors`) |
 
 ## Commands
 
@@ -81,8 +87,9 @@ plaud-sync is the user's checklist (SETUP §15). Update this paragraph when some
 .venv/bin/python -m factotum sync-file <plaud_id> --dry-run   # a real Claude run (~$0.15) that prints the JSON and writes nothing
 .venv/bin/python -m factotum claude-check | plaud-check       # the headless login; the Plaud CLI and the trigger mailbox
 .venv/bin/python -m factotum mail-check | canvas-check        # Mailbird's accounts vs the monitored ones; Canvas items vs rows
-.venv/bin/python -m factotum sweep mail|canvas|calendar       # one sweep now
-.venv/bin/python -m factotum mirror [--all|--dry-run]         # the Notion tasks mirror: rows edited since the last pass, or every row
+.venv/bin/python -m factotum sweep mail|canvas|calendar|slack # one sweep now
+.venv/bin/python -m factotum mirror [--all|--dry-run|--task ID…]  # the Notion tasks mirror: rows edited since the last pass, every row, or named rows
+.venv/bin/python -m factotum connectors [--arm|--revoke ID]   # the OAuth connectors behind /mcp (claude.ai, Claude Desktop)
 .venv/bin/python -m factotum slack-check | discord-check      # tokens, workspaces / servers, what each can read
 .venv/bin/python -m factotum planner --dry-run [--send]       # the morning planner (~$0.30): JSON only, or applied and mailed
 .venv/bin/python -m factotum chat-check                       # the MCP server over a pipe, Mailbird, one haiku run through it
@@ -141,6 +148,16 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
   matches Factotum's id because creates are pushed in id order and nothing else creates rows there.
 - **A reminder push has no `Click` header** (2026-11-02): with one, the ntfy app on the phone opened
   the browser before Snooze / Done could be tapped. `notify.ntfy.tap_opens_app` restores it.
+- **A `plaud_note` link is not always a Notion page id** (2026-11-02): the import stored the note
+  page's id under that kind, but sync-file stores the Plaud recording id (`of_<hex>`) there. The
+  mirror put one in the Notes relation and Notion refused the whole row (404 "Could not find page"
+  on Task-395..397). `notion_mirror.note_ids` only takes a bare 32-hex id; `mirror --task` re-pushes.
+- **`/oauth/authorize` must never be in an Access bypass policy** (2026-11-02): the consent page's
+  only login is Access. It verifies the `Cf-Access-Jwt-Assertion` JWT (needs `server.oauth.access_team`
+  and `access_aud`) and never a bare identity header; offline tests monkeypatch `oauth._fetch_certs`.
+- **A `slack_mention` never proves a planner proposal** (2026-11-02): anyone in a workspace can
+  write "Task-42 is done". `planner.NON_PROVING` stages such a proposal for Review; and its link is
+  `slack_message`, never `mail_thread` (the mail sweep polls those through Mailbird).
 - **`expire` only touches rows Review has shown** (`last_offered_at`, stamped by `GET /api/review`).
   A row that was never on a Review page stays open however old it is; that is by design.
 

@@ -213,13 +213,26 @@ Claude runs lose the calendar tools.
 outside its read list before a request is made. Chat and the skills get `slack_channels`,
 `slack_history`, `slack_thread` and `slack_search` (search needs that workspace's user token with
 `search:read`; a bot token reads channels but cannot search, and the tool says so). Mentions are
-resolved to names once per user per run; results are capped. No sweep yet: Slack is something to
-ask about, not an input that writes evidence.
+resolved to names once per user per run; results are capped. **The mention sweep** (built
+2026-11-02, `factotum/slack_sweep.py`): every `sources.slack.sweep_minutes` (20), Python reads each
+workspace's joined channels since that workspace's watermark (one page each, `max_channels` per
+pass; a `channels:` list on the workspace narrows it) and keeps the messages that @-mention the
+token's user and are not the user's own. One naming `Task-<n>` becomes evidence on that task
+(kind `slack_mention`), a mention (the fade clock moves), a `slack_message` link, and the Review
+reason "Mentioned in Slack". Any other becomes evidence with no task: Review shows it as a
+suggestion card (Create task / Dismiss; the task files under the workspace's `project`, source
+Slack, the message linked) and the planner sees it in its §3. A Slack mention never *proves* a
+planner proposal: anyone in a workspace can write "Task-42 is done", so a proposal resting on one
+is staged for Review, not applied. Permalinks are built from `auth.test`'s team URL; channels
+only, no DMs.
 
 **Discord** (`sources.discord`, read-only; built 2026-11-02). One bot token, invited to each server
-listed under `guilds`; `factotum/discord.py` has only `get`. Tools: `discord_channels`,
-`discord_messages`, and `discord_search`, which reads the newest messages of each text channel
-(bounded) and filters them, because Discord offers bots no search. Reading content needs the
+listed under `guilds`; `factotum/discord.py` has only `get`. Tools: `discord_channels` (text
+channels and forums, with a `kind`), `discord_threads` (a server's active threads, forum posts
+among them, and a channel's archived threads on request), `discord_messages` (a channel by name
+or a thread by id; a forum itself holds no messages and the tool says to list its threads), and
+`discord_search`, which reads the newest messages of each text channel and active thread (both
+bounded) and filters them, because Discord offers bots no search. Reading content needs the
 Message Content intent.
 
 **Commands.** The email command channel is retired. Voice stays (§8.1 applies spoken
@@ -360,8 +373,12 @@ scrolls inside the Log. The Chat tab has a thread sidebar beside the messages on
 drawer (☰ Threads) on phones, and shows each turn's cost and duration. Review also shows the
 planner's suggestions (creates it could not prove) as cards with Create / Dismiss, and offers
 "Accept" for a planner proposal on a task's card; a decision judges the card's evidence in the same
-batch. A batch a skill staged (§15) appears as a banner above every tab with Apply / Dismiss.
-Settings saves on change and exposes the sweep intervals, the planner toggle and the chat budget.
+batch. A Slack mention naming a task is the Review reason "Mentioned in Slack"; one naming none is
+a suggestion card beside the planner's (Create task files it under the workspace's project with the
+message linked). A batch a skill staged (§15) appears as a banner above every tab with Apply /
+Dismiss. Settings saves on change and exposes the sweep intervals (Slack's too), the planner toggle
+and the chat budget; Settings → Connections turns the claude.ai connector on, arms it for a new
+client, and lists every connector with Revoke.
 
 ## 10. Reminders and push
 
@@ -488,6 +505,8 @@ link; every batch is undoable; sinks are write-only.
    Discord read tools, the ntfy tap, the phone layout, the chat sidebar and turn duration, the
    chat link's account. *Gate: the first `factotum mirror --all` pass lands every row in Notion,
    a skill turn stages a batch that the tray applies, and the phone shows a row's title in full.*
+   Wave 7 (2026-11-02, after the restart): the Slack mention sweep, Discord forums and threads, the
+   claude.ai connector (§15), `mirror --task` and the Notes-relation fix behind the three 404s.
 
 ## 15. Claude Code skills
 
@@ -503,10 +522,29 @@ local stdio (`claude mcp add -s user factotum -e PYTHONPATH=… -- .venv/bin/pyt
 For another machine it is `POST /mcp` on the service: one JSON-RPC message per request behind
 `Authorization: Bearer $FACTOTUM_MCP_TOKEN` (constant-time compared; no token, no route), serving
 reads and `stage_changes` by default, drafts and the Plaud subprocess only when
-`server.mcp_http_tools` opts in. A claude.ai custom connector cannot send a bearer header or a
-Cloudflare Access service token and needs an OAuth server Factotum does not have, so the
-claude.ai copy of the skill is not wired (ruling 2026-11-02); Claude Code and Claude Desktop with
-`mcp-remote --header` can use the route, with an Access bypass policy on `/mcp`.
+`server.mcp_http_tools` opts in.
+
+**The claude.ai connector (built 2026-11-02, `factotum/oauth.py`).** A claude.ai or Claude Desktop
+custom connector cannot send a bearer header, so Factotum is its own OAuth 2.1 authorization server
+for `/mcp` when `server.oauth.enabled` is on: RFC 9728 protected-resource metadata (and a 401 on
+`/mcp` that points at it) → RFC 8414 server metadata → RFC 7591 dynamic registration, which accepts
+only the claude.ai / claude.com callbacks (`server.oauth.redirect_uris`) and caps live clients →
+the consent page → PKCE S256 code exchange (`resource` = `<public_url>/mcp`) → opaque tokens stored
+as SHA-256 hashes, refresh rotation, 24 h access / 90 day refresh by default. The consent page is
+the one human step and the one place identity matters: it stays behind Cloudflare Access and
+verifies the signed assertion Access attaches to every request it lets through (RS256 against the
+team's published certs, `aud` = the Access application's tag, `iss` = the team; `access_team` and
+`access_aud` in config, and the gate refuses until both are set) and requires an `owner.emails`
+address; a bare identity header is never enough, since anything that can reach the origin can send
+one. A connector that was never granted is approved only while the owner has armed Settings →
+Connections ("Allow a new connector", 10 minutes), so a consent link somebody else minted cannot be
+approved by reflex; the page states when the client registered and warns to Deny anything the owner
+did not just add. `/mcp` takes the static token or an access token and serves the same allowlist
+either way. Settings → Connections and `factotum connectors` list every client, when it last spoke
+and its live tokens, with Revoke (every token at once). The Access bypass is for exactly the paths a
+connector's servers call — `/mcp`, `/oauth/register`, `/oauth/token`, the three `/.well-known`
+documents — and never `/oauth/authorize` (SETUP §16). For Claude Code on another machine the bearer
+route remains the simpler path.
 
 ## 16. Open questions
 
