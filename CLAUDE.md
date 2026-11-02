@@ -18,10 +18,13 @@ Guidance for Claude Code working in this repository. Read `SPEC.md` for the desi
 
 ## Phase status
 
-Phase 1 of 6 is built (SPEC.md §14): store, scoring, lifecycle, Notion import, batches, command
-grammar, API, and the Today / Timeline / Projects / Review / Settings tabs. Chat, reminders,
-sweeps, the Plaud port and the Claude runner do not exist yet; the UI shows "phase N" where a
-control is a placeholder. Update this paragraph when a phase lands.
+Phases 1 and 2 of 6 are built (SPEC.md §14): store, scoring, lifecycle, Notion import, batches,
+command grammar, API, the Today / Timeline / Projects / Review / Log / Settings tabs, and the
+automations: a 30 s scheduler thread in the service (`factotum/scheduler.py`) that fires ntfy
+reminders with Snooze/Done/Open actions (`/r/<token>`), pushes the daily review nudge, runs the
+expire pass, sends the Python-built morning brief over SMTP and sweeps Google Calendar. Chat, the
+mail and Canvas sweeps, the Plaud port and the Claude runner do not exist yet; the UI shows
+"phase N" where a control is a placeholder. Update this paragraph when a phase lands.
 
 ## Where things live
 
@@ -36,6 +39,10 @@ control is a placeholder. Update this paragraph when a phase lands.
 | API routes, static UI | SPEC §9 | `factotum/api.py`, `factotum/web/` |
 | the one-time import and the interim `--new-only` sync | SPEC §12 | `factotum/importers/notion_tasks.py` |
 | Notion property names, sink toggles | SPEC §7 | `config/factotum.example.yaml` `sinks:` |
+| the scheduler tick, daily jobs, run logging | SPEC §10 | `factotum/scheduler.py` (`Scheduler.tick`), `db.log_run` |
+| reminders firing, repeats, action tokens | SPEC §10 | `factotum/reminders.py`, `factotum/notify.py` (ntfy) |
+| the morning brief, SMTP | SPEC §7 | `factotum/brief.py` (`build`, `send`, `smtp_settings`) |
+| Google Calendar auth, events, sweep | SPEC §6, SETUP §6 | `factotum/gcal.py` |
 | Claude runs (phase 3+) | SPEC §8 | `factotum/claude/` (not yet), `prompts/` (not yet) |
 
 ## Commands
@@ -47,6 +54,8 @@ control is a placeholder. Update this paragraph when a phase lands.
 .venv/bin/python -m factotum import-notion --apply            # the one-time migration
 .venv/bin/python -m factotum import-notion --new-only --apply # interim: pull rows plaud-sync created since
 .venv/bin/python -m factotum score | review | expire [--apply]
+.venv/bin/python -m factotum tick                  # one scheduler tick now; `brief [--send]`, `calendar-check`, `google-auth`
+.venv/bin/python -m factotum serve --port 8751 --no-scheduler   # a second instance for UI checks; never two schedulers on one DB
 .venv/bin/python -m factotum serve                 # http://127.0.0.1:8750
 sudo systemctl restart factotum                    # after code changes; see the restart rule below
 journalctl -u factotum -n 20
@@ -68,6 +77,11 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
   `last_mention_at`; that timestamp is the fade clock.
 - **Filters in the Notion REST import**: `fetch_all` tries the 2025-09 data-source endpoint,
   then the older database endpoint. Keep both until the older one is gone.
+- **Daily jobs are "at or after HH:MM, once per day"**, keyed by `state.last_run.<job>` in the
+  settings table. A fresh deploy after the brief time sends the brief immediately; seed the key
+  for today if that is not wanted. Never run two schedulers against one database.
+- **`expire` only touches rows Review has shown** (`last_offered_at`, stamped by `GET /api/review`).
+  A row that was never on a Review page stays open however old it is; that is by design.
 
 ## Gotchas carried over from plaud-sync (dates are when they were learned)
 

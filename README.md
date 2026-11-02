@@ -14,9 +14,11 @@ commitments, reading email context, drafting replies); Python does every write.
 
 ## Status
 
-Phase 1 of 6 (see SPEC.md §14): store, scoring, lifecycle, the one-time Notion import with a
-dry-run report, the batch write path with undo, the command grammar, and the UI's Today /
-Timeline / Projects / Review / Settings tabs. No automations run yet.
+Phases 1 and 2 of 6 (see SPEC.md §14): store, scoring, lifecycle, the one-time Notion import with
+a dry-run report, the batch write path with undo, the command grammar, the UI's Today / Timeline /
+Projects / Review / Log / Settings tabs, and the automations: ntfy reminders with action buttons,
+the daily review push, the expire pass, the morning brief email and the Google Calendar sweep.
+Nothing calls Claude yet (phase 3).
 
 ## Quick start
 
@@ -29,7 +31,7 @@ cp config/factotum.example.yaml config/factotum.yaml   # edit projects, accounts
 .venv/bin/python -m factotum import-notion --apply
 .venv/bin/python -m factotum import-notion --new-only --apply   # hourly, until the old system stops writing
 .venv/bin/python -m factotum serve                     # http://127.0.0.1:8750
-.venv/bin/pytest                                       # 29 tests, no network
+.venv/bin/pytest                                       # 45 tests, no network
 ```
 
 ## Adapting it to your own workflow
@@ -51,7 +53,10 @@ factotum/            the service
   lifecycle.py       tiers, fade, last call, review queue, import classifier
   commands.py        the `done 389 392` grammar
   batches.py         the one write path, with undo
-  api.py             FastAPI routes + static UI
+  api.py             FastAPI routes + static UI + /r/<token> reminder actions
+  scheduler.py       the 30 s tick: reminders, review push, expire, brief, calendar sweep
+  reminders.py       firing, repeats, action tokens        notify.py  ntfy publisher
+  brief.py           the morning brief (SMTP)              gcal.py    Google Calendar auth, events, sweep
   importers/         notion_tasks.py (one-time migration)
   sinks/             notion_mirror.py (one-way task mirror)
   web/               index.html, app.css, app.js

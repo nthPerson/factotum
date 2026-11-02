@@ -216,7 +216,7 @@ with Access is what authorises them.
 ## 8. Secrets and the service
 
 ```bash
-cp .env.example .env && nano .env         # NOTION_TOKEN, MAILBIRD_TOKEN, NTFY_TOKEN, CANVAS_TOKEN, IMAP_*, FACTOTUM_SECRET
+cp .env.example .env && nano .env         # NOTION_TOKEN, MAILBIRD_TOKEN, NTFY_TOKEN, CANVAS_TOKEN, IMAP_*, SMTP_* (or leave empty to reuse IMAP), FACTOTUM_SECRET
 cp config/factotum.example.yaml config/factotum.yaml
 sudo cp deploy/factotum.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now factotum

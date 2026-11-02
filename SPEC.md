@@ -202,9 +202,11 @@ instructions, including reminder and tier verbs). The UI grammar handles
   config (`properties:`), so a user with a different layout edits YAML, not code. Default on
   for Robert; the Settings tab shows the toggle and the config file name. With it off, Factotum
   is a standalone SQLite task list.
-- **Morning brief** (email at `notify.morning_brief.time`): verdict, Top, due today, reminders
-  firing today, hard deadlines this week, closed on evidence since yesterday, waiting on. No
-  evening email.
+- **Morning brief** (email at `notify.morning_brief.time`): verdict (phase 4), Top, overdue hard
+  deadlines, due today, due tomorrow, reminders firing today, hard deadlines this week, calendar
+  for today and tomorrow when the calendar is on, closed on evidence since yesterday (with who
+  closed it), waiting on, and how many items Review holds. Sent over SMTP from `SMTP_USER`
+  (falling back to the IMAP account) to `notify.morning_brief.to`. No evening email.
 - **ntfy** (§10).
 
 ## 8. Claude runs
@@ -279,6 +281,20 @@ Keyboard: `j k d x s t l e`, Esc deselects; Review `d k s x`.
   up to three `view` actions (*Snooze 1 h*, *Done*, *Open*) pointing at `/r/<token>?…`, since
   `http` actions cannot carry an Access session. Tokens are single use, 24 h.
 - Review push: daily at `notify.review_time`; skipped when reviewed today or the queue is empty.
+- **The clock** is one thread in the service (`factotum/scheduler.py`): a tick every 30 s re-reads the
+  effective config, fires due reminders, and runs each daily job once at or after its time (so a
+  service down at 06:30 still sends the brief when it comes back); a failed job retries after an
+  hour. Daily jobs: `expire` at `lifecycle.expire_time` (03:30), the brief, the review push; the
+  calendar sweep every `sources.calendar.sweep_minutes`. Everything that did something lands in
+  `runs` with cost 0, so the Log tab shows it next to the Claude runs.
+- **Nothing expires unseen.** `/api/review` stamps `last_offered_at` on the rows it serves; `expire`
+  fades or lapses a row only if it was on a Review page on or after the day its warning started.
+  Until then it stays open, stays in Review, and the push keeps asking. A Review decision (Keep,
+  Later) restarts the quiet clock, so a kept backlog item returns as Fading in `fade_days`.
+- Action tokens live on the reminder row; Done and Snooze are single use (a second tap says what
+  already happened), Open only navigates; all three stop working 24 h after the push. Snooze is
+  one hour from the tap. A repeating reminder's next occurrence is queued when it fires; a
+  reminder with a malformed `fire_at` never fires and shows in the task's details for repair.
 - **Setting one.** "Set reminder" on a Review card and in a row's details: date-time, optional
   label, once or daily / weekdays / weekly / monthly. It is a staged change (`add_reminder`) under
   its own key, so it rides in the same batch as the decision without replacing it, Keep, Later or
@@ -354,8 +370,10 @@ link; every batch is undoable; sinks are write-only.
 1. **Core (this commit):** store, scoring, lifecycle, import with dry-run report, Today /
    Timeline / Projects / Review / Settings, tray with undo, grammar commands, accounts table.
    *Gate: the user's first Review session on real rows.*
-2. **Push + brief:** scheduler, ntfy reminders and the review push, `/r/<token>` routes,
-   morning brief email, `google-auth` and the calendar sweep.
+2. **Push + brief (built 2026-11-01):** scheduler, ntfy reminders and the review push, `/r/<token>`
+   routes, morning brief email (Python-built until the phase 4 planner adds the verdict),
+   `google-auth`, `calendar-check` and the calendar sweep. *Gate: a reminder's buttons work from the
+   phone, the brief arrives, the calendar is authorised.*
 3. **Plaud port:** IMAP trigger, CLI fetch, `sync-file` run with the new bar, Notion notes sink,
    voice verbs incl. reminders and tiers. One week in parallel with plaud-sync, then stop it.
 4. **Mail + Canvas + planner:** Mailbird client and sweep, Canvas sweep, `planner-morning`.
@@ -379,4 +397,4 @@ the tunnel with a Cloudflare Access service token and added as a custom connecto
 
 - Hostname: `factotum.nthperson.dev` (recommended) or `plaud-sync.nthperson.dev`.
 - Review cap 15 and the 3-day fade warning: right sizes to start?
-- Google Calendar: OAuth desktop client (one-time browser consent) or service account?
+- Google Calendar: OAuth desktop client, published to production so the token does not expire weekly (SETUP §6); service account kept as a documented alternative.
