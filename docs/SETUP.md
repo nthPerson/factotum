@@ -257,6 +257,10 @@ accepts a mail only when that server's `Authentication-Results` header shows DKI
 for the sender's domain, so a spoofed From cannot start a run). Project descriptions, tie-breakers
 and the note Type/Tag options live under `taxonomy:` and are what the run classifies with.
 
+The service runs with systemd's minimal PATH, so `plaud` (under nvm) and `claude` (`~/.local/bin`)
+are invisible to it unless `sources.plaud.cli` and `claude.binary` hold absolute paths (`which plaud`,
+`which claude`). Both checks below say whether the service would find them.
+
 Checks:
 ```bash
 .venv/bin/python -m factotum plaud-check                 # the CLI, today's recordings, the mailbox and its unseen count

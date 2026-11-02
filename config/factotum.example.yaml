@@ -145,7 +145,7 @@ sources:
     sender: no-reply@plaud.ai                   # the parsed From must equal this, and the mail must carry…
     auth_server: mx.google.com                  # …this server's Authentication-Results with DKIM/DMARC pass for its domain
     subject_prefix: "[Plaud-AutoFlow]"
-    cli: plaud                                  # @plaud-ai/cli on PATH
+    cli: plaud                                  # @plaud-ai/cli; give the absolute path (`which plaud`): the service has systemd's minimal PATH
     extraction:
       max_undated_per_recording: 3
   canvas:
@@ -238,7 +238,7 @@ notify:
     to: robertashe2.0+planner@gmail.com
 
 claude:
-  binary: claude
+  binary: claude                # absolute path (`which claude`) for the same reason; `factotum claude-check` says which
   models: { sync_file: sonnet, planner_morning: sonnet, chat_turn: sonnet, check: haiku }
   budgets_usd: { sync_file: 1.00, planner_morning: 0.75, chat_turn: 0.60, check: 0.05 }
   timeouts_s: { sync_file: 600 }

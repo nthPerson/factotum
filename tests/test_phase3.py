@@ -44,6 +44,11 @@ def test_runner_classifies_a_dead_login_a_timeout_and_a_prose_answer(cfg):
     res = runner.run(cfg, "sync_file", "p", exec_=dead)
     assert not res.ok and res.auth_failed and res.error.startswith("auth:") and "login" in res.error
 
+    def missing(cmd, **kw):
+        raise FileNotFoundError(2, "No such file or directory", cmd[0])
+    res = runner.run(cfg, "sync_file", "p", exec_=missing)
+    assert not res.ok and "claude.binary" in res.error and "PATH" in res.error
+
     def slow(cmd, **kw):
         raise subprocess.TimeoutExpired(cmd, 5)
     res = runner.run(cfg, "sync_file", "p", exec_=slow)

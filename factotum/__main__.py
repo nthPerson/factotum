@@ -22,6 +22,20 @@ from . import batches, config as C, lifecycle, scoring
 from .db import connect, get_settings, init_db, rows
 
 
+SYSTEMD_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+
+def _binary_note(name: str) -> str:
+    """Where a configured binary resolves, and whether the service (systemd's PATH) would find it."""
+    import shutil
+    here, svc = shutil.which(name), shutil.which(name, path=SYSTEMD_PATH)
+    if not here:
+        return f"{name!r}: NOT FOUND from this shell"
+    if "/" in name or svc:
+        return f"{name!r} → {here}"
+    return f"{name!r} → {here} here, but NOT on the service's PATH: set the absolute path in config"
+
+
 def _start_plaud_trigger(cfg: dict) -> None:
     """The IMAP IDLE thread (SPEC.md §6 "Plaud"): its own connection, the effective config re-read per mail."""
     from . import plaud_trigger, sync_file
@@ -129,6 +143,7 @@ def main(argv: list[str] | None = None) -> int:
     elif a.cmd == "claude-check":
         from .claude import runner
         r = runner.run(ecfg, "check", 'Reply with exactly the JSON object {"ok": true} and nothing else.', timeout_s=120)
+        print("claude.binary", _binary_note(str(C.get(ecfg, "claude.binary", "claude"))))
         if r.ok and r.data == {"ok": True}:
             print(f"claude is logged in (model {C.get(ecfg, 'claude.models.check', 'haiku')}, {r.duration_ms} ms, ${r.cost_usd:.4f})")
         else:
@@ -136,6 +151,7 @@ def main(argv: list[str] | None = None) -> int:
     elif a.cmd == "plaud-check":
         import subprocess
         from . import plaud, plaud_trigger
+        print("sources.plaud.cli", _binary_note(str(C.get(ecfg, "sources.plaud.cli", "plaud"))))
         try:
             out = subprocess.run([C.get(ecfg, "sources.plaud.cli", "plaud"), "today"], capture_output=True, text=True, timeout=90)
             print(out.stdout.strip() or out.stderr.strip())

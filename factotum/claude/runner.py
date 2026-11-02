@@ -70,7 +70,8 @@ def run(cfg: dict, kind: str, prompt: str, *, allowed_tools: list[str] | tuple[s
     except subprocess.TimeoutExpired:
         return RunResult(False, None, "", 0.0, timeout_s * 1000, error=f"timeout after {timeout_s}s")
     except FileNotFoundError as e:
-        return RunResult(False, None, "", 0.0, 0, error=f"claude binary not found: {e}")
+        return RunResult(False, None, "", 0.0, 0, error=f"claude binary not found ({e}): the service runs with systemd's minimal PATH, "
+                                                      "so set claude.binary in config to the absolute path (`which claude`)")
     try:
         env = json.loads(res.stdout or "")
         if not isinstance(env, dict):

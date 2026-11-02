@@ -51,7 +51,8 @@ def _run(cfg: dict, args: list[str], run_=subprocess.run, timeout: int = 120) ->
     try:
         res = run_([_cli(cfg)] + args, capture_output=True, text=True, timeout=timeout)
     except FileNotFoundError as e:
-        raise PlaudError(f"plaud CLI not found ({e}); see docs/SETUP.md §2") from e
+        raise PlaudError(f"plaud CLI not found ({e}): the service runs with systemd's minimal PATH, so set sources.plaud.cli "
+                         "in config to the absolute path (`which plaud`); docs/SETUP.md §9") from e
     except subprocess.TimeoutExpired as e:
         raise PlaudError(f"plaud {args[0]} timed out after {timeout}s") from e
     if res.returncode != 0:
