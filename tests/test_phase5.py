@@ -311,6 +311,7 @@ def test_chat_turn_stores_the_exchange_validates_proposals_links_seen_threads_an
     assert [d["draft_message_id"] for d in res["drafts"]] == [900]                 # the sidecar, not the model's claim
     msgs = chat.messages(conn, tid)
     assert [m["role"] for m in msgs] == ["user", "assistant"] and msgs[0]["attached"] == [388] and msgs[1]["proposals"][2]["fields"]["name"].startswith("Book")
+    assert msgs[1]["duration_ms"] == 9000 and res["duration_ms"] == 9000          # shown beside the cost in the Chat tab
     th = one(conn, "SELECT * FROM chat_threads WHERE id = ?", (tid,))
     assert th["claude_session_id"] == "S1" and th["title"] == "When did Max write?"
     r = one(conn, "SELECT * FROM runs WHERE kind = 'chat-turn'")

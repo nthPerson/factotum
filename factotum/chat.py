@@ -64,7 +64,7 @@ def messages(conn: sqlite3.Connection, thread_id: int) -> list[dict]:
     out = []
     for m in rows(conn, "SELECT * FROM chat_messages WHERE thread_id = ? ORDER BY id", (thread_id,)):
         out.append({"id": m["id"], "role": m["role"], "text": m["text"] or "", "attached": _loads(m.get("attached_json"), []), "proposals": _loads(m.get("proposals_json"), []),
-                    "drafts": _loads(m.get("drafts_json"), []), "rejected": _loads(m.get("rejected_json"), []), "cost_usd": m.get("cost_usd"), "error": m.get("error"), "created_at": m["created_at"]})
+                    "drafts": _loads(m.get("drafts_json"), []), "rejected": _loads(m.get("rejected_json"), []), "cost_usd": m.get("cost_usd"), "duration_ms": m.get("duration_ms"), "error": m.get("error"), "created_at": m["created_at"]})
     return out
 
 
@@ -252,18 +252,18 @@ def turn(conn: sqlite3.Connection, cfg: dict, thread_id: int, text: str, attache
     ms = int(res.duration_ms or (time.monotonic() - started) * 1000)
     (run_dir / "result.txt").write_text(res.result_text or "", encoding="utf-8")
     if not res.ok:
-        cur = conn.execute("INSERT INTO chat_messages (thread_id, role, text, cost_usd, error, created_at) VALUES (?, 'assistant', ?, ?, ?, ?)",
-                           (thread_id, (res.result_text or "")[:2000], res.cost_usd, (res.error or "run failed")[:500], now_iso()))
+        cur = conn.execute("INSERT INTO chat_messages (thread_id, role, text, cost_usd, duration_ms, error, created_at) VALUES (?, 'assistant', ?, ?, ?, ?, ?)",
+                           (thread_id, (res.result_text or "")[:2000], res.cost_usd, ms, (res.error or "run failed")[:500], now_iso()))
         log_run(conn, "chat-turn", ms, ok=False, error=(res.error or "run failed")[:300], cost_usd=res.cost_usd, summary=f"thread {thread_id}")
         conn.commit()
-        return {"ok": False, "error": res.error, "thread_id": thread_id, "message_id": int(cur.lastrowid), "user_message_id": umid, "cost_usd": res.cost_usd}
+        return {"ok": False, "error": res.error, "thread_id": thread_id, "message_id": int(cur.lastrowid), "user_message_id": umid, "cost_usd": res.cost_usd, "duration_ms": ms}
     data = res.data or {}
     reply = str(data.get("reply_md") or "").strip()[:20000]
     seen = mcp_server.seen_threads(run_dir)
     drafts = mcp_server.drafts_made(run_dir)
     kept, rejected = _clean_proposals(conn, cfg, data, seen)
-    cur = conn.execute("INSERT INTO chat_messages (thread_id, role, text, proposals_json, drafts_json, rejected_json, cost_usd, created_at) VALUES (?, 'assistant', ?, ?, ?, ?, ?, ?)",
-                       (thread_id, reply, json.dumps(kept, default=str), json.dumps(drafts, default=str), json.dumps(rejected), res.cost_usd, now_iso()))
+    cur = conn.execute("INSERT INTO chat_messages (thread_id, role, text, proposals_json, drafts_json, rejected_json, cost_usd, duration_ms, created_at) VALUES (?, 'assistant', ?, ?, ?, ?, ?, ?, ?)",
+                       (thread_id, reply, json.dumps(kept, default=str), json.dumps(drafts, default=str), json.dumps(rejected), res.cost_usd, ms, now_iso()))
     amid = int(cur.lastrowid)
     if res.session_id:
         conn.execute("UPDATE chat_threads SET claude_session_id = ? WHERE id = ?", (res.session_id, thread_id))
@@ -271,7 +271,7 @@ def turn(conn: sqlite3.Connection, cfg: dict, thread_id: int, text: str, attache
             summary=f"thread {thread_id}: {len(kept)} proposal{'s' if len(kept) != 1 else ''}, {len(drafts)} draft{'s' if len(drafts) != 1 else ''}" + (f", {len(rejected)} rejected" if rejected else ""))
     conn.commit()
     return {"ok": True, "thread_id": thread_id, "message_id": amid, "user_message_id": umid, "reply_md": reply, "proposals": kept, "drafts": drafts,
-            "rejected": rejected, "cost_usd": res.cost_usd, "session_id": res.session_id}
+            "rejected": rejected, "cost_usd": res.cost_usd, "duration_ms": ms, "session_id": res.session_id}
 
 
 def create_from_proposal(conn: sqlite3.Connection, cfg: dict, message_id: int, index: int, today: date) -> int:

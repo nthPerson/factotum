@@ -122,7 +122,7 @@ def connect(path: str | Path) -> sqlite3.Connection:
 # Columns added after a table first shipped. CREATE TABLE IF NOT EXISTS leaves an existing table
 # alone, so init_db adds these to databases created before them.
 MIGRATIONS = {"reminders": {"repeat": "TEXT", "sent_at": "TEXT"}, "tasks": {"last_offered_at": "TEXT"},
-              "chat_messages": {"drafts_json": "TEXT", "rejected_json": "TEXT", "error": "TEXT"}}
+              "chat_messages": {"drafts_json": "TEXT", "rejected_json": "TEXT", "error": "TEXT", "duration_ms": "INTEGER"}}
 
 
 def init_db(conn: sqlite3.Connection) -> None:
