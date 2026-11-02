@@ -399,3 +399,27 @@ def test_discord_client_is_read_only_and_the_tools_list_channels_read_and_search
     monkeypatch.delenv("DISCORD_BOT_TOKEN")
     ctx2 = M.Context(conn, cfg, run_dir=tmp_path)
     assert "DISCORD_BOT_TOKEN" in _text(_rpc(ctx2, 5, "tools/call", {"name": "discord_channels", "arguments": {"server": "LARK dev"}}))
+
+
+def test_mirror_notes_relation_ignores_plaud_recording_ids_and_task_ids_repush_rows(cfg, conn, monkeypatch):
+    """sync-file links a task to its recording as plaud_note `of_<hex>` (the Plaud id); only a Notion
+    page id belongs in the Notes relation (2026-11-02: Task-395..397 404'd on a Plaud id). `--task`
+    re-pushes named rows, stamped or not."""
+    from factotum import notion_mirror as NM
+    monkeypatch.setenv("NOTION_TOKEN", "t")
+    stamped = "2026-10-01T00:00:00+00:00"
+    upsert_task(conn, task(id=395, name="Call Molina", notion_page_id="p395", mirrored_at=stamped))
+    upsert_task(conn, task(id=396, name="Test", notion_page_id=None, mirrored_at=stamped))
+    upsert_task(conn, task(id=397, name="Other", notion_page_id="p397", mirrored_at=stamped))
+    conn.execute("INSERT INTO links (task_id, kind, ref, label, created_at) VALUES (395, 'plaud_note', 'of_7a19f5574ec383b17337cc2fc4757834', 'rec', 'now')")
+    conn.execute("INSERT INTO links (task_id, kind, ref, label, created_at) VALUES (395, 'plaud_note', '40ceb306-5110-81c4-b511-c37681343d3a', 'Plaud note (Notion page id)', 'now')")
+    conn.execute("INSERT INTO links (task_id, kind, ref, label, created_at) VALUES (395, 'note_page', 'https://app.notion.com/p/11-01-Action-Plan-40ceb306511081c4b511c37681343d3a', 'n', 'now')")
+    conn.commit()
+    assert NM.note_ids(conn, 395) == ["40ceb306511081c4b511c37681343d3a"]
+    fake = FakeNotion()
+    assert NM.sweep(conn, cfg, dry_run=True, transport=fake.transport())["pending"] == 0       # every row stamped: nothing pending
+    res = NM.sweep(conn, cfg, ids=[395, 396], transport=fake.transport(), pause=0)
+    assert res["updated"] == 1 and res["created"] == 1 and not res["failed"]
+    assert [p for p, _ in fake.pages("PATCH")] == ["/v1/pages/p395"] and len(fake.pages("POST")) == 1
+    assert fake.pages("PATCH")[0][1]["properties"]["Notes"] == {"relation": [{"id": "40ceb306511081c4b511c37681343d3a"}]}
+    assert one(conn, "SELECT notion_page_id FROM tasks WHERE id = 396")["notion_page_id"] == "page-1"

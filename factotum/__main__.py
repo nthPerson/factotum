@@ -103,6 +103,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("discord-check", help="the Discord bot: who it is, the servers it is in vs the config, text channels per configured server")
     p = sub.add_parser("mirror", help="push task rows to the Notion Tasks database (one-way); default: rows edited since the last pass")
     p.add_argument("--all", action="store_true", help="every row (the first pass after enabling the mirror)")
+    p.add_argument("--task", nargs="+", type=int, metavar="ID", help="re-push these rows only (a row Notion refused, once the cause is fixed)")
     p.add_argument("--dry-run", action="store_true", help="count what would be pushed, write nothing")
     sub.add_parser("score")
     sub.add_parser("review")
@@ -311,14 +312,14 @@ def main(argv: list[str] | None = None) -> int:
             print("the mirror is off (Settings → Notion tasks mirror); pushing anyway because you asked")
         total = {"created": 0, "updated": 0, "failed": []}
         while True:
-            res = notion_mirror.sweep(conn, ecfg, all_rows=a.all, dry_run=a.dry_run, cap=10**6 if a.all else 200)
+            res = notion_mirror.sweep(conn, ecfg, all_rows=a.all, dry_run=a.dry_run, cap=10**6 if a.all or a.task else 200, ids=a.task)
             if a.dry_run:
                 print(f"{res['pending']} rows would be pushed (dry run)"); break
             for k in ("created", "updated"):
                 total[k] += res[k]
             total["failed"] += res["failed"]
             print(f"  created {res['created']}, updated {res['updated']}, failed {len(res['failed'])}, {res['pending']} pending")
-            if a.all or not res["pending"] or not (res["created"] or res["updated"]):
+            if a.all or a.task or not res["pending"] or not (res["created"] or res["updated"]):
                 break
         for f in total["failed"]:
             print("  !", f)

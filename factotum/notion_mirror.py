@@ -41,6 +41,7 @@ DEFAULT_PROPS = {"title": "Name", "task_id": "Task ID", "status": "Status", "pro
 DEFAULT_STATUS_MAP = {"open": "Next", "done": "Done", "dropped": "Dropped", "faded": "Dropped", "lapsed": "Dropped"}
 READ_ONLY = {"unique_id", "created_time", "created_by", "last_edited_time", "last_edited_by", "formula", "rollup", "button", "verification"}
 _HEX32 = re.compile(r"([0-9a-f]{32})$")
+_HEX32_ONLY = re.compile(r"^([0-9a-f]{32})$")
 PAUSE_S = 0.35
 SETTLE_S = 5
 
@@ -78,11 +79,15 @@ def schema(cfg: dict, transport=None) -> dict[str, str]:
 
 
 def note_ids(conn: sqlite3.Connection, task_id: int) -> list[str]:
-    """Notion page ids of the task's note pages: `plaud_note` links hold the id, `note_page` links the URL."""
+    """Notion page ids of the task's note pages: `note_page` links hold the page URL (the id ends
+    it; the title before it may contain hex too) and an imported `plaud_note` link holds the id
+    itself. A `plaud_note` link written by sync-file holds the PLAUD recording id (`of_<hex>`), which
+    is not a page: Notion refused whole rows over it (404, 2026-11-02, Task-395..397)."""
     out: list[str] = []
     for l in rows(conn, "SELECT kind, ref FROM links WHERE task_id = ? AND kind IN ('plaud_note', 'note_page') ORDER BY id", (task_id,)):
-        m = _HEX32.search(str(l["ref"] or "").split("?")[0].split("#")[0].rstrip("/").replace("-", "").lower())
-        if m and m.group(1) not in out:               # the id ENDS a Notion URL; the title before it may contain hex too
+        ref = str(l["ref"] or "").split("?")[0].split("#")[0].rstrip("/").replace("-", "").lower()
+        m = _HEX32_ONLY.match(ref) if l["kind"] == "plaud_note" else _HEX32.search(ref)
+        if m and m.group(1) not in out:
             out.append(m.group(1))
     return out
 
@@ -168,11 +173,13 @@ def properties(cfg: dict, t: dict, sch: dict[str, str], notes: list[str], today:
     return out
 
 
-def _pending(conn: sqlite3.Connection, all_rows: bool) -> list[dict]:
+def _pending(conn: sqlite3.Connection, all_rows: bool, ids: list[int] | None = None) -> list[dict]:
     """Rows to push: creates first, in id order (Notion's own Task ID counter then keeps pace with
     Factotum's ids for as long as nothing else creates rows there), then edits in edited_at order.
     `mirrored_at` holds the edited_at that was pushed, and a row edited in the last few seconds waits
     for the next pass, so an edit landing in the same second as a push is never lost."""
+    if ids:
+        return rows(conn, f"SELECT * FROM tasks WHERE id IN ({','.join('?' * len(ids))}) ORDER BY id", tuple(int(i) for i in ids))
     if all_rows:
         return rows(conn, "SELECT * FROM tasks ORDER BY id")
     settled = (datetime.now(timezone.utc) - timedelta(seconds=SETTLE_S)).replace(microsecond=0).isoformat()
@@ -181,11 +188,13 @@ def _pending(conn: sqlite3.Connection, all_rows: bool) -> list[dict]:
             + rows(conn, f"SELECT * FROM tasks WHERE notion_page_id IS NOT NULL AND {due} ORDER BY edited_at, id", (settled,)))
 
 
-def sweep(conn: sqlite3.Connection, cfg: dict, *, all_rows: bool = False, dry_run: bool = False, cap: int = 60, transport=None, pause: float | None = None) -> dict:
-    """Push up to `cap` pending rows. Returns counts; `pending` is what is still left afterwards.
+def sweep(conn: sqlite3.Connection, cfg: dict, *, all_rows: bool = False, dry_run: bool = False, cap: int = 60, transport=None, pause: float | None = None,
+          ids: list[int] | None = None) -> dict:
+    """Push up to `cap` pending rows (`ids`: exactly those rows, stamped or not — the way to re-push
+    a row Notion refused once the cause is fixed). Returns counts; `pending` is what is still left afterwards.
     A row Notion refuses (an option it lacks, a retyped column) is reported in `failed` and the
     pass goes on; the watermark advances past it, so it waits for its next edit or `--all`."""
-    pend = _pending(conn, all_rows)
+    pend = _pending(conn, all_rows, ids)
     if dry_run:
         return {"created": 0, "updated": 0, "failed": [], "pending": len(pend), "dry_run": True}
     todo = pend[:cap]
