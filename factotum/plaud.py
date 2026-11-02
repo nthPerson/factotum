@@ -17,6 +17,13 @@ from . import config as C
 
 _LINE = re.compile(r"^\s*(?P<id>\S+)\s{2,}(?P<name>.+?)\s{2,}(?P<date>\d{4}-\d{2}-\d{2})\s{2,}(?P<dur>\S+)\s*$")
 _KV = re.compile(r"^\s*(?P<k>[a-z_]+):\s*(?P<v>.*?)\s*$")
+_ID = re.compile(r"^[A-Za-z0-9_\-]{6,64}$")   # Plaud ids look like of_<32 hex>; anything else never reaches the CLI
+
+
+def _checked_id(rec_id: str) -> str:
+    if not _ID.match(rec_id or "") or rec_id.startswith("-"):
+        raise PlaudError(f"not a Plaud recording id: {rec_id!r}")
+    return rec_id
 
 
 class PlaudError(RuntimeError):
@@ -79,6 +86,8 @@ def locate(cfg: dict, subject: str, received_date: str, run_=subprocess.run) -> 
     keywords = [title]
     words = sorted((w for w in re.findall(r"[A-Za-z][A-Za-z\-']{4,}", title)), key=len, reverse=True)
     keywords += words[:2]
+    # The subject is attacker-controlled mail text: never let it start a CLI flag.
+    keywords = [k for k in (kw.lstrip("-").strip() for kw in keywords) if k]
     for kw in keywords:
         recs = [r for r in parse_search(_run(cfg, ["search", kw, "--from", lo, "--to", hi, "--max", "50"], run_)) if lo <= r.date <= hi]
         if not recs:
@@ -91,7 +100,7 @@ def locate(cfg: dict, subject: str, received_date: str, run_=subprocess.run) -> 
 
 
 def details(cfg: dict, rec_id: str, run_=subprocess.run) -> dict:
-    out = _run(cfg, ["file", rec_id], run_)
+    out = _run(cfg, ["file", _checked_id(rec_id)], run_)
     d: dict = {}
     for line in out.splitlines():
         m = _KV.match(line)
@@ -103,6 +112,7 @@ def details(cfg: dict, rec_id: str, run_=subprocess.run) -> dict:
 
 
 def fetch_files(cfg: dict, rec_id: str, dest: Path, run_=subprocess.run) -> Files:
+    rec_id = _checked_id(rec_id)
     dest = Path(dest)
     dest.mkdir(parents=True, exist_ok=True)
     summary, transcript = dest / "summary.md", dest / "transcript.md"

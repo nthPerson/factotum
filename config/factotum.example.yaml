@@ -19,23 +19,99 @@ taxonomy:
   areas: [Personal, Academics, Work, Research]
   # weight: high | medium | low  (see scoring.project_weights)
   projects:
-    - { name: BDA M.S.,                    area: Academics, weight: high,   never_fade: true }
-    - { name: GEOG 582,                    area: Academics, weight: high }
-    - { name: COMPE 510,                   area: Academics, weight: high }
-    - { name: BDA 696,                     area: Academics, weight: high }
-    - { name: SCIBER-CT,                   area: Academics, weight: high,   never_fade: true }
-    - { name: DiCE Lab,                    area: Research,  weight: high }
-    - { name: Caltrans,                    area: Research,  weight: high }
-    - { name: Evidential Deep Learning,    area: Research,  weight: high,   never_fade: true }
-    - { name: FAMAIL,                      area: Research,  weight: low  }
-    - { name: ZIP Launchpad,               area: Work,      weight: high }
-    - { name: Car Sounds,                  area: Work,      weight: medium }
-    - { name: LARK,                        area: Work,      weight: medium }
-    - { name: Construction Diagram/Doc AI, area: Work,      weight: low }
-    - { name: Plaud Sync,                  area: Personal,  weight: medium }
-    - { name: Personal,                    area: Personal,  weight: high }
-    - { name: Unknown,                     area: Work,      weight: medium }
+    - name: BDA M.S.
+      area: Academics
+      weight: high
+      never_fade: true
+      description: "SDSU Big Data Analytics M.S. degree ADMIN only: program of study, electives approval, advising, candidacy, BDA 600 capstone / BDA 799A thesis logistics, graduation. Course content goes to the course; thesis research goes to its research project."
+    - name: GEOG 582
+      area: Academics
+      weight: high
+      description: "Fall 2026 course Intro to GIS Programming (Atsushi Nara): GIS programming, spatial Python, ArcPy/QGIS/GDAL/GeoPandas, this course's lectures, assignments, projects."
+    - name: COMPE 510
+      area: Academics
+      weight: high
+      description: "Fall 2026 course Machine Learning for Engineers (Dr. Junfei Xie): lectures, assignments, exams, study sessions. Course content files here even though it is also the SCIBER-CT ARX course."
+    - name: BDA 696
+      area: Academics
+      weight: high
+      description: "Fall 2026 course Process & Model Big Data (Ryan Lafler): pipelines, SQL/Spark-style processing, modeling at scale, the group project."
+    - name: SCIBER-CT
+      area: Academics
+      weight: high
+      never_fade: true
+      description: "SCIBER-CT, pronounced \"cyber city\": SDSU's NSF Research Traineeship (NRT) graduate certificate; Robert is an inaugural-cohort NRT Fellow. Program matters only: certificate course planning, ARX framework, workshops, Summer 2027 internship, hackathon, symposium, cohort sessions, stipend/PaymentWorks, CITI training, travel, Max (program manager), Dr. Haririan/Akhavian as director."
+    - name: DiCE Lab
+      area: Research
+      weight: high
+      description: "Data-informed Construction Engineering Lab (Dr. Akhavian, SDSU), the lab's OWN work: lab meetings, robotics, AR/VR/XR, data collection, field testing, human-robot collaboration in construction."
+    - name: Caltrans
+      area: Research
+      weight: high
+      description: "Driver-distraction research: outdoor advertising displays, the driving simulator."
+    - name: Evidential Deep Learning
+      area: Research
+      weight: high
+      never_fade: true
+      description: "Construction digital twins, dynamic digital twin, evidential deep learning for construction, Scan-to-BIM."
+    - name: FAMAIL
+      area: Research
+      weight: low
+      description: "Fairness-aware (multi-agent) imitation learning research: GAIL, KDD paper, fairness metrics, trajectory editing, FATE."
+    - name: ZIP Launchpad
+      area: Work
+      weight: high
+      description: "SDSU's ZIP Launchpad startup incubator program: cohort workshops, mentors, Lavin Seed Fund, startup-week events, the Car Sounds venture's program obligations."
+    - name: Car Sounds
+      area: Work
+      weight: medium
+      description: "Vehicle audio data collection and automotive sound classification; the Car Sounds team and weekly syncs."
+    - name: LARK
+      area: Work
+      weight: medium
+      description: "Merchant card-processing statement analysis: interchange, downgrades, ISOs, proposals, the Sidekick AI assistant."
+    - name: Construction Diagram/Doc AI
+      area: Work
+      weight: low
+      description: "Construction-document AI."
+    - name: Plaud Sync
+      area: Personal
+      weight: medium
+      description: "Work ON this automation itself: Factotum, the Plaud sync, the planner, prompts, watcher, Claude skills, Notion taxonomy and schema."
+    - name: Personal
+      area: Personal
+      weight: high
+      description: "Personal-life notes not tied to work, school or research: memos, health, insurance, errands, budgeting, home, travel, goals, reflections."
+    - name: Unknown
+      area: Work
+      weight: medium
+      description: "ONLY a work/academic/research note with no identifiable project. Never for a personal note: that is Personal."
   efforts: [XS, S, M, L]
+  # Tie-breakers the sync run applies when a recording could file under two projects.
+  tie_breakers: |
+    - Prefer the most specific project: construction digital twins are Evidential Deep Learning, not DiCE Lab.
+    - SCIBER-CT vs DiCE Lab: the traineeship program (coursework planning, cohort, admin, internship, hackathon) is SCIBER-CT; the lab's research is DiCE Lab. Dr. Akhavian leads both, so his presence decides nothing.
+    - A specific course's CONTENT (lectures, assignments, exams, study) is that course (GEOG 582, COMPE 510, BDA 696), Area Academics; only certificate-level matters are SCIBER-CT and only degree-level matters are BDA M.S.
+    - Thesis admin (committee, candidacy, BDA 600/799A, defense) is BDA M.S.; thesis research content is its research project.
+    - ZIP Launchpad vs Car Sounds: program obligations (workshops, mentors, funding) are ZIP Launchpad; the product and the data work are Car Sounds.
+    - If Area is Personal, Project is always Personal, never Unknown.
+  # Note page classification (the Notion notes sink's Type and Tags options).
+  note_types:
+    - { name: Meeting,    description: any multi-person meeting, call or group discussion; prefer Meeting whenever the transcript shows more than one genuine participant }
+    - { name: Reminder,   description: a memo whose purpose is to manage the task list or calendar, or a short note-to-self }
+    - { name: Goal,       description: goal-setting or objective planning }
+    - { name: Research,   description: research thinking, paper discussion, experiment notes }
+    - { name: Dev,        description: software design or debugging notes }
+    - { name: Client,     description: a client or partner conversation }
+    - { name: Lecture,    description: a recorded class session }
+    - { name: Coursework, description: assignment or study work for a course }
+    - { name: Personal,   description: personal-life content }
+  note_tags:
+    - { name: Meeting,   description: a multi-person meeting or call }
+    - { name: Idea,      description: contains ideas or brainstorming }
+    - { name: Task,      description: contains actionable to-dos }
+    - { name: Follow-up, description: contains items to circle back on }
+    - { name: Personal,  description: contains goals or introspection }
 
 lifecycle:
   fade_days: 21          # undated backlog fades after this many quiet days
