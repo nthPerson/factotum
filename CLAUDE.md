@@ -18,17 +18,17 @@ Guidance for Claude Code working in this repository. Read `SPEC.md` for the desi
 
 ## Phase status
 
-Phases 1, 2 and 3 of 6 are built (SPEC.md §14): store, scoring, lifecycle, Notion import, batches,
-command grammar, API, the Today / Timeline / Projects / Review / Log / Settings tabs, the
-automations (a 30 s scheduler thread in the service, `factotum/scheduler.py`: ntfy reminders with
-Snooze/Done/Open actions at `/r/<token>`, the daily review nudge, the expire pass, the Python-built
-morning brief over SMTP, the Google Calendar sweep), and the Plaud port: an IMAP IDLE thread
-(`factotum/plaud_trigger.py`) that, on an authenticated Plaud mail, fetches the two files with the
-`plaud` CLI, runs one headless Claude call (`factotum/claude/runner.py`, `prompts/sync-file.md`)
-and applies its JSON (`factotum/sync_file.py`: tasks, voice instructions, reminders, calendar
-events, the Notion note page via `factotum/notion_notes.py`). The mail and Canvas sweeps, the
-planner, Chat and the tasks mirror do not exist yet; the UI shows "phase N" where a control is a
-placeholder. Update this paragraph when a phase lands.
+Phases 1 to 4 of 6 are built (SPEC.md §14): store, scoring, lifecycle, Notion import, batches,
+command grammar, API, the Today / Timeline / Projects / Review / Log / Settings tabs; the
+automations (`factotum/scheduler.py`: ntfy reminders with Snooze/Done/Open actions at `/r/<token>`,
+the daily review nudge, the expire pass, the morning brief over SMTP, the calendar, Canvas and mail
+sweeps); the Plaud port (`factotum/plaud_trigger.py` IMAP IDLE → `plaud` CLI → one headless Claude
+run via `factotum/claude/runner.py` and `prompts/sync-file.md` → `factotum/sync_file.py` writes
+tasks, instructions, reminders, events and the Notion note page); the mail sweep
+(`factotum/mail_sweep.py` over the read-only `factotum/mailbird.py`, findings in `evidence`); the
+Canvas sweep (`factotum/canvas.py`); and the morning planner (`factotum/planner.py`,
+`prompts/planner-morning.md`) whose verdict leads the brief. Chat and the tasks mirror do not exist
+yet; the UI shows "phase N" where a control is a placeholder. Update this paragraph when a phase lands.
 
 ## Where things live
 
@@ -53,6 +53,9 @@ placeholder. Update this paragraph when a phase lands.
 | the sync-file prompt, applying its JSON, retry, alert | SPEC §8.1 | `factotum/sync_file.py` (`build_prompt`, `apply_result`, `run`), `prompts/sync-file.md` |
 | project descriptions, tie-breakers, note types | SPEC §8.1 | `config/factotum.example.yaml` `taxonomy:` |
 | the Notion note page, markdown → blocks | SPEC §7 | `factotum/notion_notes.py` (`upsert`, `md_to_blocks`) |
+| Mailbird MCP (read-only), the mail sweep, evidence, Review flags | SPEC §2, §6 | `factotum/mailbird.py` (`READ_TOOLS`), `factotum/mail_sweep.py` (`sweep`, `review_flags`) |
+| Canvas items → tasks, closes, announcements | SPEC §6 | `factotum/canvas.py` (`normalize`, `sweep`) |
+| the morning planner: bundle, prompt, what gets applied | SPEC §8.2 | `factotum/planner.py` (`bundle`, `apply`, `run`), `prompts/planner-morning.md` |
 
 ## Commands
 
@@ -66,6 +69,9 @@ placeholder. Update this paragraph when a phase lands.
 .venv/bin/python -m factotum tick                  # one scheduler tick now; `brief [--send]`, `calendar-check`, `google-auth`
 .venv/bin/python -m factotum sync-file <plaud_id> --dry-run   # a real Claude run (~$0.15) that prints the JSON and writes nothing
 .venv/bin/python -m factotum claude-check | plaud-check       # the headless login; the Plaud CLI and the trigger mailbox
+.venv/bin/python -m factotum mail-check | canvas-check        # Mailbird's accounts vs the monitored ones; Canvas items vs rows
+.venv/bin/python -m factotum sweep mail|canvas|calendar       # one sweep now
+.venv/bin/python -m factotum planner --dry-run [--send]       # the morning planner (~$0.30): JSON only, or applied and mailed
 .venv/bin/python -m factotum serve --port 8751 --no-scheduler   # a second instance for UI checks; never two schedulers on one DB
 .venv/bin/python -m factotum serve                 # http://127.0.0.1:8750
 sudo systemctl restart factotum                    # after code changes; see the restart rule below
@@ -95,6 +101,9 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
   and returns without `conn.commit()` leaves the thread's transaction open: the row is invisible to
   the API's connection and, worse, the thread holds SQLite's write lock, so every UI Apply fails
   with "database is locked" after the 5 s busy timeout (bit on 2026-11-01).
+- **`set_setting` JSON-encodes what it is given.** Pass the list or dict itself and read it back
+  through `get_settings`; passing `json.dumps(...)` stores a string of JSON and the reader gets a
+  string (bit the Canvas announcements on 2026-11-02).
 - **`expire` only touches rows Review has shown** (`last_offered_at`, stamped by `GET /api/review`).
   A row that was never on a Review page stays open however old it is; that is by design.
 

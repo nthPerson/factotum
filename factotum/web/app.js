@@ -366,8 +366,8 @@
       ${f('lifecycle.review_cap', 'Review cap', 'Max items per Review session.', num('lifecycle.review_cap', 5, 50))}
       <h3>Inputs</h3>
       ${f('sources.plaud.enabled', 'Plaud recordings', 'IMAP trigger + plaud CLI (phase 3).', bool('sources.plaud.enabled'))}
-      ${f('sources.canvas.enabled', 'Canvas', 'Assignments with submission state (phase 4).', bool('sources.canvas.enabled'))}
-      ${f('sources.mail.enabled', 'Email via Mailbird', 'Sweeps for replies, waiting flips, linked threads (phase 4).', bool('sources.mail.enabled'))}
+      ${f('sources.canvas.enabled', 'Canvas', 'Hourly: new items become hard-deadline tasks, submitted ones close.', bool('sources.canvas.enabled'))}
+      ${f('sources.mail.enabled', 'Email via Mailbird', 'Every 20 min via Mailbird: replies flip Waiting, sent mail closes reply tasks, invitations and confirmations feed the planner.', bool('sources.mail.enabled'))}
       ${f('sources.calendar.enabled', 'Google Calendar', 'Needs config/google-credentials.json (docs/SETUP.md §6).', bool('sources.calendar.enabled') + ' &nbsp; calendar id ' + text('sources.calendar.calendar_id', '160px'))}
       <h3>Email accounts</h3>
       <table><tr><td class="code">address</td><td class="code">label</td><td class="code">roles (monitor, plaud_trigger, brief_recipient)</td><td class="code">on</td><td></td></tr>${accounts}</table>

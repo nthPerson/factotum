@@ -184,10 +184,22 @@ mailbox) and writes nothing. `python -m factotum sync-file <id> [--dry-run]` run
 by hand. No large payload ever passes through a tool result, so the 40 KB MCP spill is gone.
 
 **Mailbird.** Accounts and roles live in the `accounts` table, managed in Settings → Email
-accounts (add, edit, remove, enable). Allow/deny globs in config. Sweep every `sweep_minutes`.
+accounts (add, edit, remove, enable). Allow/deny globs in config. Sweep every `sweep_minutes`
+(`factotum/mail_sweep.py`, Python only, read-only client `factotum/mailbird.py` that refuses any
+tool outside its read list). Per monitored account it walks Inbox and Sent above a per-account
+time watermark and writes rows to `evidence`: a reply from the ADDRESS a task waits on clears
+`waiting_on` (a display-name match is only flagged: names are forgeable); a message the account
+itself sent to a task's `counterpart` after the task was created closes a "reply to …" task
+(closed_by `mail-evidence`, link kept) and is a candidate for any other; a linked thread
+(`links.kind = mail_thread`) that moved is flagged; `.ics` invitations and confirmation-shaped
+subjects are candidates with a 500-character excerpt. Review shows the flags as "Thread updated";
+the planner judges the candidates. Bodies are fetched for candidates only and treated as data.
 
 **Canvas.** `/api/v1/planner/items` with submission state; course map, effort by type and skip
-patterns in config. Auto-close on submitted/graded/excused/complete.
+patterns in config. Auto-close on submitted/graded/excused/complete (`factotum/canvas.py`, every
+`sources.canvas.sweep_minutes`): a new item becomes a hard-deadline task named by type ("Take
+COMPE 510 Quiz 7"), a moved due date moves the task, a closed row is never reopened because Canvas
+says open. Announcements are kept for the planner's bundle, not turned into tasks.
 
 **Calendar.** `sources.calendar` in config, toggled in Settings. Provider `google` with an OAuth
 Desktop-app client (`config/google-credentials.json`, token written once by
@@ -245,11 +257,19 @@ recording in one tap; creations are upserts by `source_key`. Returns:
 ```
 
 ### 8.2 `planner-morning`
-Inputs: a bundle Python built: scored open rows (top 60 by score plus every Top row), the mail
-sweep's candidate asks and evidence, Canvas deltas, reminders due today, calendar for 7 days.
-Tools: calendar read, Mailbird read (to inspect a candidate). Returns proposals, `why_now` for
-≤ 15 rows, the verdict, the brief HTML. Python auto-applies proposals that cite evidence, stages
-the rest for Review, sends the brief.
+Inputs: a bundle Python built (`factotum/planner.py`): scored open rows (Top first, then by
+score, ≤ 60), the mail sweep's unjudged `evidence` rows with their excerpts, Canvas announcements
+since yesterday, reminders due today, the calendar for 7 days, the Waiting rows and the Review
+count. Tools: none; the excerpts are in the bundle, so the run cannot stall and costs one turn.
+Returns the verdict, `why_now` for ≤ 15 listed rows, proposals and dismissals. Python applies a
+proposal only when it cites an `evidence` row that exists, is unjudged and is about the same task
+(an automatic close always leaves a `mail_thread` link); an uncited proposal on a listed row becomes
+a "Planner suggests" item in Review (kind `proposal` in `evidence`); everything else is rejected
+and listed in the run row. `why_now` and the applied proposals ride in one batch (source
+`planner`). The brief stays Python-built (phase 2) and leads with the verdict, shows `why_now`
+beside the rows that have one, and lists what the planner did and what it left for Review. If the
+run fails, the plain brief goes out with the reason. `python -m factotum planner [--dry-run]
+[--send]` runs it by hand.
 
 ### 8.3 `chat-turn` (Chat tab, "Search related emails", "Draft reply")
 Inputs: the prompt, the attached tasks as JSON, thread history via `--resume`. Tools:
@@ -397,8 +417,10 @@ link; every batch is undoable; sinks are write-only.
    tasks, so the interim `--new-only` cron is already gone). *Gate passed 2026-11-01 22:58: a
    recording made after the restart landed as a task 25 s after Plaud's mail, with its note page
    and a run row; plaud-sync disabled on lark-server the same night.*
-4. **Mail + Canvas + planner:** Mailbird client and sweep, Canvas sweep, `planner-morning`.
-   Retire forwarding and the old timers.
+4. **Mail + Canvas + planner (built 2026-11-02):** Mailbird client and sweep, Canvas sweep,
+   `planner-morning`. The lark-server planner and digest timers are disabled; the Gmail forwarding
+   filter on the SDSU account is the user's to delete. *Gate: a morning brief with a verdict whose
+   proposals were right, and a Waiting task flipped by a real reply.*
 5. **Chat:** `factotum mcp`, chat turns, email search, drafts, proposals UI.
 6. **Mirror and cleanup:** Notion tasks mirror live, retire the Today page and Command Log,
    archive plaud-sync, point the two Claude Code skills at the API.

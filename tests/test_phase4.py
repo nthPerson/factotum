@@ -282,24 +282,31 @@ def test_planner_apply_writes_why_now_applies_cited_proposals_and_stages_the_res
                 {"op": "set", "task_id": 4, "fields": {"due": "2026-11-05"}, "label": "Task-4 → due Nov 5", "evidence": [], "reason": "a guess"},
                 {"op": "drop", "task_id": 6, "fields": {}, "label": "Task-6 → drop", "evidence": [{"evidence_id": 999}], "reason": "fake evidence"},
                 {"op": "done", "task_id": 1, "fields": {}, "label": "Task-1 → done", "evidence": [{"evidence_id": 10}], "reason": "evidence about another task"},
+                {"op": "create", "task_id": None, "fields": {"name": "Study for the exam", "project": "COMPE 510", "due": "2026-11-12"}, "label": "create: Study for the exam", "evidence": [], "reason": "an announcement"},
+                {"op": "create", "task_id": None, "fields": {"name": "Sneaky", "project": "Personal"}, "label": "create: Sneaky", "evidence": [{"evidence_id": 10}], "reason": "evidence about a task"},
             ],
-            "dismiss": [{"evidence_id": 12, "reason": "handled by the create"}]}
+            "dismiss": [{"evidence_id": 12, "reason": "handled by the create"}, {"evidence_id": 13, "reason": "about an unlisted task"}]}
+    conn.execute("INSERT INTO evidence (id, task_id, kind, ref, account, label, excerpt, at) VALUES (13, 79, 'thread_updated', 'conv-x', 'a', 'x', 'y', '2026-11-01T12:00:00')"); conn.commit()
     res = planner.apply(conn, cfg, data, b, today)
     assert res["verdict"].startswith("A light day") and res["why_now"] == 2
     assert one(conn, "SELECT why_now FROM tasks WHERE id = 1")["why_now"].startswith("Due Sunday") and one(conn, "SELECT why_now FROM tasks WHERE id = 79")["why_now"] is None
     t2 = one(conn, "SELECT status, closed_by FROM tasks WHERE id = 2"); assert (t2["status"], t2["closed_by"]) == ("done", "planner")
-    assert one(conn, "SELECT status FROM tasks WHERE id = 3")["status"] == "done"
-    assert one(conn, "SELECT COUNT(*) AS n FROM links WHERE task_id = 3 AND kind = 'mail_thread' AND ref = 'conv-conf'")["n"] == 1   # an automatic close cites a link
+    # evidence 11 has no task: the planner's attribution to Task-3 is a judgment, so it goes to Review with the thread attached, not auto-closed
+    assert one(conn, "SELECT status FROM tasks WHERE id = 3")["status"] == "open"
+    assert one(conn, "SELECT COUNT(*) AS n FROM links WHERE task_id = 3 AND kind = 'mail_thread' AND ref = 'conv-conf'")["n"] == 1
+    assert one(conn, "SELECT COUNT(*) AS n FROM links WHERE task_id = 2 AND kind = 'mail_thread' AND ref = 'conv-sent-max'")["n"] == 1   # an automatic close cites a link
     d = one(conn, "SELECT * FROM tasks WHERE name = 'Go to the dentist'")
     assert d and d["source"] == "Planner" and d["due"] == "2026-11-12T14:00" and d["hard"] == 1 and d["status"] == "open" and d["last_reviewed_at"] is None
     assert one(conn, "SELECT status FROM tasks WHERE id = 1")["status"] == "open" and one(conn, "SELECT status FROM tasks WHERE id = 6")["status"] == "open"
     assert one(conn, "SELECT due FROM tasks WHERE id = 4")["due"] is None                                      # uncited: staged for Review, not applied
     flags = review_flags(conn)
-    assert flags[4]["planner"] == "Task-4 → due Nov 5" and 2 not in flags
+    assert flags[4]["planner"] == "Task-4 → due Nov 5" and flags[3]["planner"].startswith("Task-3 → done") and 2 not in flags
     judged = {e["id"]: e["verdict"] for e in rows(conn, "SELECT id, verdict FROM evidence WHERE judged_at IS NOT NULL")}
-    assert judged == {10: "applied", 11: "applied", 12: "applied"}
-    assert [l for l in res["applied"]] == ["Task-2 → done (slides sent to Max)", "Task-3 → done (registration confirmed)", "create: Go to the dentist"]
-    assert res["staged"] == ["Task-4 → due Nov 5"] and len(res["rejected"]) == 2
+    assert judged == {10: "applied", 11: "staged", 12: "applied"}                                     # 13 is about an unlisted row: not the planner's to dismiss
+    assert res["applied"] == ["Task-2 → done (slides sent to Max)", "create: Go to the dentist"]
+    assert res["staged"] == ["Task-3 → done (registration confirmed)", "Task-4 → due Nov 5", "create: Study for the exam"]
+    assert one(conn, "SELECT COUNT(*) AS n FROM tasks WHERE name IN ('Study for the exam', 'Sneaky')")["n"] == 0
+    assert len(res["rejected"]) == 3
     srcs = [b["source"] for b in rows(conn, "SELECT source FROM batches ORDER BY id")]
     assert srcs.count("planner") == 1
 

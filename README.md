@@ -14,13 +14,14 @@ commitments, reading email context, drafting replies); Python does every write.
 
 ## Status
 
-Phases 1, 2 and 3 of 6 (see SPEC.md §14): store, scoring, lifecycle, the one-time Notion import with
+Phases 1 to 4 of 6 (see SPEC.md §14): store, scoring, lifecycle, the one-time Notion import with
 its dry-run report, undoable batches, the command grammar, the API and the tabs; the automations
 (ntfy reminders with action buttons, the daily review push, the expire pass, the morning brief
-over SMTP, the Google Calendar sweep); and the Plaud port: an IMAP trigger, the `plaud` CLI fetch,
-one headless Claude run per recording whose JSON Python applies (tasks, voice instructions,
-reminders, calendar events, the Notion note page). The mail and Canvas sweeps, the planner, Chat
-and the Notion tasks mirror are phases 4 to 6.
+over SMTP, the Google Calendar sweep); the Plaud port (IMAP trigger, `plaud` CLI fetch, one
+headless Claude run per recording whose JSON Python applies); the mail sweep over Mailbird's MCP
+(read-only: replies flip Waiting tasks, sent mail closes reply tasks, invitations and
+confirmations become evidence); the Canvas sweep; and the morning planner, whose verdict and
+proposals lead the brief. Chat and the Notion tasks mirror are phases 5 and 6.
 
 ## Quick start
 
@@ -33,7 +34,7 @@ cp config/factotum.example.yaml config/factotum.yaml   # edit projects, accounts
 .venv/bin/python -m factotum import-notion --apply
 .venv/bin/python -m factotum import-notion --new-only --apply   # hourly, until the old system stops writing
 .venv/bin/python -m factotum serve                     # http://127.0.0.1:8750
-.venv/bin/pytest                                       # 63 tests, no network
+.venv/bin/pytest                                       # 77 tests, no network
 ```
 
 ## Adapting it to your own workflow

@@ -7,10 +7,13 @@ applies what is proven and stages the rest.
     run(conn, cfg, today, ...)            -> {ok, verdict, applied, staged, cost_usd, …} | {ok: False, error}
 
 Rules Python enforces, whatever the model says: `why_now` only on rows the bundle listed (≤ 15); a
-proposal is applied only when it cites an `evidence` row that exists, is unjudged and is about the
-same task (an automatic close always leaves a link to that thread); an uncited proposal on a listed
-row becomes a "Planner suggests" item in Review; everything else is rejected and reported. All
-changes to existing rows ride in one batch (source `planner`) so the Log tab undoes a morning.
+proposal on a task is applied only when every `evidence` row it cites exists, is unjudged and was
+attached to THAT task by the sweep (an automatic close always leaves a link to that thread);
+evidence with no task can justify a `create` and nothing else; a proposal that is uncited, or whose
+evidence the model merely attributed, becomes a "Planner suggests" item in Review with the thread
+linked; dismissals reach only evidence about listed rows; everything else is rejected and reported.
+All changes to existing rows ride in one batch (source `planner`) so the Log tab undoes a morning;
+a created row is not in the batch (like every import) and shows as New in Review instead.
 """
 from __future__ import annotations
 
@@ -112,10 +115,15 @@ def apply(conn: sqlite3.Connection, cfg: dict, data: dict, b: dict, today: date)
         cited = [e for e in cited if e and e["id"] not in judged]
         if op == "create":
             f = _clean_task_fields(cfg, fields)
-            if not cited:
-                rejected.append(f"{label}: a create needs evidence"); continue
             if not f.get("name"):
                 rejected.append(f"{label}: no name"); continue
+            if p.get("evidence") and not cited:
+                rejected.append(f"{label}: cites evidence that does not exist or was already judged"); continue
+            if not cited:   # an announcement or a hunch: shown in the brief, created by nobody but the user
+                conn.execute("INSERT INTO evidence (task_id, kind, ref, label, excerpt, at) VALUES (NULL, 'proposal', NULL, ?, ?, ?)", (label, reason, now_iso()))
+                staged.append(label); continue
+            if any(e.get("task_id") is not None for e in cited):
+                rejected.append(f"{label}: cites evidence that belongs to a task"); continue
             n_create += 1
             tid = upsert_task(conn, dict(f, status="open", source="Planner", source_key=f"planner:{today.isoformat()}:{n_create}", mentions=0, created_at=now_iso(), edited_at=now_iso()))
             add_mention(conn, tid, "planner", cited[0].get("ref"))
@@ -131,6 +139,10 @@ def apply(conn: sqlite3.Connection, cfg: dict, data: dict, b: dict, today: date)
             rejected.append(f"{label}: cites evidence about another task"); continue
         if p.get("evidence") and not cited:
             rejected.append(f"{label}: cites evidence that does not exist or was already judged"); continue
+        # Only evidence the sweep itself attached to this task proves anything; evidence with no task
+        # (a confirmation, an invitation) attributed by the model is a judgment, so the proposal goes to
+        # Review with the thread attached rather than being applied.
+        proven = bool(cited) and all(e.get("task_id") == tid for e in cited)
         if op == "set":
             f = _clean_task_fields(cfg, fields)
             if not f:
@@ -140,20 +152,24 @@ def apply(conn: sqlite3.Connection, cfg: dict, data: dict, b: dict, today: date)
             ch = {"task_id": tid, "op": "add_reminder", "fields": {"fire_at": fields.get("fire_at"), "label": fields.get("label"), "repeat": fields.get("repeat")}}
         else:
             ch = {"task_id": tid, "op": op, "fields": {}}
-        if cited:
+        for e in cited:
+            if e.get("ref"):
+                add_link(conn, tid, "mail_thread", e["ref"], label=e.get("label"), account=e.get("account"))
+            judged[e["id"]] = "applied" if proven else "staged"
+        if proven:
             changes.append(ch)
-            for e in cited:
-                if e.get("ref"):
-                    add_link(conn, tid, "mail_thread", e["ref"], label=e.get("label"), account=e.get("account"))
-                judged[e["id"]] = "applied"
             applied.append(label)
         else:
             conn.execute("INSERT INTO evidence (task_id, kind, ref, label, excerpt, at) VALUES (?, 'proposal', ?, ?, ?, ?)",
                          (tid, json.dumps(ch), label, reason, now_iso()))
             staged.append(label)
-    for d in data.get("dismiss") or []:
-        if isinstance(d, dict) and str(d.get("evidence_id") or "").isdigit() and int(d["evidence_id"]) in evidence and int(d["evidence_id"]) not in judged:
-            judged[int(d["evidence_id"])] = "dismissed"
+    for d in (data.get("dismiss") or [])[:20]:
+        if not (isinstance(d, dict) and str(d.get("evidence_id") or "").isdigit()):
+            continue
+        eid = int(d["evidence_id"])
+        e = evidence.get(eid)
+        if e and eid not in judged and (e.get("task_id") is None or e.get("task_id") in allowed):
+            judged[eid] = "dismissed"
     for eid, verdict in judged.items():
         conn.execute("UPDATE evidence SET judged_at = ?, verdict = ? WHERE id = ?", (now_iso(), verdict, eid))
     res = batches.apply(conn, changes, "planner", today, closed_by="planner") if changes else {"skipped": [], "batch_id": None}

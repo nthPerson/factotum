@@ -278,3 +278,21 @@ Leave no unseen Plaud mail behind: whatever is unseen when plaud-sync stops is p
 Factotum's next service start, which is what you want. The old `planner@morning.timer`,
 `planner@evening.timer` and `plaud-digest.timer` stay until phase 4.
 
+## 10. Mail, Canvas and the planner (phase 4)
+
+`.venv/bin/python -m factotum mail-check` lists Mailbird's accounts against the monitored ones in
+Settings → Email accounts (an account Mailbird does not have, such as the Plaud trigger mailbox,
+is simply skipped by the sweep). `canvas-check` shows the items in the window and the row each
+one maps to. `sweep mail|canvas` runs one sweep by hand; the service runs them every
+`sources.mail.sweep_minutes` and `sources.canvas.sweep_minutes`.
+
+The planner runs inside the morning-brief job: `planner --dry-run` prints what it would propose
+(a real Claude run, about $0.30); `planner --send` applies and mails the brief now. Its prompt and
+result land under `data/runs/planner/<date>/`.
+
+Cutover from plaud-sync (done 2026-11-02 for Robert): on lark-server
+`sudo systemctl disable --now planner@morning.timer planner@evening.timer plaud-digest.timer`.
+Then delete the Gmail filter on the SDSU account that forwarded mail to the trigger mailbox:
+Gmail → Settings → Filters and Blocked Addresses → the forwarding rule → Delete. Nothing reads
+that forwarded mail any more; the sweep reads the SDSU inbox through Mailbird directly.
+
