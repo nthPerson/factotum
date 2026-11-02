@@ -104,6 +104,7 @@ def connect(path: str | Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 5000")   # the API and the scheduler each hold a connection
     return conn
 
 
@@ -167,6 +168,15 @@ def add_mention(conn: sqlite3.Connection, task_id: int, source_kind: str, source
     at = at or now_iso()
     conn.execute("INSERT INTO mentions (task_id, source_kind, source_ref, at) VALUES (?, ?, ?, ?)", (task_id, source_kind, source_ref, at))
     conn.execute("UPDATE tasks SET mentions = mentions + 1, last_mention_at = MAX(COALESCE(last_mention_at, ''), ?) WHERE id = ?", (at, task_id))
+
+
+def log_run(conn: sqlite3.Connection, kind: str, duration_ms: int, *, ok: bool, summary: str | None = None,
+            error: str | None = None, cost_usd: float = 0.0, started_at: str | None = None) -> int:
+    """One row in `runs`: Claude runs with their cost, and the automations (cost 0) so the Log tab
+    shows what ran. The caller commits."""
+    cur = conn.execute("INSERT INTO runs (kind, started_at, duration_ms, cost_usd, ok, summary, error) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                       (kind, started_at or now_iso(), duration_ms, cost_usd, 1 if ok else 0, summary, error))
+    return int(cur.lastrowid)
 
 
 def get_settings(conn: sqlite3.Connection) -> dict[str, Any]:

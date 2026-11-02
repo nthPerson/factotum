@@ -43,6 +43,7 @@ lifecycle:
   last_call_days: 7      # hard deadlines this far past due get one Last call, then lapse
   top_cap: 7             # soft cap on the Top rail
   review_cap: 15         # max items per Review session
+  expire_time: "03:30"   # when the daily fade / lapse pass runs (local time); only rows Review has shown
   resurrect_on_mention: true
 
 scoring:
@@ -109,6 +110,7 @@ sources:
     token_file: config/google-token.json               # written by `python -m factotum google-auth`
     calendar_id: primary
     days_ahead: 14
+    sweep_minutes: 30             # how often passed events are checked and the look-ahead refreshed
 
 sinks:
   notion_notes:

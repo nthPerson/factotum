@@ -2,8 +2,9 @@
 repeating one, and the three actions that come back through `/r/<token>`.
 
 `fire_at` is naive local wall time in `owner.timezone`; `now_local` passed in here is the same.
-Tokens are random, stored on the reminder row, single use for Done and Snooze, valid 24 h from
-`sent_at`; Open only navigates and does not consume the token.
+Tokens are random, stored on the reminder row, single use for Done and Snooze (the row's status
+says whether it was used, so a second tap gets a clear answer), valid 24 h from `sent_at`; Open
+only navigates and never consumes the token.
 """
 from __future__ import annotations
 
@@ -105,6 +106,8 @@ def act(conn: sqlite3.Connection, cfg: dict, token: str, action: str, now_local:
     if not r:
         raise TokenError(404, "This link is unknown or was already used.")
     r = dict(r)
+    if r["status"] != "sent" and action != "open":
+        raise TokenError(410, f"This reminder was already acted on (it is {r['status']}).")
     sent_at = datetime.fromisoformat(r["sent_at"]) if r.get("sent_at") else None
     if sent_at is None or datetime.now(timezone.utc) - sent_at > TOKEN_TTL:
         raise TokenError(410, "This link has expired (reminder actions are good for 24 hours).")
@@ -113,12 +116,12 @@ def act(conn: sqlite3.Connection, cfg: dict, token: str, action: str, now_local:
         return {"action": "open", "task_id": r["task_id"], "task_name": r["task_name"]}
     if action == "done":
         res = batches.apply(conn, [{"task_id": r["task_id"], "op": "done"}], "ntfy")
-        conn.execute("UPDATE reminders SET status = 'done', token = NULL WHERE id = ?", (r["id"],))
+        conn.execute("UPDATE reminders SET status = 'done' WHERE id = ?", (r["id"],))
         conn.commit()
         return {"action": "done", "task_id": r["task_id"], "task_name": r["task_name"], "batch_id": res["batch_id"]}
     if action == "snooze":
         at = (now_local + SNOOZE).strftime("%Y-%m-%dT%H:%M")
-        conn.execute("UPDATE reminders SET status = 'snoozed', token = NULL WHERE id = ?", (r["id"],))
+        conn.execute("UPDATE reminders SET status = 'snoozed' WHERE id = ?", (r["id"],))
         conn.execute("INSERT INTO reminders (task_id, fire_at, label, status, created_by, created_at) VALUES (?, ?, ?, 'pending', 'ntfy', ?)",
                      (r["task_id"], at, r.get("label"), now_iso()))
         conn.commit()

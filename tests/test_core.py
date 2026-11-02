@@ -480,3 +480,45 @@ def test_reminder_action_links_are_single_use_and_expire(cfg, tmp_path):
     c.execute("UPDATE reminders SET sent_at = '2026-10-01T00:00:00+00:00', token = 'old' WHERE id = 1"); c.commit()
     assert client.get("/r/old", params={"a": "open"}).status_code == 410             # older than 24 h
 
+
+
+# --- phase 2: the scheduler ------------------------------------------------------------------
+
+def _sched(conn, cfg, push=None, mailer=None):
+    from factotum.scheduler import Scheduler
+    cfg["notify"]["ntfy"]["topic"] = "factotum-test"      # no topic → reminders wait instead of being marked sent
+    return Scheduler(cfg, conn, push=push or FakePush(), mailer=mailer or (lambda *a, **k: None), calendar=None)
+
+
+def test_review_push_fires_once_a_day_after_its_time_and_only_with_a_queue(conn, cfg):
+    upsert_task(conn, task(id=1, due=None, created_at="2026-10-30T00:00:00+00:00", last_mention_at="2026-10-30")); conn.commit()
+    push = FakePush()
+    s = _sched(conn, cfg, push)       # example config: review_time 19:30
+    s.tick(datetime(2026, 11, 1, 19, 29)); assert push.sent == []
+    s.tick(datetime(2026, 11, 1, 19, 30)); assert len(push.sent) == 1 and "Review" in push.sent[0]["title"] and "1 item" in push.sent[0]["body"]
+    s.tick(datetime(2026, 11, 1, 21, 0)); assert len(push.sent) == 1                      # once a day
+    s.tick(datetime(2026, 11, 2, 19, 31)); assert len(push.sent) == 2                     # next day, late start still fires
+    assert conn.execute("SELECT COUNT(*) FROM runs WHERE kind = 'review_push'").fetchone()[0] == 2
+    from factotum.db import set_setting
+    set_setting(conn, "state.last_review_at", "2026-11-03"); conn.commit()
+    s.tick(datetime(2026, 11, 3, 19, 30)); assert len(push.sent) == 2                     # reviewed today → quiet
+    batches.apply(conn, [{"task_id": 1, "op": "keep"}], "review", date(2026, 11, 4))
+    s.tick(datetime(2026, 11, 4, 19, 30)); assert len(push.sent) == 2                     # empty queue → quiet
+
+
+def test_scheduler_expires_as_an_automation_batch_and_fires_due_reminders(conn, cfg):
+    upsert_task(conn, task(id=1, due=None, last_mention_at="2026-10-05", last_offered_at="2026-10-25"))
+    upsert_task(conn, task(id=2, name="Call Reza")); conn.commit()
+    batches.apply(conn, [{"task_id": 2, "op": "add_reminder", "fields": {"fire_at": "2026-11-01T09:00"}}], "ui", TODAY)
+    push = FakePush()
+    s = _sched(conn, cfg, push)
+    s.tick(datetime(2026, 11, 1, 3, 29))
+    assert conn.execute("SELECT status FROM tasks WHERE id = 1").fetchone()[0] == "open"
+    s.tick(datetime(2026, 11, 1, 9, 0, 10))                                               # past 03:30 (expire) and 09:00 (reminder)
+    assert conn.execute("SELECT status, closed_by FROM tasks WHERE id = 1").fetchone()[:] == ("faded", "automation")
+    assert conn.execute("SELECT source FROM batches ORDER BY id DESC LIMIT 1").fetchone()[0] == "automation"
+    assert [m["title"] for m in push.sent] == ["Call Reza"]
+    kinds = {r[0] for r in conn.execute("SELECT kind FROM runs")}
+    assert {"expire", "reminder"} <= kinds
+    s.tick(datetime(2026, 11, 1, 9, 1))
+    assert len(push.sent) == 1 and conn.execute("SELECT COUNT(*) FROM runs WHERE kind = 'expire'").fetchone()[0] == 1
