@@ -77,44 +77,59 @@ def apply(conn: sqlite3.Connection, changes: list[dict], source: str, today: dat
     undo: list[dict] = []
     applied = 0
     skipped: list[dict] = []
-    for ch in changes:
-        task = get_task(conn, int(ch["task_id"]))
-        if not task:
-            skipped.append({"task_id": ch.get("task_id"), "why": "no such task"})
-            continue
-        if ch.get("op") == "add_reminder":
-            # A reminder is a row of its own, not a task field, so it rides beside any decision on
-            # the same task (Keep, Later, even Drop) and is cancelled by the batch's undo.
-            try:
-                rf = _reminder_fields(ch)
-            except ValueError as e:
-                skipped.append({"task_id": task["id"], "why": str(e)})
-                continue
-            cur.execute("INSERT INTO reminders (task_id, fire_at, label, repeat, status, created_by, created_at) VALUES (?, ?, ?, ?, 'pending', ?, ?)",
-                        (task["id"], rf["fire_at"], rf["label"], rf["repeat"], source, now_iso()))
-            rid = cur.lastrowid
-            cur.execute("INSERT INTO changes (batch_id, task_id, field, old, new) VALUES (?, ?, 'reminder', NULL, ?)", (batch_id, task["id"], json.dumps(dict(rf, id=rid))))
-            undo.append({"task_id": task["id"], "reminder_id": rid})
-            applied += 1
-            continue
-        try:
-            fields = _resolve(conn, ch, today, closed_by)
-        except ValueError as e:
-            skipped.append({"task_id": task["id"], "why": str(e)})
-            continue
-        diffs = {k: v for k, v in fields.items() if task.get(k) != v}
-        if not diffs:
-            continue
-        for k, v in diffs.items():
-            cur.execute("INSERT INTO changes (batch_id, task_id, field, old, new) VALUES (?, ?, ?, ?, ?)",
-                        (batch_id, task["id"], k, json.dumps(task.get(k)), json.dumps(v)))
-            undo.append({"task_id": task["id"], "field": k, "old": task.get(k)})
-        sets = ", ".join(f"{k} = ?" for k in diffs) + ", edited_at = ?"
-        cur.execute(f"UPDATE tasks SET {sets} WHERE id = ?", tuple(diffs.values()) + (now_iso(), task["id"]))
-        applied += 1
+    try:
+        for ch in changes:
+            if _apply_one(conn, cur, ch, batch_id, source, today, closed_by, undo, skipped):
+                applied += 1
+    except Exception:
+        conn.rollback()   # one shared connection serves every request; never leave it mid-transaction
+        raise
     cur.execute("UPDATE batches SET undo_json = ? WHERE id = ?", (json.dumps(undo), batch_id))
     conn.commit()
     return {"batch_id": batch_id, "applied": applied, "skipped": skipped}
+
+
+def _apply_one(conn, cur, ch: dict, batch_id: int, source: str, today: date, closed_by: str, undo: list, skipped: list) -> bool:
+    """Apply one change; returns True when it wrote something. Anything malformed is skipped with a
+    reason (a tray saved by an older UI build may lack task_id), never raised."""
+    try:
+        task_id = int(ch.get("task_id"))
+    except (TypeError, ValueError):
+        skipped.append({"task_id": ch.get("task_id"), "why": "missing or invalid task_id"})
+        return False
+    task = get_task(conn, task_id)
+    if not task:
+        skipped.append({"task_id": task_id, "why": "no such task"})
+        return False
+    if ch.get("op") == "add_reminder":
+        # A reminder is a row of its own, not a task field, so it rides beside any decision on
+        # the same task (Keep, Later, even Drop) and is cancelled by the batch's undo.
+        try:
+            rf = _reminder_fields(ch)
+        except ValueError as e:
+            skipped.append({"task_id": task["id"], "why": str(e)})
+            return False
+        cur.execute("INSERT INTO reminders (task_id, fire_at, label, repeat, status, created_by, created_at) VALUES (?, ?, ?, ?, 'pending', ?, ?)",
+                    (task["id"], rf["fire_at"], rf["label"], rf["repeat"], source, now_iso()))
+        rid = cur.lastrowid
+        cur.execute("INSERT INTO changes (batch_id, task_id, field, old, new) VALUES (?, ?, 'reminder', NULL, ?)", (batch_id, task["id"], json.dumps(dict(rf, id=rid))))
+        undo.append({"task_id": task["id"], "reminder_id": rid})
+        return True
+    try:
+        fields = _resolve(conn, ch, today, closed_by)
+    except ValueError as e:
+        skipped.append({"task_id": task["id"], "why": str(e)})
+        return False
+    diffs = {k: v for k, v in fields.items() if task.get(k) != v}
+    if not diffs:
+        return False
+    for k, v in diffs.items():
+        cur.execute("INSERT INTO changes (batch_id, task_id, field, old, new) VALUES (?, ?, ?, ?, ?)",
+                    (batch_id, task["id"], k, json.dumps(task.get(k)), json.dumps(v)))
+        undo.append({"task_id": task["id"], "field": k, "old": task.get(k)})
+    sets = ", ".join(f"{k} = ?" for k in diffs) + ", edited_at = ?"
+    cur.execute(f"UPDATE tasks SET {sets} WHERE id = ?", tuple(diffs.values()) + (now_iso(), task["id"]))
+    return True
 
 
 def undo(conn: sqlite3.Connection, batch_id: int) -> dict:

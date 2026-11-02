@@ -153,8 +153,8 @@ deliverables.
 (70 − 5/day, floor 25) instead of clamping. Claude writes `why_now` for the rows the morning
 brief shows (≤ 15); it never writes scores.
 
-**Review queue** (`lifecycle.build_review_queue`), ordered: last call · thread updated · new ·
-soft slipped · fading soon · back · reminder missed. *New* means never decided on
+**Review queue** (`lifecycle.build_review_queue`), ordered: last call · thread updated · back from
+Later · new · soft slipped · fading soon · back · reminder missed. *New* means never decided on
 (`last_reviewed_at` is null), not "created since the last session": an item the user did not get to
 stays in the queue. The queue is served in pages of `review_cap` (15); ids already staged in the tray
 are excluded from the next page, and after a page the UI offers "Review another 15 of the remaining
@@ -276,7 +276,8 @@ Keyboard: `j k d x s t l e`; Review `d k s x`.
   its own key, so it rides in the same batch as the decision without replacing it, Keep, Later or
   even Drop; undoing the batch cancels it. A reminder fires whatever the task's status is: a
   dropped task can still carry a "check anyway" nudge. When a repeating reminder fires, the
-  scheduler marks it sent and inserts the next occurrence as a new pending row (phase 2).
+  scheduler marks it sent and inserts the next occurrence as a new pending row (phase 2). `fire_at`
+  is naive local wall time (`YYYY-MM-DDTHH:MM`) in `owner.timezone`; the scheduler converts.
 - Voice: "add X due next week, remind me tomorrow afternoon" → a task plus one reminder.
 - The morning brief lists reminders firing today, so email and push agree.
 

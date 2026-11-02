@@ -11,10 +11,11 @@ from .dates import days_until, parse_date
 OPEN = "open"
 CLOSED = ("done", "dropped", "faded", "lapsed")
 
-REVIEW_ORDER = ["last_call", "thread_updated", "new", "slipped", "fading", "back", "reminder_missed"]
+REVIEW_ORDER = ["last_call", "thread_updated", "snooze_over", "new", "slipped", "fading", "back", "reminder_missed"]
 REVIEW_LABELS = {
     "last_call": "Last call · hard deadline passed",
     "thread_updated": "Thread updated",
+    "snooze_over": "Back from Later",
     "new": "New · not yet reviewed",
     "slipped": "Soft date slipped",
     "fading": "Fading soon",
@@ -69,6 +70,10 @@ def review_reasons(task: dict, today: date, cfg: dict, last_review_at: date | No
         out.append("last_call")
     if flags.get("thread_updated"):
         out.append("thread_updated")
+    # Later = "come back on <date>": once the snooze is over the item is asked about again, until
+    # a decision made on or after that date suppresses it.
+    if snoozed and snoozed <= today and not (reviewed and reviewed >= snoozed):
+        out.append("snooze_over")
     # "New" means never decided on, not "created since the last session": an item you did not get
     # to in one session must still be there in the next one. `last_review_at` is kept for the
     # review push (skip when reviewed today) and no longer gates the queue.

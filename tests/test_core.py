@@ -98,6 +98,16 @@ def test_review_new_means_never_reviewed_not_since_last_session(cfg):
     assert [i["task"]["id"] for i in q] == [1] and q[0]["primary"] == "new"
 
 
+def test_later_brings_the_item_back_to_review_on_the_snooze_date(cfg):
+    # Later on Monday → Friday: hidden until Friday, then back in Review as the first thing after
+    # last call, and suppressed again once decided on
+    t = task(id=1, due=None, snoozed_until="2026-11-06", last_reviewed_at="2026-11-02", last_mention_at="2026-10-30")
+    assert lifecycle.review_reasons(t, date(2026, 11, 5), cfg, None) == []
+    assert lifecycle.review_reasons(t, date(2026, 11, 6), cfg, None) == ["snooze_over"]
+    assert lifecycle.review_reasons(dict(t, last_reviewed_at="2026-11-06"), date(2026, 11, 7), cfg, None) == []
+    assert lifecycle.REVIEW_ORDER.index("snooze_over") < lifecycle.REVIEW_ORDER.index("new")
+
+
 def test_import_classifier_buckets(cfg):
     assert lifecycle.classify_import(task(due="2026-11-08", hard=1, source="Canvas"), TODAY, cfg) == ("canvas_future", "open")
     assert lifecycle.classify_import(task(due="2026-09-30", hard=1, mentions=1), TODAY, cfg) == ("hard_lapsed", "lapsed")
@@ -159,6 +169,14 @@ def test_apply_and_undo(conn, cfg):
     batches.undo(conn, res["batch_id"])
     row = conn.execute("SELECT status, due FROM tasks WHERE id = ?", (tid,)).fetchone()
     assert row["status"] == "open" and row["due"] is None
+
+
+def test_apply_skips_a_change_without_a_task_id_and_leaves_no_open_transaction(conn):
+    # a tray saved by an older UI build has no task_id on its entries; that must not 500
+    upsert_task(conn, task(id=1)); conn.commit()
+    res = batches.apply(conn, [{"op": "done"}, {"task_id": "x", "op": "done"}, {"task_id": 1, "op": "done"}], "ui", TODAY)
+    assert res["applied"] == 1 and len(res["skipped"]) == 2 and not conn.in_transaction
+    assert conn.execute("SELECT status FROM tasks WHERE id = 1").fetchone()[0] == "done"
 
 
 def test_apply_rejects_unknown_field(conn):
@@ -308,3 +326,14 @@ def test_review_endpoint_pages_and_excludes_staged_ids(conn, cfg, tmp_path):
     assert len(page["items"]) == 15 and page["total"] == 20
     page2 = client.get("/api/review", params={"exclude": "1,2,3"}).json()
     assert page2["total"] == 17 and not {1, 2, 3} & {i["task"]["id"] for i in page2["items"]}
+
+
+def test_task_list_carries_a_reminders_repeat(conn, cfg, tmp_path):
+    from fastapi.testclient import TestClient
+    from factotum.api import create_app
+    app = create_app(cfg, db_path=str(tmp_path / "api.db"))
+    upsert_task(app.state.conn, task(id=1)); app.state.conn.commit()
+    client = TestClient(app)
+    client.post("/api/batches/apply", json={"source": "ui", "changes": [{"task_id": 1, "op": "add_reminder", "fields": {"fire_at": "2026-11-04T09:30", "repeat": "weekly"}}]})
+    t = next(t for t in client.get("/api/tasks").json()["tasks"] if t["id"] == 1)
+    assert t["reminders"][0]["repeat"] == "weekly"

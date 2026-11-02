@@ -78,7 +78,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None) -> FastAPI:
             params += (project,)
         out = [decorate(t, today, ecfg) for t in rows(conn, sql + " ORDER BY COALESCE(due, '9999'), id", params)]
         links = rows(conn, "SELECT task_id, kind, ref, label, account FROM links")
-        rem = rows(conn, "SELECT task_id, id, fire_at, label, status FROM reminders WHERE status IN ('pending','snoozed')")
+        rem = rows(conn, "SELECT task_id, id, fire_at, label, repeat, status FROM reminders WHERE status IN ('pending','snoozed')")
         by_l: dict[int, list] = {}
         for l in links:
             by_l.setdefault(l["task_id"], []).append(l)
