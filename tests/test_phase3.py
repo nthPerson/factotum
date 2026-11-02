@@ -53,3 +53,67 @@ def test_runner_classifies_a_dead_login_a_timeout_and_a_prose_answer(cfg):
         return SimpleNamespace(returncode=0, stdout=_envelope("Sorry, I could not do that.", cost=0.3), stderr="")
     res = runner.run(cfg, "sync_file", "p", exec_=prose)
     assert not res.ok and res.data is None and "no JSON" in res.error and res.cost_usd == 0.3 and res.result_text.startswith("Sorry")
+
+
+# --- T2 the Plaud CLI -------------------------------------------------------------------------
+
+SEARCH_OUT = """- Searching for "Molina"...
+
+Matched 2 of 185 scanned
+
+  of_7a19f5574ec383b17337cc2fc4757834  11-01 Action Plan: Molina Healthcare Duplicate Payment and Auto-Pay Alignment  2026-11-01  1m39s
+  of_0000000000000000000000000000beef  10-02 Molina enrollment call  2026-10-02  12m05s
+"""
+FILE_OUT = """- Fetching file...
+
+File Details:
+
+  id:           of_7a19f5574ec383b17337cc2fc4757834
+  name:         11-01 Action Plan: Molina Healthcare Duplicate Payment and Auto-Pay Alignment
+  created_at:   2026-11-02T05:41:48
+  start_at:     2026-11-02T05:40:00
+  duration:     1m39s
+  serial_number: 8810B30294766599
+  audio:        available
+  transcript:   available
+  summary:      available
+"""
+
+
+def _fake_plaud(tmp_path):
+    calls = []
+
+    def run_(cmd, **kw):
+        calls.append(cmd)
+        sub = cmd[1]
+        if sub == "search":
+            return SimpleNamespace(returncode=0, stdout=SEARCH_OUT, stderr="")
+        if sub == "file":
+            return SimpleNamespace(returncode=0, stdout=FILE_OUT, stderr="")
+        if sub in ("summary", "transcript"):
+            out = cmd[cmd.index("-o") + 1]
+            (tmp_path / out).write_text(f"{sub} of {cmd[2]}\n") if not out.startswith("/") else __import__("pathlib").Path(out).write_text(f"{sub} of {cmd[2]}\n")
+            return SimpleNamespace(returncode=0, stdout=f"{sub} saved\n", stderr="")
+        raise AssertionError(cmd)
+    return run_, calls
+
+
+def test_plaud_locates_a_recording_by_subject_and_date(cfg, tmp_path):
+    from factotum import plaud
+    run_, calls = _fake_plaud(tmp_path)
+    rec = plaud.locate(cfg, "[Plaud-AutoFlow] 11-01 Action Plan: Molina Healthcare Duplicate Payment and Auto-Pay Alignment", "2026-11-01", run_=run_)
+    assert rec.id == "of_7a19f5574ec383b17337cc2fc4757834" and rec.date == "2026-11-01"
+    assert rec.name.startswith("11-01 Action Plan")
+    assert calls[0][:2] == ["plaud", "search"] and "--from" in calls[0] and "--to" in calls[0]
+    # the same title on another day is not this recording; nothing in the window → None, no guessing
+    assert plaud.locate(cfg, "Molina", "2026-09-01", run_=run_) is None
+
+
+def test_plaud_details_and_files(cfg, tmp_path):
+    from factotum import plaud
+    run_, calls = _fake_plaud(tmp_path)
+    d = plaud.details(cfg, "of_7a19f5574ec383b17337cc2fc4757834", run_=run_)
+    assert d["name"].startswith("11-01") and d["start_at"] == "2026-11-02T05:40:00" and d["duration"] == "1m39s"
+    files = plaud.fetch_files(cfg, "of_7a19f5574ec383b17337cc2fc4757834", tmp_path / "rec", run_=run_)
+    assert files.summary.read_text().startswith("summary of of_7a19") and files.transcript.read_text().startswith("transcript of of_7a19")
+    assert files.summary.parent == tmp_path / "rec"
