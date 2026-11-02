@@ -127,7 +127,7 @@ def test_plaud_details_and_files(cfg, tmp_path):
 # --- T3 the sync-file prompt ------------------------------------------------------------------
 
 REC = {"id": "of_7a19f5574ec383b17337cc2fc4757834", "name": "11-01 Action Plan: Molina Healthcare Duplicate Payment and Auto-Pay Alignment",
-       "date": "2026-11-01", "start_at": "2026-11-01T21:40:00"}
+       "date": "2026-11-01", "start_at": "2026-11-01T21:40", "start_utc": "2026-11-02T05:40:00+00:00"}
 
 
 def test_sync_prompt_carries_taxonomy_open_rows_files_and_the_subject_as_data(cfg, conn, tmp_path):
@@ -198,7 +198,7 @@ def test_apply_result_creates_updates_instructs_reminds_and_undoes_as_one_batch(
     res = sync_file.apply_result(conn, cfg, REC, data, TODAY, calendar=lambda ev: (events.append(ev), {"id": "ev1", "link": "https://cal/ev1"})[1])
     t = one(conn, "SELECT * FROM tasks WHERE source_key = 'plaud:of_7a19f5574ec383b17337cc2fc4757834:1'")
     assert t and t["status"] == "open" and t["source"] == "Plaud" and t["mentions"] == 1 and t["counterpart"] == "Molina Healthcare"
-    assert t["created_at"].startswith("2026-11-01T21:40") and t["source_link"].endswith(REC["id"]) and t["due"] == "2026-11-03"
+    assert t["created_at"] == "2026-11-02T05:40:00+00:00" and t["source_link"].endswith(REC["id"]) and t["due"] == "2026-11-03"
     assert one(conn, "SELECT * FROM links WHERE task_id = ? AND kind = 'plaud_note'", (t["id"],))["ref"] == REC["id"]
     assert len(res["created"]) == 4 and res["created"][0] == t["id"]                 # the dated one plus three undated
     assert any("u4" in u for u in res["unresolved"]) and any("name" in u for u in res["unresolved"])
@@ -507,3 +507,19 @@ def test_trigger_fails_closed_without_a_configured_sender(cfg, conn):
     assert not plaud_trigger.authenticated({"Authentication-Results": ['mx.google.com; dkim=pass header.i="@plaud.ai']}, "mx.google.com", "plaud.ai")
     assert not plaud_trigger.authenticated({"Authentication-Results": ['mx.google.com; dkim=fail (x \\) ; dkim=pass header.i=@plaud.ai)']}, "mx.google.com", "plaud.ai")   # quoted-pair inside a comment
     assert not plaud_trigger.authenticated({"Authentication-Results": ['mx.google.com; dkim=pass header.i=@plaud.ai/evil']}, "mx.google.com", "plaud.ai")              # odd characters in a value
+
+
+def test_recording_times_are_converted_from_plaud_utc_to_local(cfg, conn, tmp_path, monkeypatch):
+    """`plaud file` reports start_at in UTC; a 9:40 PM Sunday recording in Los Angeles shows as
+    Monday 05:40. The prompt and the note page must say Sunday, and tasks keep a UTC created_at."""
+    from factotum import sync_file
+    from factotum.db import one
+    plaud_run, _ = _fake_plaud(tmp_path)
+    monkeypatch.setattr(sync_file, "RUNS_DIR", tmp_path / "runs")
+    runner, calls = _runner_seq(GOOD)
+    res = sync_file.run(conn, cfg, plaud_id="of_7a19f5574ec383b17337cc2fc4757834", subject=None, received=None, today=TODAY, runner=runner, plaud_run=plaud_run,
+                        notes=lambda cfg, rec, note, transcript, **kw: "u", calendar=None)
+    rec = res["rec"]
+    assert rec["date"] == "2026-11-01" and rec["start_at"] == "2026-11-01T21:40" and rec["start_utc"] == "2026-11-02T05:40:00+00:00"
+    assert "Sunday 2026-11-01 21:40" in calls[0][1]
+    assert one(conn, "SELECT created_at FROM tasks WHERE source_key LIKE 'plaud:of_7a19%'")["created_at"] == "2026-11-02T05:40:00+00:00"

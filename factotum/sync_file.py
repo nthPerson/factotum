@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import html
 import sqlite3
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from . import batches, config as C
@@ -62,6 +62,22 @@ def open_rows_text(conn: sqlite3.Connection, cap: int = SLICE_CAP) -> str:
         bits.append((r["name"] or "")[:90])
         lines.append(" | ".join(bits))
     return "\n".join(lines) or "(no open tasks)"
+
+
+def recording(cfg: dict, d: dict, fallback_name: str = "", fallback_date: str | None = None) -> dict:
+    """The rec dict from `plaud file` details. Plaud reports start_at/created_at in UTC; the prompt,
+    the note page and the task dates use the owner's wall time, created_at stays UTC."""
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo(str(C.get(cfg, "owner.timezone", "UTC")))
+    raw = d.get("start_at") or d.get("created_at") or ""
+    rec = {"id": d["id"], "name": d.get("name") or fallback_name or d["id"], "start_at": None, "start_utc": None, "date": fallback_date}
+    try:
+        utc = datetime.fromisoformat(str(raw)[:19]).replace(tzinfo=timezone.utc)
+        local = utc.astimezone(tz)
+        rec.update(start_utc=utc.isoformat(), start_at=local.strftime("%Y-%m-%dT%H:%M"), date=local.strftime("%Y-%m-%d"))
+    except ValueError:
+        pass
+    return rec
 
 
 def _when(rec: dict) -> str:
@@ -145,7 +161,7 @@ def apply_result(conn: sqlite3.Connection, cfg: dict, rec: dict, data: dict, tod
     callable(event) -> {"id", "link"} or None when the calendar is off. Returns a summary."""
     from .db import add_link, add_mention, get_task, upsert_task
     unresolved: list[str] = [str(u) for u in (data.get("unresolved") or []) if u]
-    at = str(rec.get("start_at") or rec.get("date") or now_iso())
+    at = str(rec.get("start_utc") or rec.get("start_at") or rec.get("date") or now_iso())
     rec_id = rec["id"]
     link = f"{C.get(cfg, 'sinks.notion_notes.source_link_prefix', 'https://web.plaud.ai/file/')}{rec_id}"
     cap = int(C.get(cfg, "sources.plaud.extraction.max_undated_per_recording", 3))
@@ -354,14 +370,12 @@ def run(conn: sqlite3.Connection, cfg: dict, *, subject: str | None, received: s
         return {"ok": False, "error": why, "rec": None}
     try:
         if plaud_id:
-            d = plaud.details(cfg, plaud_id, run_=plaud_run)
-            rec = {"id": d["id"], "name": d.get("name") or plaud_id, "start_at": d.get("start_at"), "date": (d.get("start_at") or d.get("created_at") or "")[:10]}
+            rec = recording(cfg, plaud.details(cfg, plaud_id, run_=plaud_run))
         else:
             found = plaud.locate(cfg, subject or "", (received or today.isoformat())[:10], run_=plaud_run)
             if not found:
                 return fail(f"no Plaud recording matches the subject within a day of the mail: {subject!r}")
-            d = plaud.details(cfg, found.id, run_=plaud_run)
-            rec = {"id": found.id, "name": d.get("name") or found.name, "start_at": d.get("start_at"), "date": found.date}
+            rec = recording(cfg, plaud.details(cfg, found.id, run_=plaud_run), found.name, found.date)
         workdir = Path(RUNS_DIR) / rec["id"]
         files = plaud.fetch_files(cfg, rec["id"], workdir, run_=plaud_run)
     except plaud.PlaudError as e:
