@@ -143,6 +143,7 @@
       lastBatch = res.batch_id;
       staged = new Map(); try { localStorage.removeItem('factotum.staged'); } catch (_) {}
       ui.sel.clear(); logData = null;
+      if (ui.tab !== 'review') review = null;   // a stale Review page would still show the old due date; re-fetch on the next visit
       await load();
       if (ui.tab === 'review') {
         // The decisions are in; today counts as reviewed (phase 2 skips the push), and the next
@@ -307,7 +308,8 @@
       const body = ui.reviewPaused ? '' : total ? '<p>Apply them in the tray, or keep going.</p>' : '';
       return `<div class="review"><div class="finish"><h2>${head}</h2>${body}${more}${review.last_review_at ? `<p class="hint">Last review: ${review.last_review_at}</p>` : ''}</div></div>`;
     }
-    const { task: x, reasons, primary, flags } = items[0];
+    const { task: raw, reasons, primary, flags } = items[0];
+    const x = view(raw);   // staged edits (a due date set on this card) show at once, not only after Apply
     const d = fmtDue(x.due);
     const cls = primary === 'last_call' ? 'crit' : primary === 'new' || primary === 'back' ? 'new' : 'warn';
     const idx = total - items.length;
