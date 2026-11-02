@@ -80,6 +80,10 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
 - **Daily jobs are "at or after HH:MM, once per day"**, keyed by `state.last_run.<job>` in the
   settings table. A fresh deploy after the brief time sends the brief immediately; seed the key
   for today if that is not wanted. Never run two schedulers against one database.
+- **`db.log_run` and `set_setting` do not commit; the caller does.** A scheduler branch that logs
+  and returns without `conn.commit()` leaves the thread's transaction open: the row is invisible to
+  the API's connection and, worse, the thread holds SQLite's write lock, so every UI Apply fails
+  with "database is locked" after the 5 s busy timeout (bit on 2026-11-01).
 - **`expire` only touches rows Review has shown** (`last_offered_at`, stamped by `GET /api/review`).
   A row that was never on a Review page stays open however old it is; that is by design.
 
