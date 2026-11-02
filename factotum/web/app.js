@@ -10,6 +10,7 @@
   let settings = null;      // /api/settings payload
   let staged = new Map();   // task id -> {op, fields, label}
   let lastBatch = null;
+  let lastTap = { id: null, at: 0 };   // for the hand-rolled double-click on rows
   let ui = { tab: 'today', focus: null, sel: new Set(), open: new Set(), reviewIdx: 0, laterOpen: false, reviewPaused: false, rvNote: { id: null, text: '' }, remOpen: null, dueOpen: null };
   try { const h = location.hash.replace('#', ''); if (TABS.includes(h)) ui.tab = h; } catch (_) {}
   try { const s = JSON.parse(localStorage.getItem('factotum.staged') || '[]'); staged = new Map(s); } catch (_) {}
@@ -122,7 +123,6 @@
       done: () => stage(id, 'done', {}, 'done'),
       drop: () => stage(id, 'drop', {}, 'dropped'),
       snooze: () => stage(id, 'set', { snoozed_until: isoPlus(1) }, 'snoozed to tomorrow'),
-      fri: () => stageDue(id, nextFri()),
       tomorrow: () => stageDue(id, isoPlus(1)),
       nextweek: () => stageDue(id, isoPlus(7 - ((TODAY().getDay() + 6) % 7))),
       setdue: () => stageDue(id, extra),
@@ -185,12 +185,12 @@
   function attachedIds() { return ui.sel.size ? [...ui.sel] : (ui.focus ? [ui.focus] : []); }
   function composer() {
     const ids = attachedIds();
-    return `<div class="composer"><div class="attach">${ids.length ? 'Attached: ' + ids.map(id => `<span class="chip">Task-${id}</span>`).join('') : 'Nothing attached · click a row to focus one, shift-click to attach several'}</div>
+    return `<div class="composer"><div class="attach">${ids.length ? 'Attached: ' + ids.map(id => `<span class="chip">Task-${id}</span>`).join('') : 'Nothing attached · tap a row to attach it'}</div>
       <div class="cmd"><input id="cmd" placeholder="Command: done 389 392 · push 364 fri · top 23 · longterm 38   (free text → Chat, phase 5)" aria-label="Prompt or command"><button class="btn primary" id="cmd-go">Send</button></div>
-      <p class="hint">Tap a row to select it (the bulk bar appears) · <kbd>j</kbd><kbd>k</kbd> move · <kbd>d</kbd> done · <kbd>x</kbd> drop · <kbd>s</kbd> snooze · <kbd>t</kbd> top · <kbd>l</kbd> long-term · <kbd>e</kbd> details</p></div>
+      <p class="hint">Tap a row to select it (the bulk bar appears) · <kbd>j</kbd><kbd>k</kbd> move · <kbd>d</kbd> done · <kbd>x</kbd> drop · <kbd>s</kbd> snooze · <kbd>t</kbd> top · <kbd>l</kbd> long-term · <kbd>e</kbd> details · double-click a row for details · <kbd>Esc</kbd> deselect</p></div>
       <div class="bulk" id="bulk"><b id="bulk-n"></b> selected
         <button class="btn small" data-bulk="done">Done</button><button class="btn small" data-bulk="drop">Drop</button>
-        <button class="btn small" data-bulk="snooze">Snooze to tomorrow</button><button class="btn small" data-bulk="fri">Due Friday</button>
+        <button class="btn small" data-bulk="snooze">Snooze to tomorrow</button>
         <span class="remform"><input type="date" id="bulk-date" aria-label="Due date"><button class="btn small" data-bulk="setdue">Set due</button><button class="btn small" data-bulk="cleardue">Clear due</button></span>
         <button class="btn small" data-bulk="top">Pin to Top</button><button class="btn small" data-bulk="longterm">Long-term</button>
         <span class="spacer"></span><button class="btn small" data-bulk="clear">Clear</button></div>`;
@@ -387,7 +387,15 @@
       // A plain tap selects (phones have no shift); the checkbox is the same selection. Keyboard
       // focus follows the last tap so j/k keep working.
       const toggleSel = () => { ui.sel.has(id) ? ui.sel.delete(id) : ui.sel.add(id); ui.focus = id; render(); };
-      r.querySelector('.main').addEventListener('click', e => { if (e.target.closest('input, button, .chip.due')) return; toggleSel(); });
+      // Two taps on the same row within 400 ms are a double-click: the first tap's selection flip
+      // is undone and the details open. Tracked by hand because render() replaces the DOM node
+      // between the two clicks, so the browser's dblclick event would not fire.
+      r.querySelector('.main').addEventListener('click', e => {
+        if (e.target.closest('input, button, .chip.due')) return;
+        const now = Date.now();
+        if (lastTap.id === id && now - lastTap.at < 400) { lastTap = { id: null, at: 0 }; ui.sel.has(id) ? ui.sel.delete(id) : ui.sel.add(id); ui.open.has(id) ? ui.open.delete(id) : ui.open.add(id); render(); return; }
+        lastTap = { id, at: now }; toggleSel();
+      });
       r.querySelector('input[type=checkbox]').addEventListener('change', toggleSel);
       r.querySelector('[data-chev]').addEventListener('click', () => { ui.open.has(id) ? ui.open.delete(id) : ui.open.add(id); render(); });
       r.querySelector('.main').setAttribute('draggable', 'true');
@@ -407,7 +415,11 @@
       [...ui.sel].forEach(id => act(id, k, d)); ui.sel.clear(); render();
     }));
     const bulk = document.getElementById('bulk');
-    if (bulk) { bulk.classList.toggle('on', ui.sel.size > 0); const n = document.getElementById('bulk-n'); if (n) n.textContent = ui.sel.size; }
+    if (bulk) {
+      bulk.classList.toggle('on', ui.sel.size > 0); const n = document.getElementById('bulk-n'); if (n) n.textContent = ui.sel.size;
+      const tray = document.getElementById('tray'); bulk.style.bottom = tray.classList.contains('on') ? (tray.offsetHeight + 8) + 'px' : '';
+    }
+    document.body.classList.toggle('bulk-on', ui.sel.size > 0);
     panel.querySelectorAll('[data-proj]').forEach(b => b.addEventListener('click', () => { const k = 'p:' + b.dataset.proj; ui.open.has(k) ? ui.open.delete(k) : ui.open.add(k); render(); }));
     panel.querySelectorAll('[data-rv]').forEach(b => b.addEventListener('click', () => reviewAct(b.dataset.rv)));
     const rd = document.getElementById('rv-date'); if (rd) rd.onchange = () => reviewAct('date', rd.value);
@@ -416,7 +428,7 @@
     wireReminders(panel); wireDue(panel);
     panel.querySelectorAll('[data-undo]').forEach(b => b.onclick = async () => { await api(`/api/batches/${b.dataset.undo}/undo`, { method: 'POST' }); await load(); logData = null; toast('Batch undone'); render(); });
     const cmdGo = document.getElementById('cmd-go'); if (cmdGo) cmdGo.onclick = () => { const i = document.getElementById('cmd'); const v = i.value.trim(); i.value = ''; sendPrompt(v); };
-    const cmd = document.getElementById('cmd'); if (cmd) cmd.addEventListener('keydown', e => { if (e.key === 'Enter') { const v = cmd.value.trim(); cmd.value = ''; sendPrompt(v); } e.stopPropagation(); });
+    const cmd = document.getElementById('cmd'); if (cmd) cmd.addEventListener('keydown', e => { if (e.key === 'Escape') return; if (e.key === 'Enter') { const v = cmd.value.trim(); cmd.value = ''; sendPrompt(v); } e.stopPropagation(); });
     document.getElementById('tray-apply').onclick = applyAll;
     document.getElementById('tray-discard').onclick = () => { staged = new Map(); try { localStorage.removeItem('factotum.staged'); } catch (_) {} render(); };
     const save = document.getElementById('settings-save'); if (save) save.onclick = saveSettings;
@@ -489,6 +501,7 @@
 
   document.getElementById('tabs').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; ui.tab = b.dataset.tab; ui.laterOpen = false; location.hash = ui.tab; render(); });
   document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { lastTap = { id: null, at: 0 }; if (ui.sel.size) { ui.sel.clear(); render(); } if (e.target.matches('input, select, textarea')) e.target.blur(); return; }   // Esc: deselect everything
     if (e.target.matches('input, select, textarea')) return;
     if (ui.tab === 'review') { const map = { d: 'done', k: 'keep', s: 'later', x: 'drop', t: 'top', l: 'longterm' }; if (map[e.key]) { e.preventDefault(); reviewAct(map[e.key]); } return; }
     const visible = [...document.querySelectorAll('#panel .row')].map(r => +r.dataset.id); if (!visible.length) return;

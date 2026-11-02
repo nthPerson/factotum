@@ -108,7 +108,10 @@ section.group h3.crit { color: var(--crit); } section.group h3.warn { color: var
 .details .links a { color: var(--accent); text-decoration: none; margin-right: 12px; }
 .details .actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; grid-column: 1 / -1; }
 .empty { padding: 14px; color: var(--muted); font-size: 13px; }
-.bulk { display: none; position: sticky; top: calc(env(safe-area-inset-top, 0px) + 52px); z-index: 4; background: var(--accent-soft); border: 1px solid var(--accent); border-radius: 8px; padding: 8px 12px; margin-bottom: 12px; align-items: center; gap: 8px; flex-wrap: wrap; }
+/* The bulk bar floats at the bottom (above the tray when both show) so selecting a row never shifts
+   the list: a second tap must land on the same row for the double-click to work. */
+.bulk { display: none; position: fixed; left: max(12px, env(safe-area-inset-left, 0px)); right: max(12px, env(safe-area-inset-right, 0px)); bottom: calc(12px + env(safe-area-inset-bottom, 0px)); z-index: 6; background: var(--accent-soft); border: 1px solid var(--accent); border-radius: 8px; padding: 8px 12px; align-items: center; gap: 8px; flex-wrap: wrap; box-shadow: 0 6px 24px rgba(0,0,0,.18); }
+body.bulk-on main { padding-bottom: 190px; }
 .bulk.on { display: flex; }
 .bulk b { font-family: var(--mono); font-weight: 500; }
 .tray { position: fixed; left: 0; right: 0; bottom: 0; z-index: 6; background: var(--surface); border-top: 1px solid var(--line);
