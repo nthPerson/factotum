@@ -398,7 +398,14 @@ class FakeImap:
 
     def search(self, criteria):
         self.searches.append(criteria)
-        return [u for u in self.mails if b"\\Seen" not in self.flags.get(u, [])]
+        uids = sorted(self.mails)
+        if criteria == ["ALL"]:
+            return uids
+        if "UID" in criteria:                       # "N:*" → every uid ≥ N, plus the highest one (the IMAP quirk)
+            low = int(criteria[criteria.index("UID") + 1].split(":")[0])
+            hits = [u for u in uids if u >= low] or uids[-1:]
+            return hits
+        return [u for u in uids if b"\\Seen" not in self.flags.get(u, [])]
 
     def fetch(self, uids, parts):
         return {u: {b"RFC822": self.mails[u]} for u in uids}
@@ -420,16 +427,46 @@ def test_trigger_handles_only_plaud_mail_once_and_marks_it_seen(cfg, conn):
         _mail(15, '"PLAUD.AI" <no-reply@plaud.ai>', "[Plaud-AutoFlow] DKIM failed", auth="mx.google.com; dkim=fail header.i=@plaud.ai; spf=pass"),
     ])
     handled = []
+    from factotum.db import set_setting
+    set_setting(conn, "state.plaud_trigger.last_uid.nthperson.dev@gmail.com", 9); conn.commit()   # the mails above are new
     t = plaud_trigger.PlaudTrigger(cfg, conn, handler=lambda subject, received: (handled.append((subject, received)), {"ok": True})[1], account="nthperson.dev@gmail.com")
     assert t.process_mailbox(server) == 1
     assert handled == [("[Plaud-AutoFlow] 11-01 Action Plan: Molina", "2026-11-02T05:42:09+00:00")]
     assert server.flags[10] == [b"\\Seen"] and all(u not in server.flags for u in (11, 12, 13, 14, 15))
-    assert server.searches[0] == ["UNSEEN", "FROM", "plaud.ai"]
+    assert server.searches[0][:1] == ["UID"] and server.searches[0][2:] == ["FROM", "plaud.ai"]
     assert t.process_mailbox(server) == 0 and len(handled) == 1
     server.flags.clear()                                      # the flag is lost (another client, a reconnect): the table still remembers
     assert t.process_mailbox(server) == 0 and len(handled) == 1
     seen = rows(conn, "SELECT uid, ok FROM trigger_seen ORDER BY uid")
     assert [(r["uid"], r["ok"]) for r in seen] == [(10, 1)]
+    assert t.watermark() == 15                                # everything up to the newest mail looked at is behind us
+
+
+def test_trigger_does_not_depend_on_the_unread_flag(cfg, conn):
+    """plaud-sync (or a phone) reads the mail first and sets \\Seen: the trigger must still handle it.
+    Older mail is never reprocessed: the watermark starts at the newest uid already handled, or at
+    the top of the mailbox on a fresh account."""
+    from factotum import plaud_trigger
+    from factotum.db import set_setting
+    cfg["sources"]["plaud"]["sender"] = "no-reply@plaud.ai"
+    server = FakeImap([_mail(100, '"PLAUD.AI" <no-reply@plaud.ai>', "[Plaud-AutoFlow] old one"), _mail(101, '"PLAUD.AI" <no-reply@plaud.ai>', "[Plaud-AutoFlow] older too")])
+    handled = []
+    t = plaud_trigger.PlaudTrigger(cfg, conn, handler=lambda s, r: (handled.append(s), {"ok": True})[1], account="a@b")
+    assert t.process_mailbox(server) == 0 and handled == [] and t.watermark() == 101          # fresh account: nothing old is replayed
+    uid, raw = _mail(102, '"PLAUD.AI" <no-reply@plaud.ai>', "[Plaud-AutoFlow] read on the phone first")
+    server.mails[uid] = raw; server.flags[uid] = [b"\\Seen"]
+    assert t.process_mailbox(server) == 1 and handled == ["[Plaud-AutoFlow] read on the phone first"] and t.watermark() == 102
+    # a second trigger for the same account picks the watermark up from the table, not from the mailbox
+    t2 = plaud_trigger.PlaudTrigger(cfg, conn, handler=lambda s, r: (handled.append(s), {"ok": True})[1], account="a@b")
+    server.mails[103] = _mail(103, '"PLAUD.AI" <no-reply@plaud.ai>', "[Plaud-AutoFlow] after a restart")[1]
+    assert t2.process_mailbox(server) == 1 and handled[-1] == "[Plaud-AutoFlow] after a restart"
+    # an account whose trigger_seen has rows but no watermark yet (the first deploy of this rule) starts just above them
+    conn.execute("DELETE FROM settings WHERE key LIKE 'state.plaud_trigger.%'"); conn.commit()
+    conn.execute("INSERT INTO trigger_seen (account, uid, subject, at, ok) VALUES ('c@d', 480, 'x', 'now', 0)"); conn.commit()
+    server3 = FakeImap([_mail(480, '"PLAUD.AI" <no-reply@plaud.ai>', "[Plaud-AutoFlow] handled before"), _mail(481, '"PLAUD.AI" <no-reply@plaud.ai>', "[Plaud-AutoFlow] missed by the race")])
+    server3.flags = {480: [b"\\Seen"], 481: [b"\\Seen"]}
+    t3 = plaud_trigger.PlaudTrigger(cfg, conn, handler=lambda s, r: (handled.append(s), {"ok": True})[1], account="c@d")
+    assert t3.process_mailbox(server3) == 1 and handled[-1] == "[Plaud-AutoFlow] missed by the race"
 
 
 def test_apply_result_ignores_foreign_source_keys_and_targets_outside_the_prompt(conn, cfg):

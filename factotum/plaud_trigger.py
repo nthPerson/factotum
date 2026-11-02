@@ -1,8 +1,13 @@
 """The Plaud trigger (SPEC.md §6 "Plaud"): IMAP IDLE on the mailbox with the `plaud_trigger` role.
 A mail from the Plaud sender whose subject carries the AutoFlow prefix starts one sync-file run.
-Ported from plaud-sync's watcher with its lessons: `\\Seen` after handling, the uid remembered in
-`trigger_seen` so a lost flag never reprocesses, one retry inside the run, and (legacy/README) the
-sender checked on the parsed `From` address, not on the IMAP search alone; the subject is data.
+Ported from plaud-sync's watcher with its lessons, minus one: the unread flag is not the queue.
+Another reader of the mailbox (plaud-sync fetching the mail, a phone opening it) sets `\\Seen`
+within seconds and the mail would never be handled. The queue is a UID watermark per account
+(`state.plaud_trigger.last_uid.<account>` in settings): every Plaud mail above it is examined once,
+read or not, and `trigger_seen` remembers what was handled. A fresh account starts at the top of
+its mailbox, so nothing old is replayed. Still (legacy/README): the sender is checked on the parsed
+`From` address and Gmail's own authentication result, not on the IMAP search alone; the subject is
+data and never enters the prompt.
 """
 from __future__ import annotations
 
@@ -17,7 +22,7 @@ from email.header import decode_header, make_header
 from email.utils import parseaddr, parsedate_to_datetime
 
 from . import config as C
-from .db import now_iso
+from .db import get_settings, now_iso, set_setting
 
 IDLE_TIMEOUT_S = 29 * 60      # re-issue IDLE before Gmail's ~30 min cutoff
 RECONNECT_S = 15
@@ -121,8 +126,9 @@ def _decode(raw) -> str:
 
 
 class PlaudTrigger:
-    def __init__(self, cfg: dict, conn: sqlite3.Connection, handler, *, account: str, log=print):
-        self.cfg, self.conn, self.handler, self.account, self.log = cfg, conn, handler, account, log
+    def __init__(self, cfg: dict, conn: sqlite3.Connection, handler, *, account: str, log=None):
+        self.cfg, self.conn, self.handler, self.account = cfg, conn, handler, account
+        self.log = log or (lambda m: print(m, flush=True))     # the service's stdout is a pipe: unflushed lines reach the journal late or never
         self.sender = str(C.get(cfg, "sources.plaud.sender", "") or "").strip().lower()
         if "@" not in self.sender:
             raise ValueError("sources.plaud.sender must be the Plaud sender address (fail closed; see docs/SETUP.md §9)")
@@ -141,15 +147,36 @@ class PlaudTrigger:
                           (self.account, uid, subject[:300], now_iso(), None if ok is None else int(ok)))
         self.conn.commit()
 
+    def _wm_key(self) -> str:
+        return f"state.plaud_trigger.last_uid.{self.account}"
+
+    def watermark(self) -> int | None:
+        """The highest uid examined. From settings; else just above what trigger_seen holds for this
+        account (the first deploy of this rule); else None, meaning "start at the top of the mailbox"."""
+        v = get_settings(self.conn).get(self._wm_key())
+        if v is not None:
+            return int(v)
+        row = self.conn.execute("SELECT MAX(uid) FROM trigger_seen WHERE account = ?", (self.account,)).fetchone()
+        return int(row[0]) if row and row[0] is not None else None
+
+    def _set_watermark(self, uid: int) -> None:
+        set_setting(self.conn, self._wm_key(), int(uid))
+        self.conn.commit()
+
     def process_mailbox(self, server) -> int:
-        """Handle every unseen Plaud mail once. Returns how many runs were started."""
+        """Handle every Plaud mail above the watermark once, read or unread. Returns how many runs started."""
         sender = self.sender
         search_from = str(C.get(self.cfg, "sources.plaud.from_filter", "") or sender)
         prefix = str(C.get(self.cfg, "sources.plaud.subject_prefix", "") or "")
-        criteria = ["UNSEEN"] + (["FROM", search_from] if search_from else [])
+        wm = self.watermark()
+        if wm is None:
+            top = max((int(u) for u in server.search(["ALL"])), default=0)
+            self._set_watermark(top)
+            self.log(f"trigger: first start for {self.account}; watching for mail above uid {top}")
+            return 0
+        uids = sorted(int(u) for u in server.search(["UID", f"{wm + 1}:*"] + (["FROM", search_from] if search_from else [])) if int(u) > wm)
         started = 0
-        for uid in server.search(criteria):
-            uid = int(uid)
+        for uid in uids:
             if self._seen(uid):
                 continue
             raw = server.fetch([uid], ["RFC822"])[uid][b"RFC822"]
@@ -182,6 +209,8 @@ class PlaudTrigger:
                 self.log(f"trigger: could not mark uid={uid} seen: {e}")
             self._remember(uid, subject, ok)
             started += 1
+        if uids:
+            self._set_watermark(max(uids))
         return started
 
     # ---- the thread --------------------------------------------------------------------------

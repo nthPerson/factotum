@@ -41,17 +41,17 @@ def _start_plaud_trigger(cfg: dict) -> None:
     from . import plaud_trigger, sync_file
     tconn = connect(C.db_path())
     if not C.get(C.effective(cfg, get_settings(tconn)), "sources.plaud.enabled", False):
-        print("plaud trigger: sources.plaud.enabled is off")
+        print("plaud trigger: sources.plaud.enabled is off", flush=True)
         return
     imap = plaud_trigger.imap_settings()
     if not imap:
-        print("plaud trigger: IMAP_USER / IMAP_PASSWORD not set; not started")
+        print("plaud trigger: IMAP_USER / IMAP_PASSWORD not set; not started", flush=True)
         return
 
     def handle(subject: str, received: str) -> dict:
         ecfg = C.effective(cfg, get_settings(tconn))
         res = sync_file.run(tconn, ecfg, subject=subject, received=received)
-        print("sync-file:", res.get("line") or res.get("error"))
+        print("sync-file:", res.get("line") or res.get("error"), flush=True)
         return res
     plaud_trigger.PlaudTrigger(cfg, tconn, handle, account=imap["user"]).start(imap)
 
