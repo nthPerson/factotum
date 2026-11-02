@@ -1,7 +1,7 @@
 """The mail sweep (SPEC.md §2 "Mailbird's role" item 1, §6): every `sources.mail.sweep_minutes`,
 Python (no Claude) reads each monitored account's new Inbox and Sent conversations and:
-  - flips a Waiting task when the person it waits on writes back (waiting_on cleared, Review shows
-    "Thread updated"),
+  - flips a Waiting task when the ADDRESS it waits on writes back (waiting_on cleared, Review shows
+    "Thread updated"); a match on the display name alone is only flagged, since names are forgeable,
   - closes a "reply to X" task when a message was sent to X after the task was created
     (closed_by `mail-evidence`), and records any other sent-to-counterpart as a candidate,
   - watches linked threads (links.kind = mail_thread) and flags new messages,
@@ -64,18 +64,21 @@ def _evidence(conn, task_id, kind, ref, account, label, excerpt, at) -> bool:
     return True
 
 
-def _waiting_match(task: dict, msgs: list[dict]) -> bool:
+def _waiting_match(task: dict, msgs: list[dict]) -> str | None:
+    """'address' when a message comes from an address named in waiting_on (proof enough to flip),
+    'name' when only the display name matches (spoofable: flagged for Review, never flipped), else None."""
     w = str(task.get("waiting_on") or "")
     emails = {e.lower() for e in EMAIL_RE.findall(w)}
-    name = re.split(r"[(—–,;:-]", w, 1)[0].strip()
+    name = re.split(r"[(\u2014\u2013,;:-]", w, 1)[0].strip()
     tokens = [t for t in re.findall(r"[A-Za-z]{3,}", name) if t.lower() not in ("the", "and", "for", "from")]
+    found = None
     for m in msgs:
         addr, disp = _addr(m)
         if addr and addr in emails:
-            return True
+            return "address"
         if tokens and all(t.lower() in (disp + " " + addr).lower() for t in tokens):
-            return True
-    return False
+            found = "name"
+    return found
 
 
 def sweep(conn: sqlite3.Connection, cfg: dict, client, now_local: datetime) -> str | None:
@@ -128,9 +131,11 @@ def sweep(conn: sqlite3.Connection, cfg: dict, client, now_local: datetime) -> s
                     continue
                 last = msgs[-1]
                 if folder == "sent":
-                    sent_to = set().union(*(_recipients(m) for m in msgs))
+                    # only what this account itself sent counts, each message on its own clock
+                    mine = [m for m in msgs if _addr(m)[0] == address]
                     for t, emails in owed:
-                        if emails & sent_to and when[:19] > str(t.get("created_at") or "")[:19]:
+                        hits = [m for m in mine if emails & _recipients(m) and str(m.get("receivedAtUtc") or "")[:19] > str(t.get("created_at") or "")[:19]]
+                        if hits:
                             add_link(conn, t["id"], "mail_thread", cid, label=subject[:120], account=address)
                             conn.execute("UPDATE links SET last_seen_at = ? WHERE task_id = ? AND kind = 'mail_thread' AND ref = ?", (when, t["id"], cid))
                             if _evidence(conn, t["id"], "sent_to_counterpart", cid, address, subject, c.get("lastSender"), when):
@@ -145,12 +150,16 @@ def sweep(conn: sqlite3.Connection, cfg: dict, client, now_local: datetime) -> s
                     continue
                 matched = False
                 for t in waiting:
-                    if _waiting_match(t, msgs):
+                    how = _waiting_match(t, msgs)
+                    if how:
                         matched = True
                         add_link(conn, t["id"], "mail_thread", cid, label=subject[:120], account=address)
                         conn.execute("UPDATE links SET last_seen_at = ? WHERE task_id = ? AND kind = 'mail_thread' AND ref = ?", (when, t["id"], cid))
-                        if _evidence(conn, t["id"], "reply_from_waiting", cid, address, subject, c.get("lastSender"), when):
-                            changes.append({"task_id": t["id"], "op": "set", "fields": {"waiting_on": None}}); flipped += 1
+                        if how == "address":
+                            if _evidence(conn, t["id"], "reply_from_waiting", cid, address, subject, c.get("lastSender"), when):
+                                changes.append({"task_id": t["id"], "op": "set", "fields": {"waiting_on": None}}); flipped += 1
+                        elif _evidence(conn, t["id"], "maybe_reply_from_waiting", cid, address, subject, c.get("lastSender"), when):
+                            candidates += 1
                 if matched:
                     continue
                 kind = "ics" if ICS_RE.search(subject) else "confirmation" if CONFIRM_RE.search(subject) else None
@@ -190,7 +199,7 @@ def review_flags(conn: sqlite3.Connection) -> dict[int, dict]:
     """What the sweeps and the planner want Review to say, keyed by task id."""
     out: dict[int, dict] = {}
     for e in rows(conn, "SELECT task_id, kind, label FROM evidence WHERE judged_at IS NULL AND task_id IS NOT NULL"):
-        if e["kind"] in ("thread_updated", "reply_from_waiting"):
+        if e["kind"] in ("thread_updated", "reply_from_waiting", "maybe_reply_from_waiting"):
             out.setdefault(int(e["task_id"]), {})["thread_updated"] = True
         elif e["kind"] == "proposal":
             out.setdefault(int(e["task_id"]), {})["planner"] = e["label"]
