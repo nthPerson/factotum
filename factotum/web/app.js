@@ -491,7 +491,7 @@
     if (!settings) { loadSettings(); return '<div class="empty">Loading settings…</div>'; }
     const e = settings.effective;
     const f = (key, label, sub, control) => `<div class="field"><label for="s-${key}">${label}<span class="sub">${sub}</span></label><div>${control}</div></div>`;
-    const num = (key, min, max) => `<input type="number" id="s-${key}" data-key="${key}" value="${e[key]}" min="${min}" max="${max}">`;
+    const num = (key, min, max) => `<input type="number" id="s-${key}" data-key="${key}" value="${e[key] == null ? '' : e[key]}" min="${min}" max="${max}" ${Number.isInteger(min) ? '' : 'step="0.05"'}>`;
     const bool = key => `<input type="checkbox" id="s-${key}" data-key="${key}" ${e[key] ? 'checked' : ''}>`;
     const text = (key, w) => `<input type="text" id="s-${key}" data-key="${key}" value="${esc(e[key] || '')}" style="width:${w || '100%'}">`;
     const time = key => `<input type="time" id="s-${key}" data-key="${key}" value="${esc(e[key] || '')}">`;
@@ -507,18 +507,23 @@
       ${f('lifecycle.review_cap', 'Review cap', 'Max items per Review session.', num('lifecycle.review_cap', 5, 50))}
       <h3>Inputs</h3>
       ${f('sources.plaud.enabled', 'Plaud recordings', 'IMAP trigger + plaud CLI (phase 3).', bool('sources.plaud.enabled'))}
-      ${f('sources.canvas.enabled', 'Canvas', 'Hourly: new items become hard-deadline tasks, submitted ones close.', bool('sources.canvas.enabled'))}
-      ${f('sources.mail.enabled', 'Email via Mailbird', 'Every 20 min via Mailbird: replies flip Waiting, sent mail closes reply tasks, invitations and confirmations feed the planner.', bool('sources.mail.enabled'))}
-      ${f('sources.calendar.enabled', 'Google Calendar', 'Needs config/google-credentials.json (docs/SETUP.md §6).', bool('sources.calendar.enabled') + ' &nbsp; calendar id ' + text('sources.calendar.calendar_id', '160px'))}
+      ${f('sources.canvas.enabled', 'Canvas', 'New items become hard-deadline tasks, submitted ones close.', bool('sources.canvas.enabled') + ' &nbsp; every ' + num('sources.canvas.sweep_minutes', 5, 1440) + ' min')}
+      ${f('sources.mail.enabled', 'Email via Mailbird', 'Replies flip Waiting, sent mail closes reply tasks, invitations and confirmations feed the planner.', bool('sources.mail.enabled') + ' &nbsp; every ' + num('sources.mail.sweep_minutes', 5, 1440) + ' min')}
+      ${f('sources.calendar.enabled', 'Google Calendar', 'Needs config/google-credentials.json (docs/SETUP.md §6).', bool('sources.calendar.enabled') + ' &nbsp; every ' + num('sources.calendar.sweep_minutes', 5, 1440) + ' min &nbsp; calendar id ' + text('sources.calendar.calendar_id', '160px'))}
+      ${f('sources.slack.enabled', 'Slack', 'Chat can search and read the workspaces named in the config file (docs/SETUP.md §12); tokens in .env.', bool('sources.slack.enabled'))}
+      ${f('sources.discord.enabled', 'Discord', 'Chat can list channels and read recent messages in the servers named in the config file (docs/SETUP.md §13).', bool('sources.discord.enabled'))}
       <h3>Email accounts</h3>
       <table><tr><td class="code">address</td><td class="code">label</td><td class="code">roles (monitor, plaud_trigger, brief_recipient)</td><td class="code">on</td><td></td></tr>${accounts}</table>
       <button class="btn small" id="acc-add">+ account</button>
       <h3>Outputs</h3>
       ${f('sinks.notion_notes.enabled', 'Notion notes', 'One page per recording in the Plaud notes database.', bool('sinks.notion_notes.enabled'))}
-      ${f('sinks.notion_tasks_mirror.enabled', 'Notion tasks mirror', 'One-way copy of every task row; never read back. Property names in the config file.', bool('sinks.notion_tasks_mirror.enabled'))}
+      ${f('sinks.notion_tasks_mirror.enabled', 'Notion tasks mirror', 'One-way copy of every task row; never read back. Property names in the config file.', bool('sinks.notion_tasks_mirror.enabled') + ' &nbsp; every ' + num('sinks.notion_tasks_mirror.sweep_minutes', 2, 1440) + ' min')}
       ${f('notify.ntfy.enabled', 'ntfy push', 'Reminders and the review push.', bool('notify.ntfy.enabled') + ' &nbsp; topic ' + text('notify.ntfy.topic', '220px'))}
       ${f('notify.morning_brief.enabled', 'Morning brief', 'Email at this time: Top, due today, reminders.', bool('notify.morning_brief.enabled') + ' ' + time('notify.morning_brief.time') + ' to ' + text('notify.morning_brief.to', '240px'))}
-      <p style="margin-top:16px"><button class="btn primary" id="settings-save">Save settings</button></p>
+      <h3>Claude</h3>
+      ${f('claude.planner.enabled', 'Morning planner', 'One Claude run before the brief: the verdict, why-now lines and proposals. Off = the plain brief.', bool('claude.planner.enabled'))}
+      ${f('claude.budgets_usd.chat_turn', 'Chat turn budget', 'Dollars a single chat turn may spend before Claude stops.', '$ ' + num('claude.budgets_usd.chat_turn', 0.05, 5) )}
+      <p style="margin-top:16px" class="hint">Every control saves when it changes. <button class="btn small" id="settings-save">Save now</button> <span id="settings-state"></span></p>
     </div>`;
   }
   function renderTray() {
@@ -618,6 +623,7 @@
     document.getElementById('tray-apply').onclick = applyAll;
     document.getElementById('tray-discard').onclick = () => { staged = new Map(); try { localStorage.removeItem('factotum.staged'); } catch (_) {} render(); };
     const save = document.getElementById('settings-save'); if (save) save.onclick = saveSettings;
+    if (ui.tab === 'settings') panel.querySelectorAll('[data-key], [data-acc]').forEach(el => el.addEventListener('change', () => { clearTimeout(saveSettings.t); saveSettings.t = setTimeout(saveSettings, 300); }));
     const accAdd = document.getElementById('acc-add'); if (accAdd) accAdd.onclick = () => { settings.accounts.push({ address: '', display: '', roles: ['monitor'], enabled: true }); render(); };
     panel.querySelectorAll('[data-accdel]').forEach(b => b.onclick = () => { settings.accounts.splice(+b.dataset.accdel, 1); render(); });
     // rail drag & drop
@@ -677,6 +683,7 @@
     document.querySelectorAll('#panel [data-key]').forEach(el => {
       const k = el.dataset.key;
       values[k] = el.type === 'checkbox' ? el.checked : el.type === 'number' ? Number(el.value) : el.value;
+      if (el.type === 'number' && (el.value === '' || Number.isNaN(values[k]))) delete values[k];
     });
     const accounts = settings.accounts.map((a, i) => ({ address: a.address, display: a.display, roles: a.roles, enabled: a.enabled }));
     document.querySelectorAll('#panel [data-acc]').forEach(el => {
@@ -684,7 +691,8 @@
       if (f === 'roles') a.roles = el.value.split(',').map(s => s.trim()).filter(Boolean);
       else if (f === 'enabled') a.enabled = el.checked; else a[f] = el.value;
     });
-    try { settings = await api('/api/settings', { method: 'PUT', body: JSON.stringify({ values, accounts }) }); toast('Settings saved'); render(); }
+    const active = document.activeElement && document.activeElement.dataset ? document.activeElement.id : null;
+    try { settings = await api('/api/settings', { method: 'PUT', body: JSON.stringify({ values, accounts }) }); toast('Settings saved'); render(); const el = active && document.getElementById(active); if (el) el.focus(); }
     catch (e) { toast('Save failed: ' + e.message); }
   }
 

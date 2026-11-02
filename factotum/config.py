@@ -23,9 +23,11 @@ SETTINGS_KEYS = [
     "notify.morning_brief.enabled", "notify.morning_brief.time", "notify.morning_brief.to",
     "sources.plaud.enabled", "sources.canvas.enabled", "sources.mail.enabled",
     "sources.calendar.enabled", "sources.calendar.calendar_id",
-    "sinks.notion_notes.enabled", "sinks.notion_tasks_mirror.enabled",
+    "sources.canvas.sweep_minutes", "sources.mail.sweep_minutes", "sources.calendar.sweep_minutes",
+    "sources.slack.enabled", "sources.discord.enabled",
+    "sinks.notion_notes.enabled", "sinks.notion_tasks_mirror.enabled", "sinks.notion_tasks_mirror.sweep_minutes",
     "scoring.project_weights",
-    "claude.models",
+    "claude.models", "claude.planner.enabled", "claude.budgets_usd.chat_turn",
 ]
 
 

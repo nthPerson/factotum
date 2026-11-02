@@ -200,6 +200,7 @@ sinks:
     source_link_prefix: https://web.plaud.ai/file/
   notion_tasks_mirror:
     enabled: true                 # one-way mirror of every task row; never read back. Toggle in Settings.
+    sweep_minutes: 10             # how often rows edited since the last pass are pushed (Settings can override)
     database_id: b1c52e69d3924aea8962bee32440ffbe
     data_source_id: be0b1624-4ea6-43dd-acc2-3a828a8ab07e
     # property names in the Notion Tasks database, in case a user's differ

@@ -231,6 +231,26 @@ def test_scheduler_runs_the_mail_sweep_on_its_interval(conn, cfg):
     assert len(calls) == 2 and one(conn, "SELECT COUNT(*) AS n FROM runs WHERE kind = 'mail_sweep'")["n"] == 0     # None = nothing to log
 
 
+def test_sweep_intervals_and_the_planner_toggle_are_settings_keys(conn, cfg):
+    """The Settings tab may override the sweep intervals (the scheduler re-reads them every tick)
+    and claude.planner.enabled; the chat budget too."""
+    from datetime import datetime
+    from types import SimpleNamespace
+    from factotum import config as C
+    from factotum.db import set_setting
+    from factotum.scheduler import Scheduler
+    for k in ("sources.mail.sweep_minutes", "sources.canvas.sweep_minutes", "sources.calendar.sweep_minutes", "sinks.notion_tasks_mirror.sweep_minutes",
+              "claude.planner.enabled", "claude.budgets_usd.chat_turn"):
+        assert k in C.SETTINGS_KEYS, k
+    set_setting(conn, "sources.mail.sweep_minutes", 5); conn.commit()
+    calls = []
+    s = Scheduler(cfg, conn, push=lambda *a, **k: None, mailer=lambda *a, **k: None, mail=SimpleNamespace(sweep_job=lambda c, e, now: (calls.append(now), None)[1]))
+    s.tick(datetime(2026, 11, 2, 10, 0)); s.tick(datetime(2026, 11, 2, 10, 4)); s.tick(datetime(2026, 11, 2, 10, 6)); s.tick(datetime(2026, 11, 2, 10, 12))
+    assert len(calls) == 3
+    assert C.get(C.effective(cfg, {"claude.budgets_usd.chat_turn": 0.2}), "claude.budgets_usd.chat_turn") == 0.2
+    assert C.get(C.effective(cfg, {"claude.budgets_usd.chat_turn": 0.2}), "claude.budgets_usd.sync_file") == 1.0      # a nested override leaves its siblings alone
+
+
 # --- T4 the morning planner -------------------------------------------------------------------
 
 def _seed_planner(conn, cfg):
