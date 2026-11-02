@@ -27,8 +27,8 @@ RETRY_AFTER = timedelta(hours=1)
 
 
 class Scheduler:
-    def __init__(self, cfg: dict, conn: sqlite3.Connection, push=notify.publish, mailer=None, calendar=None, canvas=None, mail=None):
-        self.cfg, self.conn, self.push, self.mailer, self.calendar, self.canvas, self.mail = cfg, conn, push, mailer, calendar, canvas, mail
+    def __init__(self, cfg: dict, conn: sqlite3.Connection, push=notify.publish, mailer=None, calendar=None, canvas=None, mail=None, planner=None):
+        self.cfg, self.conn, self.push, self.mailer, self.calendar, self.canvas, self.mail, self.planner = cfg, conn, push, mailer, calendar, canvas, mail, planner
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._rem_error_at: datetime | None = None
@@ -138,7 +138,19 @@ class Scheduler:
 
     def _brief(self, ecfg: dict, today: date) -> str | None:
         from . import brief
-        return brief.send(self.conn, ecfg, today, self.mailer, self.calendar)
+        pres = None
+        if self.planner is not None and C.get(ecfg, "claude.planner.enabled", True):
+            try:
+                pres = self.planner.run(self.conn, ecfg, today, calendar=self.calendar)
+            except Exception as e:   # the brief still goes out, plain, saying why
+                self.conn.rollback()
+                pres = {"ok": False, "error": f"{type(e).__name__}: {e}"[:300]}
+        out = brief.send(self.conn, ecfg, today, self.mailer, self.calendar, planner=pres)
+        if pres and pres.get("ok"):
+            out += f" · planner: {pres.get('line') or pres.get('verdict')}"
+        elif pres:
+            out += f" · planner failed: {pres.get('error')}"
+        return out
 
     # ---- the thread --------------------------------------------------------------------------
 

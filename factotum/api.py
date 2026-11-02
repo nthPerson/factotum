@@ -147,7 +147,10 @@ def create_app(cfg: dict | None = None, db_path: str | None = None) -> FastAPI:
         skip = {int(x) for x in (exclude or "").split(",") if x.strip().lstrip("-").isdigit()}
         open_tasks = [decorate(t, today, ecfg) for t in rows(conn, "SELECT * FROM tasks WHERE status = 'open'") if t["id"] not in skip]
         from .mail_sweep import review_flags
-        full = lifecycle.build_review_queue(open_tasks, today, ecfg, last, flags_by_id=review_flags(conn), cap=10**9)
+        flags = review_flags(conn)
+        full = lifecycle.build_review_queue(open_tasks, today, ecfg, last, flags_by_id=flags, cap=10**9)
+        for i in full:
+            i["flags"] = flags.get(i["task"]["id"], {})
         cap = int(C.get(ecfg, "lifecycle.review_cap", 15))
         page = full[:cap]
         if page:

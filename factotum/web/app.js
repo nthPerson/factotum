@@ -307,7 +307,7 @@
       const body = ui.reviewPaused ? '' : total ? '<p>Apply them in the tray, or keep going.</p>' : '';
       return `<div class="review"><div class="finish"><h2>${head}</h2>${body}${more}${review.last_review_at ? `<p class="hint">Last review: ${review.last_review_at}</p>` : ''}</div></div>`;
     }
-    const { task: x, reasons, primary } = items[0];
+    const { task: x, reasons, primary, flags } = items[0];
     const d = fmtDue(x.due);
     const cls = primary === 'last_call' ? 'crit' : primary === 'new' || primary === 'back' ? 'new' : 'warn';
     const idx = total - items.length;
@@ -315,7 +315,7 @@
     return `<div class="review">
       <div class="progress"><span>${idx + 1} of ${total}</span><div class="track"><div class="fill" style="width:${Math.round(100 * idx / total)}%"></div></div><span>~${Math.max(1, Math.ceil(items.length * 12 / 60))} min left</span></div>
       <div class="card" data-id="${x.id}">
-        <div class="why ${cls}">${esc(review.labels[primary])}${reasons.length > 1 ? ' · also ' + reasons.slice(1).map(r => review.labels[r]).join(', ') : ''}</div>
+        <div class="why ${cls}">${esc(review.labels[primary])}${reasons.length > 1 ? ' · also ' + reasons.slice(1).map(r => review.labels[r]).join(', ') : ''}${flags && flags.planner ? ` · <b>${esc(flags.planner)}</b>` : ''}</div>
         <h2>${esc(x.name)}</h2>
         <div class="sub"><span class="code">Task-${x.id}</span><span class="chip proj">${esc(x.project || '—')}</span>${d ? `<span class="chip due ${d.days < 0 ? 'crit' : ''} ${x.hard ? 'hard' : ''}">${d.label}</span>` : '<span class="chip">no date</span>'}<span class="chip eff">${esc(x.effort || '?')}</span><span class="chip">${x.mentions} mention${x.mentions === 1 ? '' : 's'}</span><span class="chip">score ${x.score}</span></div>
         <p>${esc(x.why_now || (x.score_reasons || []).join(' · '))}</p>${x.context ? `<p class="ctx">${esc(x.context)}</p>` : ''}

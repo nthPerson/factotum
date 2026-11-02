@@ -85,6 +85,9 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("plaud-check", help="the Plaud CLI, its login, today's recordings, and the trigger mailbox")
     sub.add_parser("mail-check", help="Mailbird's MCP from here: accounts it has versus the monitored ones")
     sub.add_parser("canvas-check", help="Canvas: the token, the items in the window, what a sweep would do")
+    p = sub.add_parser("planner", help="the morning planner now: one Claude run, then the brief's verdict and proposals")
+    p.add_argument("--dry-run", action="store_true", help="run Claude and print the JSON; write nothing")
+    p.add_argument("--send", action="store_true", help="also send the brief with the verdict")
     p = sub.add_parser("sweep", help="run one sweep now")
     p.add_argument("which", choices=["mail", "canvas", "calendar"])
     sub.add_parser("score")
@@ -109,17 +112,17 @@ def main(argv: list[str] | None = None) -> int:
         from .api import create_app
         app = create_app(cfg)
         if not a.no_scheduler:
-            from . import brief, canvas, gcal, mail_sweep, notify
+            from . import brief, canvas, gcal, mail_sweep, notify, planner
             from .scheduler import Scheduler
             # its own connection: the API holds one, and SQLite serialises writers with busy_timeout
-            Scheduler(cfg, connect(C.db_path()), push=notify.publish, mailer=brief.smtp_mailer, calendar=gcal, canvas=canvas, mail=mail_sweep).start()
+            Scheduler(cfg, connect(C.db_path()), push=notify.publish, mailer=brief.smtp_mailer, calendar=gcal, canvas=canvas, mail=mail_sweep, planner=planner).start()
             _start_plaud_trigger(cfg)
         uvicorn.run(app, host=a.host or C.get(cfg, "server.host", "127.0.0.1"), port=a.port or int(C.get(cfg, "server.port", 8750)))
     elif a.cmd == "tick":
         from . import brief, gcal, notify
-        from . import canvas, mail_sweep
+        from . import canvas, mail_sweep, planner
         from .scheduler import Scheduler
-        did = Scheduler(cfg, conn, push=notify.publish, mailer=brief.smtp_mailer, calendar=gcal, canvas=canvas, mail=mail_sweep).tick()
+        did = Scheduler(cfg, conn, push=notify.publish, mailer=brief.smtp_mailer, calendar=gcal, canvas=canvas, mail=mail_sweep, planner=planner).tick()
         print("\n".join(did) if did else "nothing due")
     elif a.cmd == "brief":
         from . import brief, gcal
@@ -194,6 +197,19 @@ def main(argv: list[str] | None = None) -> int:
         for it in items:
             row = conn.execute("SELECT id, status FROM tasks WHERE source_key = ?", (it["key"],)).fetchone()
             print(f"  {it['due'] or 'undated':16} {it['state']:15} {it['project']:12} {it['name'][:50]:50} {'Task-%d %s' % (row[0], row[1]) if row else 'NEW'}")
+    elif a.cmd == "planner":
+        from . import brief, gcal, planner
+        res = planner.run(conn, ecfg, today, calendar=gcal, dry_run=a.dry_run)
+        if not res["ok"]:
+            raise SystemExit(f"planner failed: {res['error']}")
+        if a.dry_run:
+            print(json.dumps(res["data"], indent=1, ensure_ascii=False)); print(f"\n(dry run · ${res['cost_usd']:.2f} · prompt under data/runs/planner/{today}/)")
+        else:
+            print(res["line"], f"· ${res['cost_usd']:.2f}")
+            for r in res["rejected"]:
+                print("  rejected:", r)
+            if a.send:
+                print(brief.send(conn, ecfg, today, brief.smtp_mailer, gcal, planner=res))
     elif a.cmd == "sweep":
         from datetime import datetime as _dt
         from . import canvas, gcal, mail_sweep

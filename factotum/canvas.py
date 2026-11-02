@@ -169,5 +169,5 @@ def sweep_job(conn: sqlite3.Connection, cfg: dict, now: datetime) -> str | None:
     if not token:
         raise RuntimeError("CANVAS_TOKEN is not set (.env); turn sources.canvas off in Settings or add the token")
     data = fetch(cfg, token, now.date())
-    set_setting(conn, ANNOUNCEMENTS_KEY, json.dumps(data["announcements"][-20:]))
+    set_setting(conn, ANNOUNCEMENTS_KEY, data["announcements"][-20:])
     return sweep(conn, cfg, normalize(cfg, data["items"]), now.date())

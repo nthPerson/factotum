@@ -54,7 +54,7 @@ def _fmt_due(t: dict, today: date) -> str:
     return f"{when}{' · hard' if t.get('hard') else ''}"
 
 
-def build(conn: sqlite3.Connection, cfg: dict, today: date, events: list[dict] | None = None, calendar_note: str | None = None) -> dict:
+def build(conn: sqlite3.Connection, cfg: dict, today: date, events: list[dict] | None = None, calendar_note: str | None = None, planner: dict | None = None) -> dict:
     open_tasks = rows(conn, "SELECT * FROM tasks WHERE status = 'open'")
     for t in open_tasks:
         t["score"], t["priority"], _ = scoring.score(t, today, cfg)
@@ -91,7 +91,14 @@ def build(conn: sqlite3.Connection, cfg: dict, today: date, events: list[dict] |
             H.append(f'<li style="margin:2px 0">{escape(main)}' + (f' <span style="color:#777;font-size:12px">{escape(meta)}</span>' if meta else '') + '</li>')
         H.append('</ul>')
 
-    row = lambda t, meta=None: (f"Task-{t['id']} {t['name']}", meta if meta is not None else " · ".join(x for x in (t.get("project"), _fmt_due(t, today)) if x))  # noqa: E731
+    row = lambda t, meta=None: (f"Task-{t['id']} {t['name']}", meta if meta is not None else " · ".join(x for x in (t.get("project"), _fmt_due(t, today), t.get("why_now")) if x))  # noqa: E731
+    if planner:
+        if planner.get("ok") and planner.get("verdict"):
+            T.append(planner["verdict"])
+            H.append(f'<p style="margin:10px 0 14px;font-size:15px;line-height:1.4"><b>{escape(planner["verdict"])}</b></p>')
+        elif not planner.get("ok"):
+            note = f"The planner did not run: {planner.get('error') or 'unknown error'}"
+            T.append(note); H.append(f'<p style="margin:10px 0;color:#a33;font-size:12px">{escape(note)}</p>')
     section("Top", [row(t) for t in top], "Nothing pinned. Pin up to 7 from the Today tab.")
     section("Overdue · hard deadlines", [row(t) for t in overdue])
     section("Due today", [row(t) for t in due_today], "Nothing due today.")
@@ -106,6 +113,9 @@ def build(conn: sqlite3.Connection, cfg: dict, today: date, events: list[dict] |
             ev_lines.append((f"{when}  {e.get('summary') or '(no title)'}", "accepted" if e.get("self_status") == "accepted" else ""))
         section("Calendar · today and tomorrow", ev_lines, calendar_note or "Nothing on the calendar.")
     section("Closed since yesterday", [(f"Task-{c['id']} {c['name']}", f"{c['new'].strip(chr(34))} · by {c['closed_by'] or '?'}") for c in closed])
+    if planner and planner.get("ok"):
+        section("Done by the planner", [(a, "") for a in planner.get("applied") or []])
+        section("For Review · the planner suggests", [(a, "") for a in planner.get("staged") or []])
     section("Waiting on", [row(t, t.get("waiting_on") or "") for t in waiting])
     foot = f"Review holds {review_n} item{'' if review_n == 1 else 's'}." if review_n else "Review is empty."
     base = str(C.get(cfg, "server.public_url", "")).rstrip("/")
@@ -118,7 +128,7 @@ def build(conn: sqlite3.Connection, cfg: dict, today: date, events: list[dict] |
     return {"subject": subject, "text": "\n".join([subject] + T), "html": html}
 
 
-def send(conn: sqlite3.Connection, cfg: dict, today: date, mailer, calendar=None) -> str:
+def send(conn: sqlite3.Connection, cfg: dict, today: date, mailer, calendar=None, planner: dict | None = None) -> str:
     """Build and send today's brief. `mailer(cfg, to, subject, text, html)`; `calendar` is the gcal
     module or None. Returns a one-line summary for the runs log."""
     to = C.get(cfg, "notify.morning_brief.to")
@@ -130,6 +140,6 @@ def send(conn: sqlite3.Connection, cfg: dict, today: date, mailer, calendar=None
             events = calendar.events(cfg, datetime.combine(today, datetime.min.time()), datetime.combine(today + timedelta(days=2), datetime.min.time()))
         except Exception as e:   # the brief still goes out without the calendar
             note = f"calendar unavailable: {type(e).__name__}: {str(e)[:120]}"
-    b = build(conn, cfg, today, events, note)
+    b = build(conn, cfg, today, events, note, planner=planner)
     mailer(cfg, to, b["subject"], b["text"], b["html"])
     return f"sent to {to}: {b['subject']}"
