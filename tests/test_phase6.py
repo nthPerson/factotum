@@ -77,14 +77,12 @@ def test_mirror_properties_follow_the_schema_and_the_config_map(cfg, conn, monke
 
 def test_mirror_sweep_creates_updates_since_the_watermark_caps_and_records_page_ids(cfg, conn, monkeypatch):
     from factotum import notion_mirror as NM
-    from factotum.db import get_settings
     monkeypatch.setenv("NOTION_TOKEN", "t")
-    upsert_task(conn, task(id=1, name="Old mirrored", notion_page_id="page-old", edited_at="2026-10-01T00:00:00+00:00"))
-    upsert_task(conn, task(id=2, name="Edited since", notion_page_id="page-2", edited_at="2026-11-02T10:00:00+00:00"))
+    upsert_task(conn, task(id=1, name="Old mirrored", notion_page_id="page-old", edited_at="2026-10-01T00:00:00+00:00", mirrored_at="2026-11-01T00:00:00+00:00"))
+    upsert_task(conn, task(id=2, name="Edited since", notion_page_id="page-2", edited_at="2026-11-02T10:00:00+00:00", mirrored_at="2026-11-01T00:00:00+00:00"))
     upsert_task(conn, task(id=3, name="Never mirrored", edited_at="2026-10-05T00:00:00+00:00"))
     upsert_task(conn, task(id=4, name="Also new", edited_at="2026-11-02T11:00:00+00:00"))
-    from factotum.db import set_setting
-    set_setting(conn, "state.mirror.watermark", "2026-11-01T00:00:00+00:00"); conn.commit()
+    conn.commit()
     fake = FakeNotion()
     dry = NM.sweep(conn, cfg, dry_run=True, transport=fake.transport())
     assert dry["pending"] == 3 and fake.pages("POST") == [] and fake.pages("PATCH") == []
@@ -93,19 +91,22 @@ def test_mirror_sweep_creates_updates_since_the_watermark_caps_and_records_page_
     assert res["created"] == 2 and res["updated"] == 0 and res["pending"] == 1
     assert one(conn, "SELECT notion_page_id FROM tasks WHERE id = 3")["notion_page_id"] == "page-1" and one(conn, "SELECT notion_page_id FROM tasks WHERE id = 4")["notion_page_id"] == "page-2"
     assert one(conn, "SELECT edited_at FROM tasks WHERE id = 3")["edited_at"] == "2026-10-05T00:00:00+00:00"     # storing the page id is not an edit
-    assert fake.pages("PATCH") == [] and get_settings(conn)["state.mirror.watermark"] == "2026-11-01T00:00:00+00:00"   # no edit pushed yet: the watermark stays
+    assert fake.pages("PATCH") == [] and one(conn, "SELECT mirrored_at FROM tasks WHERE id = 3")["mirrored_at"] == "2026-10-05T00:00:00+00:00"
     create_body = fake.pages("POST")[0][1]
     assert create_body["parent"] == {"type": "data_source_id", "data_source_id": cfg["sinks"]["notion_tasks_mirror"]["data_source_id"]} and create_body["properties"]["Name"]["title"][0]["text"]["content"] == "Never mirrored"
     assert sum(1 for m, p, _, _ in fake.calls if m == "GET") == 1                                   # the schema once per sweep
     res2 = NM.sweep(conn, cfg, transport=fake.transport())
     assert res2["updated"] == 1 and res2["created"] == 0 and res2["pending"] == 0 and [p for p, _ in fake.pages("PATCH")] == ["/v1/pages/page-2"]
-    assert get_settings(conn)["state.mirror.watermark"] == "2026-11-02T11:00:00+00:00"              # everything went: the newest edit seen
+    # an edit after the push is pending again; a refused row is stamped and reported, not retried every pass
+    conn.execute("UPDATE tasks SET edited_at = '2026-11-02T12:00:00+00:00' WHERE id = 1"); conn.commit()
+    bad = FakeNotion(fail_update_for={"page-old"})
+    res3 = NM.sweep(conn, cfg, transport=bad.transport())
+    assert res3["failed"] == ["Task-1: 400 Status is expected to be select."] and res3["pending"] == 0
     assert NM.sweep(conn, cfg, transport=fake.transport())["pending"] == 0
-    # --all re-pushes every row; a row Notion refuses is reported, not fatal
-    fake2 = FakeNotion(fail_update_for={"page-old"})
-    res3 = NM.sweep(conn, cfg, all_rows=True, transport=fake2.transport())
-    assert res3["updated"] == 3 and res3["failed"] == ["Task-1: 400 Status is expected to be select."]
-    assert one(conn, "SELECT notion_page_id FROM tasks WHERE id = 1")["notion_page_id"] == "page-old"
+    # --all re-pushes every row
+    fake2 = FakeNotion()
+    res4 = NM.sweep(conn, cfg, all_rows=True, transport=fake2.transport())
+    assert res4["updated"] == 4 and res4["failed"] == [] and one(conn, "SELECT notion_page_id FROM tasks WHERE id = 1")["notion_page_id"] == "page-old"
 
 
 def test_scheduler_runs_the_mirror_on_its_interval_when_the_sink_is_on(conn, cfg):

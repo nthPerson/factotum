@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   completed_at TEXT, closed_by TEXT,
   snoozed_until TEXT, last_reviewed_at TEXT,
   last_offered_at TEXT,                          -- last day a Review page showed this row (the automations only expire what was shown)
-  calendar_event TEXT, notion_page_id TEXT, canvas_id TEXT
+  calendar_event TEXT, notion_page_id TEXT, canvas_id TEXT,
+  mirrored_at TEXT                               -- when the Notion mirror last pushed this row (not an edit)
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project);
@@ -101,7 +102,7 @@ TASK_FIELDS = [
     "due", "due_is_datetime", "hard", "effort", "source", "source_key", "source_link", "account",
     "counterpart", "waiting_on", "waiting_since", "context", "why_now", "score", "priority",
     "manual_priority", "mentions", "last_mention_at", "created_at", "edited_at", "completed_at",
-    "closed_by", "snoozed_until", "last_reviewed_at", "last_offered_at", "calendar_event", "notion_page_id", "canvas_id",
+    "closed_by", "snoozed_until", "last_reviewed_at", "last_offered_at", "calendar_event", "notion_page_id", "canvas_id", "mirrored_at",
 ]
 
 
@@ -121,7 +122,7 @@ def connect(path: str | Path) -> sqlite3.Connection:
 
 # Columns added after a table first shipped. CREATE TABLE IF NOT EXISTS leaves an existing table
 # alone, so init_db adds these to databases created before them.
-MIGRATIONS = {"reminders": {"repeat": "TEXT", "sent_at": "TEXT"}, "tasks": {"last_offered_at": "TEXT"},
+MIGRATIONS = {"reminders": {"repeat": "TEXT", "sent_at": "TEXT"}, "tasks": {"last_offered_at": "TEXT", "mirrored_at": "TEXT"},
               "chat_messages": {"drafts_json": "TEXT", "rejected_json": "TEXT", "error": "TEXT", "duration_ms": "INTEGER"}}
 
 

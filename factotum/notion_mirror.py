@@ -9,9 +9,10 @@ once per pass, so a renamed or retyped column is a YAML edit or nothing at all.
     sweep(conn, cfg, *, all_rows=False, dry_run=False, cap=60) -> {created, updated, failed, pending}
     sweep_job(conn, cfg, now_local)             -> what the scheduler calls
 
-Which rows: every row with no `notion_page_id` yet, plus every row edited since the watermark
-(`state.mirror.watermark`, the edited_at of the last row pushed). The page id a create returns is
-stored on the row without touching edited_at, so a mirror pass never schedules itself again.
+Which rows: every row with no `notion_page_id` yet (creates, in id order), plus every row edited
+since it was last pushed (`mirrored_at`, stamped per row without touching edited_at, so a pass never
+schedules itself again). A row Notion refuses is stamped too and reported; it waits for its next
+edit or `--all`.
 Read-only columns in Notion (unique_id, created_time, formulas, rollups) are skipped: "Task ID" in
 Notion is Notion's own counter and only matches Factotum's id for rows that came from the import.
 Notion allows ~3 requests a second; the scheduler pass is capped and the CLI loops with a pause.
@@ -22,12 +23,12 @@ import os
 import re
 import sqlite3
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 
 import httpx
 
 from . import config as C, scoring
-from .db import get_settings, rows, set_setting
+from .db import rows
 
 NOTION = "https://api.notion.com/v1"
 TEXT_CAP = 2000
@@ -40,6 +41,7 @@ DEFAULT_STATUS_MAP = {"open": "Next", "done": "Done", "dropped": "Dropped", "fad
 READ_ONLY = {"unique_id", "created_time", "created_by", "last_edited_time", "last_edited_by", "formula", "rollup", "button", "verification"}
 _HEX32 = re.compile(r"([0-9a-f]{32})$")
 PAUSE_S = 0.35
+SETTLE_S = 5
 
 
 class MirrorError(Exception):
@@ -146,12 +148,14 @@ def properties(cfg: dict, t: dict, sch: dict[str, str], notes: list[str], today:
 
 def _pending(conn: sqlite3.Connection, all_rows: bool) -> list[dict]:
     """Rows to push: creates first, in id order (Notion's own Task ID counter then keeps pace with
-    Factotum's ids for as long as nothing else creates rows there), then edits in edited_at order."""
+    Factotum's ids for as long as nothing else creates rows there), then edits in edited_at order.
+    `mirrored_at` holds the edited_at that was pushed, and a row edited in the last few seconds waits
+    for the next pass, so an edit landing in the same second as a push is never lost."""
     if all_rows:
         return rows(conn, "SELECT * FROM tasks ORDER BY id")
-    wm = get_settings(conn).get("state.mirror.watermark") or ""
+    settled = (datetime.now(timezone.utc) - timedelta(seconds=SETTLE_S)).replace(microsecond=0).isoformat()
     return (rows(conn, "SELECT * FROM tasks WHERE notion_page_id IS NULL ORDER BY id")
-            + rows(conn, "SELECT * FROM tasks WHERE notion_page_id IS NOT NULL AND edited_at > ? ORDER BY edited_at, id", (wm,)))
+            + rows(conn, "SELECT * FROM tasks WHERE notion_page_id IS NOT NULL AND (mirrored_at IS NULL OR edited_at > mirrored_at) AND edited_at <= ? ORDER BY edited_at, id", (settled,)))
 
 
 def sweep(conn: sqlite3.Connection, cfg: dict, *, all_rows: bool = False, dry_run: bool = False, cap: int = 60, transport=None, pause: float | None = None) -> dict:
@@ -173,7 +177,6 @@ def sweep(conn: sqlite3.Connection, cfg: dict, *, all_rows: bool = False, dry_ru
     today = date.today()
     created = updated = 0
     failed: list[str] = []
-    last_update_edit = None          # the watermark follows the edits, which are processed in edited_at order
     with httpx.Client(timeout=60, transport=transport) as client:
         for t in todo:
             props = properties(cfg, t, sch, note_ids(conn, t["id"]), today)
@@ -187,7 +190,6 @@ def sweep(conn: sqlite3.Connection, cfg: dict, *, all_rows: bool = False, dry_ru
                     if r.status_code != 200:
                         raise MirrorError(f"{r.status_code} {_message(r)}")
                     updated += 1
-                    last_update_edit = t["edited_at"]
                 else:
                     r = client.post(f"{NOTION}/pages", headers=_headers(version), json={"parent": parent, "properties": props})
                     if r.status_code != 200:
@@ -196,14 +198,9 @@ def sweep(conn: sqlite3.Connection, cfg: dict, *, all_rows: bool = False, dry_ru
                     created += 1
             except (MirrorError, httpx.HTTPError) as e:
                 failed.append(f"Task-{t['id']}: {e}"[:300])
-                if t.get("notion_page_id"):
-                    last_update_edit = t["edited_at"]      # a refused edit waits for its next edit or --all, not forever
+            conn.execute("UPDATE tasks SET mirrored_at = ? WHERE id = ?", (t.get("edited_at"), t["id"]))   # pushed or refused: wait for the next edit
             if pause:
                 time.sleep(pause)
-    if len(todo) == len(pend):       # everything pending went: the watermark is the newest edit seen (a create included)
-        set_setting(conn, "state.mirror.watermark", max((t["edited_at"] for t in todo), default=""))
-    elif last_update_edit:
-        set_setting(conn, "state.mirror.watermark", last_update_edit)
     conn.commit()
     return {"created": created, "updated": updated, "failed": failed, "pending": len(_pending(conn, False))}
 
