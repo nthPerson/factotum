@@ -99,19 +99,69 @@ curl -s https://api.notion.com/v1/databases/b1c52e69d3924aea8962bee32440ffbe \
 
 ## 6. Google Calendar (optional, phase 2)
 
-Factotum reads your calendar from Python so the sweep can close Dated tasks on passed events,
-and writes events for deadlines. It needs an OAuth client of type **Desktop app**:
+Factotum reads your calendar from Python so the sweep can close Dated tasks whose event has
+passed, show the next days in the brief, and (later) put deadlines on the calendar. It talks to
+Google as *you*, through an OAuth "Desktop app" client that you create once in Google Cloud.
+Nothing here costs money and no billing account is needed.
 
-1. https://console.cloud.google.com → create or pick a project → APIs & Services → Library →
-   enable **Google Calendar API**.
-2. APIs & Services → OAuth consent screen → External, add yourself as a test user.
-3. Credentials → Create credentials → OAuth client ID → Application type **Desktop app** →
-   download the JSON → save as `config/google-credentials.json` (git-ignored).
-4. `python -m factotum google-auth` (phase 2) opens the browser once and writes
-   `config/google-token.json`. Then turn **Google Calendar** on in Settings.
+Two accounts are involved and they may be the same one: the Google account that **owns the Cloud
+project** (any account) and the Google account **whose calendar** you want (for Robert:
+robertashe2.0@gmail.com, where most events are). You consent with the second one in step 6.
 
-A service account also works if you share the calendar with its address; set
-`sources.calendar.provider: google-service` (phase 2).
+The console has been reorganised several times; this is the 2025–2026 layout. If a page is named
+differently for you, the old names are in brackets. Use the search box at the top of the console
+("Search for resources, docs, products") to jump to any page by name.
+
+1. **Project.** https://console.cloud.google.com → project picker (top left) → pick `Factotum`
+   (you already created it). Everything below is inside that project.
+2. **Enable the API** (done already): search "Google Calendar API" → Enable.
+3. **The consent screen** [older UI: "OAuth consent screen"]. Search "Google Auth Platform" →
+   **Overview** → if it says "Google Auth Platform not configured yet", click **Get started**:
+   - App information: App name `Factotum`, User support email = your address → Next.
+   - Audience: **External** → Next. (Internal is only offered to Google Workspace organisations.)
+   - Contact information: your address → Next.
+   - Agree to the policy → Continue → **Create**.
+4. **Test user.** Google Auth Platform → **Audience** → under *Test users* click **Add users** →
+   enter the calendar account (robertashe2.0@gmail.com) → Save. Only accounts on this list can
+   consent while the app is in *Testing*.
+5. **Desktop client** [older UI: "Credentials → Create credentials → OAuth client ID"].
+   Google Auth Platform → **Clients** → **Create client** → Application type **Desktop app** →
+   Name `Factotum on mf-pc` → Create. A dialog shows the client id and secret; click
+   **Download JSON** (you can also download it later from the ⬇ icon in the Clients list). Save
+   the file on the WSL side as `~/factotum/config/google-credentials.json` (git-ignored). From
+   Windows the WSL path is `\\wsl$\Ubuntu\home\robert\factotum\config\`. Do not create a
+   "Web application" client: its redirect rules break the local flow with `redirect_uri_mismatch`.
+6. **Consent once, from WSL:**
+   ```bash
+   cd ~/factotum && .venv/bin/python -m factotum google-auth
+   ```
+   It opens the Windows browser (or prints a URL to paste). Sign in with the calendar account.
+   Google shows **"Google hasn't verified this app"** because the app is yours and unreviewed:
+   click **Advanced** → **Go to Factotum (unsafe)** → tick the calendar permissions → Continue.
+   The browser lands on a "The authentication flow has completed" page; the command writes
+   `config/google-token.json` and prints the next few events as a check. If the browser cannot
+   reach the localhost page (it happens on some VPNs), run
+   `python -m factotum google-auth --manual`, which prints the URL and asks you to paste back the
+   address bar of the page you land on, even if that page says the site cannot be reached.
+7. **Avoid the 7-day expiry.** While the consent screen is in *Testing*, Google expires the
+   token after 7 days and Factotum would then stop reading your calendar and ask you to run
+   `google-auth` again. Switch it to production: Google Auth Platform → **Audience** →
+   **Publish app** → Confirm. For the Calendar scopes this needs no review: the app stays
+   "unverified" (the warning in step 6 keeps appearing, only to you) but tokens stop expiring.
+   Publish first, then run step 6, because a token issued during Testing keeps its 7-day limit.
+   If you published after consenting, delete `config/google-token.json` and run step 6 again.
+8. Settings tab → **Google Calendar** on (or `sources.calendar.enabled: true` in
+   `config/factotum.yaml`). `sources.calendar.calendar_id: primary` is the calendar of the
+   account that consented; another calendar's id is under its Settings → "Integrate calendar".
+
+Check: `.venv/bin/python -m factotum calendar-check` prints the next 7 days of events. A
+`401`/`invalid_grant` there means the token expired or was revoked: run `google-auth` again.
+
+**Service account instead of OAuth** (an alternative, not needed): a service account can read a
+calendar you share with its email address, with no consent screen and no expiry, but Google
+blocks personal Gmail calendars from being shared with service accounts in some regions, and it
+cannot act as you. Supported by `sources.calendar.provider: google-service` with the key file in
+`credentials_file`.
 
 ## 7. Cloudflare tunnel and Access
 
