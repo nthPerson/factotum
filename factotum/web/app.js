@@ -12,12 +12,14 @@
   let lastBatch = null;
   let chat = { threads: null, current: null, messages: [], live: null, busy: false, from: null };   // from: {review: id} when a turn was asked from a Review card
   let lastTap = { id: null, at: 0 };   // for the hand-rolled double-click on rows
-  let ui = { tab: 'today', focus: null, sel: new Set(), open: new Set(), reviewIdx: 0, laterOpen: false, reviewPaused: false, rvNote: { id: null, text: '' }, remOpen: null, dueOpen: null, rvReply: null };
+  let ui = { tab: 'today', focus: null, sel: new Set(), open: new Set(), reviewIdx: 0, laterOpen: false, reviewPaused: false, rvNote: { id: null, text: '' }, remOpen: null, dueOpen: null, rvReply: null,
+             railOpen: !window.matchMedia('(max-width: 860px)').matches, chatDrawer: false };
   try { const h = location.hash.replace('#', ''); if (TABS.includes(h)) ui.tab = h; } catch (_) {}
   try { const s = JSON.parse(localStorage.getItem('factotum.staged') || '[]'); staged = new Map(s); } catch (_) {}
   for (const [k, v] of staged) { if (!v || typeof v !== 'object') staged.delete(k); else if (v.task_id == null) v.task_id = typeof k === 'number' ? k : parseInt(k, 10); }  // trays saved before entries carried task_id
 
   const TODAY = () => new Date(data.today + 'T12:00:00');
+  const PHONE = () => window.matchMedia('(max-width: 700px)').matches;
   const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const byId = id => data.tasks.find(t => t.id === id);
   const api = (path, opts) => fetch(path, Object.assign({ headers: { 'Content-Type': 'application/json' } }, opts)).then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
@@ -173,7 +175,7 @@
     const p = document.getElementById('panel');
     const fns = { today: renderToday, timeline: renderTimeline, projects: renderProjects, review: renderReview, chat: renderChat, log: renderLog, settings: renderSettings };
     p.innerHTML = pendingHtml() + fns[ui.tab]();
-    document.querySelectorAll('#tabs button').forEach(b => b.setAttribute('aria-selected', b.dataset.tab === ui.tab));
+    document.querySelectorAll('#tabs button').forEach(b => { b.setAttribute('aria-selected', b.dataset.tab === ui.tab); if (b.dataset.tab === ui.tab && PHONE() && b.scrollIntoView) b.scrollIntoView({ block: 'nearest', inline: 'center' }); });
     document.getElementById('n-today').textContent = openOnes().filter(x => x.due && fmtDue(x.due).days <= 1).length || '';
     document.getElementById('n-review').textContent = review && (review.total || (review.suggestions || []).length) ? review.total + (review.suggestions || []).filter(x => !x.created).length : '';
     document.getElementById('remind').innerHTML = settings && settings.effective['notify.review_time']
@@ -189,16 +191,20 @@
   }
   function renderRail() {
     const top = openOnes().filter(x => x.top_rank).sort((a, b) => a.top_rank - b.top_rank);
-    document.getElementById('rail').innerHTML = `<h2>Top <span>${top.length} of ${data.top_cap}</span></h2>
+    const rail = document.getElementById('rail');
+    rail.classList.toggle('collapsed', !ui.railOpen);
+    rail.innerHTML = `<h2 id="rail-head"><span class="lbl">Top <span>${top.length} of ${data.top_cap}</span></span><span class="tog" aria-hidden="true">${ui.railOpen ? '▾' : '▸'}</span></h2>
       <ol id="rail-list">${top.map(x => { const d = fmtDue(x.due); return `<li draggable="true" data-id="${x.id}"><span class="grip">⋮⋮</span><span class="t" title="${esc(x.name)}">${esc(x.name)}</span>${d ? `<span class="due">${d.label}</span>` : ''}</li>`; }).join('')}</ol>
       <div class="drop" id="rail-drop">Drag a row here, or press <b>t</b></div>`;
+    document.getElementById('rail-head').onclick = () => { ui.railOpen = !ui.railOpen; renderRail(); wireRail(); };
   }
   function attachedIds() { return ui.sel.size ? [...ui.sel] : (ui.focus ? [ui.focus] : []); }
   function composer() {
     const ids = attachedIds();
     return `<div class="composer"><div class="attach">${ids.length ? 'Attached: ' + ids.map(id => `<span class="chip">Task-${id}</span>`).join('') : 'Nothing attached · tap a row to attach it'}</div>
-      <div class="cmd"><input id="cmd" placeholder="Command: done 389 392 · push 364 fri · top 23 · longterm 38 · or ask Claude in plain words" aria-label="Prompt or command"><button class="btn primary" id="cmd-go">Send</button></div>
-      <p class="hint">Tap a row to select it (the bulk bar appears) · <kbd>j</kbd><kbd>k</kbd> move · <kbd>d</kbd> done · <kbd>x</kbd> drop · <kbd>s</kbd> snooze · <kbd>t</kbd> top · <kbd>l</kbd> long-term · <kbd>e</kbd> details · double-click a row for details · <kbd>Esc</kbd> deselect</p></div>
+      <div class="cmd"><input id="cmd" placeholder="${PHONE() ? 'done 389 · push 364 fri · or ask Claude' : 'Command: done 389 392 · push 364 fri · top 23 · longterm 38 · or ask Claude in plain words'}" aria-label="Prompt or command"><button class="btn primary" id="cmd-go">Send</button></div>
+      <p class="hint keys">Tap a row to select it (the bulk bar appears) · <kbd>j</kbd><kbd>k</kbd> move · <kbd>d</kbd> done · <kbd>x</kbd> drop · <kbd>s</kbd> snooze · <kbd>t</kbd> top · <kbd>l</kbd> long-term · <kbd>e</kbd> details · double-click a row for details · <kbd>Esc</kbd> deselect</p>
+      <p class="hint touch">Tap a row to select it · double-tap or ▸ for details</p></div>
       <div class="bulk" id="bulk"><b id="bulk-n"></b> selected
         <button class="btn small" data-bulk="done">Done</button><button class="btn small" data-bulk="drop">Drop</button>
         <button class="btn small" data-bulk="snooze">Snooze to tomorrow</button>
@@ -239,8 +245,9 @@
     return `<div class="${cls}" data-id="${x.id}">
       <div class="main">
         <input type="checkbox" id="ck-${x.id}" aria-label="Select" ${ui.sel.has(x.id) ? 'checked' : ''}>
-        <div class="title"><span class="code">Task-${x.id}</span><span class="name">${esc(x.name)}</span></div>
-        <div class="meta">${chips}<button class="chev" aria-label="Details" data-chev="${x.id}"></button></div>
+        <div class="title"><span class="code">Task-${x.id}</span> <span class="name">${esc(x.name)}</span></div>
+        <button class="chev" aria-label="Details" data-chev="${x.id}"></button>
+        <div class="meta">${chips}</div>
       </div>
       <div class="details">
         <dl><dt>Score</dt><dd>${x.score} · ${x.priority} · ${esc((x.score_reasons || []).join(' · '))}</dd>
@@ -332,7 +339,7 @@
         <div class="why ${cls}">${esc(review.labels[primary])}${reasons.length > 1 ? ' · also ' + reasons.slice(1).map(r => review.labels[r]).join(', ') : ''}${flags && flags.planner ? ` · <b>${esc(flags.planner)}</b>` : ''}</div>
         <h2>${esc(x.name)}</h2>
         <div class="sub"><span class="code">Task-${x.id}</span><span class="chip proj">${esc(x.project || '—')}</span>${d ? `<span class="chip due ${d.days < 0 ? 'crit' : ''} ${x.hard ? 'hard' : ''}">${d.label}</span>` : '<span class="chip">no date</span>'}<span class="chip eff">${esc(x.effort || '?')}</span><span class="chip">${x.mentions} mention${x.mentions === 1 ? '' : 's'}</span><span class="chip">score ${x.score}</span></div>
-        <p>${esc(x.why_now || (x.score_reasons || []).join(' · '))}</p>${x.context ? `<p class="ctx">${esc(x.context)}</p>` : ''}
+        <p>${esc(x.why_now || (x.score_reasons || []).join(' · '))}</p>${x.context ? `<p class="ctx ${ui.ctxOpen === x.id ? 'open' : ''}">${esc(x.context)}</p>${x.context.length > 280 ? `<button class="btn small more" data-ctx-more="${x.id}">${ui.ctxOpen === x.id ? 'Less' : 'Show all context'}</button>` : ''}` : ''}
         <textarea id="rv-note" rows="2" placeholder="Note to save with this decision (optional) — appended to the task's context">${esc(note)}</textarea>
         <div class="links">${x.source_link ? `<a href="${esc(x.source_link)}" target="_blank" rel="noopener">${x.source === 'Plaud' ? 'Plaud note' : 'Source'}</a>` : ''}</div>
         <div class="big"><button class="done" data-rv="done">Done <kbd>d</kbd></button><button data-rv="keep">Keep <kbd>k</kbd></button><button class="later" data-rv="later">Later <kbd>s</kbd></button><button class="drop" data-rv="drop">Drop <kbd>x</kbd></button></div>
@@ -421,11 +428,16 @@
   }
   function renderChat() {
     if (!chat.threads) { loadChatThreads(); return '<div class="empty">Loading chat…</div>'; }
-    const opts = chat.threads.map(t => `<option value="${t.id}" ${t.id === chat.current ? 'selected' : ''}>${esc(t.title || 'untitled')} · ${new Date(t.last_at || t.created_at).toLocaleDateString([], { month: 'short', day: 'numeric' })}</option>`).join('');
-    const head = `<div class="chat-head"><select id="chat-thread" aria-label="Thread">${opts || '<option value="">no threads yet</option>'}</select><button class="btn small" id="chat-new">New thread</button></div>`;
+    const when = t => new Date(t.last_at || t.created_at).toLocaleDateString([], { month: 'short', day: 'numeric' });
+    const cur = chat.threads.find(t => t.id === chat.current);
+    const list = `<nav class="threads ${ui.chatDrawer ? 'open' : ''}" id="chat-threads" aria-label="Threads">
+        <div class="thead"><b>Threads</b><button class="btn small primary" id="chat-new">+ New</button><button class="btn small close" id="chat-threads-close" aria-label="Close">×</button></div>
+        ${chat.threads.length ? chat.threads.map(t => `<button class="thread ${t.id === chat.current ? 'cur' : ''}" data-thread="${t.id}"><span class="t">${esc(t.title || 'untitled')}</span><span class="d">${when(t)}</span></button>`).join('') : '<div class="hint">No threads yet.</div>'}
+      </nav>`;
+    const head = `<div class="chat-head"><button class="btn small" id="chat-threads-toggle" aria-label="Threads">☰ Threads</button><span class="cur">${cur ? esc(cur.title || 'untitled') : 'New thread'}</span></div>`;
     const body = chat.messages.length || chat.live ? chat.messages.map(messageHtml).join('') + liveHtml()
       : '<div class="note">Ask about your tasks, your mail or your calendar. Attach tasks by selecting rows on another tab first. Everything Claude proposes is staged into the tray; nothing changes until you Apply. Drafts it writes land in Mailbird and are never sent.</div>';
-    return `<div class="chat">${head}<div class="msgs" id="msgs">${body}</div>${composer()}</div>`;
+    return `<div class="chat">${list}<div class="chat-main">${head}<div class="msgs" id="msgs">${body}</div>${composer()}</div><div class="backdrop ${ui.chatDrawer ? 'on' : ''}" id="chat-backdrop"></div></div>`;
   }
   function reviewAsk(id) {
     const live = chat.busy && chat.from && chat.from.review === id ? `<div class="hint"><span class="spin"></span> ${esc((chat.live || {}).status || 'Working…')}</div>` : '';
@@ -490,7 +502,7 @@
         ${b.changes.map(c => c.field === 'evidence' ? `<div class="logc">${c.task_id ? `<span class="code">Task-${c.task_id}</span> <span class="name">${esc(c.task_name || '')}</span>` : '<span class="code">suggestion</span>'} <span class="f">evidence #${c.new && c.new.evidence_id}</span> ${esc((c.new || {}).verdict || '')}</div>`
           : `<div class="logc"><span class="code">Task-${c.task_id}</span> <span class="name">${esc(c.task_name || '')}</span> <span class="f">${esc(c.field)}</span> ${val(c.old)} → ${val(c.new)}</div>`).join('')}
       </div>`).join('') || '<div class="empty">No batches yet.</div>';
-    const runs = logData.runs.length ? `<table class="runs"><tr><th>Run</th><th>Started</th><th>Took</th><th>Cost</th><th>Result</th></tr>${logData.runs.map(r => `<tr class="${r.ok ? '' : 'bad'}"><td>${esc(r.kind)}</td><td>${when(r.started_at)}</td><td>${r.duration_ms ? Math.round(r.duration_ms / 1000) + ' s' : ''}</td><td>${r.cost_usd != null ? '$' + Number(r.cost_usd).toFixed(2) : ''}</td><td>${esc(r.error || r.summary || (r.ok ? 'ok' : ''))}</td></tr>`).join('')}</table>`
+    const runs = logData.runs.length ? `<div class="scroll"><table class="runs"><tr><th>Run</th><th>Started</th><th>Took</th><th>Cost</th><th>Result</th></tr>${logData.runs.map(r => `<tr class="${r.ok ? '' : 'bad'}"><td>${esc(r.kind)}</td><td>${when(r.started_at)}</td><td>${r.duration_ms ? Math.round(r.duration_ms / 1000) + ' s' : ''}</td><td>${r.cost_usd != null ? '$' + Number(r.cost_usd).toFixed(2) : ''}</td><td>${esc(r.error || r.summary || (r.ok ? 'ok' : ''))}</td></tr>`).join('')}</table></div>`
       : '<div class="note">Nothing has run yet. Reminders, the review push, the expire pass and the morning brief land here when they do something (cost $0.00); Claude runs with their cost start in phase 3.</div>';
     return `<div class="log"><h3>Changes</h3>${batches}<h3>Runs · automations and Claude</h3>${runs}</div>`;
   }
@@ -584,6 +596,7 @@
     document.body.classList.toggle('bulk-on', ui.sel.size > 0);
     panel.querySelectorAll('[data-proj]').forEach(b => b.addEventListener('click', () => { const k = 'p:' + b.dataset.proj; ui.open.has(k) ? ui.open.delete(k) : ui.open.add(k); render(); }));
     panel.querySelectorAll('[data-rv]').forEach(b => b.addEventListener('click', () => reviewAct(b.dataset.rv)));
+    panel.querySelectorAll('[data-ctx-more]').forEach(b => b.onclick = () => { ui.ctxOpen = ui.ctxOpen === +b.dataset.ctxMore ? null : +b.dataset.ctxMore; render(); });
     panel.querySelectorAll('[data-rv-accept]').forEach(b => b.onclick = () => {
       const eid = +b.dataset.rvAccept; const item = review.items.find(i => (i.evidence || []).some(e => e.id === eid)); const e = item && item.evidence.find(e => e.id === eid); if (!e || !e.change) return;
       const c = e.change, tid = item.task.id;
@@ -625,8 +638,10 @@
       try { await api('/api/chat/drafts/open', { method: 'POST', body: JSON.stringify({ draft: d }) }); toast('Shown in Mailbird'); }
       catch (e) { toast('Mailbird did not open it (' + e.message + '); the draft is in its Drafts folder'); }
     });
-    const ct = document.getElementById('chat-thread'); if (ct) ct.onchange = () => { if (ct.value) loadChatThread(+ct.value); };
-    const cn = document.getElementById('chat-new'); if (cn) cn.onclick = () => { chat.current = null; chat.messages = []; render(); };
+    panel.querySelectorAll('[data-thread]').forEach(b => b.onclick = () => { ui.chatDrawer = false; loadChatThread(+b.dataset.thread); });
+    const cn = document.getElementById('chat-new'); if (cn) cn.onclick = () => { chat.current = null; chat.messages = []; ui.chatDrawer = false; render(); };
+    const tt = document.getElementById('chat-threads-toggle'); if (tt) tt.onclick = () => { ui.chatDrawer = !ui.chatDrawer; render(); };
+    ['chat-threads-close', 'chat-backdrop'].forEach(id => { const el = document.getElementById(id); if (el) el.onclick = () => { ui.chatDrawer = false; render(); }; });
     const msgs = document.getElementById('msgs'); if (msgs) msgs.scrollTop = msgs.scrollHeight;
     const ask = document.getElementById('rv-ask'), askGo = document.getElementById('rv-ask-go');
     const askSend = () => { const v = ask.value.trim(); if (!v) return; ask.value = ''; const card = ask.closest('.card'); sendChat(v, null, [+card.dataset.id], { review: +card.dataset.id }); };
@@ -641,7 +656,9 @@
     if (ui.tab === 'settings') panel.querySelectorAll('[data-key], [data-acc]').forEach(el => el.addEventListener('change', () => { clearTimeout(saveSettings.t); saveSettings.t = setTimeout(saveSettings, 300); }));
     const accAdd = document.getElementById('acc-add'); if (accAdd) accAdd.onclick = () => { settings.accounts.push({ address: '', display: '', roles: ['monitor'], enabled: true }); render(); };
     panel.querySelectorAll('[data-accdel]').forEach(b => b.onclick = () => { settings.accounts.splice(+b.dataset.accdel, 1); render(); });
-    // rail drag & drop
+    wireRail();
+  }
+  function wireRail() {
     const list = document.getElementById('rail-list'); const drop = document.getElementById('rail-drop');
     list.querySelectorAll('li').forEach(li => {
       li.addEventListener('dragstart', e => e.dataTransfer.setData('text/plain', li.dataset.id));
