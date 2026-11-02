@@ -446,12 +446,25 @@ def test_due_reminders_fire_once_and_a_repeat_schedules_the_next(conn, cfg):
     m = push.sent[0]
     assert m["title"] == "Call Reza" and "before the meeting" in m["body"] and "Nov 5" in m["body"]
     assert [a["label"] for a in m["actions"]] == ["Snooze 1 h", "Done", "Open"] and all("/r/" in a["url"] for a in m["actions"])
+    # No Click: a tap shows the message and its buttons in the ntfy app instead of bouncing to the browser
+    # (Robert, 2026-11-02); notify.ntfy.tap_opens_app turns the old behaviour back on.
+    assert m.get("click") is None
     rows_ = _rem(conn)
     sent = [r for r in rows_ if r["status"] == "sent"]
     assert len(sent) == 1 and sent[0]["sent_at"] and sent[0]["token"] and sent[0]["ntfy_seq"] == "m1"
     nxt = [r for r in rows_ if r["status"] == "pending" and r["repeat"] == "weekly"]
     assert len(nxt) == 1 and nxt[0]["fire_at"] == "2026-11-10T09:00" and nxt[0]["label"] == "before the meeting"
     assert reminders.fire(conn, cfg, datetime(2026, 11, 3, 9, 1, 0), push) == [] and len(push.sent) == 1
+
+
+def test_reminder_push_carries_a_click_only_when_asked(conn, cfg):
+    from factotum import reminders, config as C
+    upsert_task(conn, task(id=1, name="Call Reza")); conn.commit()
+    batches.apply(conn, [{"task_id": 1, "op": "add_reminder", "fields": {"fire_at": "2026-11-03T09:00"}}], "ui", TODAY)
+    C.set_(cfg, "notify.ntfy.tap_opens_app", True)
+    push = FakePush()
+    reminders.fire(conn, cfg, datetime(2026, 11, 3, 9, 0, 30), push)
+    assert push.sent[0]["click"].endswith("/#today")
 
 
 def test_reminder_action_links_are_single_use_and_expire(cfg, tmp_path):

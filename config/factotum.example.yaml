@@ -231,6 +231,7 @@ notify:
     enabled: true
     server: https://ntfy.sh
     topic: ""                     # e.g. factotum-7f3a9c2e (docs/SETUP.md §4); token in .env
+    tap_opens_app: false          # a reminder tap shows the message and its Snooze / Done / Open buttons in ntfy; true = jump straight to the app
   review_time: "19:30"
   snooze_presets: ["30m", "1h", "tomorrow 9am"]
   morning_brief:
