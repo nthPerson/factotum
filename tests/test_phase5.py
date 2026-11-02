@@ -90,6 +90,32 @@ class FakeMail:
         return {"messageId": 900}
 
 
+def test_mcp_seen_thread_without_an_account_is_resolved_through_its_folder(conn, cfg, tmp_path):
+    """Mailbird's conversation rows carry no accountId; folders belong to one account, so a row's
+    folderId (or, for a unified folder with a negative id, its actualFolders) names the account."""
+    from factotum import mcp_server as M
+
+    class Mail(FakeMail):
+        def call(self, tool, args=None):
+            self.calls.append((tool, args))
+            if tool == "list_accounts":
+                return [{"id": 1, "email": "rashe7414@sdsu.edu"}, {"id": 2, "email": "robertashe2.0@gmail.com"}]
+            if tool == "list_folders":
+                return {1: [{"id": 11, "name": "Inbox"}, {"id": 12, "name": "Sent"}], 2: [{"id": 21, "name": "Inbox"}]}[args["accountId"]]
+            if tool == "search_conversations":
+                return [{"conversationId": "u1", "subject": "Unified", "lastMessageId": 5, "folderId": -2, "actualFolders": [21]},
+                        {"conversationId": "s1", "subject": "SDSU", "lastMessageId": 6, "folderId": 12},
+                        {"conversationId": "n1", "subject": "Nowhere", "lastMessageId": 7}]
+            raise AssertionError(tool)
+    mail = Mail()
+    ctx = M.Context(conn, cfg, run_dir=tmp_path, mail=lambda: mail)
+    res = json.loads(_text(_rpc(ctx, 1, "tools/call", {"name": "mail_search", "arguments": {"query": "x"}})))
+    assert [c["account"] for c in res["conversations"]] == ["robertashe2.0@gmail.com", "rashe7414@sdsu.edu", None]
+    seen = M.seen_threads(tmp_path)
+    assert seen["u1"]["account"] == "robertashe2.0@gmail.com" and seen["s1"]["account"] == "rashe7414@sdsu.edu" and "account" not in seen["n1"]
+    assert sum(1 for t, _ in mail.calls if t == "list_folders") == 2       # once per account, cached for the run
+
+
 def test_mcp_mail_tools_trim_results_record_drafts_and_seen_threads_and_never_send(conn, cfg, tmp_path):
     from factotum import mcp_server as M
     upsert_task(conn, task(id=9, name="Ask Erica for a block", counterpart="Erica <erica@x.org>")); conn.commit()

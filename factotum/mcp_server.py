@@ -51,6 +51,7 @@ class Context:
     tool_log: list = field(default_factory=list)
     _mail: object = field(default=None, repr=False)
     _accounts: dict | None = field(default=None, repr=False)
+    _folders: dict | None = field(default=None, repr=False)
 
     def __post_init__(self):
         self.conn.execute("PRAGMA query_only = 1")
@@ -74,6 +75,28 @@ class Context:
             self._accounts = {"by_email": {str(a.get("email") or "").lower(): int(a["id"]) for a in acc if a.get("id") is not None},
                               "by_id": {int(a["id"]): str(a.get("email") or "") for a in acc if a.get("id") is not None}}
         return self._accounts
+
+    def account_of_folder(self, *folder_ids) -> str | None:
+        """Mailbird's conversation rows carry no accountId, but every real folder belongs to one
+        account: the first positive folder id that any account lists names the account. Negative ids
+        are unified folders (skip them); one list_folders per account per run, cached."""
+        if self._folders is None:
+            self._folders = {}
+            for aid, email in self.accounts()["by_id"].items():
+                try:
+                    for f in self.mail_client().call("list_folders", {"accountId": aid}) or []:
+                        if f.get("id") is not None:
+                            self._folders[int(f["id"])] = email
+                except Exception:   # noqa: BLE001 — an account without folders is not a reason to fail the search
+                    continue
+        for fid in folder_ids:
+            try:
+                fid = int(fid)
+            except (TypeError, ValueError):
+                continue
+            if fid > 0 and fid in self._folders:
+                return self._folders[fid]
+        return None
 
     def record(self, name: str, obj: dict) -> None:
         if self.run_dir:
@@ -287,9 +310,11 @@ def mail_search(ctx: Context, args: dict) -> dict:
     by_id = ctx.accounts()["by_id"]
     out = []
     for c in res if isinstance(res, list) else []:
-        # Mailbird's rows carry no account; a search scoped to one account knows it, otherwise a
-        # message read later names it (the user's own address among its recipients) and seen.jsonl merges.
+        # Mailbird's rows carry no account; a search scoped to one account knows it, otherwise the
+        # row's folder names it (folders are per account), and a message read later confirms it.
         acc = by_id.get(int(c["accountId"])) if c.get("accountId") is not None else (by_id.get(aid) if aid is not None else None)
+        if acc is None:
+            acc = ctx.account_of_folder(c.get("folderId"), *(c.get("actualFolders") or []))
         row = {"conversation_id": c.get("conversationId"), "subject": _cut(c.get("subject"), 160), "from": _who(c.get("lastSender")), "at": c.get("receivedAtUtc"),
                "last_message_id": int(c["lastMessageId"]) if str(c.get("lastMessageId") or "").isdigit() else c.get("lastMessageId"),
                "account": acc, "messages": c.get("messageCount"), "preview": _cut(c.get("preview") or c.get("snippet"), PREVIEW)}
@@ -307,7 +332,7 @@ def mail_thread(ctx: Context, args: dict) -> dict:
     c = ctx.mail_client().call("get_conversation", {"conversationId": cid}) or {}
     msgs = [{"id": m.get("id"), "from": _who(m.get("from")), "at": m.get("receivedAtUtc") or m.get("sentAtUtc"), "preview": _cut(m.get("preview") or m.get("bodyPreview"), PREVIEW)}
             for m in (c.get("messages") or [])[:30]]
-    acc = ctx.accounts()["by_id"].get(int(c["accountId"])) if c.get("accountId") is not None else None
+    acc = ctx.accounts()["by_id"].get(int(c["accountId"])) if c.get("accountId") is not None else ctx.account_of_folder(c.get("folderId"), *(c.get("actualFolders") or []))
     _see(ctx, cid, c.get("subject"), acc, msgs[-1]["id"] if msgs else None, people=[m.get("from") for m in (c.get("messages") or [])])
     return {"conversation_id": cid, "subject": _cut(c.get("subject"), 160), "account": acc, "messages": msgs}
 
