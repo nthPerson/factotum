@@ -180,3 +180,36 @@ body.bulk-on main { padding-bottom: 190px; }
 .logc { font-size: 13px; padding: 2px 0; display: flex; gap: 6px; flex-wrap: wrap; } .logc .name { color: var(--muted); max-width: 32ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .logc .f { font-family: var(--mono); }
 .runs { width: 100%; border-collapse: collapse; font-size: 13px; } .runs th, .runs td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); } .runs tr.bad td { color: var(--crit); }
 .bulk .remform { display: inline-flex; width: auto; }
+
+/* Chat (phase 5) */
+.chat { max-width: 760px; }
+.chat-head { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
+.chat-head select { flex: 1; min-width: 0; font: inherit; padding: 7px 10px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); color: var(--fg); }
+.msgs { display: flex; flex-direction: column; gap: 10px; margin-bottom: 14px; }
+.msg { display: flex; flex-direction: column; gap: 6px; max-width: 92%; }
+.msg.user { align-self: flex-end; align-items: flex-end; }
+.msg .bubble { padding: 10px 14px; border-radius: 12px; background: var(--surface); border: 1px solid var(--line); font-size: 14px; }
+.msg.user .bubble { background: var(--accent-soft); border-color: transparent; white-space: pre-wrap; }
+.msg.ai.bad .bubble { border-color: var(--crit); color: var(--crit); }
+.msg .bubble p { margin: 0 0 8px; } .msg .bubble p:last-child { margin-bottom: 0; }
+.msg .bubble ul, .msg .bubble ol { margin: 4px 0 8px; padding-left: 20px; }
+.msg .bubble h4 { margin: 4px 0 6px; font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.msg .bubble pre, .rvreply pre { background: var(--surface-2); padding: 8px 10px; border-radius: 6px; overflow: auto; font-family: var(--mono); font-size: 12px; }
+.msg .bubble code, .rvreply code { font-family: var(--mono); font-size: 12px; background: var(--surface-2); padding: 0 4px; border-radius: 4px; }
+.msg .bubble a { color: var(--accent); }
+.msg .att { display: flex; gap: 4px; flex-wrap: wrap; }
+.msg .meta { display: flex; gap: 6px; }
+.msg.live .bubble { color: var(--muted); font-style: italic; }
+.spin { display: inline-block; width: 10px; height: 10px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; vertical-align: -1px; margin-right: 4px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spin { animation: none; } }
+.props, .drafts { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; }
+.props .phead { display: flex; justify-content: space-between; align-items: center; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin-bottom: 4px; }
+.prop { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 5px 0; border-top: 1px solid var(--line); font-size: 13px; }
+.prop:first-of-type { border-top: 0; }
+.prop label { display: flex; gap: 4px; align-items: center; font-size: 12px; color: var(--muted); }
+.prop .plabel { font-weight: 500; }
+.rej { font-size: 12px; color: var(--muted); } .rej summary { cursor: pointer; } .rej div { padding: 2px 0 0 12px; }
+.card .rvask { margin-top: 12px; } .card .rvask input { font-size: 13px; }
+.rvreply { margin-top: 8px; padding: 10px 12px; background: var(--surface-2); border-radius: 8px; font-size: 13px; }
+.rvreply p { margin: 0 0 6px; color: var(--fg); }

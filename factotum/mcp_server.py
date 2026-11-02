@@ -287,7 +287,9 @@ def mail_search(ctx: Context, args: dict) -> dict:
     by_id = ctx.accounts()["by_id"]
     out = []
     for c in res if isinstance(res, list) else []:
-        acc = by_id.get(int(c.get("accountId"))) if c.get("accountId") is not None else None
+        # Mailbird's rows carry no account; a search scoped to one account knows it, otherwise a
+        # message read later names it (the user's own address among its recipients) and seen.jsonl merges.
+        acc = by_id.get(int(c["accountId"])) if c.get("accountId") is not None else (by_id.get(aid) if aid is not None else None)
         row = {"conversation_id": c.get("conversationId"), "subject": _cut(c.get("subject"), 160), "from": _who(c.get("lastSender")), "at": c.get("receivedAtUtc"),
                "last_message_id": int(c["lastMessageId"]) if str(c.get("lastMessageId") or "").isdigit() else c.get("lastMessageId"),
                "account": acc, "messages": c.get("messageCount"), "preview": _cut(c.get("preview") or c.get("snippet"), PREVIEW)}
@@ -319,8 +321,10 @@ def mail_message(ctx: Context, args: dict) -> dict:
     cap = _int(args, "max_chars", BODY_CAP, 500, 20_000)
     m = ctx.mail_client().call("get_message", {"messageId": mid}) or {}
     body = str(m.get("body") or m.get("bodyMarkdown") or m.get("text") or "")
-    acc = ctx.accounts()["by_id"].get(int(m["accountId"])) if m.get("accountId") is not None else None
-    _see(ctx, m.get("conversationId"), m.get("subject"), acc, mid, people=[m.get("from"), *(m.get("to") or []), *(m.get("cc") or [])])
+    mine = ctx.accounts()["by_email"]
+    people = [m.get("from"), *(m.get("to") or []), *(m.get("cc") or [])]
+    acc = ctx.accounts()["by_id"].get(int(m["accountId"])) if m.get("accountId") is not None else next((_addr_of(p) for p in people if _addr_of(p) in mine), None)
+    _see(ctx, m.get("conversationId"), m.get("subject"), acc, mid, people=people)
     return {"message_id": mid, "conversation_id": m.get("conversationId"), "subject": _cut(m.get("subject"), 200), "from": _who(m.get("from")),
             "to": [_who(x) for x in (m.get("to") or [])][:20], "cc": [_who(x) for x in (m.get("cc") or [])][:20], "at": m.get("receivedAtUtc") or m.get("sentAtUtc"),
             "body": body[:cap], "truncated": len(body) > cap, "attachments": [str(a.get("name") or a.get("fileName") or "") for a in (m.get("attachments") or [])][:20]}

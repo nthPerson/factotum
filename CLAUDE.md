@@ -26,9 +26,13 @@ sweeps); the Plaud port (`factotum/plaud_trigger.py` IMAP IDLE → `plaud` CLI �
 run via `factotum/claude/runner.py` and `prompts/sync-file.md` → `factotum/sync_file.py` writes
 tasks, instructions, reminders, events and the Notion note page); the mail sweep
 (`factotum/mail_sweep.py` over the read-only `factotum/mailbird.py`, findings in `evidence`); the
-Canvas sweep (`factotum/canvas.py`); and the morning planner (`factotum/planner.py`,
-`prompts/planner-morning.md`) whose verdict leads the brief. Chat and the tasks mirror do not exist
-yet; the UI shows "phase N" where a control is a placeholder. Update this paragraph when a phase lands.
+Canvas sweep (`factotum/canvas.py`); the morning planner (`factotum/planner.py`,
+`prompts/planner-morning.md`) whose verdict leads the brief; and Chat (phase 5): `factotum mcp`
+(`factotum/mcp_server.py`, the only tool server a chat turn gets: tasks read-only, mail read + drafts
+through `factotum/mailbird.py`, calendar and Plaud reads), `factotum/chat.py` (one streamed run per
+turn, `--resume`, proposal validation, `prompts/chat-turn.md` and the two canned prompts), the
+`/api/chat/*` routes and the Chat tab. Phase 6 (the Notion tasks mirror, the Claude Code skills,
+retiring the old pages) is not built. Update this paragraph when a phase lands.
 
 ## Where things live
 
@@ -56,6 +60,9 @@ yet; the UI shows "phase N" where a control is a placeholder. Update this paragr
 | Mailbird MCP (read-only), the mail sweep, evidence, Review flags | SPEC §2, §6 | `factotum/mailbird.py` (`READ_TOOLS`), `factotum/mail_sweep.py` (`sweep`, `review_flags`) |
 | Canvas items → tasks, closes, announcements | SPEC §6 | `factotum/canvas.py` (`normalize`, `sweep`) |
 | the morning planner: bundle, prompt, what gets applied | SPEC §8.2 | `factotum/planner.py` (`bundle`, `apply`, `run`), `prompts/planner-morning.md` |
+| the MCP server a chat turn talks to, its tools, result caps, draft policy | SPEC §8.3 | `factotum/mcp_server.py` (`TOOLS`, `dispatch`, `known_recipients`) |
+| chat turns, proposal validation, session resume, canned prompts | SPEC §8.3 | `factotum/chat.py` (`build_prompt`, `turn`, `_clean_proposals`), `prompts/chat-*.md` |
+| streaming a headless run, per-run MCP config, isolation flags | SPEC §8 | `factotum/claude/runner.py` (`command`, `run`, `_run_stream`) |
 
 ## Commands
 
@@ -72,6 +79,9 @@ yet; the UI shows "phase N" where a control is a placeholder. Update this paragr
 .venv/bin/python -m factotum mail-check | canvas-check        # Mailbird's accounts vs the monitored ones; Canvas items vs rows
 .venv/bin/python -m factotum sweep mail|canvas|calendar       # one sweep now
 .venv/bin/python -m factotum planner --dry-run [--send]       # the morning planner (~$0.30): JSON only, or applied and mailed
+.venv/bin/python -m factotum chat-check                       # the MCP server over a pipe, Mailbird, one haiku run through it
+.venv/bin/python -m factotum chat "text" --attach 388         # one chat turn from the terminal (~$0.20), stored like a UI turn
+.venv/bin/python -m factotum mcp                              # the stdio MCP server itself (the runner starts it; rarely by hand)
 .venv/bin/python -m factotum serve --port 8751 --no-scheduler   # a second instance for UI checks; never two schedulers on one DB
 .venv/bin/python -m factotum serve                 # http://127.0.0.1:8750
 sudo systemctl restart factotum                    # after code changes; see the restart rule below
@@ -104,6 +114,16 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
 - **`set_setting` JSON-encodes what it is given.** Pass the list or dict itself and read it back
   through `get_settings`; passing `json.dumps(...)` stores a string of JSON and the reader gets a
   string (bit the Canvas announcements on 2026-11-02).
+- **Headless runs pass `--setting-sources "" --disable-slash-commands`** (2026-11-02): without them
+  the user's own SessionStart hooks, plugins and skills load into every `claude -p` run (~5 KB of hook
+  output and the user's permission mode showed up in a probe). The runner adds both to every command.
+- **A chat run whose MCP server fails to start still "succeeds"** (2026-11-02): `system/init` reports
+  `{"name": "factotum", "status": "failed"}` and the model answers from thin air (haiku invented task
+  ids). The chat prompt says to report a failed tool; the UI shows the init warning; `chat-check` is
+  the test. The server is `python -m factotum mcp` with `PYTHONPATH` set — a missing subcommand or a
+  stdout print before the protocol starts breaks it silently.
+- **`factotum mcp` must never write to stdout except JSON-RPC lines**; logs go to stderr. Its DB
+  connection is `query_only`, so a tool that tries to write raises instead of bypassing batches.
 - **`expire` only touches rows Review has shown** (`last_offered_at`, stamped by `GET /api/review`).
   A row that was never on a Review page stays open however old it is; that is by design.
 

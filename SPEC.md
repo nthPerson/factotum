@@ -272,21 +272,40 @@ run fails, the plain brief goes out with the reason. `python -m factotum planner
 [--send]` runs it by hand.
 
 ### 8.3 `chat-turn` (Chat tab, "Search related emails", "Draft reply")
-Inputs: the prompt, the attached tasks as JSON, thread history via `--resume`. Tools:
-`factotum mcp` (`tasks_query`, `task_get`, `reminders_list`; read-only), Mailbird read + draft
-tools, Plaud read, calendar read, Notion read. Returns, streamed, then final:
+Inputs: the prompt (`prompts/chat-turn.md` on a thread's first turn, a short continuation header
+after), the attached tasks as JSON, the thread continued through `--resume` (the session id is kept on
+`chat_threads`; a lost session is retried once without it, with the thread's record in the prompt).
+Tools: **only `factotum mcp`** (`factotum/mcp_server.py`, started by the runner per turn with
+`--tools ""` so no built-in tool exists): `tasks_query`, `task_get`, `reminders_list` (a `query_only`
+connection), `mail_search`, `mail_thread`, `mail_message`, `mail_draft_reply`, `mail_draft_new` (through
+`mailbird.Client`: reads plus drafts, never send/trash/move), `calendar_events`, `plaud_search`,
+`plaud_summary`. Mailbird's own MCP is not loaded into the run: Claude Code's client would reject the
+self-signed loopback certificate, the bearer token stays out of the run's config, and Python's
+whitelist holds by construction. Every result is trimmed (previews, bodies capped at 6 KB, 30 KB per
+result) so nothing nears the spill. The run is streamed (`stream-json`): the UI shows "Searching mail ·
+from:max" as it happens. The final message is one JSON object:
 ```json
 { "reply_md": "…",
-  "proposals": [ { "op": "set|done|drop|merge_into|create|link_thread|add_reminder|pin_top|longterm",
+  "proposals": [ { "op": "set|done|drop|pin_top|longterm|add_reminder|link_thread|create",
                    "task_id": 388, "fields": {…}, "label": "Task-388 → due Thu Nov 5",
-                   "evidence": [ { "kind": "mail_message", "ref": "<id>", "account": "…", "label": "Oct 29 15:03 from Max" } ] } ],
-  "drafts": [ { "account": "…", "message_id": "…", "to": "…", "subject": "…" } ] }
+                   "evidence": [ { "kind": "mail_thread", "ref": "<conversation id>", "label": "Oct 29 15:03 from Max" } ] } ] }
 ```
-The UI renders proposals as checkboxes; "Stage selected" puts them in the tray. Drafts are
-created in the run (reversible, never sent) and listed with "Open in Mailbird"
-(`show_notification`). "Search related emails" is a chat turn with a canned prompt and the task
-attached; the optional prompt field is appended. Found threads become `mail_thread` links, which
-the sweep then watches for free, so a task linked once never goes stale silently.
+Python validates before the UI may stage anything: ops in that set only; a task op names an existing
+row; `set` fields pass the voice-note cleaner (settable fields, taxonomy, ISO dates); a reminder
+validates like the tray's; `create` waits for a click (an upsert by `chat:<message>:<n>`); mail
+evidence counts only for a conversation the run actually fetched. **`link_thread` is applied at once**,
+but only for a conversation the run fetched (the server records `seen.jsonl` per run): a link is
+metadata the sweep then watches for free, not task state, so a task linked once never goes stale
+silently. **Drafts** come from the server's own record (`drafts.jsonl`), never from the model's claim;
+they are listed with "Open in Mailbird" (`select_conversation`, or `show_notification` for a new
+message). A new draft goes only to a bare address a task names (counterpart, waiting_on) or one of the
+user's own accounts — a hostile mail that CCs a stranger cannot make that stranger a recipient; a reply
+draft needs a conversation the turn read and is flagged in the UI when it reaches an address no task
+names. The UI renders proposals as checkboxes; "Stage selected" puts them in the tray. "Search
+related emails" and "Draft reply" are chat turns with a canned prompt (`prompts/chat-search-mail.md`,
+`chat-draft-reply.md`) and the task attached; the Review card's prompt field is a turn whose proposals
+about that task are staged straight into the review batch. Every turn is a `runs` row (`chat-turn`)
+with its cost; prompt and result live under `data/runs/chat/<thread>-<message>/`.
 
 ## 9. The UI
 
@@ -295,7 +314,9 @@ Chat · Log · Settings**. The mockup is the reference. Rows show only: checkbox
 fade chips, next reminder, project, due, effort, staged-change chip; the chevron opens details
 (score reasons, why now, context, source and account, links, lifecycle, reminders, actions, the
 Claude buttons). Top rail with drag. Composer on every tab with attached chips; grammar commands
-stage instantly, anything else opens Chat. A tap on a row or its checkbox selects it (no modifier,
+stage instantly, anything else opens Chat (phase 5): the Chat tab is a thread picker, the messages,
+the live status of the run, and under each answer the proposals as checkboxes ("Stage selected"),
+"Create task" for a proposed row, and the drafts with "Open in Mailbird". A tap on a row or its checkbox selects it (no modifier,
 so it works on a phone); a double-tap opens its details; Esc clears the selection. The bulk bar
 floats at the bottom of the screen with any selection (it never shifts the list, so the second
 tap of a double-tap lands on the same row) and offers Done, Drop, Snooze, a due date to set or
@@ -421,7 +442,10 @@ link; every batch is undoable; sinks are write-only.
    `planner-morning`. The lark-server planner and digest timers are disabled; the Gmail forwarding
    filter on the SDSU account is the user's to delete. *Gate: a morning brief with a verdict whose
    proposals were right, and a Waiting task flipped by a real reply.*
-5. **Chat:** `factotum mcp`, chat turns, email search, drafts, proposals UI.
+5. **Chat (built 2026-11-02):** `factotum mcp`, chat turns streamed into the Chat tab, "Search
+   related emails" and "Draft reply" on every row, the Review card's prompt field, proposals staged
+   into the tray, drafts in Mailbird. *Gate: a real "Search related emails" links the right thread, a
+   draft reply appears in Mailbird unsent, and a Review-card question stages the intended change.*
 6. **Mirror and cleanup:** Notion tasks mirror live, retire the Today page and Command Log,
    archive plaud-sync, point the two Claude Code skills at the API.
 
@@ -430,9 +454,10 @@ link; every batch is undoable; sinks are write-only.
 `plaud-sync-planner` and `plaud-sync-ops` (installed in Claude Code and claude.ai) keep working
 unchanged until import day. From import day the planner skill is **read-only** (the Notion
 Tasks DB is a mirror; writes there are lost); task edits go through the Factotum UI. In phase 5
-both are replaced by `factotum-planner` and `factotum-ops` under `skills/` here: the planner
-skill uses the same `factotum mcp` server Chat uses, extended with write tools that *stage a
-batch* rather than write directly, so the tray rule holds from a skill too. For Claude Code on
+both are replaced by `factotum-planner` and `factotum-ops` under `skills/` here (moved to phase 6
+with the mirror; Chat shipped first): the planner skill uses the same `factotum mcp` server Chat
+uses, extended with write tools that *stage a batch* rather than write directly, so the tray rule
+holds from a skill too. For Claude Code on
 mf-pc that server is local stdio; for claude.ai it is exposed as a streamable-HTTP route behind
 the tunnel with a Cloudflare Access service token and added as a custom connector.
 

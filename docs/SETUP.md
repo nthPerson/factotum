@@ -296,3 +296,17 @@ Then delete the Gmail filter on the SDSU account that forwarded mail to the trig
 Gmail → Settings → Filters and Blocked Addresses → the forwarding rule → Delete. Nothing reads
 that forwarded mail any more; the sweep reads the SDSU inbox through Mailbird directly.
 
+## 11. Chat (phase 5)
+
+Nothing new to install: a chat turn is a headless `claude -p` run whose only tool server is
+`.venv/bin/python -m factotum mcp`, started per turn by the service. Check it with
+`.venv/bin/python -m factotum chat-check`: it lists the server's tools over a pipe, reaches Mailbird,
+then runs one tiny Claude call through the server (about $0.002). A turn from the terminal is
+`.venv/bin/python -m factotum chat "what did Max propose?" --attach 388`.
+
+Drafts need Mailbird's **Allow write actions** toggle (Settings → Wingman AI); without it the draft
+tools report the refusal to the model and the reply says so. Factotum never sends: a draft the chat
+wrote sits in Mailbird's Drafts (or the Quick Reply of its thread) until you send or delete it, and the
+Chat tab flags a reply that reaches an address no task names. Prompts and results of every turn are
+under `data/runs/chat/<thread>-<message>/`; the cost is on the Log tab.
+

@@ -242,7 +242,6 @@ claude:
   binary: claude                # absolute path (`which claude`) for the same reason; `factotum claude-check` says which
   models: { sync_file: sonnet, planner_morning: sonnet, chat_turn: sonnet, check: haiku }
   budgets_usd: { sync_file: 1.00, planner_morning: 0.75, chat_turn: 0.60, check: 0.05 }
-  timeouts_s: { sync_file: 600, planner_morning: 600 }
   planner: { enabled: true }   # the morning brief's verdict and proposals; off = the plain brief
   timeouts_s: { sync_file: 600, planner_morning: 480, chat_turn: 240 }
 
