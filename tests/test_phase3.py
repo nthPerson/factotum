@@ -450,3 +450,10 @@ def test_trigger_fails_closed_without_a_configured_sender(cfg, conn):
         plaud_trigger.PlaudTrigger(cfg, conn, handler=lambda *a: None, account="x")
     assert plaud_trigger.authenticated({"Authentication-Results": ["mx.google.com; dmarc=pass header.from=plaud.ai"]}, "mx.google.com", "plaud.ai")
     assert not plaud_trigger.authenticated({"Authentication-Results": ["mx.google.com; dkim=pass header.i=@plaud.ai.evil.com"]}, "mx.google.com", "plaud.ai")
+    assert not plaud_trigger.authenticated({"Authentication-Results": ["mx.google.com; dkim=pass header.i=@sub.plaud.ai"]}, "mx.google.com", "plaud.ai")   # pinned exactly
+    ok = "mx.google.com; dkim=pass (a comment; with a semicolon and (nesting)) header.i=@plaud.ai header.s=x"
+    assert plaud_trigger.authenticated({"Authentication-Results": [ok]}, "mx.google.com", "plaud.ai")
+    # only the topmost header counts: the receiving server prepends its own and strips ones that claim its name
+    assert plaud_trigger.authenticated({"Authentication-Results": [ok, "evil.example; dkim=fail"]}, "mx.google.com", "plaud.ai")
+    assert not plaud_trigger.authenticated({"Authentication-Results": ["evil.example; dkim=pass header.i=@plaud.ai", ok]}, "mx.google.com", "plaud.ai")
+    assert not plaud_trigger.authenticated({"Authentication-Results": ['mx.google.com; dkim=fail header.i="@plaud.ai" (dkim=pass header.i=@plaud.ai)']}, "mx.google.com", "plaud.ai")

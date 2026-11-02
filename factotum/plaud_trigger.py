@@ -24,34 +24,49 @@ DEFAULT_AUTHSERV = "mx.google.com"
 
 
 def _dom_ok(value: str, domain: str) -> bool:
-    v = value.strip().lower().lstrip("@")
-    return v == domain or v.endswith("." + domain)
+    return value.strip().strip('"').lower().lstrip("@") == domain
+
+
+def _strip_comments(text: str) -> str:
+    """RFC 5322 comments, nested, can hold semicolons and fake results; drop them before splitting."""
+    out, depth = [], 0
+    for ch in text:
+        if ch == "(":
+            depth += 1
+        elif ch == ")" and depth:
+            depth -= 1
+        elif not depth:
+            out.append(ch)
+    return "".join(out)
 
 
 def authenticated(headers, authserv: str, domain: str) -> bool:
     """True when the receiving server's own Authentication-Results header (authserv-id `authserv`,
-    e.g. mx.google.com) shows dkim=pass or dmarc=pass for `domain`. A sender can forge the From
-    line and even add an Authentication-Results header of its own, but not one that names the
-    receiving server: RFC 8601 has the server strip those on the way in."""
+    e.g. mx.google.com) shows dkim=pass or dmarc=pass for exactly `domain`. Only the topmost such
+    header counts: the receiving server prepends its own and (RFC 8601 §5) removes any arriving
+    header that claims its name, so a sender can forge From and append headers of its own, but not
+    the first one. Comments are stripped first; a quoted-string is treated as its content."""
     get_all = getattr(headers, "get_all", None)
     values = (get_all("Authentication-Results") or []) if get_all else (headers.get("Authentication-Results") or [])
     if isinstance(values, str):
         values = [values]
+    if not values:
+        return False
     domain = domain.lower()
-    for raw in values:
-        parts = [x.strip() for x in " ".join(str(raw).split()).split(";")]
-        if not parts or parts[0].split()[0].lower() != authserv.lower():
+    raw = _strip_comments(" ".join(str(values[0]).split()))
+    parts = [x.strip() for x in raw.split(";")]
+    if not parts or not parts[0] or parts[0].split()[0].lower() != authserv.lower():
+        return False
+    for clause in parts[1:]:
+        toks = clause.split()
+        if not toks:
             continue
-        for clause in parts[1:]:
-            toks = clause.split()
-            if not toks:
-                continue
-            method = toks[0].lower()
-            props = dict(t.split("=", 1) for t in toks[1:] if "=" in t and not t.startswith("("))
-            if method == "dkim=pass" and any(_dom_ok(props.get(k, ""), domain) for k in ("header.i", "header.d")):
-                return True
-            if method == "dmarc=pass" and _dom_ok(props.get("header.from", ""), domain):
-                return True
+        method = toks[0].lower()
+        props = dict(t.split("=", 1) for t in toks[1:] if "=" in t)
+        if method == "dkim=pass" and any(_dom_ok(props.get(k, ""), domain) for k in ("header.i", "header.d")):
+            return True
+        if method == "dmarc=pass" and _dom_ok(props.get("header.from", ""), domain):
+            return True
     return False
 
 
