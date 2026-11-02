@@ -61,10 +61,12 @@ class Scheduler:
             if not self._rem_error_at or now - self._rem_error_at > RETRY_AFTER:
                 self._rem_error_at = now
                 log_run(self.conn, "reminder", int((time.monotonic() - started) * 1000), ok=False, error=f"{type(e).__name__}: {e}"[:500])
+                self.conn.commit()
             return
         if fired:
             summary = ", ".join(f"Task-{f['task_id']} {f['task_name']}"[:60] for f in fired)
             log_run(self.conn, "reminder", int((time.monotonic() - started) * 1000), ok=True, summary=summary)
+            self.conn.commit()   # the Log tab reads through another connection; a row left in this transaction is invisible
             did.append(f"reminders: {summary}")
 
     def _daily(self, name: str, hhmm: str | None, now: datetime, st: dict, did: list[str], fn) -> None:

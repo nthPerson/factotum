@@ -619,3 +619,23 @@ def test_manual_consent_accepts_the_http_localhost_address_google_redirects_to()
     assert gcal.manual_token_kwargs("4/0AUn6Hd8_x") == {"code": "4/0AUn6Hd8_x"}
     with pytest.raises(ValueError):
         gcal.manual_token_kwargs("")
+
+
+def test_reminder_runs_are_committed_so_the_log_tab_sees_them(conn, cfg):
+    """The service thread logs each reminder tick through its own connection; the Log tab reads
+    through another. A run row that is only in the thread's transaction is invisible (and was)."""
+    import sqlite3
+    from factotum.db import set_setting
+    upsert_task(conn, task(id=2, name="Call Reza"))
+    for job in ("expire", "review_push", "morning_brief"):      # the daily jobs already ran: only the reminder branch runs
+        set_setting(conn, f"state.last_run.{job}", "2026-11-01")
+    conn.commit()
+    batches.apply(conn, [{"task_id": 2, "op": "add_reminder", "fields": {"fire_at": "2026-11-01T09:00"}}], "ui", TODAY)
+    _sched(conn, cfg, FakePush()).tick(datetime(2026, 11, 1, 9, 0, 10))
+    other = sqlite3.connect(conn.execute("PRAGMA database_list").fetchone()[2])
+    assert other.execute("SELECT ok FROM runs WHERE kind = 'reminder'").fetchall() == [(1,)]
+    # the failure path too: ntfy down leaves the row pending and logs a failed run that others can see
+    batches.apply(conn, [{"task_id": 2, "op": "add_reminder", "fields": {"fire_at": "2026-11-01T10:00"}}], "ui", TODAY)
+    def boom(*a, **k): raise RuntimeError("ntfy down")
+    _sched(conn, cfg, boom).tick(datetime(2026, 11, 1, 10, 0, 10))
+    assert other.execute("SELECT ok FROM runs WHERE kind = 'reminder' ORDER BY id").fetchall() == [(1,), (0,)]
