@@ -152,10 +152,19 @@ deliverables.
 (70 − 5/day, floor 25) instead of clamping. Claude writes `why_now` for the rows the morning
 brief shows (≤ 15); it never writes scores.
 
-**Review queue** (`lifecycle.build_review_queue`), ordered and capped at `review_cap` (15):
-last call · thread updated · new · soft slipped · fading soon · back · reminder missed.
-Decisions: **Done · Keep · Later · Drop**, plus ★ Top and Long-term. *Keep* sets
-`last_reviewed_at` and suppresses the item until something changes.
+**Review queue** (`lifecycle.build_review_queue`), ordered: last call · thread updated · new ·
+soft slipped · fading soon · back · reminder missed. *New* means never decided on
+(`last_reviewed_at` is null), not "created since the last session": an item the user did not get to
+stays in the queue. The queue is served in pages of `review_cap` (15); ids already staged in the tray
+are excluded from the next page, and after a page the UI offers "Review another 15 of the remaining
+N" rather than loading it unasked. Decisions: **Done · Keep · Later · Drop**, plus ★ Top and
+Long-term. Every decision sets `last_reviewed_at`; *Keep* changes nothing else and suppresses the
+item until something changes; *Later* sets `snoozed_until` to tomorrow, Friday, next week or a
+picked date, and never touches `due`. A decision may carry a free-text note, appended dated to
+`context` in the same change. Applying a Review batch marks the day reviewed (the phase 2 push
+stays quiet). Phase 5 adds a prompt field on the card: a chat turn with the task attached whose
+proposal is staged into the same batch (e.g. "add that the first pass is done and ~30 PDFs still
+need fetching by hand").
 
 ## 6. Inputs (each with an `enabled` flag)
 

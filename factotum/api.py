@@ -5,7 +5,7 @@
   POST /api/commands  {text}             parse the grammar → changes (nothing applied)
   POST /api/batches/apply {source, changes}   the one write path
   POST /api/batches/{id}/undo
-  GET  /api/review                       the review queue (read-only in phase 1; decisions go through batches)
+  GET  /api/review?exclude=1,2           one page of the review queue + total (decisions go through batches)
   GET  /api/settings · PUT /api/settings  Settings-tab overrides (whitelisted keys), accounts
   GET  /api/stats
 """
@@ -125,15 +125,20 @@ def create_app(cfg: dict | None = None, db_path: str | None = None) -> FastAPI:
             raise HTTPException(404)
 
     @app.get("/api/review")
-    def review():
+    def review(exclude: str | None = None):
+        """One page of the review queue. `exclude` is a comma-separated list of task ids the client
+        has already decided on (staged in the tray, not yet applied), so the next page skips them.
+        `total` is the whole eligible set after exclusion; `items` is the first `cap` of it."""
         today = date.today()
         ecfg = eff_cfg()
         st = get_settings(conn)
         last = parse_date(st.get("state.last_review_at"))
-        open_tasks = [decorate(t, today, ecfg) for t in rows(conn, "SELECT * FROM tasks WHERE status = 'open'")]
-        q = lifecycle.build_review_queue(open_tasks, today, ecfg, last)
+        skip = {int(x) for x in (exclude or "").split(",") if x.strip().lstrip("-").isdigit()}
+        open_tasks = [decorate(t, today, ecfg) for t in rows(conn, "SELECT * FROM tasks WHERE status = 'open'") if t["id"] not in skip]
+        full = lifecycle.build_review_queue(open_tasks, today, ecfg, last, cap=10**9)
+        cap = int(C.get(ecfg, "lifecycle.review_cap", 15))
         return {"today": today.isoformat(), "last_review_at": st.get("state.last_review_at"),
-                "cap": C.get(ecfg, "lifecycle.review_cap", 15), "labels": lifecycle.REVIEW_LABELS, "items": q}
+                "cap": cap, "total": len(full), "labels": lifecycle.REVIEW_LABELS, "items": full[:cap]}
 
     @app.post("/api/review/finish")
     def finish_review():

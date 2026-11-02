@@ -90,6 +90,14 @@ def test_review_queue_order_and_cap(cfg):
     assert len(q) == 15
 
 
+def test_review_new_means_never_reviewed_not_since_last_session(cfg):
+    # an item you did not get to in one session must still be there in the next one
+    old_unreviewed = task(id=1, due=None, created_at="2026-10-01T00:00:00+00:00", last_mention_at="2026-10-30")
+    reviewed = task(id=2, due=None, created_at="2026-10-01T00:00:00+00:00", last_mention_at="2026-10-30", last_reviewed_at="2026-10-31")
+    q = lifecycle.build_review_queue([old_unreviewed, reviewed], TODAY, cfg, last_review_at=date(2026, 10, 31))
+    assert [i["task"]["id"] for i in q] == [1] and q[0]["primary"] == "new"
+
+
 def test_import_classifier_buckets(cfg):
     assert lifecycle.classify_import(task(due="2026-11-08", hard=1, source="Canvas"), TODAY, cfg) == ("canvas_future", "open")
     assert lifecycle.classify_import(task(due="2026-09-30", hard=1, mentions=1), TODAY, cfg) == ("hard_lapsed", "lapsed")
@@ -238,3 +246,21 @@ def test_parse_notion_page():
     t = parse_page(page)
     assert t["id"] == 374 and t["status"] == "open" and t["legacy_status"] == "Next"
     assert t["source_key"] == "plaud:of_bbc:2" and t["_notes"] == ["note-1"] and t["due"] is None
+
+
+# --- api -------------------------------------------------------------------------------------
+
+def test_review_endpoint_pages_and_excludes_staged_ids(conn, cfg, tmp_path):
+    from fastapi.testclient import TestClient
+    from factotum.api import create_app
+    db = tmp_path / "api.db"
+    app = create_app(cfg, db_path=str(db))
+    c = app.state.conn
+    for i in range(1, 21):
+        upsert_task(c, task(id=i, due=None, created_at="2026-10-30T00:00:00+00:00", last_mention_at="2026-10-30"))
+    c.commit()
+    client = TestClient(app)
+    page = client.get("/api/review").json()
+    assert len(page["items"]) == 15 and page["total"] == 20
+    page2 = client.get("/api/review", params={"exclude": "1,2,3"}).json()
+    assert page2["total"] == 17 and not {1, 2, 3} & {i["task"]["id"] for i in page2["items"]}

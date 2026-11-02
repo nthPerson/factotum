@@ -20,3 +20,5 @@ include = ["factotum*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+# starlette's test client warns about httpx until httpx2 is the default; not ours to fix
+filterwarnings = ["ignore:Using `httpx` with `starlette.testclient` is deprecated"]

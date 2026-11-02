@@ -10,7 +10,7 @@
   let settings = null;      // /api/settings payload
   let staged = new Map();   // task id -> {op, fields, label}
   let lastBatch = null;
-  let ui = { tab: 'today', focus: null, sel: new Set(), open: new Set(), reviewIdx: 0, laterOpen: false };
+  let ui = { tab: 'today', focus: null, sel: new Set(), open: new Set(), reviewIdx: 0, laterOpen: false, reviewPaused: false, rvNote: { id: null, text: '' } };
   try { const h = location.hash.replace('#', ''); if (TABS.includes(h)) ui.tab = h; } catch (_) {}
   try { const s = JSON.parse(localStorage.getItem('factotum.staged') || '[]'); staged = new Map(s); } catch (_) {}
 
@@ -88,7 +88,13 @@
       staged = new Map(); try { localStorage.removeItem('factotum.staged'); } catch (_) {}
       ui.sel.clear();
       await load();
-      if (ui.tab === 'review') await loadReview();
+      if (ui.tab === 'review') {
+        // The decisions are in; today counts as reviewed (phase 2 skips the push), and the next
+        // page waits for a click instead of appearing under the user's hands.
+        await api('/api/review/finish', { method: 'POST' });
+        await loadReview();
+        ui.reviewPaused = true; render();
+      }
       toast(`${res.applied} change${res.applied === 1 ? '' : 's'} applied` + (res.skipped.length ? ` · ${res.skipped.length} skipped` : ''), true);
     } catch (e) { toast('Apply failed: ' + e.message); }
   }
@@ -109,7 +115,7 @@
     p.innerHTML = fns[ui.tab]();
     document.querySelectorAll('#tabs button').forEach(b => b.setAttribute('aria-selected', b.dataset.tab === ui.tab));
     document.getElementById('n-today').textContent = openOnes().filter(x => x.due && fmtDue(x.due).days <= 1).length || '';
-    document.getElementById('n-review').textContent = review ? (review.items.length - ui.reviewIdx > 0 ? review.items.length - ui.reviewIdx : '') : '';
+    document.getElementById('n-review').textContent = review && review.total ? review.total : '';
     document.getElementById('remind').innerHTML = settings && settings.effective['notify.review_time']
       ? `<span>Review at</span><span class="pill">${esc(settings.effective['notify.review_time'])}</span>` : '';
     renderTray();
@@ -216,31 +222,44 @@
       return `<div class="proj-group ${ui.open.has('p:' + p) ? 'open' : ''}"><button data-proj="${esc(p)}">${esc(p)} <span class="n">${rows.length} open · ${due} due this week</span>${fading ? `<span class="warnn">${fading} fading</span>` : ''}</button><div class="rows">${rows.sort((a, b) => (a.due || '9').localeCompare(b.due || '9')).map(row).join('')}</div></div>`;
     }).join('');
   }
-  async function loadReview() { review = await api('/api/review'); ui.reviewIdx = 0; render(); }
+  // One page of the queue. Ids already staged in the tray are excluded server-side, so a page is
+  // always `cap` fresh items and the counter counts this page only.
+  async function loadReview() {
+    const exclude = [...staged.keys()].join(',');
+    review = await api('/api/review' + (exclude ? '?exclude=' + exclude : ''));
+    if (review.total === undefined) review.total = review.items.length;   // older server
+    ui.reviewIdx = 0; ui.reviewPaused = false; ui.laterOpen = false; render();
+  }
   function renderReview() {
     if (!review) { loadReview(); return '<div class="empty">Loading review queue…</div>'; }
     const items = review.items.filter(i => !staged.has(i.task.id));
     const total = review.items.length;
-    if (!items.length) {
-      return `<div class="review"><div class="finish"><h2>${total ? 'Done for today.' : 'Nothing to review.'}</h2><p>${staged.size} decision${staged.size === 1 ? '' : 's'} staged. Apply in the tray, then <button class="btn small" id="review-finish">mark today reviewed</button>.</p>${review.last_review_at ? `<p>Last review: ${review.last_review_at}</p>` : ''}</div></div>`;
+    const remaining = ui.reviewPaused ? review.total : review.total - total;
+    if (ui.reviewPaused || !items.length) {
+      const more = remaining > 0 ? `<p><button class="btn" id="review-more">Review another ${Math.min(review.cap, remaining)} of the remaining ${remaining}</button></p>` : '';
+      const head = ui.reviewPaused ? (remaining ? 'Batch applied.' : 'Batch applied. Nothing left to review.') : total ? `${staged.size} decision${staged.size === 1 ? '' : 's'} staged.` : 'Nothing to review.';
+      const body = ui.reviewPaused ? '' : total ? '<p>Apply them in the tray, or keep going.</p>' : '';
+      return `<div class="review"><div class="finish"><h2>${head}</h2>${body}${more}${review.last_review_at ? `<p class="hint">Last review: ${review.last_review_at}</p>` : ''}</div></div>`;
     }
     const { task: x, reasons, primary } = items[0];
     const d = fmtDue(x.due);
     const cls = primary === 'last_call' ? 'crit' : primary === 'new' || primary === 'back' ? 'new' : 'warn';
     const idx = total - items.length;
+    const note = ui.rvNote.id === x.id ? ui.rvNote.text : '';
     return `<div class="review">
       <div class="progress"><span>${idx + 1} of ${total}</span><div class="track"><div class="fill" style="width:${Math.round(100 * idx / total)}%"></div></div><span>~${Math.max(1, Math.ceil(items.length * 12 / 60))} min left</span></div>
       <div class="card" data-id="${x.id}">
         <div class="why ${cls}">${esc(review.labels[primary])}${reasons.length > 1 ? ' · also ' + reasons.slice(1).map(r => review.labels[r]).join(', ') : ''}</div>
         <h2>${esc(x.name)}</h2>
         <div class="sub"><span class="code">Task-${x.id}</span><span class="chip proj">${esc(x.project || '—')}</span>${d ? `<span class="chip due ${d.days < 0 ? 'crit' : ''} ${x.hard ? 'hard' : ''}">${d.label}</span>` : '<span class="chip">no date</span>'}<span class="chip eff">${esc(x.effort || '?')}</span><span class="chip">${x.mentions} mention${x.mentions === 1 ? '' : 's'}</span><span class="chip">score ${x.score}</span></div>
-        <p>${esc(x.why_now || (x.score_reasons || []).join(' · '))}</p>${x.context ? `<p>${esc(x.context)}</p>` : ''}
+        <p>${esc(x.why_now || (x.score_reasons || []).join(' · '))}</p>${x.context ? `<p class="ctx">${esc(x.context)}</p>` : ''}
+        <textarea id="rv-note" rows="2" placeholder="Note to save with this decision (optional) — appended to the task's context">${esc(note)}</textarea>
         <div class="links">${x.source_link ? `<a href="${esc(x.source_link)}" target="_blank" rel="noopener">${x.source === 'Plaud' ? 'Plaud note' : 'Source'}</a>` : ''}</div>
         <div class="big"><button class="done" data-rv="done">Done <kbd>d</kbd></button><button data-rv="keep">Keep <kbd>k</kbd></button><button class="later" data-rv="later">Later <kbd>s</kbd></button><button class="drop" data-rv="drop">Drop <kbd>x</kbd></button></div>
-        <div class="later-menu ${ui.laterOpen ? 'on' : ''}"><button class="btn small" data-rv="tomorrow">Tomorrow</button><button class="btn small" data-rv="fri">Friday</button><button class="btn small" data-rv="nextweek">Next week</button><button class="btn small" data-rv="snooze">Snooze, keep the date</button></div>
+        <div class="later-menu ${ui.laterOpen ? 'on' : ''}"><span class="hint">Comes back on:</span><button class="btn small" data-rv="tomorrow">Tomorrow</button><button class="btn small" data-rv="fri">Friday</button><button class="btn small" data-rv="nextweek">Next week</button><input type="date" id="rv-date" min="${data.today}" aria-label="Pick a date"></div>
         <div class="extra"><button class="btn small" data-rv="top">★ Pin to Top</button><button class="btn small" data-rv="longterm">Mark long-term (never fades)</button></div>
       </div>
-      <div class="note">Keep = no change; the item will not be asked about again until something changes. Decisions stage into the tray; Apply writes them all at once.</div></div>`;
+      <div class="note">Keep = no change; the item will not be asked about again until something changes. Later = hidden until the date you pick, then back in Review and Today. Decisions stage into the tray; Apply writes them all at once.</div></div>`;
   }
   function renderChat() {
     return `<div class="note">Chat arrives in phase 5: a prompt with the attached tasks as context, one headless Claude run with Mailbird read and draft tools, proposals you stage into the tray. See SPEC.md §8.3.</div>` + composer();
@@ -317,7 +336,9 @@
     if (bulk) { bulk.classList.toggle('on', ui.sel.size > 0); const n = document.getElementById('bulk-n'); if (n) n.textContent = ui.sel.size; }
     panel.querySelectorAll('[data-proj]').forEach(b => b.addEventListener('click', () => { const k = 'p:' + b.dataset.proj; ui.open.has(k) ? ui.open.delete(k) : ui.open.add(k); render(); }));
     panel.querySelectorAll('[data-rv]').forEach(b => b.addEventListener('click', () => reviewAct(b.dataset.rv)));
-    const rf = document.getElementById('review-finish'); if (rf) rf.onclick = async () => { await api('/api/review/finish', { method: 'POST' }); await loadReview(); toast('Marked reviewed'); };
+    const rd = document.getElementById('rv-date'); if (rd) rd.onchange = () => reviewAct('date', rd.value);
+    const rn = document.getElementById('rv-note'); if (rn) rn.oninput = () => { ui.rvNote = { id: +rn.closest('.card').dataset.id, text: rn.value }; };
+    const rm = document.getElementById('review-more'); if (rm) rm.onclick = () => loadReview();
     const cmdGo = document.getElementById('cmd-go'); if (cmdGo) cmdGo.onclick = () => { const i = document.getElementById('cmd'); const v = i.value.trim(); i.value = ''; sendPrompt(v); };
     const cmd = document.getElementById('cmd'); if (cmd) cmd.addEventListener('keydown', e => { if (e.key === 'Enter') { const v = cmd.value.trim(); cmd.value = ''; sendPrompt(v); } e.stopPropagation(); });
     document.getElementById('tray-apply').onclick = applyAll;
@@ -344,12 +365,25 @@
     const [m] = top.splice(from, 1); top.splice(top.indexOf(toId), 0, m);
     top.forEach((id, i) => stage(id, 'set', { top_rank: i + 1 }, 'Top ' + (i + 1)));
   }
-  function reviewAct(kind) {
+  function reviewAct(kind, dateStr) {
     const items = review.items.filter(i => !staged.has(i.task.id)); if (!items.length) return;
-    const id = items[0].task.id;
+    const x = items[0].task, id = x.id;
     if (kind === 'later') { ui.laterOpen = !ui.laterOpen; render(); return; }
-    ui.laterOpen = false;
-    act(id, kind);
+    if (kind === 'top' || kind === 'longterm') { act(id, kind); return; }   // extras, not decisions
+    // A decision is a review: it sets last_reviewed_at (Keep does so server-side). An optional note
+    // is appended to the task's context, dated, in the same change.
+    const text = ui.rvNote.id === id ? ui.rvNote.text.trim() : '';
+    const extra = text ? { context: (x.context ? x.context + '\n' : '') + data.today + ': ' + text } : {};
+    const later = (day, label) => stage(id, 'set', { snoozed_until: day, last_reviewed_at: data.today, ...extra }, 'later · back ' + label);
+    if (kind === 'done') stage(id, 'done', extra, 'done');
+    else if (kind === 'drop') stage(id, 'drop', extra, 'dropped');
+    else if (kind === 'keep') stage(id, 'keep', extra, 'kept');
+    else if (kind === 'tomorrow') later(isoPlus(1), 'tomorrow');
+    else if (kind === 'fri') later(nextFri(), 'Friday');
+    else if (kind === 'nextweek') later(isoPlus(7 - ((TODAY().getDay() + 6) % 7)), 'next week');
+    else if (kind === 'date') { if (!dateStr) return; later(dateStr, dateStr); }
+    else return;
+    ui.laterOpen = false; ui.rvNote = { id: null, text: '' };
   }
   async function sendPrompt(text) {
     if (!text) return;

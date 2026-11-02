@@ -147,7 +147,10 @@ section.group h3.crit { color: var(--crit); } section.group h3.warn { color: var
 .card .big button.later { background: var(--warn-soft); color: var(--warn); border-color: transparent; }
 .card .big button.drop { background: var(--crit-soft); color: var(--crit); border-color: transparent; }
 .card .extra, .card .later-menu { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
-.card .later-menu { display: none; } .card .later-menu.on { display: flex; }
+.card .later-menu { display: none; align-items: center; } .card .later-menu.on { display: flex; }
+.card .later-menu input[type=date] { font: inherit; font-size: 13px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-2); color: var(--fg); }
+.card textarea { width: 100%; box-sizing: border-box; font: inherit; font-size: 14px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); color: var(--fg); resize: vertical; margin: 4px 0 8px; }
+.card p.ctx { white-space: pre-wrap; }
 .review .finish { text-align: center; padding: 40px 20px; }
 .review .finish h2 { margin: 0 0 8px; } .review .finish p { color: var(--muted); }
 .settings { max-width: 620px; }

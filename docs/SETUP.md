@@ -149,10 +149,10 @@ The repo unit runs as the owner with an explicit `--config`.
 
 If the hostname answers **530 / error 1033** while the foreground run logs "Registered tunnel
 connection", `cloudflared tunnel info factotum` from a second shell shows the edge's view. "does not
-have any active connection" there means the connector registers but the edge discards it; upgrade
-`cloudflared` (`sudo apt install --only-upgrade cloudflared`) and retry, or convert the tunnel to
-remote management in the dashboard (Networks → Tunnels → factotum → Configure → Migrate) and run it
-with the dashboard token like the host's existing tunnel does.
+have any active connection" there means the connector registers but the edge discards it. On mf-pc
+(2026-11-01) the cause was an outdated client: 2026.5.0 did this, 2026.10.7 did not. Run
+`sudo apt install --only-upgrade cloudflared` first; converting the tunnel to remote management in
+the dashboard (Networks → Tunnels → factotum → Configure → Migrate) is the fallback.
 
 **Access policy** (either way): Zero Trust → Access → Applications → **Add an application** →
 Self-hosted → name Factotum, session duration 1 month, domain `factotum.nthperson.dev` → Identity

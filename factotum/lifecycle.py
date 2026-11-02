@@ -15,7 +15,7 @@ REVIEW_ORDER = ["last_call", "thread_updated", "new", "slipped", "fading", "back
 REVIEW_LABELS = {
     "last_call": "Last call · hard deadline passed",
     "thread_updated": "Thread updated",
-    "new": "New since your last review",
+    "new": "New · not yet reviewed",
     "slipped": "Soft date slipped",
     "fading": "Fading soon",
     "back": "Back · mentioned again",
@@ -69,8 +69,10 @@ def review_reasons(task: dict, today: date, cfg: dict, last_review_at: date | No
         out.append("last_call")
     if flags.get("thread_updated"):
         out.append("thread_updated")
-    created = parse_date(task.get("created_at"))
-    if created and (last_review_at is None or created > last_review_at) and not reviewed:
+    # "New" means never decided on, not "created since the last session": an item you did not get
+    # to in one session must still be there in the next one. `last_review_at` is kept for the
+    # review push (skip when reviewed today) and no longer gates the queue.
+    if not reviewed:
         out.append("new")
     d = days_until(task.get("due"), today)
     if d is not None and d < 0 and not task.get("hard") and not task.get("top_rank") and not (reviewed and reviewed >= parse_date(task["due"])):
@@ -86,8 +88,10 @@ def review_reasons(task: dict, today: date, cfg: dict, last_review_at: date | No
     return [r for r in REVIEW_ORDER if r in out]
 
 
-def build_review_queue(tasks: list[dict], today: date, cfg: dict, last_review_at: date | None, flags_by_id: dict[int, dict] | None = None) -> list[dict]:
-    """Ordered, capped queue of {task, reasons}."""
+def build_review_queue(tasks: list[dict], today: date, cfg: dict, last_review_at: date | None, flags_by_id: dict[int, dict] | None = None,
+                       cap: int | None = None) -> list[dict]:
+    """Ordered, capped queue of {task, reasons}. `cap=None` reads lifecycle.review_cap; pass a large
+    number to see the whole eligible set (the API does, to report how many pages remain)."""
     flags_by_id = flags_by_id or {}
     items = []
     for t in tasks:
@@ -95,7 +99,7 @@ def build_review_queue(tasks: list[dict], today: date, cfg: dict, last_review_at
         if rs:
             items.append({"task": t, "reasons": rs, "primary": rs[0]})
     items.sort(key=lambda i: (REVIEW_ORDER.index(i["primary"]), i["task"].get("due") or "9999", -(i["task"].get("score") or 0)))
-    cap = int(C.get(cfg, "lifecycle.review_cap", 15))
+    cap = int(C.get(cfg, "lifecycle.review_cap", 15)) if cap is None else int(cap)
     return items[:cap]
 
 
