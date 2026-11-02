@@ -7,6 +7,7 @@ sender checked on the parsed `From` address, not on the IMAP search alone; the s
 from __future__ import annotations
 
 import email
+import re
 import sqlite3
 import threading
 import time
@@ -23,8 +24,12 @@ RECONNECT_S = 15
 DEFAULT_AUTHSERV = "mx.google.com"
 
 
+_VALUE = re.compile(r"^@?[A-Za-z0-9.\-]+$")
+
+
 def _dom_ok(value: str, domain: str) -> bool:
-    return value.strip().lower().lstrip("@") == domain
+    v = value.strip()
+    return bool(_VALUE.match(v)) and v.lower().lstrip("@") == domain
 
 
 def _statements(text: str) -> list[list[str]] | None:
@@ -49,7 +54,9 @@ def _statements(text: str) -> list[list[str]] | None:
                 tok.append(ch)
             continue
         if depth:
-            if ch == "(":
+            if ch == "\\":
+                i += 1                      # a quoted-pair inside a comment: the next character is literal
+            elif ch == "(":
                 depth += 1
             elif ch == ")":
                 depth -= 1

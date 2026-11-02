@@ -463,3 +463,5 @@ def test_trigger_fails_closed_without_a_configured_sender(cfg, conn):
     assert plaud_trigger.authenticated({"Authentication-Results": ['mx.google.com; dkim=pass header.i="@plaud.ai" header.s="a(b"']}, "mx.google.com", "plaud.ai")
     assert not plaud_trigger.authenticated({"Authentication-Results": ['mx.google.com; dkim=pass header.i=@plaud.ai (unbalanced']}, "mx.google.com", "plaud.ai")
     assert not plaud_trigger.authenticated({"Authentication-Results": ['mx.google.com; dkim=pass header.i="@plaud.ai']}, "mx.google.com", "plaud.ai")
+    assert not plaud_trigger.authenticated({"Authentication-Results": ['mx.google.com; dkim=fail (x \\) ; dkim=pass header.i=@plaud.ai)']}, "mx.google.com", "plaud.ai")   # quoted-pair inside a comment
+    assert not plaud_trigger.authenticated({"Authentication-Results": ['mx.google.com; dkim=pass header.i=@plaud.ai/evil']}, "mx.google.com", "plaud.ai")              # odd characters in a value
