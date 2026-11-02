@@ -310,3 +310,89 @@ wrote sits in Mailbird's Drafts (or the Quick Reply of its thread) until you sen
 Chat tab flags a reply that reaches an address no task names. Prompts and results of every turn are
 under `data/runs/chat/<thread>-<message>/`; the cost is on the Log tab.
 
+
+## 12. Slack (optional, phase 6)
+
+Read-only, several workspaces. For each workspace: https://api.slack.com/apps → **Create New App**
+→ From scratch → name "Factotum", pick the workspace → **OAuth & Permissions** → User Token Scopes:
+`search:read`, `channels:read`, `channels:history`, `groups:read`, `groups:history`, `im:history`,
+`users:read` → **Install to Workspace** → copy the **User OAuth Token** (`xoxp-…`). A bot token
+(`xoxb-…`) also works for everything except search. Then:
+
+```yaml
+# config/factotum.yaml
+sources:
+  slack:
+    enabled: true
+    workspaces:
+      - { name: DiCE Lab,   token_env: SLACK_TOKEN_DICE }
+      - { name: Car Sounds, token_env: SLACK_TOKEN_CARSOUNDS }
+```
+and one line per workspace in `.env` (`SLACK_TOKEN_DICE=xoxp-…`). Check with
+`.venv/bin/python -m factotum slack-check`: each workspace's team, how many channels the token
+sees, and whether search works. Factotum never posts; the client refuses write methods.
+
+## 13. Discord (optional, phase 6)
+
+Read-only, one bot for every server. https://discord.com/developers/applications → **New
+Application** "Factotum" → **Bot** → Reset Token → copy it to `.env` as `DISCORD_BOT_TOKEN`; on the
+same page turn on **Message Content Intent** (without it every message's text is empty). **OAuth2
+→ URL Generator**: scope `bot`, permissions *View Channels* and *Read Message History*; open the
+URL once per server to invite the bot. Server ids: Discord → User Settings → Advanced → Developer
+Mode, then right-click the server → Copy Server ID.
+
+```yaml
+sources:
+  discord:
+    enabled: true
+    guilds:
+      - { name: LARK dev, id: "123456789012345678" }
+```
+`.venv/bin/python -m factotum discord-check` names the bot, lists the servers it is in against the
+config, and reads one message to confirm the intent is on.
+
+## 14. The skills and `factotum mcp` from elsewhere (phase 6)
+
+On this machine both skills and the server are already registered:
+
+```bash
+ln -sfn /home/robert/factotum/skills/factotum-planner ~/.claude/skills/factotum-planner
+ln -sfn /home/robert/factotum/skills/factotum-ops     ~/.claude/skills/factotum-ops
+claude mcp add -s user factotum -e PYTHONPATH=/home/robert/factotum -- /home/robert/factotum/.venv/bin/python -m factotum mcp
+claude mcp get factotum        # Status: ✔ Connected
+```
+A skill never writes task state: `stage_changes` records a batch that appears above every tab in
+the UI with **Apply** / **Dismiss**.
+
+From another machine, the same server answers `POST /mcp` on the service. Set
+`FACTOTUM_MCP_TOKEN` in `.env` (`openssl rand -hex 32`), restart, add a Cloudflare Access
+**bypass** policy for the path `/mcp` (Zero Trust → Access → Applications → the Factotum app →
+add a policy, action Bypass, include Everyone, path `/mcp`; the bearer token is the gate), then on
+the other machine:
+
+```bash
+claude mcp add --transport http factotum https://factotum.nthperson.dev/mcp --header "Authorization: Bearer <token>"
+```
+By default the route serves reads and `stage_changes`; to allow drafts or Plaud reads from there,
+set `server.mcp_http_tools` in the config to a list of tool names (or `all`). A claude.ai custom
+connector needs OAuth, which Factotum does not implement; that copy of the old skill is simply
+removed.
+
+## 15. Retiring plaud-sync (the user's clicks)
+
+Everything below is reversible or archival; nothing in Factotum depends on it.
+
+1. **Notion**: the ☀️ Today page and the Command Log database were written by plaud-sync's
+   planner and command channel; nothing writes them now. Archive both (page menu → Delete / or
+   move under an "Archive" page). The Tasks database stays: it is the mirror. The Plaud notes
+   database stays: Factotum writes it.
+2. **Skills**: `rm ~/.claude/skills/plaud-sync-planner` (or move it aside) so the two
+   `factotum-*` skills are the only ones answering about tasks; in claude.ai, delete the uploaded
+   `plaud-sync-planner` skill.
+3. **lark-server**: the timers are already disabled (phase 4); `systemctl --user disable --now
+   plaud-sync.service` if a service remains, then remove the checkout when nothing else there
+   needs it.
+4. **GitHub**: `gh repo archive nthPerson/plaud-sync` once Factotum has run a full week without
+   anyone touching the old repo.
+5. **Mirror**: `.venv/bin/python -m factotum mirror --all` once (about 400 requests, ~3 minutes);
+   from then the scheduler keeps Notion current every `sinks.notion_tasks_mirror.sweep_minutes`.

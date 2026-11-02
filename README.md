@@ -14,17 +14,20 @@ commitments, reading email context, drafting replies); Python does every write.
 
 ## Status
 
-Phases 1 to 5 of 6 (see SPEC.md §14): store, scoring, lifecycle, the one-time Notion import with
+All six phases are built (SPEC.md §14): store, scoring, lifecycle, the one-time Notion import with
 its dry-run report, undoable batches, the command grammar, the API and the tabs; the automations
 (ntfy reminders with action buttons, the daily review push, the expire pass, the morning brief
-over SMTP, the Google Calendar sweep); the Plaud port (IMAP trigger, `plaud` CLI fetch, one
-headless Claude run per recording whose JSON Python applies); the mail sweep over Mailbird's MCP
-(read-only: replies flip Waiting tasks, sent mail closes reply tasks, invitations and
-confirmations become evidence); the Canvas sweep; the morning planner, whose verdict and
-proposals lead the brief; and Chat (phase 5): one streamed headless run per turn over the
-`factotum mcp` server (tasks read-only, mail read plus drafts, calendar and Plaud reads), proposals
-you stage into the tray, "Search related emails" and "Draft reply" on every row, a prompt field on the
-Review card. The Notion tasks mirror and the Claude Code skills are phase 6.
+over SMTP, the Google Calendar, Canvas, mail and Notion-mirror sweeps); the Plaud port (IMAP
+trigger, `plaud` CLI fetch, one headless Claude run per recording whose JSON Python applies); the
+mail sweep over Mailbird's MCP (read-only: replies flip Waiting tasks, sent mail closes reply
+tasks, invitations and confirmations become evidence); the Canvas sweep; the morning planner,
+whose verdict and proposals lead the brief; Chat: one streamed headless run per turn over the
+`factotum mcp` server (tasks read-only, mail read plus drafts, calendar, Plaud, Slack and Discord
+reads), proposals you stage into the tray, "Search related emails" and "Draft reply" on every row,
+a prompt field on the Review card; and phase 6: the one-way Notion tasks mirror, the two Claude
+Code skills on the same server (a skill stages a batch the tray applies), the server over HTTP
+behind a bearer token, and a phone layout. Retiring the old Notion pages and plaud-sync is a
+checklist in docs/SETUP.md §15.
 
 ## Quick start
 
@@ -37,7 +40,7 @@ cp config/factotum.example.yaml config/factotum.yaml   # edit projects, accounts
 .venv/bin/python -m factotum import-notion --apply
 .venv/bin/python -m factotum import-notion --new-only --apply   # hourly, until the old system stops writing
 .venv/bin/python -m factotum serve                     # http://127.0.0.1:8750
-.venv/bin/pytest                                       # 85 tests, no network
+.venv/bin/pytest                                       # 99 tests, no network
 ```
 
 ## Adapting it to your own workflow

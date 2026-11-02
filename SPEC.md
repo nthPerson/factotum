@@ -208,6 +208,20 @@ shared with. Used for: closing Dated tasks on passed, accepted events; creating 
 the planner's 14-day look-ahead. With the provider off, nothing calendar-related runs and the
 Claude runs lose the calendar tools.
 
+**Slack** (`sources.slack`, read-only; built 2026-11-02). Several workspaces, each a config entry
+(`name`, `token_env`) with its token in `.env`; `factotum/slack.py` refuses any Web API method
+outside its read list before a request is made. Chat and the skills get `slack_channels`,
+`slack_history`, `slack_thread` and `slack_search` (search needs that workspace's user token with
+`search:read`; a bot token reads channels but cannot search, and the tool says so). Mentions are
+resolved to names once per user per run; results are capped. No sweep yet: Slack is something to
+ask about, not an input that writes evidence.
+
+**Discord** (`sources.discord`, read-only; built 2026-11-02). One bot token, invited to each server
+listed under `guilds`; `factotum/discord.py` has only `get`. Tools: `discord_channels`,
+`discord_messages`, and `discord_search`, which reads the newest messages of each text channel
+(bounded) and filters them, because Discord offers bots no search. Reading content needs the
+Message Content intent.
+
 **Commands.** The email command channel is retired. Voice stays (§8.1 applies spoken
 instructions, including reminder and tier verbs). The UI grammar handles
 `done|drop|snooze|push|defer|top|longterm <ids…> [to <when>]` with no Claude run.
@@ -217,11 +231,17 @@ instructions, including reminder and tier verbs). The UI grammar handles
 - **Notion notes** (`sinks.notion_notes`): one page per recording in the Plaud notes database
   with Summary, Mind Map, Transcript and "Mentioned follow-ups". Database id, data source id and
   the `Source Link` prefix are config.
-- **Notion tasks mirror** (`sinks.notion_tasks_mirror`): one-way upsert of every task row so
-  relations and dashboards keep showing history. Never read back. The Notion property names are
-  config (`properties:`), so a user with a different layout edits YAML, not code. Default on
-  for Robert; the Settings tab shows the toggle and the config file name. With it off, Factotum
-  is a standalone SQLite task list.
+- **Notion tasks mirror** (`sinks.notion_tasks_mirror`; built 2026-11-02): one-way upsert of every
+  task row so relations and dashboards keep showing history. Never read back. The Notion property
+  names are config (`properties:`); the property *types* come from the database's own schema,
+  fetched once per pass, so a retyped or missing column is skipped rather than guessed. A
+  scheduler pass every `sweep_minutes` pushes rows with no page yet (creates, in id order, so
+  Notion's own Task ID counter keeps pace with Factotum's ids while nothing else creates rows
+  there) and rows edited since their last push (`tasks.mirrored_at`, stamped without touching
+  `edited_at`); `factotum mirror --all` is the first full pass. Read-only Notion columns
+  (unique_id, created time, formulas) are never written. Default on for Robert; the Settings tab
+  shows the toggle, the interval and the config file name. With it off, Factotum is a standalone
+  SQLite task list.
 - **Morning brief** (email at `notify.morning_brief.time`): verdict (phase 4), Top, overdue hard
   deadlines, due today, due tomorrow, reminders firing today, hard deadlines this week, calendar
   for today and tomorrow when the calendar is on, closed on evidence since yesterday (with who
@@ -331,13 +351,26 @@ one Undo. Review as a card stack. Settings: lifecycle values, inputs and outputs
 accounts table, ntfy topic, brief time and recipient, with a note naming the config file.
 Keyboard: `j k d x s t l e`, Esc deselects; Review `d k s x`.
 
+Phone layout (2026-11-02): under 700 px a row is title first (code and name on one line, wrapping)
+with its chips on a second line and the chevron as a real tap target; the tab strip scrolls
+sideways instead of wrapping; the keyboard hint is replaced by a one-line touch hint; buttons are
+36 px and inputs 16 px (no iOS zoom); the Top rail collapses to its header; a long Review context
+is clamped with "Show all context" so the decision buttons stay near the top; the runs table
+scrolls inside the Log. The Chat tab has a thread sidebar beside the messages on wide screens and a
+drawer (☰ Threads) on phones, and shows each turn's cost and duration. Review also shows the
+planner's suggestions (creates it could not prove) as cards with Create / Dismiss, and offers
+"Accept" for a planner proposal on a task's card; a decision judges the card's evidence in the same
+batch. A batch a skill staged (§15) appears as a banner above every tab with Apply / Dismiss.
+Settings saves on change and exposes the sweep intervals, the planner toggle and the chat budget.
+
 ## 10. Reminders and push
 
 - The public ntfy.sh server caps delay at 3 days and 250 messages/day, so **the service owns the
   schedule** and publishes at fire time.
-- Task reminder: title = task name, body = label + due, `Click` = the task URL behind Access,
-  up to three `view` actions (*Snooze 1 h*, *Done*, *Open*) pointing at `/r/<token>?…`, since
-  `http` actions cannot carry an Access session. Tokens are single use, 24 h.
+- Task reminder: title = task name, body = label + due, up to three `view` actions (*Snooze 1 h*,
+  *Done*, *Open*) pointing at `/r/<token>?…`, since `http` actions cannot carry an Access session.
+  No `Click` header (2026-11-02): with one, a tap on the phone bounced to the browser before the
+  buttons could be used; `notify.ntfy.tap_opens_app: true` restores it. Tokens are single use, 24 h.
 - Review push: daily at `notify.review_time`; skipped when reviewed today or the queue is empty.
 - **The clock** is one thread in the service (`factotum/scheduler.py`): a tick every 30 s re-reads the
   effective config, fires due reminders, and runs each daily job once at or after its time (so a
@@ -446,20 +479,34 @@ link; every batch is undoable; sinks are write-only.
    related emails" and "Draft reply" on every row, the Review card's prompt field, proposals staged
    into the tray, drafts in Mailbird. *Gate: a real "Search related emails" links the right thread, a
    draft reply appears in Mailbird unsent, and a Review-card question stages the intended change.*
-6. **Mirror and cleanup:** Notion tasks mirror live, retire the Today page and Command Log,
-   archive plaud-sync, point the two Claude Code skills at the API.
+6. **Mirror and cleanup (built 2026-11-02):** the Notion tasks mirror and its scheduler pass; the
+   two skills (`skills/factotum-planner`, `skills/factotum-ops`) on `factotum mcp`, registered for
+   Claude Code and reachable over `POST /mcp` with a bearer token; batches a skill stages land in
+   the tray. Retiring the Today page and the Command Log and archiving plaud-sync are the user's
+   clicks (SETUP §15). Same day, from the user's list: evidence verdicts as batch changes, planner
+   suggestions and Accept on Review, Settings for intervals / planner / chat budget, Slack and
+   Discord read tools, the ntfy tap, the phone layout, the chat sidebar and turn duration, the
+   chat link's account. *Gate: the first `factotum mirror --all` pass lands every row in Notion,
+   a skill turn stages a batch that the tray applies, and the phone shows a row's title in full.*
 
 ## 15. Claude Code skills
 
-`plaud-sync-planner` and `plaud-sync-ops` (installed in Claude Code and claude.ai) keep working
-unchanged until import day. From import day the planner skill is **read-only** (the Notion
-Tasks DB is a mirror; writes there are lost); task edits go through the Factotum UI. In phase 5
-both are replaced by `factotum-planner` and `factotum-ops` under `skills/` here (moved to phase 6
-with the mirror; Chat shipped first): the planner skill uses the same `factotum mcp` server Chat
-uses, extended with write tools that *stage a batch* rather than write directly, so the tray rule
-holds from a skill too. For Claude Code on
-mf-pc that server is local stdio; for claude.ai it is exposed as a streamable-HTTP route behind
-the tunnel with a Cloudflare Access service token and added as a custom connector.
+`plaud-sync-planner` and `plaud-sync-ops` (installed in Claude Code and claude.ai) kept working
+until import day; from then the Notion Tasks DB is a mirror and writes there are lost. Phase 6
+replaces them with `factotum-planner` and `factotum-ops` under `skills/` (symlinked into
+`~/.claude/skills`): the planner skill uses the same `factotum mcp` server Chat uses, plus one
+write tool, `stage_changes`, which records a pending batch in `proposals` (validated like a chat
+proposal, through a separate connection; the tool connection stays `query_only`). The tray shows
+it with Apply / Dismiss, so the tray rule holds from a skill too; `stage_changes` is left out of a
+chat turn's allowlist, whose proposals travel in its JSON. For Claude Code on mf-pc the server is
+local stdio (`claude mcp add -s user factotum -e PYTHONPATH=… -- .venv/bin/python -m factotum mcp`).
+For another machine it is `POST /mcp` on the service: one JSON-RPC message per request behind
+`Authorization: Bearer $FACTOTUM_MCP_TOKEN` (constant-time compared; no token, no route), serving
+reads and `stage_changes` by default, drafts and the Plaud subprocess only when
+`server.mcp_http_tools` opts in. A claude.ai custom connector cannot send a bearer header or a
+Cloudflare Access service token and needs an OAuth server Factotum does not have, so the
+claude.ai copy of the skill is not wired (ruling 2026-11-02); Claude Code and Claude Desktop with
+`mcp-remote --header` can use the route, with an Access bypass policy on `/mcp`.
 
 ## 16. Open questions
 

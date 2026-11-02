@@ -18,21 +18,21 @@ Guidance for Claude Code working in this repository. Read `SPEC.md` for the desi
 
 ## Phase status
 
-Phases 1 to 4 of 6 are built (SPEC.md §14): store, scoring, lifecycle, Notion import, batches,
-command grammar, API, the Today / Timeline / Projects / Review / Log / Settings tabs; the
-automations (`factotum/scheduler.py`: ntfy reminders with Snooze/Done/Open actions at `/r/<token>`,
-the daily review nudge, the expire pass, the morning brief over SMTP, the calendar, Canvas and mail
-sweeps); the Plaud port (`factotum/plaud_trigger.py` IMAP IDLE → `plaud` CLI → one headless Claude
-run via `factotum/claude/runner.py` and `prompts/sync-file.md` → `factotum/sync_file.py` writes
-tasks, instructions, reminders, events and the Notion note page); the mail sweep
-(`factotum/mail_sweep.py` over the read-only `factotum/mailbird.py`, findings in `evidence`); the
-Canvas sweep (`factotum/canvas.py`); the morning planner (`factotum/planner.py`,
-`prompts/planner-morning.md`) whose verdict leads the brief; and Chat (phase 5): `factotum mcp`
-(`factotum/mcp_server.py`, the only tool server a chat turn gets: tasks read-only, mail read + drafts
-through `factotum/mailbird.py`, calendar and Plaud reads), `factotum/chat.py` (one streamed run per
-turn, `--resume`, proposal validation, `prompts/chat-turn.md` and the two canned prompts), the
-`/api/chat/*` routes and the Chat tab. Phase 6 (the Notion tasks mirror, the Claude Code skills,
-retiring the old pages) is not built. Update this paragraph when a phase lands.
+All six phases (SPEC.md §14) are built as of 2026-11-02: store, scoring, lifecycle, Notion import,
+batches, command grammar, API, the Today / Timeline / Projects / Review / Chat / Log / Settings
+tabs; the automations (`factotum/scheduler.py`: ntfy reminders with Snooze/Done/Open actions at
+`/r/<token>`, the daily review nudge, the expire pass, the morning brief over SMTP, the calendar,
+Canvas, mail and Notion-mirror sweeps); the Plaud port (`factotum/plaud_trigger.py` IMAP IDLE →
+`plaud` CLI → one headless Claude run via `factotum/claude/runner.py` and `prompts/sync-file.md` →
+`factotum/sync_file.py`); the mail sweep (`factotum/mail_sweep.py` over the read-only
+`factotum/mailbird.py`, findings in `evidence`); the Canvas sweep (`factotum/canvas.py`); the morning
+planner (`factotum/planner.py`); Chat (`factotum mcp` in `factotum/mcp_server.py`, `factotum/chat.py`,
+`prompts/chat-*.md`, the `/api/chat/*` routes); and phase 6: the Notion tasks mirror
+(`factotum/notion_mirror.py`), the skills `skills/factotum-planner` and `skills/factotum-ops` on the
+same MCP server with `stage_changes` → `proposals` → the tray, `POST /mcp` behind a bearer token,
+Slack and Discord read tools (`factotum/slack.py`, `factotum/discord.py`), evidence verdicts as
+batch changes, planner suggestions on Review, the phone layout. Retiring the old Notion pages and
+plaud-sync is the user's checklist (SETUP §15). Update this paragraph when something lands.
 
 ## Where things live
 
@@ -63,6 +63,10 @@ retiring the old pages) is not built. Update this paragraph when a phase lands.
 | the MCP server a chat turn talks to, its tools, result caps, draft policy | SPEC §8.3 | `factotum/mcp_server.py` (`TOOLS`, `dispatch`, `known_recipients`) |
 | chat turns, proposal validation, session resume, canned prompts | SPEC §8.3 | `factotum/chat.py` (`build_prompt`, `turn`, `_clean_proposals`), `prompts/chat-*.md` |
 | streaming a headless run, per-run MCP config, isolation flags | SPEC §8 | `factotum/claude/runner.py` (`command`, `run`, `_run_stream`) |
+| the Notion tasks mirror: schema-typed properties, which rows, `factotum mirror` | SPEC §7 | `factotum/notion_mirror.py` (`properties`, `sweep`), `tasks.mirrored_at` |
+| a skill staging a batch, the tray banner, the HTTP MCP route and its allowlist | SPEC §15 | `factotum/mcp_server.py` (`stage_changes`, `Context.allowed`), `api.py` (`/api/proposals`, `/mcp`), `skills/` |
+| Slack / Discord read tools, workspaces and servers, tokens | SPEC §6 | `factotum/slack.py`, `factotum/discord.py`, `mcp_server.py` (`slack_*`, `discord_*`) |
+| verdicts on evidence (dismiss, accept, reviewed), planner suggestions on Review | SPEC §9 | `factotum/batches.py` (`judge_evidence`), `api.py` (`/api/review`, `/api/review/suggestions`) |
 
 ## Commands
 
@@ -78,6 +82,8 @@ retiring the old pages) is not built. Update this paragraph when a phase lands.
 .venv/bin/python -m factotum claude-check | plaud-check       # the headless login; the Plaud CLI and the trigger mailbox
 .venv/bin/python -m factotum mail-check | canvas-check        # Mailbird's accounts vs the monitored ones; Canvas items vs rows
 .venv/bin/python -m factotum sweep mail|canvas|calendar       # one sweep now
+.venv/bin/python -m factotum mirror [--all|--dry-run]         # the Notion tasks mirror: rows edited since the last pass, or every row
+.venv/bin/python -m factotum slack-check | discord-check      # tokens, workspaces / servers, what each can read
 .venv/bin/python -m factotum planner --dry-run [--send]       # the morning planner (~$0.30): JSON only, or applied and mailed
 .venv/bin/python -m factotum chat-check                       # the MCP server over a pipe, Mailbird, one haiku run through it
 .venv/bin/python -m factotum chat "text" --attach 388         # one chat turn from the terminal (~$0.20), stored like a UI turn
@@ -124,6 +130,17 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
   stdout print before the protocol starts breaks it silently.
 - **`factotum mcp` must never write to stdout except JSON-RPC lines**; logs go to stderr. Its DB
   connection is `query_only`, so a tool that tries to write raises instead of bypassing batches.
+- **Every state-changing `/api` call must carry `Content-Type: application/json`** (2026-11-02): a
+  middleware answers 415 otherwise, so a body-less POST (undo, apply a proposal) is never a browser
+  "simple request" that rides on the Access cookie. `fetch` with no body still needs the header; the
+  UI's `api()` helper sets it, tests pass `json={}`.
+- **`mcp_server.Context` sets `PRAGMA query_only` on the connection it is given** (2026-11-02): never
+  hand it the API's shared connection; the `/mcp` route opens one per request, and `stage_changes`
+  writes through `ctx.writer`, a separate connection.
+- **Notion's Task ID is Notion's counter** (2026-11-02): the mirror cannot set a `unique_id`; it only
+  matches Factotum's id because creates are pushed in id order and nothing else creates rows there.
+- **A reminder push has no `Click` header** (2026-11-02): with one, the ntfy app on the phone opened
+  the browser before Snooze / Done could be tapped. `notify.ntfy.tap_opens_app` restores it.
 - **`expire` only touches rows Review has shown** (`last_offered_at`, stamped by `GET /api/review`).
   A row that was never on a Review page stays open however old it is; that is by design.
 
