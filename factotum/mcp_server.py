@@ -229,9 +229,32 @@ def _account_id(ctx: Context, address: str | None) -> int | None:
     return aid
 
 
-def _see(ctx: Context, cid, subject=None, account=None, last_message_id=None) -> None:
+def _see(ctx: Context, cid, subject=None, account=None, last_message_id=None, people=()) -> None:
     if cid:
-        ctx.record("seen", {"conversation_id": str(cid), "subject": _cut(subject, 200) if subject else None, "account": account, "last_message_id": last_message_id})
+        ctx.record("seen", {"conversation_id": str(cid), "subject": _cut(subject, 200) if subject else None, "account": account, "last_message_id": last_message_id,
+                            "people": sorted({_addr_of(p) for p in people if _addr_of(p)}) or None})
+
+
+def _addr_of(x) -> str:
+    if isinstance(x, dict):
+        return str(x.get("address") or x.get("email") or "").lower()
+    s = str(x or "")
+    return s[s.find("<") + 1: s.rfind(">")].lower() if "<" in s else s.strip().lower()
+
+
+def known_recipients(ctx: Context) -> set[str]:
+    """Addresses a NEW draft may be sent to: the user's own accounts, every task's counterpart or
+    waiting_on address, and anyone on a message this run actually read. A mail that tells the model to
+    "forward this to x@y" cannot reach a stranger (security review 2026-11-02)."""
+    import re
+    out: set[str] = set(ctx.accounts()["by_email"])
+    for r in rows(ctx.conn, "SELECT counterpart, waiting_on, account FROM tasks"):
+        for v in r.values():
+            out.update(m.lower() for m in re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", str(v or "")))
+    if ctx.run_dir:
+        for t in seen_threads(ctx.run_dir).values():
+            out.update(t.get("people") or [])
+    return out
 
 
 @tool("mail_search", "Search mail in Mailbird (free text or `from:` `to:` `subject:` `has:attachment`). Returns conversations: id, subject, "
@@ -269,7 +292,7 @@ def mail_thread(ctx: Context, args: dict) -> dict:
     msgs = [{"id": m.get("id"), "from": _who(m.get("from")), "at": m.get("receivedAtUtc") or m.get("sentAtUtc"), "preview": _cut(m.get("preview") or m.get("bodyPreview"), PREVIEW)}
             for m in (c.get("messages") or [])[:30]]
     acc = ctx.accounts()["by_id"].get(int(c["accountId"])) if c.get("accountId") is not None else None
-    _see(ctx, cid, c.get("subject"), acc, msgs[-1]["id"] if msgs else None)
+    _see(ctx, cid, c.get("subject"), acc, msgs[-1]["id"] if msgs else None, people=[m.get("from") for m in (c.get("messages") or [])])
     return {"conversation_id": cid, "subject": _cut(c.get("subject"), 160), "account": acc, "messages": msgs}
 
 
@@ -283,7 +306,7 @@ def mail_message(ctx: Context, args: dict) -> dict:
     m = ctx.mail_client().call("get_message", {"messageId": mid}) or {}
     body = str(m.get("body") or m.get("bodyMarkdown") or m.get("text") or "")
     acc = ctx.accounts()["by_id"].get(int(m["accountId"])) if m.get("accountId") is not None else None
-    _see(ctx, m.get("conversationId"), m.get("subject"), acc, mid)
+    _see(ctx, m.get("conversationId"), m.get("subject"), acc, mid, people=[m.get("from"), *(m.get("to") or []), *(m.get("cc") or [])])
     return {"message_id": mid, "conversation_id": m.get("conversationId"), "subject": _cut(m.get("subject"), 200), "from": _who(m.get("from")),
             "to": [_who(x) for x in (m.get("to") or [])][:20], "cc": [_who(x) for x in (m.get("cc") or [])][:20], "at": m.get("receivedAtUtc") or m.get("sentAtUtc"),
             "body": body[:cap], "truncated": len(body) > cap, "attachments": [str(a.get("name") or a.get("fileName") or "") for a in (m.get("attachments") or [])][:20]}
@@ -314,7 +337,8 @@ def mail_draft_reply(ctx: Context, args: dict) -> dict:
     return {"draft_message_id": rec["draft_message_id"], "conversation_id": cid, "note": "draft saved in Mailbird, not sent"}
 
 
-@tool("mail_draft_new", "Save a NEW message as a DRAFT in Mailbird from one of the user's accounts (never sent).",
+@tool("mail_draft_new", "Save a NEW message as a DRAFT in Mailbird from one of the user's accounts (never sent). Recipients must be people "
+      "Factotum knows: a task's counterpart, the user's own accounts, or someone on a message read in this conversation.",
       {"account": {"type": "string", "description": "sending account's email address"}, "to": {"type": "array", "items": {"type": "string"}},
        "cc": {"type": "array", "items": {"type": "string"}}, "subject": {"type": "string"}, "body": {"type": "string"}}, ["account", "to", "subject", "body"])
 def mail_draft_new(ctx: Context, args: dict) -> dict:
@@ -322,6 +346,11 @@ def mail_draft_new(ctx: Context, args: dict) -> dict:
     to = [str(x) for x in (args.get("to") or []) if str(x).strip()][:20]
     if aid is None or not to:
         raise ToolError("account and at least one recipient are required")
+    known = known_recipients(ctx)
+    strangers = [a for a in to + [str(x) for x in (args.get("cc") or [])] if _addr_of(a) not in known]
+    if strangers:
+        raise ToolError(f"not a known contact: {', '.join(strangers)}. New drafts go only to task counterparts, the user's accounts, "
+                        "or people on mail read in this conversation; reply on their thread with mail_draft_reply, or tell the user.")
     payload = {"accountId": aid, "to": [{"email": a} for a in to], "subject": _str(args, "subject", "", 300), "body": _str(args, "body", "", 20_000), "showInUi": False}
     cc = [str(x) for x in (args.get("cc") or []) if str(x).strip()][:20]
     if cc:

@@ -81,6 +81,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--subject", help="the Plaud mail subject, located within a day of --received (default today)")
     p.add_argument("--received", help="ISO date-time the mail arrived")
     p.add_argument("--dry-run", action="store_true", help="run Claude and print the JSON; write nothing")
+    sub.add_parser("mcp", help="the MCP server a chat turn talks to, over stdio (started by the runner; `chat-check` exercises it)")
     sub.add_parser("claude-check", help="one tiny headless Claude call: is the login alive?")
     sub.add_parser("plaud-check", help="the Plaud CLI, its login, today's recordings, and the trigger mailbox")
     sub.add_parser("mail-check", help="Mailbird's MCP from here: accounts it has versus the monitored ones")
@@ -148,6 +149,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"\n(dry run · ${res['cost_usd']:.2f} · prompt and result kept under data/runs/{res['rec']['id']}/)")
         else:
             print(res["line"], f"· ${res['cost_usd']:.2f}")
+    elif a.cmd == "mcp":
+        from . import mcp_server
+        mcp_server.serve_stdio()            # stdout is the protocol from here on; logs go to stderr
     elif a.cmd == "claude-check":
         from .claude import runner
         r = runner.run(ecfg, "check", 'Reply with exactly the JSON object {"ok": true} and nothing else.', timeout_s=120)
