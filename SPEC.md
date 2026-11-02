@@ -176,8 +176,10 @@ for the sender's domain and the parsed `From` equals `sources.plaud.sender`; the
 locates the recording (`plaud search`, same title within a day of the mail) and never enters the
 prompt. Then `plaud summary|transcript <id> -o` write the two files under `data/runs/<id>/`, one
 Claude run (§8.1) reads them, and Python writes the note page, tasks, mentions, reminders and
-calendar events. Handled uids go to `trigger_seen` and get `\Seen`, so a lost flag never
-reprocesses. One automatic retry two minutes later; a failure alerts over ntfy (else the brief's
+calendar events. The queue is a UID watermark per account, not the unread flag: another reader
+(plaud-sync, a phone) marks a mail read within seconds, so every Plaud mail above the watermark is
+examined once, read or not, handled uids go to `trigger_seen`, and a first start begins at the top
+of the mailbox so nothing old is replayed. One automatic retry two minutes later; a failure alerts over ntfy (else the brief's
 mailbox) and writes nothing. `python -m factotum sync-file <id> [--dry-run]` runs the same thing
 by hand. No large payload ever passes through a tool result, so the 40 KB MCP spill is gone.
 
