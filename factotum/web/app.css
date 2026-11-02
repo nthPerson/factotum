@@ -170,3 +170,10 @@ section.group h3.crit { color: var(--crit); } section.group h3.warn { color: var
 .remform { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; width: 100%; }
 .remform input, .remform select { font: inherit; font-size: 13px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-2); color: var(--fg); }
 .remform input[type=text] { flex: 1; min-width: 120px; }
+
+.log { max-width: 760px; } .log h3 { margin: 18px 0 8px; font-size: 14px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+.logb { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-bottom: 8px; } .logb.undone { opacity: .6; }
+.loghead { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
+.logc { font-size: 13px; padding: 2px 0; display: flex; gap: 6px; flex-wrap: wrap; } .logc .name { color: var(--muted); max-width: 32ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .logc .f { font-family: var(--mono); }
+.runs { width: 100%; border-collapse: collapse; font-size: 13px; } .runs th, .runs td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); } .runs tr.bad td { color: var(--crit); }
+.bulk .remform { display: inline-flex; width: auto; }

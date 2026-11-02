@@ -254,11 +254,17 @@ the sweep then watches for free, so a task linked once never goes stale silently
 ## 9. The UI
 
 One page, phone-friendly, served by the service. Tabs: **Today · Timeline · Projects · Review ·
-Chat · Settings**. The mockup is the reference. Rows show only: checkbox, code, name, tier and
+Chat · Log · Settings**. The mockup is the reference. Rows show only: checkbox, code, name, tier and
 fade chips, next reminder, project, due, effort, staged-change chip; the chevron opens details
 (score reasons, why now, context, source and account, links, lifecycle, reminders, actions, the
 Claude buttons). Top rail with drag. Composer on every tab with attached chips; grammar commands
-stage instantly, anything else opens Chat. Bulk bar on multi-select. Tray with one Apply and
+stage instantly, anything else opens Chat. A tap on a row or its checkbox selects it (no modifier,
+so it works on a phone); the bulk bar appears with any selection and offers Done, Drop, Snooze,
+a due date to set or clear, Top and Long-term. Due dates can also be set or cleared from a row's
+details and from a Review card, staged beside the decision rather than replacing it. The Log tab
+lists recent batches with every field change (old → new, task named) and an Undo per batch, and
+the Claude runs with their cost. Assets are served with `no-cache` and version-stamped URLs so a
+deploy reaches the phone without a hard refresh. Tray with one Apply and
 one Undo. Review as a card stack. Settings: lifecycle values, inputs and outputs on/off, email
 accounts table, ntfy topic, brief time and recipient, with a note naming the config file.
 Keyboard: `j k d x s t l e`; Review `d k s x`.

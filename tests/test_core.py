@@ -337,3 +337,32 @@ def test_task_list_carries_a_reminders_repeat(conn, cfg, tmp_path):
     client.post("/api/batches/apply", json={"source": "ui", "changes": [{"task_id": 1, "op": "add_reminder", "fields": {"fire_at": "2026-11-04T09:30", "repeat": "weekly"}}]})
     t = next(t for t in client.get("/api/tasks").json()["tasks"] if t["id"] == 1)
     assert t["reminders"][0]["repeat"] == "weekly"
+
+
+def test_static_assets_are_never_served_stale(cfg, tmp_path):
+    # Cloudflare caches .js/.css by default and browsers apply heuristic freshness when the origin
+    # is silent; the page must stamp its assets and the assets must say no-cache
+    from fastapi.testclient import TestClient
+    from factotum.api import create_app
+    client = TestClient(create_app(cfg, db_path=str(tmp_path / "api.db")))
+    page = client.get("/")
+    assert "no-cache" in page.headers["cache-control"] and "/static/app.js?v=" in page.text and "/static/app.css?v=" in page.text
+    asset = client.get("/static/app.js")
+    assert asset.status_code == 200 and "no-cache" in asset.headers["cache-control"]
+
+
+def test_log_lists_batches_with_their_changes_and_runs(cfg, tmp_path):
+    from fastapi.testclient import TestClient
+    from factotum.api import create_app
+    app = create_app(cfg, db_path=str(tmp_path / "api.db"))
+    c = app.state.conn
+    upsert_task(c, task(id=1, name="Call Reza"))
+    c.execute("INSERT INTO runs (kind, started_at, duration_ms, cost_usd, ok, summary) VALUES ('sync-file', '2026-11-01T06:30:00+00:00', 42000, 0.37, 1, 'filed one note')")
+    c.commit()
+    client = TestClient(app)
+    client.post("/api/batches/apply", json={"source": "review", "changes": [{"task_id": 1, "op": "set", "fields": {"due": "2026-11-05"}}]})
+    log = client.get("/api/log").json()
+    b = log["batches"][0]
+    assert b["source"] == "review" and b["undone_at"] is None
+    assert b["changes"][0] == {"task_id": 1, "task_name": "Call Reza", "field": "due", "old": None, "new": "2026-11-05"}
+    assert log["runs"][0]["kind"] == "sync-file" and log["runs"][0]["cost_usd"] == 0.37

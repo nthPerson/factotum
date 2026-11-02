@@ -3,14 +3,14 @@
   'use strict';
   const PLAUD = 'https://web.plaud.ai/file/';
   const NOTION = 'https://app.notion.com/p/';
-  const TABS = ['today', 'timeline', 'projects', 'review', 'chat', 'settings'];
+  const TABS = ['today', 'timeline', 'projects', 'review', 'chat', 'log', 'settings'];
 
   let data = { tasks: [], projects: [], today: new Date().toISOString().slice(0, 10), top_cap: 7 };
   let review = null;        // /api/review payload
   let settings = null;      // /api/settings payload
   let staged = new Map();   // task id -> {op, fields, label}
   let lastBatch = null;
-  let ui = { tab: 'today', focus: null, sel: new Set(), open: new Set(), reviewIdx: 0, laterOpen: false, reviewPaused: false, rvNote: { id: null, text: '' }, remOpen: null };
+  let ui = { tab: 'today', focus: null, sel: new Set(), open: new Set(), reviewIdx: 0, laterOpen: false, reviewPaused: false, rvNote: { id: null, text: '' }, remOpen: null, dueOpen: null };
   try { const h = location.hash.replace('#', ''); if (TABS.includes(h)) ui.tab = h; } catch (_) {}
   try { const s = JSON.parse(localStorage.getItem('factotum.staged') || '[]'); staged = new Map(s); } catch (_) {}
   for (const [k, v] of staged) { if (!v || typeof v !== 'object') staged.delete(k); else if (v.task_id == null) v.task_id = typeof k === 'number' ? k : parseInt(k, 10); }  // trays saved before entries carried task_id
@@ -21,9 +21,10 @@
   const api = (path, opts) => fetch(path, Object.assign({ headers: { 'Content-Type': 'application/json' } }, opts)).then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
 
   function view(t) {
-    const st = staged.get(t.id);
-    if (!st) return t;
-    const v = Object.assign({}, t, st.fields || {});
+    const st = staged.get(t.id), due = staged.get(t.id + ':due');
+    if (!st && !due) return t;
+    const v = Object.assign({}, t, due ? due.fields : {}, st ? st.fields : {});
+    if (!st) return v;
     if (st.op === 'done') v.status = 'done';
     if (st.op === 'drop') v.status = 'dropped';
     if (st.op === 'pin_top') v.top_rank = v.top_rank || 99;
@@ -73,6 +74,26 @@
       <input type="text" data-f="label" placeholder="Label (optional)" aria-label="Label">
       <button class="btn small" data-rem-add="${id}">Add</button><button class="btn small" data-rem-cancel="${id}">Cancel</button></div>`;
   }
+  // An attribute edit (due date) is staged under "<id>:due", beside the task's decision if any.
+  function stageExtra(key, task_id, op, fields, label) {
+    staged.set(key, { task_id, op, fields, label });
+    try { localStorage.setItem('factotum.staged', JSON.stringify([...staged])); } catch (_) {}
+    render();
+  }
+  function stageDue(id, due) { stageExtra(id + ':due', id, 'set', { due: due || null }, due ? 'due ' + due : 'due cleared'); }
+  function dueForm(id, current) {
+    const st = staged.get(id + ':due');
+    if (st) return `<span class="chip staged">${esc(st.label)}</span><button class="btn small" data-due-clear="${id}">Undo</button>`;
+    if (ui.dueOpen !== id) return `<button class="btn small" data-due-open="${id}">📅 ${current ? 'Change due' : 'Set due'}</button>`;
+    return `<span class="remform" data-due-form="${id}"><input type="date" value="${esc((current || '').slice(0, 10))}" aria-label="Due date"><button class="btn small" data-due-set="${id}">Set</button>${current ? `<button class="btn small" data-due-none="${id}">Clear due</button>` : ''}<button class="btn small" data-due-cancel="${id}">Cancel</button></span>`;
+  }
+  function wireDue(root) {
+    root.querySelectorAll('[data-due-open]').forEach(b => b.onclick = () => { ui.dueOpen = +b.dataset.dueOpen; render(); });
+    root.querySelectorAll('[data-due-cancel]').forEach(b => b.onclick = () => { ui.dueOpen = null; render(); });
+    root.querySelectorAll('[data-due-set]').forEach(b => b.onclick = () => { const id = +b.dataset.dueSet; const v = root.querySelector(`[data-due-form="${id}"] input`).value; if (!v) { toast('Pick a date'); return; } ui.dueOpen = null; stageDue(id, v); });
+    root.querySelectorAll('[data-due-none]').forEach(b => b.onclick = () => { ui.dueOpen = null; stageDue(+b.dataset.dueNone, null); });
+    root.querySelectorAll('[data-due-clear]').forEach(b => b.onclick = () => { staged.delete(+b.dataset.dueClear + ':due'); try { localStorage.setItem('factotum.staged', JSON.stringify([...staged])); } catch (_) {} render(); });
+  }
   function stageReminder(id) {
     const f = document.querySelector(`[data-rem-form="${id}"]`); if (!f) return;
     const fire_at = f.querySelector('[data-f=fire_at]').value, repeat = f.querySelector('[data-f=repeat]').value, label = f.querySelector('[data-f=label]').value.trim();
@@ -101,13 +122,15 @@
       done: () => stage(id, 'done', {}, 'done'),
       drop: () => stage(id, 'drop', {}, 'dropped'),
       snooze: () => stage(id, 'set', { snoozed_until: isoPlus(1) }, 'snoozed to tomorrow'),
-      fri: () => stage(id, 'set', { due: nextFri() }, 'due Friday'),
-      tomorrow: () => stage(id, 'set', { due: isoPlus(1) }, 'due tomorrow'),
-      nextweek: () => stage(id, 'set', { due: isoPlus(7 - ((TODAY().getDay() + 6) % 7)) }, 'due next week'),
+      fri: () => stageDue(id, nextFri()),
+      tomorrow: () => stageDue(id, isoPlus(1)),
+      nextweek: () => stageDue(id, isoPlus(7 - ((TODAY().getDay() + 6) % 7))),
+      setdue: () => stageDue(id, extra),
+      cleardue: () => stageDue(id, null),
       top: () => t.top_rank ? stage(id, 'unpin', {}, 'unpinned') : stage(id, 'pin_top', {}, 'pinned'),
       longterm: () => stage(id, 'set', { longterm: t.longterm ? 0 : 1 }, t.longterm ? 'not long-term' : 'long-term'),
       keep: () => stage(id, 'keep', {}, 'kept'),
-      due: () => stage(id, 'set', { due: extra }, 'due ' + (extra || 'cleared')),
+      due: () => stageDue(id, extra),
     };
     (ops[kind] || (() => {}))();
   }
@@ -118,7 +141,7 @@
       const res = await api('/api/batches/apply', { method: 'POST', body: JSON.stringify({ source: ui.tab === 'review' ? 'review' : 'ui', changes }) });
       lastBatch = res.batch_id;
       staged = new Map(); try { localStorage.removeItem('factotum.staged'); } catch (_) {}
-      ui.sel.clear();
+      ui.sel.clear(); logData = null;
       await load();
       if (ui.tab === 'review') {
         // The decisions are in; today counts as reviewed (phase 2 skips the push), and the next
@@ -143,7 +166,7 @@
   function render() {
     renderRail();
     const p = document.getElementById('panel');
-    const fns = { today: renderToday, timeline: renderTimeline, projects: renderProjects, review: renderReview, chat: renderChat, settings: renderSettings };
+    const fns = { today: renderToday, timeline: renderTimeline, projects: renderProjects, review: renderReview, chat: renderChat, log: renderLog, settings: renderSettings };
     p.innerHTML = fns[ui.tab]();
     document.querySelectorAll('#tabs button').forEach(b => b.setAttribute('aria-selected', b.dataset.tab === ui.tab));
     document.getElementById('n-today').textContent = openOnes().filter(x => x.due && fmtDue(x.due).days <= 1).length || '';
@@ -164,10 +187,11 @@
     const ids = attachedIds();
     return `<div class="composer"><div class="attach">${ids.length ? 'Attached: ' + ids.map(id => `<span class="chip">Task-${id}</span>`).join('') : 'Nothing attached · click a row to focus one, shift-click to attach several'}</div>
       <div class="cmd"><input id="cmd" placeholder="Command: done 389 392 · push 364 fri · top 23 · longterm 38   (free text → Chat, phase 5)" aria-label="Prompt or command"><button class="btn primary" id="cmd-go">Send</button></div>
-      <p class="hint">Keys: <kbd>j</kbd><kbd>k</kbd> move · <kbd>d</kbd> done · <kbd>x</kbd> drop · <kbd>s</kbd> snooze · <kbd>t</kbd> top · <kbd>l</kbd> long-term · <kbd>e</kbd> details · shift-click to select many</p></div>
+      <p class="hint">Tap a row to select it (the bulk bar appears) · <kbd>j</kbd><kbd>k</kbd> move · <kbd>d</kbd> done · <kbd>x</kbd> drop · <kbd>s</kbd> snooze · <kbd>t</kbd> top · <kbd>l</kbd> long-term · <kbd>e</kbd> details</p></div>
       <div class="bulk" id="bulk"><b id="bulk-n"></b> selected
         <button class="btn small" data-bulk="done">Done</button><button class="btn small" data-bulk="drop">Drop</button>
         <button class="btn small" data-bulk="snooze">Snooze to tomorrow</button><button class="btn small" data-bulk="fri">Due Friday</button>
+        <span class="remform"><input type="date" id="bulk-date" aria-label="Due date"><button class="btn small" data-bulk="setdue">Set due</button><button class="btn small" data-bulk="cleardue">Clear due</button></span>
         <button class="btn small" data-bulk="top">Pin to Top</button><button class="btn small" data-bulk="longterm">Long-term</button>
         <span class="spacer"></span><button class="btn small" data-bulk="clear">Clear</button></div>`;
   }
@@ -200,7 +224,7 @@
     const srcLink = x.source_link ? `<a href="${esc(x.source_link)}" target="_blank" rel="noopener">${x.source === 'Plaud' ? 'Plaud note' : x.source === 'Canvas' ? 'Canvas' : 'Source'}</a>` : '';
     return `<div class="${cls}" data-id="${x.id}">
       <div class="main">
-        <input type="checkbox" id="ck-${x.id}" aria-label="Done" ${x.status === 'done' ? 'checked' : ''}>
+        <input type="checkbox" id="ck-${x.id}" aria-label="Select" ${ui.sel.has(x.id) ? 'checked' : ''}>
         <div class="title"><span class="code">Task-${x.id}</span><span class="name">${esc(x.name)}</span></div>
         <div class="meta">${chips}<button class="chev" aria-label="Details" data-chev="${x.id}"></button></div>
       </div>
@@ -218,6 +242,7 @@
           <button class="btn small" data-act="snooze" data-id="${x.id}">Snooze to tomorrow</button>
           <button class="btn small" data-act="top" data-id="${x.id}">${x.top_rank ? 'Unpin' : 'Pin to Top'}</button>
           <button class="btn small" data-act="longterm" data-id="${x.id}">${x.longterm ? 'Clear long-term' : 'Mark long-term'}</button>
+          ${dueForm(x.id, x.due)}
           ${reminderForm(x.id)}
           <span class="spacer"></span>
           <button class="btn small" disabled title="Phase 5">✉ Search related emails</button>
@@ -290,12 +315,27 @@
         <div class="links">${x.source_link ? `<a href="${esc(x.source_link)}" target="_blank" rel="noopener">${x.source === 'Plaud' ? 'Plaud note' : 'Source'}</a>` : ''}</div>
         <div class="big"><button class="done" data-rv="done">Done <kbd>d</kbd></button><button data-rv="keep">Keep <kbd>k</kbd></button><button class="later" data-rv="later">Later <kbd>s</kbd></button><button class="drop" data-rv="drop">Drop <kbd>x</kbd></button></div>
         <div class="later-menu ${ui.laterOpen ? 'on' : ''}"><span class="hint">Comes back on:</span><button class="btn small" data-rv="tomorrow">Tomorrow</button><button class="btn small" data-rv="fri">Friday</button><button class="btn small" data-rv="nextweek">Next week</button><input type="date" id="rv-date" min="${data.today}" aria-label="Pick a date"></div>
-        <div class="extra"><button class="btn small" data-rv="top">★ Pin to Top</button><button class="btn small" data-rv="longterm">Mark long-term (never fades)</button>${reminderForm(x.id)}</div>
+        <div class="extra"><button class="btn small" data-rv="top">★ Pin to Top</button><button class="btn small" data-rv="longterm">Mark long-term (never fades)</button>${dueForm(x.id, x.due)}${reminderForm(x.id)}</div>
       </div>
       <div class="note">Keep = no change; the item will not be asked about again until something changes. Later = hidden until the date you pick, then back in Review and Today. Decisions stage into the tray; Apply writes them all at once.</div></div>`;
   }
   function renderChat() {
     return `<div class="note">Chat arrives in phase 5: a prompt with the attached tasks as context, one headless Claude run with Mailbird read and draft tools, proposals you stage into the tray. See SPEC.md §8.3.</div>` + composer();
+  }
+  let logData = null;
+  async function loadLog() { logData = await api('/api/log'); render(); }
+  function renderLog() {
+    if (!logData) { loadLog(); return '<div class="empty">Loading log…</div>'; }
+    const when = iso => iso ? new Date(iso).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '';
+    const val = v => v === null || v === undefined ? '—' : typeof v === 'object' ? esc(JSON.stringify(v)) : esc(String(v));
+    const batches = logData.batches.map(b => `<div class="logb ${b.undone_at ? 'undone' : ''}">
+        <div class="loghead"><b>#${b.id}</b> <span class="chip">${esc(b.source)}</span> <span>${when(b.applied_at || b.created_at)}</span> <span>${b.changes.length} change${b.changes.length === 1 ? '' : 's'}</span>
+          ${b.undone_at ? `<span class="chip">undone ${when(b.undone_at)}</span>` : b.changes.length ? `<span class="spacer"></span><button class="btn small" data-undo="${b.id}">Undo</button>` : ''}</div>
+        ${b.changes.map(c => `<div class="logc"><span class="code">Task-${c.task_id}</span> <span class="name">${esc(c.task_name || '')}</span> <span class="f">${esc(c.field)}</span> ${val(c.old)} → ${val(c.new)}</div>`).join('')}
+      </div>`).join('') || '<div class="empty">No batches yet.</div>';
+    const runs = logData.runs.length ? `<table class="runs"><tr><th>Run</th><th>Started</th><th>Took</th><th>Cost</th><th>Result</th></tr>${logData.runs.map(r => `<tr class="${r.ok ? '' : 'bad'}"><td>${esc(r.kind)}</td><td>${when(r.started_at)}</td><td>${r.duration_ms ? Math.round(r.duration_ms / 1000) + ' s' : ''}</td><td>${r.cost_usd != null ? '$' + Number(r.cost_usd).toFixed(2) : ''}</td><td>${esc(r.error || r.summary || (r.ok ? 'ok' : ''))}</td></tr>`).join('')}</table>`
+      : '<div class="note">No Claude runs yet; they start in phase 3 (recordings) and phase 4 (the morning planner). Each run lands here with its cost; Settings shows the 7-day total.</div>';
+    return `<div class="log"><h3>Changes</h3>${batches}<h3>Claude runs</h3>${runs}</div>`;
   }
   async function loadSettings() { settings = await api('/api/settings'); render(); }
   function renderSettings() {
@@ -344,12 +384,11 @@
     const panel = document.getElementById('panel');
     panel.querySelectorAll('.row').forEach(r => {
       const id = +r.dataset.id;
-      r.querySelector('.main').addEventListener('click', e => {
-        if (e.target.closest('input, button, .chip.due')) return;
-        if (e.shiftKey) { ui.sel.has(id) ? ui.sel.delete(id) : ui.sel.add(id); } else { ui.focus = id; }
-        render();
-      });
-      r.querySelector('input[type=checkbox]').addEventListener('change', e => { if (e.target.checked) stage(id, 'done', {}, 'done'); else { staged.delete(id); try { localStorage.setItem('factotum.staged', JSON.stringify([...staged])); } catch (_) {} render(); } });
+      // A plain tap selects (phones have no shift); the checkbox is the same selection. Keyboard
+      // focus follows the last tap so j/k keep working.
+      const toggleSel = () => { ui.sel.has(id) ? ui.sel.delete(id) : ui.sel.add(id); ui.focus = id; render(); };
+      r.querySelector('.main').addEventListener('click', e => { if (e.target.closest('input, button, .chip.due')) return; toggleSel(); });
+      r.querySelector('input[type=checkbox]').addEventListener('change', toggleSel);
       r.querySelector('[data-chev]').addEventListener('click', () => { ui.open.has(id) ? ui.open.delete(id) : ui.open.add(id); render(); });
       r.querySelector('.main').setAttribute('draggable', 'true');
       r.querySelector('.main').addEventListener('dragstart', e => e.dataTransfer.setData('text/plain', String(id)));
@@ -363,7 +402,9 @@
     }));
     panel.querySelectorAll('[data-bulk]').forEach(b => b.addEventListener('click', () => {
       const k = b.dataset.bulk; if (k === 'clear') { ui.sel.clear(); render(); return; }
-      [...ui.sel].forEach(id => act(id, k)); ui.sel.clear(); render();
+      const d = k === 'setdue' ? (document.getElementById('bulk-date') || {}).value : null;
+      if (k === 'setdue' && !d) { toast('Pick a date'); return; }
+      [...ui.sel].forEach(id => act(id, k, d)); ui.sel.clear(); render();
     }));
     const bulk = document.getElementById('bulk');
     if (bulk) { bulk.classList.toggle('on', ui.sel.size > 0); const n = document.getElementById('bulk-n'); if (n) n.textContent = ui.sel.size; }
@@ -372,7 +413,8 @@
     const rd = document.getElementById('rv-date'); if (rd) rd.onchange = () => reviewAct('date', rd.value);
     const rn = document.getElementById('rv-note'); if (rn) rn.oninput = () => { ui.rvNote = { id: +rn.closest('.card').dataset.id, text: rn.value }; };
     const rm = document.getElementById('review-more'); if (rm) rm.onclick = () => loadReview();
-    wireReminders(panel);
+    wireReminders(panel); wireDue(panel);
+    panel.querySelectorAll('[data-undo]').forEach(b => b.onclick = async () => { await api(`/api/batches/${b.dataset.undo}/undo`, { method: 'POST' }); await load(); logData = null; toast('Batch undone'); render(); });
     const cmdGo = document.getElementById('cmd-go'); if (cmdGo) cmdGo.onclick = () => { const i = document.getElementById('cmd'); const v = i.value.trim(); i.value = ''; sendPrompt(v); };
     const cmd = document.getElementById('cmd'); if (cmd) cmd.addEventListener('keydown', e => { if (e.key === 'Enter') { const v = cmd.value.trim(); cmd.value = ''; sendPrompt(v); } e.stopPropagation(); });
     document.getElementById('tray-apply').onclick = applyAll;

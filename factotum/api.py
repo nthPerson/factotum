@@ -8,6 +8,7 @@
   GET  /api/review?exclude=1,2           one page of the review queue + total (decisions go through batches)
   GET  /api/settings · PUT /api/settings  Settings-tab overrides (whitelisted keys), accounts
   GET  /api/stats
+  GET  /api/log                          recent batches with their changes, and the Claude runs with cost
 """
 from __future__ import annotations
 
@@ -17,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -183,11 +184,40 @@ def create_app(cfg: dict | None = None, db_path: str | None = None) -> FastAPI:
         cost = rows(conn, "SELECT COALESCE(SUM(cost_usd),0) c FROM runs WHERE started_at >= date('now','-7 days')")[0]["c"]
         return {"by_status": by, "cost_7d_usd": cost}
 
+    @app.get("/api/log")
+    def log(limit: int = 40):
+        """Recent batches with every field change, task named, plus the Claude runs with their cost."""
+        limit = max(1, min(int(limit), 200))
+        bs = rows(conn, "SELECT id, created_at, applied_at, undone_at, source FROM batches ORDER BY id DESC LIMIT ?", (limit,))
+        if bs:
+            ids = tuple(b["id"] for b in bs)
+            ch = rows(conn, f"SELECT c.batch_id, c.task_id, t.name AS task_name, c.field, c.old, c.new FROM changes c "
+                            f"LEFT JOIN tasks t ON t.id = c.task_id WHERE c.batch_id IN ({','.join('?' * len(ids))}) ORDER BY c.id", ids)
+            by: dict[int, list] = {}
+            for c in ch:
+                by.setdefault(c.pop("batch_id"), []).append(dict(c, old=json.loads(c["old"]) if c["old"] else None, new=json.loads(c["new"]) if c["new"] else None))
+            for b in bs:
+                b["changes"] = by.get(b["id"], [])
+        runs = rows(conn, "SELECT id, kind, started_at, duration_ms, cost_usd, ok, summary, error FROM runs ORDER BY id DESC LIMIT ?", (limit,))
+        return {"batches": bs, "runs": runs}
+
     @app.get("/")
     def index():
-        return FileResponse(WEB / "index.html")
+        # The page stamps its assets with their mtime and everything says no-cache: Cloudflare caches
+        # .js/.css by default and browsers guess freshness when the origin is silent, which left the
+        # phone on an old app.js after a deploy.
+        html = (WEB / "index.html").read_text(encoding="utf-8")
+        for asset in ("app.js", "app.css"):
+            html = html.replace(f"/static/{asset}", f"/static/{asset}?v={int((WEB / asset).stat().st_mtime)}")
+        return HTMLResponse(html, headers={"Cache-Control": "no-cache, must-revalidate"})
 
-    app.mount("/static", StaticFiles(directory=str(WEB)), name="static")
+    class NoCacheStatic(StaticFiles):
+        async def get_response(self, path, scope):
+            r = await super().get_response(path, scope)
+            r.headers["Cache-Control"] = "no-cache, must-revalidate"
+            return r
+
+    app.mount("/static", NoCacheStatic(directory=str(WEB)), name="static")
     app.state.conn = conn
     app.state.cfg = cfg
     return app
