@@ -39,6 +39,13 @@ plaud today                            # check: lists today's recordings
 plaud transcript <id> -o /tmp/t.md     # check: a full transcript lands on disk with no size cap
 ```
 
+Claude Code must be logged in for the user the service runs as (phase 3 runs `claude -p` headlessly;
+there is no way to log in from a service):
+```bash
+claude                                 # once, interactively: /login with the Max account, then exit
+.venv/bin/python -m factotum claude-check   # one tiny headless call (~$0.005): "claude is logged in"
+```
+
 ## 3. Mailbird Next MCP (Windows side)
 
 Mailbird Next → Settings → AI / MCP: enable the server, enable **write actions** (drafts need
@@ -235,3 +242,35 @@ journalctl -u factotum -f
 ```
 The unit runs the venv interpreter, as user robert, with `HOME=/home/robert` so headless Claude
 runs (phase 3+) inherit the interactive login and the user-scope MCP servers.
+
+## 9. The Plaud trigger and the cutover from plaud-sync (phase 3)
+
+The service watches the `plaud_trigger` mailbox (`IMAP_*` in `.env`, the account under
+`sources.accounts` with that role) with IMAP IDLE. A Plaud "AutoFlow" mail starts one sync within
+seconds: `plaud search` finds the recording by title, the summary and transcript land under
+`data/runs/<id>/`, one headless Claude run reads them, and Python writes the tasks, reminders,
+calendar events and the Notion note page. The Log tab shows each run with its cost.
+
+Config: `sources.plaud.sender` (the exact From address, `no-reply@plaud.ai`), `from_filter`
+(the IMAP search), `subject_prefix`, `auth_server` (`mx.google.com` for Gmail: the trigger
+accepts a mail only when that server's `Authentication-Results` header shows DKIM or DMARC pass
+for the sender's domain, so a spoofed From cannot start a run). Project descriptions, tie-breakers
+and the note Type/Tag options live under `taxonomy:` and are what the run classifies with.
+
+Checks:
+```bash
+.venv/bin/python -m factotum plaud-check                 # the CLI, today's recordings, the mailbox and its unseen count
+.venv/bin/python -m factotum sync-file <id> --dry-run    # a real run (~$0.15) on one recording; prints the JSON, writes nothing
+.venv/bin/python -m factotum sync-file <id>              # the same, applied: tasks, note page, batch in the Log tab
+```
+
+Cutover: with plaud-sync still running on lark-server, both write the Notion note page (idempotent
+on Source Link; last writer wins) and only Factotum writes tasks. Once a recording made after the
+restart has landed correctly, on lark-server:
+```bash
+sudo systemctl disable --now plaud-sync
+```
+Leave no unseen Plaud mail behind: whatever is unseen when plaud-sync stops is processed at
+Factotum's next service start, which is what you want. The old `planner@morning.timer`,
+`planner@evening.timer` and `plaud-digest.timer` stay until phase 4.
+

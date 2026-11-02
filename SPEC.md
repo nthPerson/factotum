@@ -170,10 +170,16 @@ need fetching by hand").
 ## 6. Inputs (each with an `enabled` flag)
 
 **Plaud.** IMAP IDLE on the account with the `plaud_trigger` role (instant and reliable; Mailbird
-has no push). On a Plaud mail: `plaud search` → id; `plaud transcript <id> -o` and
-`plaud summary <id> -o`; one Claude run (§8.1) reads the two files; Python writes the note page,
-tasks, mentions, reminders and calendar links. No large payload ever passes through a tool
-result, so the 40 KB MCP spill is gone. One automatic retry and a failure alert stay.
+has no push), a thread in the service next to the scheduler. A mail counts only when Gmail's own
+`Authentication-Results` header (authserv-id `sources.plaud.auth_server`) shows DKIM or DMARC pass
+for the sender's domain and the parsed `From` equals `sources.plaud.sender`; the subject only
+locates the recording (`plaud search`, same title within a day of the mail) and never enters the
+prompt. Then `plaud summary|transcript <id> -o` write the two files under `data/runs/<id>/`, one
+Claude run (§8.1) reads them, and Python writes the note page, tasks, mentions, reminders and
+calendar events. Handled uids go to `trigger_seen` and get `\Seen`, so a lost flag never
+reprocesses. One automatic retry two minutes later; a failure alerts over ntfy (else the brief's
+mailbox) and writes nothing. `python -m factotum sync-file <id> [--dry-run]` runs the same thing
+by hand. No large payload ever passes through a tool result, so the 40 KB MCP spill is gone.
 
 **Mailbird.** Accounts and roles live in the `accounts` table, managed in Settings → Email
 accounts (add, edit, remove, enable). Allow/deny globs in config. Sweep every `sweep_minutes`.
@@ -216,9 +222,16 @@ All runs: `claude -p` as the service user, `--output-format stream-json`, explic
 final message, logged to `runs`. Model and budget per run kind are config.
 
 ### 8.1 `sync-file` (one per recording)
-Inputs: subject, received time, the two files from the Plaud CLI, the store's slice for the
-same project (≤ 50 rows, inline), the taxonomy from config. Tools: Read (those two files only),
-calendar tools if enabled, Notion read (dedup against an existing page). Returns:
+Inputs: the recording's title and time from the Plaud CLI, the two files it wrote, the store's
+slice (every open row plus the last 60 days' faded and lapsed ones, ≤ 150, inline: voice
+instructions reach any project), the taxonomy from config (`taxonomy.projects[].description`,
+`tie_breakers`, `note_types`, `note_tags`). Tools: Read, nothing else; no MCP server is loaded.
+Python dedups the note page on Source Link and the calendar event on title and day, so the run
+cannot stall on a permission prompt (the 2026-07-22 class of failure). The output is untrusted: a
+`source_key` outside `plaud:<id>:` is replaced, and an update, instruction or reminder aimed at a
+row the prompt did not list is reported under `unresolved`, not applied. Every change to an
+existing row rides in one batch (source `plaud`, closed_by `voice`), so the Log tab undoes a
+recording in one tap; creations are upserts by `source_key`. Returns:
 ```json
 { "note": { "action": "create|update", "properties": {…}, "body_md": "…", "followups": ["…"] },
   "tasks": [ { "op": "create|update", "id": null, "name": "…", "project": "…", "due": "…", "hard": true,
@@ -376,8 +389,11 @@ link; every batch is undoable; sinks are write-only.
    routes, morning brief email (Python-built until the phase 4 planner adds the verdict),
    `google-auth`, `calendar-check` and the calendar sweep. *Gate: a reminder's buttons work from the
    phone, the brief arrives, the calendar is authorised.*
-3. **Plaud port:** IMAP trigger, CLI fetch, `sync-file` run with the new bar, Notion notes sink,
-   voice verbs incl. reminders and tiers. One week in parallel with plaud-sync, then stop it.
+3. **Plaud port (built 2026-11-01):** IMAP trigger, CLI fetch, `sync-file` run with the new bar,
+   Notion notes sink, voice verbs incl. reminders and tiers. In parallel with plaud-sync until the
+   first few recordings look right, then stop it (both write the note page; only Factotum writes
+   tasks, so the interim `--new-only` cron is already gone). *Gate: a recording made after the
+   restart lands as tasks within a minute of Plaud's mail, with its note page and a run row.*
 4. **Mail + Canvas + planner:** Mailbird client and sweep, Canvas sweep, `planner-morning`.
    Retire forwarding and the old timers.
 5. **Chat:** `factotum mcp`, chat turns, email search, drafts, proposals UI.

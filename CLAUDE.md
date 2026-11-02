@@ -18,13 +18,17 @@ Guidance for Claude Code working in this repository. Read `SPEC.md` for the desi
 
 ## Phase status
 
-Phases 1 and 2 of 6 are built (SPEC.md §14): store, scoring, lifecycle, Notion import, batches,
-command grammar, API, the Today / Timeline / Projects / Review / Log / Settings tabs, and the
-automations: a 30 s scheduler thread in the service (`factotum/scheduler.py`) that fires ntfy
-reminders with Snooze/Done/Open actions (`/r/<token>`), pushes the daily review nudge, runs the
-expire pass, sends the Python-built morning brief over SMTP and sweeps Google Calendar. Chat, the
-mail and Canvas sweeps, the Plaud port and the Claude runner do not exist yet; the UI shows
-"phase N" where a control is a placeholder. Update this paragraph when a phase lands.
+Phases 1, 2 and 3 of 6 are built (SPEC.md §14): store, scoring, lifecycle, Notion import, batches,
+command grammar, API, the Today / Timeline / Projects / Review / Log / Settings tabs, the
+automations (a 30 s scheduler thread in the service, `factotum/scheduler.py`: ntfy reminders with
+Snooze/Done/Open actions at `/r/<token>`, the daily review nudge, the expire pass, the Python-built
+morning brief over SMTP, the Google Calendar sweep), and the Plaud port: an IMAP IDLE thread
+(`factotum/plaud_trigger.py`) that, on an authenticated Plaud mail, fetches the two files with the
+`plaud` CLI, runs one headless Claude call (`factotum/claude/runner.py`, `prompts/sync-file.md`)
+and applies its JSON (`factotum/sync_file.py`: tasks, voice instructions, reminders, calendar
+events, the Notion note page via `factotum/notion_notes.py`). The mail and Canvas sweeps, the
+planner, Chat and the tasks mirror do not exist yet; the UI shows "phase N" where a control is a
+placeholder. Update this paragraph when a phase lands.
 
 ## Where things live
 
@@ -43,7 +47,12 @@ mail and Canvas sweeps, the Plaud port and the Claude runner do not exist yet; t
 | reminders firing, repeats, action tokens | SPEC §10 | `factotum/reminders.py`, `factotum/notify.py` (ntfy) |
 | the morning brief, SMTP | SPEC §7 | `factotum/brief.py` (`build`, `send`, `smtp_settings`) |
 | Google Calendar auth, events, sweep | SPEC §6, SETUP §6 | `factotum/gcal.py` |
-| Claude runs (phase 3+) | SPEC §8 | `factotum/claude/` (not yet), `prompts/` (not yet) |
+| headless Claude runs: command, budget, envelope, auth failure | SPEC §8 | `factotum/claude/runner.py` (`run`, `extract_json`) |
+| the Plaud trigger mail, sender authentication, seen uids | SPEC §6 | `factotum/plaud_trigger.py` (`authenticated`, `process_mailbox`) |
+| locating a recording, the two files | SPEC §6 | `factotum/plaud.py` (`locate`, `fetch_files`) |
+| the sync-file prompt, applying its JSON, retry, alert | SPEC §8.1 | `factotum/sync_file.py` (`build_prompt`, `apply_result`, `run`), `prompts/sync-file.md` |
+| project descriptions, tie-breakers, note types | SPEC §8.1 | `config/factotum.example.yaml` `taxonomy:` |
+| the Notion note page, markdown → blocks | SPEC §7 | `factotum/notion_notes.py` (`upsert`, `md_to_blocks`) |
 
 ## Commands
 
@@ -55,6 +64,8 @@ mail and Canvas sweeps, the Plaud port and the Claude runner do not exist yet; t
 .venv/bin/python -m factotum import-notion --new-only --apply # interim: pull rows plaud-sync created since
 .venv/bin/python -m factotum score | review | expire [--apply]
 .venv/bin/python -m factotum tick                  # one scheduler tick now; `brief [--send]`, `calendar-check`, `google-auth`
+.venv/bin/python -m factotum sync-file <plaud_id> --dry-run   # a real Claude run (~$0.15) that prints the JSON and writes nothing
+.venv/bin/python -m factotum claude-check | plaud-check       # the headless login; the Plaud CLI and the trigger mailbox
 .venv/bin/python -m factotum serve --port 8751 --no-scheduler   # a second instance for UI checks; never two schedulers on one DB
 .venv/bin/python -m factotum serve                 # http://127.0.0.1:8750
 sudo systemctl restart factotum                    # after code changes; see the restart rule below
@@ -98,6 +109,12 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
 - **Headless `claude -p` cannot re-authenticate** (2026-09-15). A dead refresh token exits in
   ~50 ms with an empty stderr; the reason is only in the JSON envelope. Port plaud-sync's
   `check_auth()` pre-flight into the runner in phase 3, and always log envelope `result`.
+- **`claude -p --bare` reports "Not logged in"** (2026-11-01): bare mode skips the OAuth login, so a
+  headless run that passes it dies in 400 ms with exit 1. The runner never passes it; it isolates
+  with `--strict-mcp-config` and a run directory instead.
+- **The interim `--new-only` cron must be gone once the trigger writes tasks** (2026-11-01): plaud-sync
+  still creates Notion task rows for every recording until it is stopped, and the cron would import
+  them as twins of what sync-file just wrote. Removed at the phase 3 restart.
 - **Restarting mid-run loses that recording** (2026-09-16). Before `systemctl restart factotum`,
   check `journalctl -u factotum -n 5` for a Claude run in flight and wait for it.
 - **In the Notion Tasks DB, `Calendar Event` and `last_edited_time` are automation artefacts**

@@ -20,6 +20,39 @@ from .db import now_iso
 
 IDLE_TIMEOUT_S = 29 * 60      # re-issue IDLE before Gmail's ~30 min cutoff
 RECONNECT_S = 15
+DEFAULT_AUTHSERV = "mx.google.com"
+
+
+def _dom_ok(value: str, domain: str) -> bool:
+    v = value.strip().lower().lstrip("@")
+    return v == domain or v.endswith("." + domain)
+
+
+def authenticated(headers, authserv: str, domain: str) -> bool:
+    """True when the receiving server's own Authentication-Results header (authserv-id `authserv`,
+    e.g. mx.google.com) shows dkim=pass or dmarc=pass for `domain`. A sender can forge the From
+    line and even add an Authentication-Results header of its own, but not one that names the
+    receiving server: RFC 8601 has the server strip those on the way in."""
+    get_all = getattr(headers, "get_all", None)
+    values = (get_all("Authentication-Results") or []) if get_all else (headers.get("Authentication-Results") or [])
+    if isinstance(values, str):
+        values = [values]
+    domain = domain.lower()
+    for raw in values:
+        parts = [x.strip() for x in " ".join(str(raw).split()).split(";")]
+        if not parts or parts[0].split()[0].lower() != authserv.lower():
+            continue
+        for clause in parts[1:]:
+            toks = clause.split()
+            if not toks:
+                continue
+            method = toks[0].lower()
+            props = dict(t.split("=", 1) for t in toks[1:] if "=" in t and not t.startswith("("))
+            if method == "dkim=pass" and any(_dom_ok(props.get(k, ""), domain) for k in ("header.i", "header.d")):
+                return True
+            if method == "dmarc=pass" and _dom_ok(props.get("header.from", ""), domain):
+                return True
+    return False
 
 
 def _decode(raw) -> str:
@@ -34,6 +67,11 @@ def _decode(raw) -> str:
 class PlaudTrigger:
     def __init__(self, cfg: dict, conn: sqlite3.Connection, handler, *, account: str, log=print):
         self.cfg, self.conn, self.handler, self.account, self.log = cfg, conn, handler, account, log
+        self.sender = str(C.get(cfg, "sources.plaud.sender", "") or "").strip().lower()
+        if "@" not in self.sender:
+            raise ValueError("sources.plaud.sender must be the Plaud sender address (fail closed; see docs/SETUP.md §9)")
+        self.domain = self.sender.rsplit("@", 1)[1]
+        self.authserv = str(C.get(cfg, "sources.plaud.auth_server", DEFAULT_AUTHSERV) or DEFAULT_AUTHSERV)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -49,7 +87,7 @@ class PlaudTrigger:
 
     def process_mailbox(self, server) -> int:
         """Handle every unseen Plaud mail once. Returns how many runs were started."""
-        sender = str(C.get(self.cfg, "sources.plaud.sender", "") or "").lower()
+        sender = self.sender
         search_from = str(C.get(self.cfg, "sources.plaud.from_filter", "") or sender)
         prefix = str(C.get(self.cfg, "sources.plaud.subject_prefix", "") or "")
         criteria = ["UNSEEN"] + (["FROM", search_from] if search_from else [])
@@ -62,8 +100,11 @@ class PlaudTrigger:
             msg = email.message_from_bytes(raw)
             subject = _decode(msg.get("Subject")).replace("\r", " ").replace("\n", " ").strip()
             from_addr = parseaddr(msg.get("From", ""))[1].lower()
-            if sender and from_addr != sender:
+            if from_addr != sender:
                 self.log(f"trigger: uid={uid} from {from_addr!r} is not {sender!r}; ignored")
+                continue
+            if not authenticated(msg, self.authserv, self.domain):
+                self.log(f"trigger: uid={uid} claims {sender!r} but {self.authserv} shows no DKIM/DMARC pass for {self.domain}; ignored")
                 continue
             if prefix and not subject.lower().startswith(prefix.lower()):
                 continue

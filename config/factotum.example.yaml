@@ -142,7 +142,8 @@ sources:
     enabled: true
     trigger_account: nthperson.dev@gmail.com   # IMAP creds in .env
     from_filter: plaud.ai                       # IMAP search narrowing (substring)
-    sender: no-reply@plaud.ai                   # the parsed From address must equal this; the subject is data
+    sender: no-reply@plaud.ai                   # the parsed From must equal this, and the mail must carry…
+    auth_server: mx.google.com                  # …this server's Authentication-Results with DKIM/DMARC pass for its domain
     subject_prefix: "[Plaud-AutoFlow]"
     cli: plaud                                  # @plaud-ai/cli on PATH
     extraction:

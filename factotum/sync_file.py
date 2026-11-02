@@ -6,7 +6,7 @@
 
 Claude reads the two files and returns JSON; Python writes. The prompt is `prompts/sync-file.md`
 with the taxonomy from config, the open rows from the store and the recording's facts filled in.
-The mail subject is wrapped as data: it is attacker-controlled text.
+The mail subject only locates the recording; the prompt carries the title the Plaud CLI returned.
 """
 from __future__ import annotations
 
@@ -73,7 +73,9 @@ def _when(rec: dict) -> str:
         return str(v)
 
 
-def build_prompt(cfg: dict, conn: sqlite3.Connection, rec: dict, subject: str, received: str, files, today: date) -> str:
+def build_prompt(cfg: dict, conn: sqlite3.Connection, rec: dict, received: str, files, today: date) -> str:
+    """The mail subject never enters the prompt: it only located the recording. The title here is
+    the one the Plaud CLI returned, escaped, and the template says it is data."""
     tpl = PROMPT.read_text(encoding="utf-8")
     cap = int(C.get(cfg, "sources.plaud.extraction.max_undated_per_recording", 3))
     fill = {
@@ -87,7 +89,6 @@ def build_prompt(cfg: dict, conn: sqlite3.Connection, rec: dict, subject: str, r
         "today": today.strftime("%A %Y-%m-%d"),
         "summary_path": str(Path(files.summary)),
         "transcript_path": str(Path(files.transcript)),
-        "subject": html.escape(str(subject or ""), quote=False),
     }
     for k, v in fill.items():
         tpl = tpl.replace("{{" + k + "}}", v)
@@ -366,7 +367,7 @@ def run(conn: sqlite3.Connection, cfg: dict, *, subject: str | None, received: s
     except plaud.PlaudError as e:
         return fail(f"plaud: {e}")
     allowed = {r["id"] for r in slice_rows(conn)}
-    prompt = build_prompt(cfg, conn, rec, subject or rec["name"], received or "", files, today)
+    prompt = build_prompt(cfg, conn, rec, received or "", files, today)
     (workdir / "prompt.md").write_text(prompt, encoding="utf-8")
     cost = 0.0
     res = None
