@@ -14,8 +14,9 @@ SETTABLE = {
     "waiting_on", "manual_priority", "snoozed_until", "top_rank", "longterm", "legacy_status",
     "last_reviewed_at", "why_now", "calendar_event",
 }
-OPS = {"set", "done", "drop", "reopen", "pin_top", "unpin", "keep", "longterm", "fade", "lapse", "add_reminder"}
+OPS = {"set", "done", "drop", "reopen", "pin_top", "unpin", "keep", "longterm", "fade", "lapse", "add_reminder", "judge_evidence"}
 REPEATS = {"daily", "weekdays", "weekly", "monthly"}
+VERDICTS = ("applied", "dismissed", "reviewed", "staged")
 
 
 def _next_top_rank(conn: sqlite3.Connection) -> int:
@@ -92,6 +93,8 @@ def apply(conn: sqlite3.Connection, changes: list[dict], source: str, today: dat
 def _apply_one(conn, cur, ch: dict, batch_id: int, source: str, today: date, closed_by: str, undo: list, skipped: list) -> bool:
     """Apply one change; returns True when it wrote something. Anything malformed is skipped with a
     reason (a tray saved by an older UI build may lack task_id), never raised."""
+    if ch.get("op") == "judge_evidence":
+        return _judge_evidence(conn, cur, ch, batch_id, undo, skipped)
     try:
         task_id = int(ch.get("task_id"))
     except (TypeError, ValueError):
@@ -132,6 +135,34 @@ def _apply_one(conn, cur, ch: dict, batch_id: int, source: str, today: date, clo
     return True
 
 
+def _judge_evidence(conn, cur, ch: dict, batch_id: int, undo: list, skipped: list) -> bool:
+    """A verdict on a sweep's finding or a planner proposal (`evidence` row): dismissed, reviewed,
+    applied or staged. Recorded as a change (task 0 when the evidence names no task) and reverted by
+    the batch's undo, so a dismissal is never a bare judged_at mark. Judged evidence is left alone."""
+    f = ch.get("fields") or {}
+    try:
+        eid = int(f.get("evidence_id"))
+    except (TypeError, ValueError):
+        skipped.append({"task_id": ch.get("task_id"), "why": "judge_evidence needs evidence_id"})
+        return False
+    verdict = str(f.get("verdict") or "")
+    e = conn.execute("SELECT id, task_id, judged_at FROM evidence WHERE id = ?", (eid,)).fetchone()
+    if not e:
+        skipped.append({"task_id": ch.get("task_id"), "why": f"no such evidence {eid}"})
+        return False
+    if verdict not in VERDICTS:
+        skipped.append({"task_id": ch.get("task_id"), "why": "verdict must be one of " + ", ".join(VERDICTS)})
+        return False
+    if e["judged_at"]:
+        return False
+    tid = int(e["task_id"] or 0)
+    cur.execute("INSERT INTO changes (batch_id, task_id, field, old, new) VALUES (?, ?, 'evidence', ?, ?)",
+                (batch_id, tid, json.dumps({"evidence_id": eid, "verdict": None}), json.dumps({"evidence_id": eid, "verdict": verdict})))
+    cur.execute("UPDATE evidence SET judged_at = ?, verdict = ? WHERE id = ?", (now_iso(), verdict, eid))
+    undo.append({"task_id": tid, "evidence_id": eid})
+    return True
+
+
 def undo(conn: sqlite3.Connection, batch_id: int) -> dict:
     b = conn.execute("SELECT * FROM batches WHERE id = ?", (batch_id,)).fetchone()
     if not b:
@@ -142,6 +173,8 @@ def undo(conn: sqlite3.Connection, batch_id: int) -> dict:
     for u in json.loads(b["undo_json"] or "[]"):
         if "reminder_id" in u:
             conn.execute("UPDATE reminders SET status = 'cancelled' WHERE id = ?", (u["reminder_id"],))
+        elif "evidence_id" in u:
+            conn.execute("UPDATE evidence SET judged_at = NULL, verdict = NULL WHERE id = ?", (u["evidence_id"],))
         else:
             conn.execute(f"UPDATE tasks SET {u['field']} = ?, edited_at = ? WHERE id = ?", (u["old"], now_iso(), u["task_id"]))
         restored += 1

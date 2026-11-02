@@ -173,7 +173,7 @@
     p.innerHTML = fns[ui.tab]();
     document.querySelectorAll('#tabs button').forEach(b => b.setAttribute('aria-selected', b.dataset.tab === ui.tab));
     document.getElementById('n-today').textContent = openOnes().filter(x => x.due && fmtDue(x.due).days <= 1).length || '';
-    document.getElementById('n-review').textContent = review && review.total ? review.total : '';
+    document.getElementById('n-review').textContent = review && (review.total || (review.suggestions || []).length) ? review.total + (review.suggestions || []).filter(x => !x.created).length : '';
     document.getElementById('remind').innerHTML = settings && settings.effective['notify.review_time']
       ? `<span>Review at</span><span class="pill">${esc(settings.effective['notify.review_time'])}</span>` : '';
     renderTray();
@@ -304,6 +304,8 @@
     const items = review.items.filter(i => !staged.has(i.task.id));
     const total = review.items.length;
     const remaining = ui.reviewPaused ? review.total : review.total - total;
+    const sugg = (review.suggestions || []).filter(x => !staged.has('e:' + x.id) && !x.created);
+    if (!ui.reviewPaused && !items.length && sugg.length) return suggestionCard(sugg[0], sugg.length);
     if (ui.reviewPaused || !items.length) {
       const more = remaining > 0 ? `<p><button class="btn" id="review-more">Review another ${Math.min(review.cap, remaining)} of the remaining ${remaining}</button></p>` : '';
       const head = ui.reviewPaused ? (remaining ? 'Batch applied.' : 'Batch applied. Nothing left to review.') : total ? `${staged.size} decision${staged.size === 1 ? '' : 's'} staged.` : 'Nothing to review.';
@@ -327,11 +329,27 @@
         <div class="links">${x.source_link ? `<a href="${esc(x.source_link)}" target="_blank" rel="noopener">${x.source === 'Plaud' ? 'Plaud note' : 'Source'}</a>` : ''}</div>
         <div class="big"><button class="done" data-rv="done">Done <kbd>d</kbd></button><button data-rv="keep">Keep <kbd>k</kbd></button><button class="later" data-rv="later">Later <kbd>s</kbd></button><button class="drop" data-rv="drop">Drop <kbd>x</kbd></button></div>
         <div class="later-menu ${ui.laterOpen ? 'on' : ''}"><span class="hint">Comes back on:</span><button class="btn small" data-rv="tomorrow">Tomorrow</button><button class="btn small" data-rv="fri">Friday</button><button class="btn small" data-rv="nextweek">Next week</button><input type="date" id="rv-date" min="${data.today}" aria-label="Pick a date"></div>
+        ${(items[0].evidence || []).filter(e => e.change && !staged.has('e:' + e.id)).map(e => `<div class="extra"><span class="chip">Planner suggests</span><span>${esc(e.label)}${e.reason ? ` <span class="hint" style="margin:0">— ${esc(e.reason)}</span>` : ''}</span><button class="btn small primary" data-rv-accept="${e.id}">Accept</button></div>`).join('')}
         <div class="extra"><button class="btn small" data-rv="top">★ Pin to Top</button><button class="btn small" data-rv="longterm">Mark long-term (never fades)</button>${dueForm(x.id, x.due)}${reminderForm(x.id)}</div>
         ${reviewAsk(x.id)}
       </div>
       <div class="note">Keep = no change; the item will not be asked about again until something changes. Later = hidden until the date you pick, then back in Review and Today. Decisions stage into the tray; Apply writes them all at once.</div></div>`;
   }
+  // A planner create with no task behind it: one card, Create or Dismiss (the dismissal is a batch
+  // change like any other, so the Log tab undoes it).
+  function suggestionCard(sg, n) {
+    return `<div class="review">
+      <div class="progress"><span>${n} suggestion${n === 1 ? '' : 's'} from the planner</span><div class="track"></div></div>
+      <div class="card" data-sugg="${sg.id}">
+        <div class="why new">Planner suggests</div>
+        <h2>${esc(sg.label.replace(/^create:\s*/i, ''))}</h2>
+        ${sg.reason ? `<p class="ctx">${esc(sg.reason)}</p>` : ''}
+        <p class="hint">${sg.at ? 'Suggested ' + new Date(sg.at).toLocaleDateString([], { month: 'short', day: 'numeric' }) : ''}</p>
+        <div class="big"><button class="done" data-sugg-create="${sg.id}">Create task</button><button class="drop" data-sugg-dismiss="${sg.id}">Dismiss</button></div>
+      </div>
+      <div class="note">Create makes an open task (source Planner) that shows as New in Review; Dismiss stages a change you can undo from the Log tab.</div></div>`;
+  }
+  function stageJudge(evidenceId, taskId, verdict, label) { stageExtra('e:' + evidenceId, taskId, 'judge_evidence', { evidence_id: evidenceId, verdict }, label); }
   // ---------- Chat (SPEC §8.3) ----------
   // A tiny Markdown renderer for reply_md: escape first, then paragraphs, lists, code, bold, links.
   function md(src) {
@@ -461,7 +479,8 @@
     const batches = logData.batches.map(b => `<div class="logb ${b.undone_at ? 'undone' : ''}">
         <div class="loghead"><b>#${b.id}</b> <span class="chip">${esc(b.source)}</span> <span>${when(b.applied_at || b.created_at)}</span> <span>${b.changes.length} change${b.changes.length === 1 ? '' : 's'}</span>
           ${b.undone_at ? `<span class="chip">undone ${when(b.undone_at)}</span>` : b.changes.length ? `<span class="spacer"></span><button class="btn small" data-undo="${b.id}">Undo</button>` : ''}</div>
-        ${b.changes.map(c => `<div class="logc"><span class="code">Task-${c.task_id}</span> <span class="name">${esc(c.task_name || '')}</span> <span class="f">${esc(c.field)}</span> ${val(c.old)} → ${val(c.new)}</div>`).join('')}
+        ${b.changes.map(c => c.field === 'evidence' ? `<div class="logc">${c.task_id ? `<span class="code">Task-${c.task_id}</span> <span class="name">${esc(c.task_name || '')}</span>` : '<span class="code">suggestion</span>'} <span class="f">evidence #${c.new && c.new.evidence_id}</span> ${esc((c.new || {}).verdict || '')}</div>`
+          : `<div class="logc"><span class="code">Task-${c.task_id}</span> <span class="name">${esc(c.task_name || '')}</span> <span class="f">${esc(c.field)}</span> ${val(c.old)} → ${val(c.new)}</div>`).join('')}
       </div>`).join('') || '<div class="empty">No batches yet.</div>';
     const runs = logData.runs.length ? `<table class="runs"><tr><th>Run</th><th>Started</th><th>Took</th><th>Cost</th><th>Result</th></tr>${logData.runs.map(r => `<tr class="${r.ok ? '' : 'bad'}"><td>${esc(r.kind)}</td><td>${when(r.started_at)}</td><td>${r.duration_ms ? Math.round(r.duration_ms / 1000) + ' s' : ''}</td><td>${r.cost_usd != null ? '$' + Number(r.cost_usd).toFixed(2) : ''}</td><td>${esc(r.error || r.summary || (r.ok ? 'ok' : ''))}</td></tr>`).join('')}</table>`
       : '<div class="note">Nothing has run yet. Reminders, the review push, the expire pass and the morning brief land here when they do something (cost $0.00); Claude runs with their cost start in phase 3.</div>';
@@ -506,7 +525,7 @@
     const n = staged.size;
     document.getElementById('tray').classList.toggle('on', n > 0);
     document.getElementById('tray-count').textContent = `${n} change${n === 1 ? '' : 's'}`;
-    document.getElementById('tray-list').textContent = [...staged.values()].map(s => `Task-${s.task_id} ${s.label}`).join(' · ');
+    document.getElementById('tray-list').textContent = [...staged.values()].map(s => (s.task_id ? `Task-${s.task_id} ` : '') + s.label).join(' · ');
   }
 
   // ---------- wiring ----------
@@ -552,6 +571,20 @@
     document.body.classList.toggle('bulk-on', ui.sel.size > 0);
     panel.querySelectorAll('[data-proj]').forEach(b => b.addEventListener('click', () => { const k = 'p:' + b.dataset.proj; ui.open.has(k) ? ui.open.delete(k) : ui.open.add(k); render(); }));
     panel.querySelectorAll('[data-rv]').forEach(b => b.addEventListener('click', () => reviewAct(b.dataset.rv)));
+    panel.querySelectorAll('[data-rv-accept]').forEach(b => b.onclick = () => {
+      const eid = +b.dataset.rvAccept; const item = review.items.find(i => (i.evidence || []).some(e => e.id === eid)); const e = item && item.evidence.find(e => e.id === eid); if (!e || !e.change) return;
+      const c = e.change, tid = item.task.id;
+      if (['done', 'drop', 'pin_top', 'longterm'].includes(c.op)) stage(tid, c.op, {}, e.label);
+      else if (c.op === 'add_reminder') stageExtra(tid + ':r', tid, 'add_reminder', c.fields, e.label);
+      else stageExtra(`${tid}:c${eid}`, tid, 'set', c.fields || {}, e.label);
+      stageJudge(eid, tid, 'applied', 'suggestion accepted'); toast('Suggestion staged · decide on the card, then Apply');
+    });
+    panel.querySelectorAll('[data-sugg-dismiss]').forEach(b => b.onclick = () => { stageJudge(+b.dataset.suggDismiss, null, 'dismissed', 'planner suggestion dismissed'); });
+    panel.querySelectorAll('[data-sugg-create]').forEach(b => b.onclick = async () => {
+      const id = +b.dataset.suggCreate;
+      try { const r = await api(`/api/review/suggestions/${id}/create`, { method: 'POST' }); const sg = (review.suggestions || []).find(x => x.id === id); if (sg) sg.created = r.task_id; toast(`Created Task-${r.task_id} · it shows as New in Review`); await load(); }
+      catch (e) { toast('Create failed: ' + e.message); }
+    });
     const rd = document.getElementById('rv-date'); if (rd) rd.onchange = () => reviewAct('date', rd.value);
     const rn = document.getElementById('rv-note'); if (rn) rn.oninput = () => { ui.rvNote = { id: +rn.closest('.card').dataset.id, text: rn.value }; };
     const rm = document.getElementById('review-more'); if (rm) rm.onclick = () => loadReview();
@@ -624,6 +657,9 @@
     else if (kind === 'nextweek') later(isoPlus(7 - ((TODAY().getDay() + 6) % 7)), 'next week');
     else if (kind === 'date') { if (!dateStr) return; later(dateStr, dateStr); }
     else return;
+    // The flags that brought the card here (a thread update, a planner proposal) are judged in the
+    // same batch, so the card does not come back tomorrow for the same reason.
+    (items[0].evidence || []).forEach(e => { if (!staged.has('e:' + e.id)) stageJudge(e.id, id, 'reviewed', (e.kind === 'proposal' ? 'suggestion seen' : 'thread seen')); });
     ui.laterOpen = false; ui.rvNote = { id: null, text: '' };
   }
   async function sendPrompt(text) {

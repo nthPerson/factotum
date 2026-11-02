@@ -309,6 +309,13 @@ def test_planner_apply_writes_why_now_applies_cited_proposals_and_stages_the_res
     assert len(res["rejected"]) == 3
     srcs = [b["source"] for b in rows(conn, "SELECT source FROM batches ORDER BY id")]
     assert srcs.count("planner") == 1
+    # every judgment (applied, staged, dismissed) rides in the planner's batch, so undoing the morning un-judges the evidence
+    from factotum import batches
+    bid = res["batch_id"]
+    ev_changes = rows(conn, "SELECT task_id, old, new FROM changes WHERE batch_id = ? AND field = 'evidence' ORDER BY id", (bid,))
+    assert {json.loads(c["new"])["evidence_id"]: json.loads(c["new"])["verdict"] for c in ev_changes} == {10: "applied", 11: "staged", 12: "applied"}
+    batches.undo(conn, bid)
+    assert rows(conn, "SELECT id FROM evidence WHERE judged_at IS NOT NULL") == [] and one(conn, "SELECT status FROM tasks WHERE id = 2")["status"] == "open"
 
 
 def test_planner_run_logs_cost_and_falls_back_cleanly(conn, cfg):

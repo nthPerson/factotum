@@ -4,7 +4,7 @@ from datetime import date
 import pytest
 
 from factotum import batches, commands, config as C, lifecycle, scoring
-from factotum.db import connect, init_db, upsert_task
+from factotum.db import connect, init_db, rows, upsert_task
 from factotum.importers.notion_tasks import parse_page
 
 TODAY = date(2026, 11, 1)
@@ -235,6 +235,29 @@ def test_batch_add_reminder_and_undo_cancels_it(conn, cfg):
     assert _rem(conn)[0]["status"] == "cancelled"
 
 
+def test_judge_evidence_rides_in_a_batch_and_is_undone_with_it(conn, cfg):
+    """Dismissals (and any verdict on a sweep's finding) are batch changes, not bare judged_at marks."""
+    upsert_task(conn, task(id=1)); conn.commit()
+    conn.execute("INSERT INTO evidence (id, task_id, kind, label, at) VALUES (7, 1, 'thread_updated', 'Max wrote', 'now')")
+    conn.execute("INSERT INTO evidence (id, task_id, kind, label, excerpt, at) VALUES (8, NULL, 'proposal', 'create: dentist', 'mail', 'now')")
+    conn.commit()
+    res = batches.apply(conn, [{"task_id": 1, "op": "keep"},
+                               {"task_id": 1, "op": "judge_evidence", "fields": {"evidence_id": 7, "verdict": "reviewed"}},
+                               {"task_id": None, "op": "judge_evidence", "fields": {"evidence_id": 8, "verdict": "dismissed"}},
+                               {"task_id": None, "op": "judge_evidence", "fields": {"evidence_id": 99, "verdict": "dismissed"}},
+                               {"task_id": None, "op": "judge_evidence", "fields": {"evidence_id": 8, "verdict": "bogus"}}], "review", TODAY)
+    assert res["applied"] == 3 and [s["why"] for s in res["skipped"]] == ["no such evidence 99", "verdict must be one of applied, dismissed, reviewed, staged"]
+    ev = {e["id"]: e for e in rows(conn, "SELECT * FROM evidence")}
+    assert ev[7]["verdict"] == "reviewed" and ev[7]["judged_at"] and ev[8]["verdict"] == "dismissed"
+    ch = rows(conn, "SELECT task_id, field, new FROM changes WHERE batch_id = ? AND field = 'evidence' ORDER BY id", (res["batch_id"],))
+    assert [(c["task_id"], json.loads(c["new"])["verdict"]) for c in ch] == [(1, "reviewed"), (0, "dismissed")]     # 0 = evidence with no task
+    # a second judgment on judged evidence is a no-op, not a second change
+    assert batches.apply(conn, [{"task_id": None, "op": "judge_evidence", "fields": {"evidence_id": 8, "verdict": "applied"}}], "ui", TODAY)["applied"] == 0
+    batches.undo(conn, res["batch_id"])
+    ev = {e["id"]: e for e in rows(conn, "SELECT * FROM evidence")}
+    assert ev[7]["verdict"] is None and ev[7]["judged_at"] is None and ev[8]["judged_at"] is None
+
+
 def test_add_reminder_validates_fire_at_and_repeat(conn, cfg):
     upsert_task(conn, task(id=1)); conn.commit()
     res = batches.apply(conn, [
@@ -326,6 +349,41 @@ def test_review_endpoint_pages_and_excludes_staged_ids(conn, cfg, tmp_path):
     assert len(page["items"]) == 15 and page["total"] == 20
     page2 = client.get("/api/review", params={"exclude": "1,2,3"}).json()
     assert page2["total"] == 17 and not {1, 2, 3} & {i["task"]["id"] for i in page2["items"]}
+
+
+def test_review_carries_pending_evidence_and_planner_suggestions(cfg, tmp_path):
+    """A flagged card knows its evidence rows (so a decision judges them in the same batch, and a
+    planner proposal can be accepted); planner creates with no task are suggestion cards with Create."""
+    from fastapi.testclient import TestClient
+    from factotum.api import create_app
+    app = create_app(cfg, db_path=str(tmp_path / "api.db"))
+    c = app.state.conn
+    upsert_task(c, task(id=4, name="Reply to Max", created_at="2026-10-30T00:00:00+00:00", last_mention_at="2026-10-30"))
+    c.execute("INSERT INTO evidence (id, task_id, kind, ref, label, excerpt, at) VALUES (11, 4, 'proposal', ?, 'Task-4 → due Nov 5', 'Max asked for Thursday', 'now')",
+              (json.dumps({"task_id": 4, "op": "set", "fields": {"due": "2026-11-05"}}),))
+    c.execute("INSERT INTO evidence (id, task_id, kind, ref, label, at) VALUES (12, 4, 'thread_updated', 'conv-1', 'Max wrote', 'now')")
+    c.execute("INSERT INTO evidence (id, task_id, kind, label, excerpt, at) VALUES (13, NULL, 'proposal', 'create: Go to the dentist', 'appointment mail Nov 12', 'now')")
+    c.execute("INSERT INTO evidence (id, task_id, kind, label, excerpt, at, judged_at, verdict) VALUES (14, NULL, 'proposal', 'old', 'x', 'now', 'now', 'dismissed')")
+    c.commit()
+    client = TestClient(app)
+    page = client.get("/api/review").json()
+    item = next(i for i in page["items"] if i["task"]["id"] == 4)
+    assert "planner" in item["reasons"] and "thread_updated" in item["reasons"] and [e["id"] for e in item["evidence"]] == [11, 12]
+    assert item["evidence"][0]["change"] == {"task_id": 4, "op": "set", "fields": {"due": "2026-11-05"}} and item["evidence"][1]["change"] is None
+    assert [s["id"] for s in page["suggestions"]] == [13] and page["suggestions"][0]["label"].startswith("create") and page["suggestions"][0]["reason"] == "appointment mail Nov 12"
+    r = client.post("/api/review/suggestions/13/create").json()
+    t = c.execute("SELECT * FROM tasks WHERE id = ?", (r["task_id"],)).fetchone()
+    assert t["name"] == "Go to the dentist" and t["source"] == "Planner" and t["source_key"] == "planner-suggestion:13"
+    assert c.execute("SELECT verdict FROM evidence WHERE id = 13").fetchone()[0] == "applied"
+    assert client.post("/api/review/suggestions/13/create").json()["task_id"] == r["task_id"]        # idempotent
+    assert client.post("/api/review/suggestions/14/create").status_code == 404
+    assert client.get("/api/review").json()["suggestions"] == []
+    # the decision batch carries the judgments; the flag is gone afterwards
+    res = client.post("/api/batches/apply", json={"source": "review", "changes": [{"task_id": 4, "op": "keep"}, {"task_id": 4, "op": "judge_evidence", "fields": {"evidence_id": 11, "verdict": "reviewed"}}, {"task_id": None, "op": "judge_evidence", "fields": {"evidence_id": 12, "verdict": "reviewed"}}]}).json()
+    assert res["applied"] == 3
+    assert all(i["task"]["id"] != 4 for i in client.get("/api/review").json()["items"])
+    log = client.get("/api/log").json()["batches"][0]
+    assert [ch["field"] for ch in log["changes"]].count("evidence") == 2
 
 
 def test_task_list_carries_a_reminders_repeat(conn, cfg, tmp_path):

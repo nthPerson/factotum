@@ -5,7 +5,8 @@
   POST /api/commands  {text}             parse the grammar → changes (nothing applied)
   POST /api/batches/apply {source, changes}   the one write path
   POST /api/batches/{id}/undo
-  GET  /api/review?exclude=1,2           one page of the review queue + total (decisions go through batches)
+  GET  /api/review?exclude=1,2           one page of the review queue + total, each card's pending evidence, planner suggestions
+  POST /api/review/suggestions/{id}/create   the task a planner suggestion describes (evidence judged applied)
   GET  /api/settings · PUT /api/settings  Settings-tab overrides (whitelisted keys), accounts
   GET  /api/stats
   GET  /api/log                          recent batches with their changes, and the Claude runs with cost
@@ -171,8 +172,22 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         from .mail_sweep import review_flags
         flags = review_flags(conn)
         full = lifecycle.build_review_queue(open_tasks, today, ecfg, last, flags_by_id=flags, cap=10**9)
+        pending = rows(conn, "SELECT id, task_id, kind, ref, label, excerpt, at FROM evidence WHERE judged_at IS NULL ORDER BY id")
+        by_task: dict[int, list] = {}
+        for e in pending:
+            if e["task_id"] is not None:
+                change = None
+                if e["kind"] == "proposal":
+                    try:
+                        change = json.loads(e["ref"]) if e["ref"] else None
+                    except ValueError:
+                        change = None
+                by_task.setdefault(int(e["task_id"]), []).append({"id": e["id"], "kind": e["kind"], "label": e["label"], "reason": e["excerpt"], "change": change, "at": e["at"]})
         for i in full:
             i["flags"] = flags.get(i["task"]["id"], {})
+            i["evidence"] = by_task.get(i["task"]["id"], [])      # judged in the same batch as the decision; a proposal's change can be accepted
+        # Planner creates with no task (an announcement, a hunch): suggestion cards with Create / Dismiss.
+        suggestions = [{"id": e["id"], "label": e["label"], "reason": e["excerpt"], "at": e["at"]} for e in pending if e["task_id"] is None and e["kind"] == "proposal"]
         cap = int(C.get(ecfg, "lifecycle.review_cap", 15))
         page = full[:cap]
         if page:
@@ -183,7 +198,31 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
             for i in page:
                 i["task"]["last_offered_at"] = today.isoformat()
         return {"today": today.isoformat(), "last_review_at": st.get("state.last_review_at"),
-                "cap": cap, "total": len(full), "labels": lifecycle.REVIEW_LABELS, "items": page}
+                "cap": cap, "total": len(full), "labels": lifecycle.REVIEW_LABELS, "items": page, "suggestions": suggestions}
+
+    @app.post("/api/review/suggestions/{evidence_id}/create")
+    def create_suggestion(evidence_id: int):
+        """Create the task a planner suggestion describes (its label is "create: <name>" and its
+        reason the planner's text). An upsert by source_key, so a second tap returns the same id;
+        the evidence is judged `applied`. Like every creation, not a batch (SPEC §12 precedent)."""
+        from .db import now_iso, upsert_task
+        e = rows(conn, "SELECT * FROM evidence WHERE id = ? AND kind = 'proposal' AND task_id IS NULL", (evidence_id,))
+        if not e:
+            raise HTTPException(404, "no such suggestion")
+        e = e[0]
+        key = f"planner-suggestion:{evidence_id}"
+        ex = rows(conn, "SELECT id FROM tasks WHERE source_key = ?", (key,))
+        if ex:
+            return {"task_id": ex[0]["id"]}
+        if e["judged_at"]:
+            raise HTTPException(404, "this suggestion was already judged")
+        name = str(e["label"] or "").split(":", 1)[-1].strip()[:80] or "(untitled)"
+        now = now_iso()
+        tid = upsert_task(conn, {"name": name, "status": "open", "source": "Planner", "source_key": key, "context": (e["excerpt"] or None),
+                                 "mentions": 1, "last_mention_at": date.today().isoformat(), "created_at": now, "edited_at": now})
+        conn.execute("UPDATE evidence SET judged_at = ?, verdict = 'applied' WHERE id = ?", (now, evidence_id))
+        conn.commit()
+        return {"task_id": tid}
 
     @app.post("/api/review/finish")
     def finish_review():

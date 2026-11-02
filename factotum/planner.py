@@ -12,8 +12,9 @@ attached to THAT task by the sweep (an automatic close always leaves a link to t
 evidence with no task can justify a `create` and nothing else; a proposal that is uncited, or whose
 evidence the model merely attributed, becomes a "Planner suggests" item in Review with the thread
 linked; dismissals reach only evidence about listed rows; everything else is rejected and reported.
-All changes to existing rows ride in one batch (source `planner`) so the Log tab undoes a morning;
-a created row is not in the batch (like every import) and shows as New in Review instead.
+All changes to existing rows and every verdict on evidence (applied, staged, dismissed) ride in one
+batch (source `planner`) so the Log tab undoes a morning; a created row is not in the batch (like
+every import) and shows as New in Review instead.
 """
 from __future__ import annotations
 
@@ -170,8 +171,10 @@ def apply(conn: sqlite3.Connection, cfg: dict, data: dict, b: dict, today: date)
         e = evidence.get(eid)
         if e and eid not in judged and (e.get("task_id") is None or e.get("task_id") in allowed):
             judged[eid] = "dismissed"
+    # Every verdict rides in the planner's batch (a judge_evidence change each), so undoing the
+    # morning in the Log tab un-judges the evidence as well as reverting the rows.
     for eid, verdict in judged.items():
-        conn.execute("UPDATE evidence SET judged_at = ?, verdict = ? WHERE id = ?", (now_iso(), verdict, eid))
+        changes.append({"task_id": evidence[eid].get("task_id"), "op": "judge_evidence", "fields": {"evidence_id": eid, "verdict": verdict}})
     res = batches.apply(conn, changes, "planner", today, closed_by="planner") if changes else {"skipped": [], "batch_id": None}
     for s in res["skipped"]:
         rejected.append(f"Task-{s.get('task_id')}: {s.get('why')}")
