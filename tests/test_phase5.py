@@ -316,3 +316,53 @@ def test_chat_turn_retries_a_dead_session_without_resume_and_records_a_failure(c
     assert not bad["ok"] and "no JSON" in bad["error"]
     last = chat.messages(conn, tid)[-1]
     assert last["role"] == "assistant" and last["error"] and one(conn, "SELECT COUNT(*) AS n FROM runs WHERE kind = 'chat-turn' AND ok = 0")["n"] == 1
+
+
+# --- T4 the chat API ----------------------------------------------------------------------------
+
+def _sse(resp) -> list[dict]:
+    return [json.loads(l[5:]) for l in resp.iter_lines() if l.startswith("data:")]
+
+
+def test_chat_api_streams_a_turn_lists_threads_and_creates_from_a_proposal(cfg, tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from factotum import chat
+    from factotum.api import create_app
+    from factotum.claude.runner import RunResult
+    monkeypatch.setattr(chat, "RUNS_DIR", tmp_path / "runs")
+
+    def fake_runner(cfg, kind, prompt, **kw):
+        for ev in STREAM:
+            kw["on_event"](ev)
+        data = {"reply_md": "Hi there", "proposals": [{"op": "create", "fields": {"name": "New thing", "project": "COMPE 510"}, "label": "create New thing"},
+                                                      {"op": "done", "task_id": 1, "label": "Task-1 done"}]}
+        return RunResult(True, data, json.dumps(data), 0.2, 1000, session_id="S9")
+    app = create_app(cfg, db_path=str(tmp_path / "t.db"), chat_runner=fake_runner)
+    upsert_task(app.state.conn, task(id=1)); app.state.conn.commit()
+    c = TestClient(app)
+    with c.stream("POST", "/api/chat/turn", json={"thread_id": None, "text": "hello", "attached": [1]}) as r:
+        assert r.status_code == 200 and r.headers["content-type"].startswith("text/event-stream")
+        events = _sse(r)
+    types = [e["type"] for e in events]
+    assert types[0] == "meta" and "status" in types and types[-1] == "done"
+    done = events[-1]["result"]
+    assert done["ok"] and done["reply_md"] == "Hi there" and done["proposals"][1]["op"] == "done" and done["cost_usd"] == 0.2
+    tid = done["thread_id"]
+    th = c.get("/api/chat/threads").json()["threads"]
+    assert th[0]["id"] == tid and th[0]["title"] == "hello" and th[0]["n"] == 2
+    msgs = c.get(f"/api/chat/threads/{tid}").json()["messages"]
+    assert [m["role"] for m in msgs] == ["user", "assistant"] and msgs[0]["attached"] == [1] and msgs[1]["proposals"][0]["label"] == "create New thing"
+    r = c.post("/api/chat/create", json={"message_id": done["message_id"], "index": 0}).json()
+    t = one(app.state.conn, "SELECT * FROM tasks WHERE id = ?", (r["task_id"],))
+    assert t["name"] == "New thing" and t["source"] == "Chat"
+    assert c.post("/api/chat/create", json={"message_id": done["message_id"], "index": 1}).status_code == 400
+    assert c.get("/api/chat/threads/999").status_code == 404
+    with c.stream("POST", "/api/chat/turn", json={"thread_id": tid, "text": "", "attached": [1], "canned": "search_mail"}) as r:
+        events = _sse(r)
+    assert events[-1]["type"] == "done" and c.get(f"/api/chat/threads/{tid}").json()["messages"][2]["text"] == "Search related emails"
+    assert one(app.state.conn, "SELECT COUNT(*) AS n FROM runs WHERE kind = 'chat-turn'")["n"] == 2
+    # a failing run ends the stream with an error event, never a hung connection
+    app.state.chat_runner = lambda *a, **k: RunResult(False, None, "Sorry", 0.01, 10, error="final message has no JSON object: Sorry")
+    with c.stream("POST", "/api/chat/turn", json={"thread_id": tid, "text": "again", "attached": []}) as r:
+        events = _sse(r)
+    assert events[-1]["type"] == "error" and "no JSON" in events[-1]["error"]

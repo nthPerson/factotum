@@ -9,16 +9,22 @@
   GET  /api/settings · PUT /api/settings  Settings-tab overrides (whitelisted keys), accounts
   GET  /api/stats
   GET  /api/log                          recent batches with their changes, and the Claude runs with cost
+  GET  /api/chat/threads · GET /api/chat/threads/{id}      chat history (phase 5, SPEC.md §8.3)
+  POST /api/chat/turn {thread_id|null, text, attached, canned}   one turn, streamed as server-sent events
+  POST /api/chat/create {message_id, index}                 create the task a proposal describes
+  POST /api/chat/drafts/open {draft}                        show a draft the run saved in Mailbird's window
 """
 from __future__ import annotations
 
 import json
+import queue
+import threading
 from datetime import date
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from html import escape
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -44,6 +50,22 @@ class SettingsBody(BaseModel):
     accounts: list[dict[str, Any]] | None = None
 
 
+class TurnBody(BaseModel):
+    thread_id: int | None = None
+    text: str = ""
+    attached: list[int] = []
+    canned: str | None = None
+
+
+class CreateBody(BaseModel):
+    message_id: int
+    index: int
+
+
+class DraftOpenBody(BaseModel):
+    draft: dict[str, Any]
+
+
 def _page(title: str, text: str, base: str, undo: bool = False) -> str:
     """Tiny phone-sized confirmation page for a reminder action."""
     back = f"{base}/#today" if base else "/#today"
@@ -53,7 +75,7 @@ def _page(title: str, text: str, base: str, undo: bool = False) -> str:
             f'<p style="color:#555">{escape(text)}{hint}</p><p><a href="{escape(back)}" style="color:#2a6">Open Factotum</a></p></body>')
 
 
-def create_app(cfg: dict | None = None, db_path: str | None = None) -> FastAPI:
+def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=None) -> FastAPI:
     cfg = cfg or C.load()
     conn = connect(db_path or C.db_path())
     init_db(conn)
@@ -223,6 +245,82 @@ def create_app(cfg: dict | None = None, db_path: str | None = None) -> FastAPI:
         runs = rows(conn, "SELECT id, kind, started_at, duration_ms, cost_usd, ok, summary, error FROM runs ORDER BY id DESC LIMIT ?", (limit,))
         return {"batches": bs, "runs": runs}
 
+    # ---- Chat (SPEC.md §8.3) -------------------------------------------------------------------
+    from . import chat
+
+    @app.get("/api/chat/threads")
+    def chat_threads():
+        return {"threads": chat.threads(conn)}
+
+    @app.get("/api/chat/threads/{thread_id}")
+    def chat_thread(thread_id: int):
+        th = rows(conn, "SELECT id, title, created_at FROM chat_threads WHERE id = ?", (thread_id,))
+        if not th:
+            raise HTTPException(404)
+        return {"thread": th[0], "messages": chat.messages(conn, thread_id)}
+
+    @app.post("/api/chat/turn")
+    def chat_turn(body: TurnBody):
+        """One turn, streamed: `meta`, `status`/`text` events as the run works, then `done` with the
+        stored message (or `error`). The run happens on a worker thread; this generator relays."""
+        if body.canned is not None and body.canned not in chat.CANNED:
+            raise HTTPException(400, f"unknown canned prompt {body.canned!r}")
+        thread_id = body.thread_id or chat.new_thread(conn)
+        if not rows(conn, "SELECT 1 FROM chat_threads WHERE id = ?", (thread_id,)):
+            raise HTTPException(404, "no such thread")
+        q: queue.Queue = queue.Queue()
+        runner = app.state.chat_runner
+
+        def work():
+            try:
+                res = chat.turn(conn, eff_cfg(), thread_id, body.text, body.attached, today=date.today(), canned=body.canned, runner=runner, on_event=q.put)
+                q.put({"type": "done", "result": res} if res.get("ok") else {"type": "error", "error": res.get("error") or "run failed", "result": res})
+            except Exception as e:   # noqa: BLE001 — the stream must end with a reason, never hang
+                q.put({"type": "error", "error": f"{type(e).__name__}: {e}"})
+            q.put(None)
+
+        threading.Thread(target=work, daemon=True).start()
+
+        def gen():
+            while True:
+                try:
+                    ev = q.get(timeout=20)
+                except queue.Empty:
+                    yield ": keepalive\n\n"                   # Cloudflare closes idle streams; a comment keeps it open
+                    continue
+                if ev is None:
+                    return
+                yield "data: " + json.dumps(ev, default=str) + "\n\n"
+        return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    @app.post("/api/chat/create")
+    def chat_create(body: CreateBody):
+        try:
+            return {"task_id": chat.create_from_proposal(conn, eff_cfg(), body.message_id, body.index, date.today())}
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+    @app.post("/api/chat/drafts/open")
+    def chat_draft_open(body: DraftOpenBody):
+        """Bring a saved draft to the user's eyes in Mailbird: focus its conversation, or show the
+        assistant card listing the draft. Reads nothing back; never sends."""
+        from . import mailbird
+        d = body.draft
+        try:
+            client = mailbird.Client(eff_cfg())
+            if d.get("conversation_id"):
+                client.call_write("select_conversation", {"conversationId": str(d["conversation_id"])})
+            else:
+                acc = {str(a.get("email") or "").lower(): a.get("id") for a in client.call("list_accounts", {}) or []}
+                aid = acc.get(str(d.get("account") or "").lower())
+                if aid is None or not d.get("draft_message_id"):
+                    raise HTTPException(400, "the draft has no conversation and its account is not in Mailbird")
+                client.call_write("show_notification", {"title": "Factotum drafted a message", "body": str(d.get("subject") or "")[:200],
+                                                        "drafts": [{"accountId": int(aid), "messageId": int(d["draft_message_id"]), "recipientDisplayName": str((d.get("to") or ["?"])[0])[:80], "subject": str(d.get("subject") or "")[:120]}]})
+            return {"ok": True}
+        except mailbird.MailbirdError as e:
+            raise HTTPException(502, str(e))
+
     @app.get("/r/{token}")
     def reminder_action(token: str, a: str = "open"):
         """The three buttons on a reminder push (SPEC.md §10). `view` links, so the phone's Access
@@ -256,4 +354,5 @@ def create_app(cfg: dict | None = None, db_path: str | None = None) -> FastAPI:
     app.mount("/static", NoCacheStatic(directory=str(WEB)), name="static")
     app.state.conn = conn
     app.state.cfg = cfg
+    app.state.chat_runner = chat_runner          # tests inject a fake; None means the real headless run
     return app
