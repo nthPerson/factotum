@@ -99,6 +99,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--send", action="store_true", help="also send the brief with the verdict")
     p = sub.add_parser("sweep", help="run one sweep now")
     p.add_argument("which", choices=["mail", "canvas", "calendar"])
+    p = sub.add_parser("mirror", help="push task rows to the Notion Tasks database (one-way); default: rows edited since the last pass")
+    p.add_argument("--all", action="store_true", help="every row (the first pass after enabling the mirror)")
+    p.add_argument("--dry-run", action="store_true", help="count what would be pushed, write nothing")
     sub.add_parser("score")
     sub.add_parser("review")
     p = sub.add_parser("expire")
@@ -121,17 +124,17 @@ def main(argv: list[str] | None = None) -> int:
         from .api import create_app
         app = create_app(cfg)
         if not a.no_scheduler:
-            from . import brief, canvas, gcal, mail_sweep, notify, planner
+            from . import brief, canvas, gcal, mail_sweep, notify, notion_mirror, planner
             from .scheduler import Scheduler
             # its own connection: the API holds one, and SQLite serialises writers with busy_timeout
-            Scheduler(cfg, connect(C.db_path()), push=notify.publish, mailer=brief.smtp_mailer, calendar=gcal, canvas=canvas, mail=mail_sweep, planner=planner).start()
+            Scheduler(cfg, connect(C.db_path()), push=notify.publish, mailer=brief.smtp_mailer, calendar=gcal, canvas=canvas, mail=mail_sweep, planner=planner, mirror=notion_mirror).start()
             _start_plaud_trigger(cfg)
         uvicorn.run(app, host=a.host or C.get(cfg, "server.host", "127.0.0.1"), port=a.port or int(C.get(cfg, "server.port", 8750)))
     elif a.cmd == "tick":
         from . import brief, gcal, notify
-        from . import canvas, mail_sweep, planner
+        from . import canvas, mail_sweep, notion_mirror, planner
         from .scheduler import Scheduler
-        did = Scheduler(cfg, conn, push=notify.publish, mailer=brief.smtp_mailer, calendar=gcal, canvas=canvas, mail=mail_sweep, planner=planner).tick()
+        did = Scheduler(cfg, conn, push=notify.publish, mailer=brief.smtp_mailer, calendar=gcal, canvas=canvas, mail=mail_sweep, planner=planner, mirror=notion_mirror).tick()
         print("\n".join(did) if did else "nothing due")
     elif a.cmd == "brief":
         from . import brief, gcal
@@ -252,6 +255,25 @@ def main(argv: list[str] | None = None) -> int:
         for it in items:
             row = conn.execute("SELECT id, status FROM tasks WHERE source_key = ?", (it["key"],)).fetchone()
             print(f"  {it['due'] or 'undated':16} {it['state']:15} {it['project']:12} {it['name'][:50]:50} {'Task-%d %s' % (row[0], row[1]) if row else 'NEW'}")
+    elif a.cmd == "mirror":
+        from . import notion_mirror
+        if not C.get(ecfg, "sinks.notion_tasks_mirror.enabled") and not a.dry_run:
+            print("the mirror is off (Settings → Notion tasks mirror); pushing anyway because you asked")
+        total = {"created": 0, "updated": 0, "failed": []}
+        while True:
+            res = notion_mirror.sweep(conn, ecfg, all_rows=a.all, dry_run=a.dry_run, cap=10**6 if a.all else 200)
+            if a.dry_run:
+                print(f"{res['pending']} rows would be pushed (dry run)"); break
+            for k in ("created", "updated"):
+                total[k] += res[k]
+            total["failed"] += res["failed"]
+            print(f"  created {res['created']}, updated {res['updated']}, failed {len(res['failed'])}, {res['pending']} pending")
+            if a.all or not res["pending"] or not (res["created"] or res["updated"]):
+                break
+        for f in total["failed"]:
+            print("  !", f)
+        if not a.dry_run:
+            print(f"done: created {total['created']}, updated {total['updated']}, failed {len(total['failed'])}")
     elif a.cmd == "planner":
         from . import brief, gcal, planner
         res = planner.run(conn, ecfg, today, calendar=gcal, dry_run=a.dry_run)

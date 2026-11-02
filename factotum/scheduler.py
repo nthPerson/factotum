@@ -7,6 +7,7 @@ the review time or turning the brief off takes effect at the next tick.
     morning_brief   once a day at notify.morning_brief.time when enabled (brief.send)
     expire          once a day at lifecycle.expire_time (03:30): fade / lapse what Review has shown
     calendar_sweep  every sources.calendar.sweep_minutes when the calendar is on
+    notion_mirror   every sinks.notion_tasks_mirror.sweep_minutes when the mirror is on: rows edited since the last pass
 
 Daily jobs are "at or after HH:MM, once per day", so a service that was down at 06:30 still sends
 the brief when it comes back. A failed job retries after an hour, not the next day. Everything
@@ -27,8 +28,9 @@ RETRY_AFTER = timedelta(hours=1)
 
 
 class Scheduler:
-    def __init__(self, cfg: dict, conn: sqlite3.Connection, push=notify.publish, mailer=None, calendar=None, canvas=None, mail=None, planner=None):
+    def __init__(self, cfg: dict, conn: sqlite3.Connection, push=notify.publish, mailer=None, calendar=None, canvas=None, mail=None, planner=None, mirror=None):
         self.cfg, self.conn, self.push, self.mailer, self.calendar, self.canvas, self.mail, self.planner = cfg, conn, push, mailer, calendar, canvas, mail, planner
+        self.mirror = mirror
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._rem_error_at: datetime | None = None
@@ -52,6 +54,8 @@ class Scheduler:
             self._every("canvas_sweep", int(C.get(ecfg, "sources.canvas.sweep_minutes", 60)), now, st, did, lambda: self.canvas.sweep_job(self.conn, ecfg, now))
         if C.get(ecfg, "sources.mail.enabled") and self.mail:
             self._every("mail_sweep", int(C.get(ecfg, "sources.mail.sweep_minutes", 20)), now, st, did, lambda: self.mail.sweep_job(self.conn, ecfg, now))
+        if C.get(ecfg, "sinks.notion_tasks_mirror.enabled") and self.mirror:
+            self._every("notion_mirror", int(C.get(ecfg, "sinks.notion_tasks_mirror.sweep_minutes", 10)), now, st, did, lambda: self.mirror.sweep_job(self.conn, ecfg, now))
         return did
 
     def _reminders(self, ecfg: dict, now: datetime, did: list[str]) -> None:
