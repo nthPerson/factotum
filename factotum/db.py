@@ -71,6 +71,13 @@ CREATE TABLE IF NOT EXISTS chat_messages (
   thread_id INTEGER NOT NULL REFERENCES chat_threads(id),
   role TEXT NOT NULL, text TEXT, attached_json TEXT, proposals_json TEXT, cost_usd REAL, created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS evidence (              -- what the sweeps found and the planner proposes (SPEC §6, §8.2)
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id INTEGER REFERENCES tasks(id),             -- NULL for a candidate not yet matched to a task
+  kind TEXT NOT NULL,                               -- reply_from_waiting|sent_to_counterpart|thread_updated|ics|confirmation|proposal
+  ref TEXT, account TEXT, label TEXT, excerpt TEXT, at TEXT NOT NULL,
+  judged_at TEXT, verdict TEXT                      -- set by the planner (or Review) once acted on
+);
 CREATE TABLE IF NOT EXISTS trigger_seen (          -- mail uids the Plaud trigger has handled (never reprocessed)
   account TEXT NOT NULL, uid INTEGER NOT NULL, subject TEXT, at TEXT NOT NULL, ok INTEGER,
   PRIMARY KEY (account, uid)

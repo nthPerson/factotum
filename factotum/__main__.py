@@ -83,6 +83,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dry-run", action="store_true", help="run Claude and print the JSON; write nothing")
     sub.add_parser("claude-check", help="one tiny headless Claude call: is the login alive?")
     sub.add_parser("plaud-check", help="the Plaud CLI, its login, today's recordings, and the trigger mailbox")
+    sub.add_parser("mail-check", help="Mailbird's MCP from here: accounts it has versus the monitored ones")
+    sub.add_parser("canvas-check", help="Canvas: the token, the items in the window, what a sweep would do")
+    p = sub.add_parser("sweep", help="run one sweep now")
+    p.add_argument("which", choices=["mail", "canvas", "calendar"])
     sub.add_parser("score")
     sub.add_parser("review")
     p = sub.add_parser("expire")
@@ -105,17 +109,17 @@ def main(argv: list[str] | None = None) -> int:
         from .api import create_app
         app = create_app(cfg)
         if not a.no_scheduler:
-            from . import brief, canvas, gcal, notify
+            from . import brief, canvas, gcal, mail_sweep, notify
             from .scheduler import Scheduler
             # its own connection: the API holds one, and SQLite serialises writers with busy_timeout
-            Scheduler(cfg, connect(C.db_path()), push=notify.publish, mailer=brief.smtp_mailer, calendar=gcal, canvas=canvas).start()
+            Scheduler(cfg, connect(C.db_path()), push=notify.publish, mailer=brief.smtp_mailer, calendar=gcal, canvas=canvas, mail=mail_sweep).start()
             _start_plaud_trigger(cfg)
         uvicorn.run(app, host=a.host or C.get(cfg, "server.host", "127.0.0.1"), port=a.port or int(C.get(cfg, "server.port", 8750)))
     elif a.cmd == "tick":
         from . import brief, gcal, notify
-        from . import canvas
+        from . import canvas, mail_sweep
         from .scheduler import Scheduler
-        did = Scheduler(cfg, conn, push=notify.publish, mailer=brief.smtp_mailer, calendar=gcal, canvas=canvas).tick()
+        did = Scheduler(cfg, conn, push=notify.publish, mailer=brief.smtp_mailer, calendar=gcal, canvas=canvas, mail=mail_sweep).tick()
         print("\n".join(did) if did else "nothing due")
     elif a.cmd == "brief":
         from . import brief, gcal
@@ -168,6 +172,34 @@ def main(argv: list[str] | None = None) -> int:
             f = C.get(ecfg, "sources.plaud.from_filter", "plaud.ai")
             n = len(server.search(["FROM", f])); u = len(server.search(["UNSEEN", "FROM", f]))
             print(f"trigger mailbox {imap['user']}/{imap['folder']}: {n} mails from {f}, {u} unseen (an unseen one is processed at the next service start)")
+    elif a.cmd == "mail-check":
+        import json as _json
+        from .mailbird import Client
+        client = Client(ecfg)
+        have = {str(x.get("email") or "").lower(): x for x in client.call("list_accounts", {})}
+        print(f"Mailbird at {client.url}: {len(have)} accounts: " + ", ".join(sorted(have)))
+        for acc in rows(conn, "SELECT * FROM accounts"):
+            roles = _json.loads(acc.get("roles_json") or "[]")
+            state = "ok" if acc["address"].lower() in have else "NOT IN MAILBIRD"
+            print(f"  {acc['address']:32} {'on ' if acc['enabled'] else 'off'} {','.join(roles):28} {state}")
+        client.close()
+    elif a.cmd == "canvas-check":
+        import os
+        from . import canvas
+        if not os.environ.get("CANVAS_TOKEN"):
+            raise SystemExit("CANVAS_TOKEN is not set in .env")
+        data = canvas.fetch(ecfg, os.environ["CANVAS_TOKEN"], today)
+        items = canvas.normalize(ecfg, data["items"])
+        print(f"{len(data['items'])} items in the window, {len(items)} after filters, {len(data['announcements'])} announcements")
+        for it in items:
+            row = conn.execute("SELECT id, status FROM tasks WHERE source_key = ?", (it["key"],)).fetchone()
+            print(f"  {it['due'] or 'undated':16} {it['state']:15} {it['project']:12} {it['name'][:50]:50} {'Task-%d %s' % (row[0], row[1]) if row else 'NEW'}")
+    elif a.cmd == "sweep":
+        from datetime import datetime as _dt
+        from . import canvas, gcal, mail_sweep
+        now = _dt.now()
+        mod = {"mail": mail_sweep, "canvas": canvas, "calendar": gcal}[a.which]
+        print(mod.sweep_job(conn, ecfg, now) or "nothing to do")
     elif a.cmd == "calendar-check":
         from datetime import datetime, timedelta
         from . import gcal
