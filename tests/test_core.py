@@ -258,6 +258,16 @@ def test_judge_evidence_rides_in_a_batch_and_is_undone_with_it(conn, cfg):
     assert ev[7]["verdict"] is None and ev[7]["judged_at"] is None and ev[8]["judged_at"] is None
 
 
+def test_undo_restores_the_oldest_value_when_a_batch_set_a_field_twice(conn, cfg):
+    """Review can stage two changes to the same field in one batch (an accepted suggestion, then the
+    decision's note): undo must walk the record backwards or the task ends at the middle value."""
+    upsert_task(conn, task(id=1, context="original")); conn.commit()
+    res = batches.apply(conn, [{"task_id": 1, "op": "set", "fields": {"context": "first"}}, {"task_id": 1, "op": "set", "fields": {"context": "second"}}], "review", TODAY)
+    assert conn.execute("SELECT context FROM tasks WHERE id = 1").fetchone()[0] == "second"
+    batches.undo(conn, res["batch_id"])
+    assert conn.execute("SELECT context FROM tasks WHERE id = 1").fetchone()[0] == "original"
+
+
 def test_add_reminder_validates_fire_at_and_repeat(conn, cfg):
     upsert_task(conn, task(id=1)); conn.commit()
     res = batches.apply(conn, [
@@ -362,7 +372,8 @@ def test_review_carries_pending_evidence_and_planner_suggestions(cfg, tmp_path):
     c.execute("INSERT INTO evidence (id, task_id, kind, ref, label, excerpt, at) VALUES (11, 4, 'proposal', ?, 'Task-4 → due Nov 5', 'Max asked for Thursday', 'now')",
               (json.dumps({"task_id": 4, "op": "set", "fields": {"due": "2026-11-05"}}),))
     c.execute("INSERT INTO evidence (id, task_id, kind, ref, label, at) VALUES (12, 4, 'thread_updated', 'conv-1', 'Max wrote', 'now')")
-    c.execute("INSERT INTO evidence (id, task_id, kind, label, excerpt, at) VALUES (13, NULL, 'proposal', 'create: Go to the dentist', 'appointment mail Nov 12', 'now')")
+    c.execute("INSERT INTO evidence (id, task_id, kind, ref, label, excerpt, at) VALUES (13, NULL, 'proposal', ?, 'Dentist on Nov 12', 'appointment mail Nov 12', 'now')",
+              (json.dumps({"op": "create", "fields": {"name": "Go to the dentist", "project": "Personal", "due": "2026-11-12T14:00", "due_is_datetime": 1, "hard": 1, "effort": "S"}}),))
     c.execute("INSERT INTO evidence (id, task_id, kind, label, excerpt, at, judged_at, verdict) VALUES (14, NULL, 'proposal', 'old', 'x', 'now', 'now', 'dismissed')")
     c.commit()
     client = TestClient(app)
@@ -370,10 +381,12 @@ def test_review_carries_pending_evidence_and_planner_suggestions(cfg, tmp_path):
     item = next(i for i in page["items"] if i["task"]["id"] == 4)
     assert "planner" in item["reasons"] and "thread_updated" in item["reasons"] and [e["id"] for e in item["evidence"]] == [11, 12]
     assert item["evidence"][0]["change"] == {"task_id": 4, "op": "set", "fields": {"due": "2026-11-05"}} and item["evidence"][1]["change"] is None
-    assert [s["id"] for s in page["suggestions"]] == [13] and page["suggestions"][0]["label"].startswith("create") and page["suggestions"][0]["reason"] == "appointment mail Nov 12"
+    assert [s["id"] for s in page["suggestions"]] == [13] and page["suggestions"][0]["label"] == "Dentist on Nov 12" and page["suggestions"][0]["reason"] == "appointment mail Nov 12"
     r = client.post("/api/review/suggestions/13/create", json={}).json()
     t = c.execute("SELECT * FROM tasks WHERE id = ?", (r["task_id"],)).fetchone()
     assert t["name"] == "Go to the dentist" and t["source"] == "Planner" and t["source_key"] == "planner-suggestion:13"
+    assert t["project"] == "Personal" and t["due"] == "2026-11-12T14:00" and t["hard"] == 1 and t["effort"] == "S" and t["context"] == "appointment mail Nov 12"
+    assert page["suggestions"][0]["fields"]["name"] == "Go to the dentist"
     assert c.execute("SELECT verdict FROM evidence WHERE id = 13").fetchone()[0] == "applied"
     assert client.post("/api/review/suggestions/13/create", json={}).json()["task_id"] == r["task_id"]        # idempotent
     assert client.post("/api/review/suggestions/14/create", json={}).status_code == 404

@@ -22,7 +22,6 @@ from __future__ import annotations
 import json
 import queue
 import threading
-import uuid
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -31,6 +30,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from html import escape
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
 from . import batches, commands, config as C, lifecycle, reminders, scoring
@@ -79,6 +79,23 @@ def _page(title: str, text: str, base: str, undo: bool = False) -> str:
             f'<p style="color:#555">{escape(text)}{hint}</p><p><a href="{escape(back)}" style="color:#2a6">Open Factotum</a></p></body>')
 
 
+class JsonOnlyMutations:
+    """Every state-changing /api call carries application/json (the UI's helper always sets it). A
+    cross-site form or a bare fetch cannot, so a body-less POST (undo, apply a proposal, finish
+    review) is never a browser "simple request" that rides on the Access cookie. Pure ASGI, not
+    BaseHTTPMiddleware, so the chat's streaming response is untouched."""
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope.get("path", "").startswith("/api/") and scope.get("method") not in ("GET", "HEAD", "OPTIONS"):
+            ctype = next((v for k, v in scope.get("headers", []) if k == b"content-type"), b"").decode("latin-1").lower()
+            if not ctype.startswith("application/json"):
+                await JSONResponse({"detail": "send Content-Type: application/json"}, status_code=415)(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
 def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=None) -> FastAPI:
     cfg = cfg or C.load()
     conn = connect(db_path or C.db_path())
@@ -89,15 +106,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
     def eff_cfg() -> dict:
         return C.effective(cfg, get_settings(conn))
 
-    @app.middleware("http")
-    async def json_only_mutations(request: Request, call_next):
-        """Every state-changing /api call carries application/json (the UI's helper always sets it).
-        A cross-site form or a bare fetch cannot, so a body-less POST (undo, apply a proposal, finish
-        review) is never a browser "simple request" that rides on the Access cookie."""
-        if request.url.path.startswith("/api/") and request.method not in ("GET", "HEAD", "OPTIONS"):
-            if not (request.headers.get("content-type") or "").lower().startswith("application/json"):
-                return JSONResponse({"detail": "send Content-Type: application/json"}, status_code=415)
-        return await call_next(request)
+    app.add_middleware(JsonOnlyMutations)
 
     def decorate(t: dict, today: date, ecfg: dict) -> dict:
         s, pr, reasons = scoring.score(t, today, ecfg)
@@ -200,7 +209,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
             i["flags"] = flags.get(i["task"]["id"], {})
             i["evidence"] = by_task.get(i["task"]["id"], [])      # judged in the same batch as the decision; a proposal's change can be accepted
         # Planner creates with no task (an announcement, a hunch): suggestion cards with Create / Dismiss.
-        suggestions = [{"id": e["id"], "label": e["label"], "reason": e["excerpt"], "at": e["at"]} for e in pending if e["task_id"] is None and e["kind"] == "proposal"]
+        suggestions = [{"id": e["id"], "label": e["label"], "reason": e["excerpt"], "at": e["at"], "fields": _suggestion_fields(e)} for e in pending if e["task_id"] is None and e["kind"] == "proposal"]
         cap = int(C.get(ecfg, "lifecycle.review_cap", 15))
         page = full[:cap]
         if page:
@@ -212,6 +221,17 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
                 i["task"]["last_offered_at"] = today.isoformat()
         return {"today": today.isoformat(), "last_review_at": st.get("state.last_review_at"),
                 "cap": cap, "total": len(full), "labels": lifecycle.REVIEW_LABELS, "items": page, "suggestions": suggestions}
+
+    def _suggestion_fields(e: dict) -> dict:
+        """The planner's cleaned fields for an uncited create (evidence.ref); older rows have only a label."""
+        try:
+            d = json.loads(e["ref"]) if e.get("ref") else {}
+        except ValueError:
+            d = {}
+        f = dict((d or {}).get("fields") or {})
+        if not f.get("name"):
+            f["name"] = str(e.get("label") or "").split(":", 1)[-1].strip()[:80] or "(untitled)"
+        return f
 
     @app.post("/api/review/suggestions/{evidence_id}/create")
     def create_suggestion(evidence_id: int):
@@ -229,10 +249,11 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
             return {"task_id": ex[0]["id"]}
         if e["judged_at"]:
             raise HTTPException(404, "this suggestion was already judged")
-        name = str(e["label"] or "").split(":", 1)[-1].strip()[:80] or "(untitled)"
+        from .sync_file import _clean_task_fields
+        f = _clean_task_fields(eff_cfg(), _suggestion_fields(e))
         now = now_iso()
-        tid = upsert_task(conn, {"name": name, "status": "open", "source": "Planner", "source_key": key, "context": (e["excerpt"] or None),
-                                 "mentions": 1, "last_mention_at": date.today().isoformat(), "created_at": now, "edited_at": now})
+        tid = upsert_task(conn, dict(f, status="open", source="Planner", source_key=key, context=f.get("context") or (e["excerpt"] or None),
+                                     mentions=1, last_mention_at=date.today().isoformat(), created_at=now, edited_at=now))
         conn.execute("UPDATE evidence SET judged_at = ?, verdict = 'applied' WHERE id = ?", (now, evidence_id))
         conn.commit()
         return {"task_id": tid}
@@ -427,23 +448,29 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         auth = request.headers.get("authorization") or ""
         if not (auth.lower().startswith("bearer ") and hmac.compare_digest(auth[7:].strip(), token)):
             raise HTTPException(401, "bad or missing bearer token")
+        body = await request.body()
+        return await run_in_threadpool(_mcp_handle, body)     # tool calls block (Mailbird, Slack, SQLite): never on the event loop
+
+    def _mcp_handle(body: bytes):
+        from . import mcp_server
         try:
-            msg = json.loads(await request.body())
+            msg = json.loads(body)
         except ValueError:
             return JSONResponse(mcp_server._err(None, -32700, "parse error"))
         db = db_path or C.db_path()
         reader = connect(db)
         ecfg = eff_cfg()
-        # Reads and stage_changes by default; drafts (a leaked token must not fill Mailbird with drafts)
-        # and the Plaud subprocess only when server.mcp_http_tools opts in (a list of names, or "all").
+        # Reads and stage_changes by default; a new draft (a leaked token must not fill Mailbird with
+        # drafts) and the Plaud subprocess only when server.mcp_http_tools opts in (a list, or "all").
+        # A reply draft is never offered here: each request is its own run, so no thread was "seen".
         allowed = C.get(ecfg, "server.mcp_http_tools")
         if allowed == "all":
-            allowed = None
+            allowed = {t["name"] for t in mcp_server.TOOLS}
         elif not isinstance(allowed, list):
-            allowed = {t["name"] for t in mcp_server.TOOLS} - {"mail_draft_reply", "mail_draft_new", "plaud_search", "plaud_summary"}
+            allowed = {t["name"] for t in mcp_server.TOOLS} - {"mail_draft_new", "plaud_search", "plaud_summary"}
+        allowed = set(allowed) - {"mail_draft_reply"}
         try:
-            ctx = mcp_server.Context(reader, ecfg, run_dir=C.ROOT / "data" / "runs" / "mcp-http" / date.today().isoformat() / uuid.uuid4().hex[:12],
-                                     writer=lambda: connect(db), allowed=allowed)
+            ctx = mcp_server.Context(reader, ecfg, run_dir=None, writer=lambda: connect(db), allowed=allowed)
             if isinstance(msg, list):
                 out = [r for r in (mcp_server.dispatch(ctx, m) for m in msg) if r is not None]
                 return JSONResponse(out) if out else JSONResponse(None, status_code=202)

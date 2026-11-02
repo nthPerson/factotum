@@ -24,6 +24,7 @@ import re
 import sqlite3
 import time
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -91,6 +92,26 @@ def _text(v) -> list[dict]:
     return [{"type": "text", "text": {"content": s[i:i + TEXT_CAP]}} for i in range(0, min(len(s), TEXT_CAP * 5), TEXT_CAP)] if s else []
 
 
+_TZ: list = []          # the owner's zone for naive datetimes, set per properties() call
+
+
+def _opt(v) -> str:
+    """A select option name: Notion refuses commas in them."""
+    return " ".join(str(v).replace(",", " ").split())[:100]
+
+
+def _date(v) -> str:
+    """A date as stored ("2026-11-05" or a naive "2026-11-05T14:00" in the owner's zone); Notion
+    reads a naive datetime as UTC, so the owner's offset is appended."""
+    s = str(v)
+    if "T" in s and len(s) <= 19 and _TZ:
+        try:
+            return datetime.fromisoformat(s).replace(tzinfo=_TZ[0]).isoformat()
+        except ValueError:
+            return s
+    return s
+
+
 def _value(ptype: str, v) -> dict | None:
     """One property payload for a Notion type, or None when the type cannot carry the value."""
     if ptype == "title":
@@ -98,14 +119,14 @@ def _value(ptype: str, v) -> dict | None:
     if ptype == "rich_text":
         return {"rich_text": _text(v)}
     if ptype == "select":
-        return {"select": {"name": str(v)[:100]} if v not in (None, "") else None}
+        return {"select": {"name": _opt(v)} if v not in (None, "") else None}
     if ptype == "status":
-        return {"status": {"name": str(v)[:100]}} if v not in (None, "") else None
+        return {"status": {"name": _opt(v)}} if v not in (None, "") else None
     if ptype == "multi_select":
         vals = v if isinstance(v, list) else ([v] if v not in (None, "") else [])
-        return {"multi_select": [{"name": str(x)[:100]} for x in vals]}
+        return {"multi_select": [{"name": _opt(x)} for x in vals]}
     if ptype == "date":
-        return {"date": {"start": str(v)} if v else None}
+        return {"date": {"start": _date(v)} if v else None}
     if ptype == "checkbox":
         return {"checkbox": bool(v)}
     if ptype == "number":
@@ -125,6 +146,7 @@ def _value(ptype: str, v) -> dict | None:
 def properties(cfg: dict, t: dict, sch: dict[str, str], notes: list[str], today: date) -> dict:
     """The `properties` payload for one task row. Only columns the schema has, never read-only ones."""
     pm = props_map(cfg)
+    _TZ[:] = [ZoneInfo(str(C.get(cfg, "owner.timezone", "UTC")))]
     smap = dict(DEFAULT_STATUS_MAP, **(C.get(cfg, "sinks.notion_tasks_mirror.status_map", {}) or {}))
     score, priority, _ = scoring.score(t, today, cfg) if t.get("status") == "open" else (t.get("score"), t.get("priority"), [])
     values = {
@@ -154,8 +176,9 @@ def _pending(conn: sqlite3.Connection, all_rows: bool) -> list[dict]:
     if all_rows:
         return rows(conn, "SELECT * FROM tasks ORDER BY id")
     settled = (datetime.now(timezone.utc) - timedelta(seconds=SETTLE_S)).replace(microsecond=0).isoformat()
-    return (rows(conn, "SELECT * FROM tasks WHERE notion_page_id IS NULL ORDER BY id")
-            + rows(conn, "SELECT * FROM tasks WHERE notion_page_id IS NOT NULL AND (mirrored_at IS NULL OR edited_at > mirrored_at) AND edited_at <= ? ORDER BY edited_at, id", (settled,)))
+    due = "(mirrored_at IS NULL OR edited_at > mirrored_at) AND edited_at <= ?"      # a refused row, create or edit, waits for its next edit
+    return (rows(conn, f"SELECT * FROM tasks WHERE notion_page_id IS NULL AND {due} ORDER BY id", (settled,))
+            + rows(conn, f"SELECT * FROM tasks WHERE notion_page_id IS NOT NULL AND {due} ORDER BY edited_at, id", (settled,)))
 
 
 def sweep(conn: sqlite3.Connection, cfg: dict, *, all_rows: bool = False, dry_run: bool = False, cap: int = 60, transport=None, pause: float | None = None) -> dict:
@@ -180,28 +203,30 @@ def sweep(conn: sqlite3.Connection, cfg: dict, *, all_rows: bool = False, dry_ru
     with httpx.Client(timeout=60, transport=transport) as client:
         for t in todo:
             props = properties(cfg, t, sch, note_ids(conn, t["id"]), today)
+            # No transaction is open while Notion is on the line: each row's bookkeeping is one short
+            # write, committed at once, so the UI's Apply never waits on this pass (the 2026-11-01 lock bug).
+            page_id = None
             try:
                 if t.get("notion_page_id"):
                     r = client.patch(f"{NOTION}/pages/{t['notion_page_id']}", headers=_headers(version), json={"properties": props})
-                    if r.status_code == 404:   # the page was deleted in Notion: make a new one
-                        r = client.post(f"{NOTION}/pages", headers=_headers(version), json={"parent": parent, "properties": props})
-                        if r.status_code == 200:
-                            conn.execute("UPDATE tasks SET notion_page_id = ? WHERE id = ?", (r.json().get("id"), t["id"]))
-                    if r.status_code != 200:
+                    if r.status_code != 200:   # 404 here means no access or a page in the trash: report it, never create a twin
                         raise MirrorError(f"{r.status_code} {_message(r)}")
                     updated += 1
                 else:
                     r = client.post(f"{NOTION}/pages", headers=_headers(version), json={"parent": parent, "properties": props})
                     if r.status_code != 200:
                         raise MirrorError(f"{r.status_code} {_message(r)}")
-                    conn.execute("UPDATE tasks SET notion_page_id = ? WHERE id = ?", (r.json().get("id"), t["id"]))
+                    page_id = str((r.json() or {}).get("id") or "") or None
                     created += 1
-            except (MirrorError, httpx.HTTPError) as e:
+            except (MirrorError, httpx.HTTPError, ValueError) as e:
                 failed.append(f"Task-{t['id']}: {e}"[:300])
-            conn.execute("UPDATE tasks SET mirrored_at = ? WHERE id = ?", (t.get("edited_at"), t["id"]))   # pushed or refused: wait for the next edit
+            if page_id:
+                conn.execute("UPDATE tasks SET notion_page_id = ?, mirrored_at = ? WHERE id = ?", (page_id, t.get("edited_at"), t["id"]))
+            else:
+                conn.execute("UPDATE tasks SET mirrored_at = ? WHERE id = ?", (t.get("edited_at"), t["id"]))   # pushed or refused: wait for the next edit
+            conn.commit()
             if pause:
                 time.sleep(pause)
-    conn.commit()
     return {"created": created, "updated": updated, "failed": failed, "pending": len(_pending(conn, False))}
 
 

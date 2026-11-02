@@ -35,7 +35,7 @@ cd /home/robert/factotum
 .venv/bin/python -m factotum chat-check       # the MCP server over a pipe + one haiku run through it (~$0.002)
 .venv/bin/python -m factotum slack-check | discord-check   # when those sources are configured
 .venv/bin/python -m factotum mirror --dry-run # rows the Notion mirror would push
-.venv/bin/python -m factotum tick             # one scheduler tick now (never while the service runs its own? it is safe: ticks are idempotent, but never run two `serve` on one DB)
+.venv/bin/python -m factotum tick             # one scheduler tick — ONLY with factotum.service stopped: two schedulers on one DB send the brief twice and fire reminders twice
 ```
 
 ## Things that bite (dates are when they were learned)

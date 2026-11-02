@@ -323,6 +323,9 @@ def test_planner_apply_writes_why_now_applies_cited_proposals_and_stages_the_res
     assert flags[4]["planner"] == "Task-4 → due Nov 5" and flags[3]["planner"].startswith("Task-3 → done") and 2 not in flags
     judged = {e["id"]: e["verdict"] for e in rows(conn, "SELECT id, verdict FROM evidence WHERE judged_at IS NOT NULL")}
     assert judged == {10: "applied", 11: "staged", 12: "applied"}                                     # 13 is about an unlisted row: not the planner's to dismiss
+    assert one(conn, "SELECT task_id FROM evidence WHERE id = 12")["task_id"] == d["id"]              # the create owns its evidence: an undo cannot make a twin
+    sugg = one(conn, "SELECT ref FROM evidence WHERE kind = 'proposal' AND task_id IS NULL")
+    assert json.loads(sugg["ref"])["fields"]["name"] == "Study for the exam" and json.loads(sugg["ref"])["fields"]["due"] == "2026-11-12"
     assert res["applied"] == ["Task-2 → done (slides sent to Max)", "create: Go to the dentist"]
     assert res["staged"] == ["Task-3 → done (registration confirmed)", "Task-4 → due Nov 5", "create: Study for the exam"]
     assert one(conn, "SELECT COUNT(*) AS n FROM tasks WHERE name IN ('Study for the exam', 'Sneaky')")["n"] == 0
@@ -332,10 +335,17 @@ def test_planner_apply_writes_why_now_applies_cited_proposals_and_stages_the_res
     # every judgment (applied, staged, dismissed) rides in the planner's batch, so undoing the morning un-judges the evidence
     from factotum import batches
     bid = res["batch_id"]
+    # only the verdicts the batch can honour ride in it: applied (reverted with the change) and dismissed; a
+    # create and a staged proposal exist outside the batch, so their evidence stays judged after an undo
     ev_changes = rows(conn, "SELECT task_id, old, new FROM changes WHERE batch_id = ? AND field = 'evidence' ORDER BY id", (bid,))
-    assert {json.loads(c["new"])["evidence_id"]: json.loads(c["new"])["verdict"] for c in ev_changes} == {10: "applied", 11: "staged", 12: "applied"}
+    assert {json.loads(c["new"])["evidence_id"]: json.loads(c["new"])["verdict"] for c in ev_changes} == {10: "applied"}
     batches.undo(conn, bid)
-    assert rows(conn, "SELECT id FROM evidence WHERE judged_at IS NOT NULL") == [] and one(conn, "SELECT status FROM tasks WHERE id = 2")["status"] == "open"
+    assert {e["id"]: e["verdict"] for e in rows(conn, "SELECT id, verdict FROM evidence WHERE judged_at IS NOT NULL")} == {11: "staged", 12: "applied"}
+    assert one(conn, "SELECT status FROM tasks WHERE id = 2")["status"] == "open"
+    # a proven proposal whose reminder is malformed is rejected up front, never judged applied
+    data2 = {"verdict": "x", "why_now": [], "proposals": [{"op": "add_reminder", "task_id": 2, "fields": {"fire_at": "tomorrowish"}, "label": "bad reminder", "evidence": [{"evidence_id": 10}]}], "dismiss": []}
+    res2 = planner.apply(conn, cfg, data2, planner.bundle(conn, cfg, today), today)
+    assert res2["applied"] == [] and any("bad reminder" in r for r in res2["rejected"]) and one(conn, "SELECT judged_at FROM evidence WHERE id = 10")["judged_at"] is None
 
 
 def test_planner_run_logs_cost_and_falls_back_cleanly(conn, cfg):

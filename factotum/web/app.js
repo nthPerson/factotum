@@ -320,7 +320,7 @@
     const total = review.items.length;
     const remaining = ui.reviewPaused ? review.total : review.total - total;
     const sugg = (review.suggestions || []).filter(x => !staged.has('e:' + x.id) && !x.created);
-    if (!ui.reviewPaused && !items.length && sugg.length) return suggestionCard(sugg[0], sugg.length);
+    if (!items.length && sugg.length && !(ui.reviewPaused && remaining > 0)) return suggestionCard(sugg[0], sugg.length);
     if (ui.reviewPaused || !items.length) {
       const more = remaining > 0 ? `<p><button class="btn" id="review-more">Review another ${Math.min(review.cap, remaining)} of the remaining ${remaining}</button></p>` : '';
       const head = ui.reviewPaused ? (remaining ? 'Batch applied.' : 'Batch applied. Nothing left to review.') : total ? `${staged.size} decision${staged.size === 1 ? '' : 's'} staged.` : 'Nothing to review.';
@@ -600,10 +600,15 @@
     panel.querySelectorAll('[data-rv-accept]').forEach(b => b.onclick = () => {
       const eid = +b.dataset.rvAccept; const item = review.items.find(i => (i.evidence || []).some(e => e.id === eid)); const e = item && item.evidence.find(e => e.id === eid); if (!e || !e.change) return;
       const c = e.change, tid = item.task.id;
-      if (['done', 'drop', 'pin_top', 'longterm'].includes(c.op)) stage(tid, c.op, {}, e.label);
+      if (['done', 'drop'].includes(c.op)) {   // this IS the decision: the card's other flags are judged with it
+        stage(tid, c.op, {}, e.label);
+        (item.evidence || []).forEach(o => { if (o.id !== eid && !staged.has('e:' + o.id)) stageJudge(o.id, tid, 'reviewed', o.kind === 'proposal' ? 'suggestion seen' : 'thread seen'); });
+        ui.rvNote = { id: null, text: '' };
+      }
+      else if (['pin_top', 'longterm'].includes(c.op)) stageExtra(`${tid}:a${eid}`, tid, c.op, {}, e.label);   // an extra beside the decision, like the ★ button
       else if (c.op === 'add_reminder') stageExtra(tid + ':r', tid, 'add_reminder', c.fields, e.label);
       else stageExtra(`${tid}:c${eid}`, tid, 'set', c.fields || {}, e.label);
-      stageJudge(eid, tid, 'applied', 'suggestion accepted'); toast('Suggestion staged · decide on the card, then Apply');
+      stageJudge(eid, tid, 'applied', 'suggestion accepted'); toast(['done', 'drop'].includes(c.op) ? 'Decision staged · Apply in the tray' : 'Suggestion staged · decide on the card, then Apply');
     });
     panel.querySelectorAll('[data-pending-apply]').forEach(b => b.onclick = async () => {
       try { const r = await api(`/api/proposals/${b.dataset.pendingApply}/apply`, { method: 'POST' }); lastBatch = r.batch_id; review = null; logData = null; await load(); toast(`${r.applied} change${r.applied === 1 ? '' : 's'} applied` + (r.skipped.length ? ` · ${r.skipped.length} skipped` : ''), true); }
@@ -685,7 +690,8 @@
     // A decision is a review: it sets last_reviewed_at (Keep does so server-side). An optional note
     // is appended to the task's context, dated, in the same change.
     const text = ui.rvNote.id === id ? ui.rvNote.text.trim() : '';
-    const extra = text ? { context: (x.context ? x.context + '\n' : '') + data.today + ': ' + text } : {};
+    const ctx = view(x).context;   // as staged: an accepted suggestion or a chat proposal may have edited it already
+    const extra = text ? { context: (ctx ? ctx + '\n' : '') + data.today + ': ' + text } : {};
     const later = (day, label) => stage(id, 'set', { snoozed_until: day, last_reviewed_at: data.today, ...extra }, 'later · back ' + label);
     if (kind === 'done') stage(id, 'done', extra, 'done');
     else if (kind === 'drop') stage(id, 'drop', extra, 'dropped');
@@ -717,14 +723,16 @@
       values[k] = el.type === 'checkbox' ? el.checked : el.type === 'number' ? Number(el.value) : el.value;
       if (el.type === 'number' && (el.value === '' || Number.isNaN(values[k]))) delete values[k];
     });
-    const accounts = settings.accounts.map((a, i) => ({ address: a.address, display: a.display, roles: a.roles, enabled: a.enabled }));
+    let accounts = settings.accounts.map((a, i) => ({ address: a.address, display: a.display, roles: a.roles, enabled: a.enabled }));
     document.querySelectorAll('#panel [data-acc]').forEach(el => {
       const a = accounts[+el.dataset.acc]; const f = el.dataset.f;
       if (f === 'roles') a.roles = el.value.split(',').map(s => s.trim()).filter(Boolean);
       else if (f === 'enabled') a.enabled = el.checked; else a[f] = el.value;
     });
+    settings.accounts = accounts.map(a => Object.assign({}, a));
+    if (accounts.some(a => !String(a.address || '').trim())) accounts = null;   // a row still being typed: the server's table stays until it has an address
     const active = document.activeElement && document.activeElement.dataset ? document.activeElement.id : null;
-    try { settings = await api('/api/settings', { method: 'PUT', body: JSON.stringify({ values, accounts }) }); toast('Settings saved'); render(); const el = active && document.getElementById(active); if (el) el.focus(); }
+    try { const kept = settings.accounts; settings = await api('/api/settings', { method: 'PUT', body: JSON.stringify({ values, accounts }) }); if (accounts === null) settings.accounts = kept; toast(accounts === null ? 'Settings saved · the new account row needs an address' : 'Settings saved'); render(); const el = active && document.getElementById(active); if (el) el.focus(); }
     catch (e) { toast('Save failed: ' + e.message); }
   }
 

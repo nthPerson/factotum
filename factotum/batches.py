@@ -170,7 +170,9 @@ def undo(conn: sqlite3.Connection, batch_id: int) -> dict:
     if b["undone_at"]:
         return {"batch_id": batch_id, "restored": 0, "already": True}
     restored = 0
-    for u in json.loads(b["undo_json"] or "[]"):
+    # Newest first: a batch may set one field twice (an accepted suggestion, then the decision's
+    # note), and each entry's `old` is the value just before it; forwards, the middle value would win.
+    for u in reversed(json.loads(b["undo_json"] or "[]")):
         if "reminder_id" in u:
             conn.execute("UPDATE reminders SET status = 'cancelled' WHERE id = ?", (u["reminder_id"],))
         elif "evidence_id" in u:

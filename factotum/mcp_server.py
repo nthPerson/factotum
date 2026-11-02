@@ -535,11 +535,16 @@ def stage_changes(ctx: Context, args: dict) -> dict:
         op, tid = ch.get("op"), ch.get("task_id")
         if op not in STAGE_OPS:
             rejected.append(f"#{i}: op {op!r} is not one of {sorted(STAGE_OPS)}"); continue
-        if not isinstance(tid, int) or not one(ctx.conn, "SELECT 1 FROM tasks WHERE id = ?", (tid,)):
+        row = one(ctx.conn, "SELECT status FROM tasks WHERE id = ?", (tid,)) if isinstance(tid, int) else None
+        if not row:
             rejected.append(f"#{i}: no task {tid}"); continue
+        if row["status"] != "open":
+            rejected.append(f"#{i}: Task-{tid} is not open ({row['status']})"); continue
         fields = dict(ch.get("fields") or {})
         if op == "set":
             f = _clean_task_fields(ctx.cfg, fields)
+            if fields.get("project") and f.get("project") != fields["project"]:     # the cleaner maps an unknown project to Unknown or None: a skill must not stage that silently
+                rejected.append(f"#{i}: project {fields['project']!r} is not in the taxonomy (" + ", ".join(C.project_names(ctx.cfg)[:12]) + ")"); continue
             try:
                 f.update(_extra_fields(fields))
             except ToolError as e:

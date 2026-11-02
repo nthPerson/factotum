@@ -62,7 +62,7 @@ def test_mirror_properties_follow_the_schema_and_the_config_map(cfg, conn, monke
     p = NM.properties(cfg, t, schema, NM.note_ids(conn, 42), TODAY)
     assert p["Name"] == {"title": [{"type": "text", "text": {"content": "Reply to Max"}}]}
     assert p["Status"] == {"select": {"name": "Next"}} and p["Project"] == {"select": {"name": "COMPE 510"}} and p["Effort"] == {"select": {"name": "S"}}
-    assert p["Due"] == {"date": {"start": "2026-11-05T14:00"}} and p["Hard deadline"] == {"checkbox": True} and p["Completed"] == {"date": None}
+    assert p["Due"]["date"]["start"].startswith("2026-11-05T14:00:00") and len(p["Due"]["date"]["start"]) == 25 and p["Hard deadline"] == {"checkbox": True} and p["Completed"] == {"date": None}   # the owner's offset appended
     assert p["Snoozed Until"] == {"date": {"start": "2026-11-04"}} and p["Manual Priority"] == {"select": {"name": "P1"}}
     assert p["Score"]["number"] > 0 and p["Priority"]["select"]["name"].startswith("P") and p["Mentions"] == {"number": 1}
     assert p["Source Link"] == {"url": "https://x"} and p["Calendar Event"] == {"url": "https://cal/1"} and p["Context"]["rich_text"][0]["text"]["content"] == "ctx"
@@ -103,10 +103,50 @@ def test_mirror_sweep_creates_updates_since_the_watermark_caps_and_records_page_
     res3 = NM.sweep(conn, cfg, transport=bad.transport())
     assert res3["failed"] == ["Task-1: 400 Status is expected to be select."] and res3["pending"] == 0
     assert NM.sweep(conn, cfg, transport=fake.transport())["pending"] == 0
+    # a refused CREATE is stamped too: it waits for its next edit instead of filling every pass
+    upsert_task(conn, task(id=9, name="Refused create", edited_at="2026-10-09T00:00:00+00:00")); conn.commit()
+    class RefuseCreate(FakeNotion):
+        def transport(self):
+            inner = super().transport()
+            def handler(req):
+                if req.method == "POST" and req.url.path == "/v1/pages":
+                    return httpx.Response(400, json={"message": "Status is expected to be status."})
+                return inner.handler(req)
+            return httpx.MockTransport(handler)
+    r5 = NM.sweep(conn, cfg, transport=RefuseCreate().transport())
+    assert r5["failed"] == ["Task-9: 400 Status is expected to be status."] and r5["pending"] == 0 and NM.sweep(conn, cfg, transport=RefuseCreate().transport())["failed"] == []
+    conn.execute("UPDATE tasks SET edited_at = '2026-11-02T13:00:00+00:00' WHERE id = 9"); conn.commit()
+    assert NM.sweep(conn, cfg, dry_run=True, transport=fake.transport())["pending"] == 1
     # --all re-pushes every row
     fake2 = FakeNotion()
     res4 = NM.sweep(conn, cfg, all_rows=True, transport=fake2.transport())
-    assert res4["updated"] == 4 and res4["failed"] == [] and one(conn, "SELECT notion_page_id FROM tasks WHERE id = 1")["notion_page_id"] == "page-old"
+    assert res4["updated"] == 4 and res4["created"] == 1 and res4["failed"] == [] and one(conn, "SELECT notion_page_id FROM tasks WHERE id = 1")["notion_page_id"] == "page-old"
+    assert conn.in_transaction is False                                                           # never a transaction left open across HTTP
+
+
+def test_mirror_commits_per_row_and_values_are_notion_safe(cfg, conn, monkeypatch):
+    """A pass commits after every row (the write lock is never held across an HTTP call: the
+    2026-11-01 'database is locked' gotcha); select names carry no commas; a naive datetime gets
+    the owner's offset so Notion shows the right hour."""
+    from factotum import notion_mirror as NM
+    monkeypatch.setenv("NOTION_TOKEN", "t")
+    cfg["owner"]["timezone"] = "America/Los_Angeles"
+    upsert_task(conn, task(id=1, name="a", project="Caltrans, District 11", due="2026-11-05T14:00", due_is_datetime=1))
+    upsert_task(conn, task(id=2, name="b")); conn.commit()
+    seen = []
+    class Spy(FakeNotion):
+        def transport(self):
+            inner = super().transport()
+            def handler(req):
+                seen.append(conn.in_transaction)       # the connection must not be mid-transaction while Notion is on the line
+                return inner.handler(req)
+            return httpx.MockTransport(handler)
+    fake = Spy()
+    NM.sweep(conn, cfg, transport=fake.transport())
+    assert seen and not any(seen)
+    body = fake.pages("POST")[0][1]["properties"]
+    assert body["Project"] == {"select": {"name": "Caltrans District 11"}} and body["Due"] == {"date": {"start": "2026-11-05T14:00:00-08:00"}}
+
 
 
 def test_scheduler_runs_the_mirror_on_its_interval_when_the_sink_is_on(conn, cfg):
@@ -202,6 +242,9 @@ def test_http_mcp_route_needs_the_bearer_token_and_speaks_jsonrpc(cfg, tmp_path,
     assert "tasks_query" in names and "stage_changes" in names and "mail_search" in names and not {"mail_draft_reply", "mail_draft_new", "plaud_search", "plaud_summary"} & names
     r = client.post("/mcp", json={"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "mail_draft_new", "arguments": {}}}, headers=h).json()
     assert r["result"]["isError"] and "not available" in r["result"]["content"][0]["text"]
+    cfg["server"]["mcp_http_tools"] = "all"
+    names = {t["name"] for t in client.post("/mcp", json={"jsonrpc": "2.0", "id": 5, "method": "tools/list"}, headers=h).json()["result"]["tools"]}
+    assert "mail_draft_new" in names and "mail_draft_reply" not in names                       # one message per request: no thread is ever "seen this run"
     monkeypatch.delenv("FACTOTUM_MCP_TOKEN")
     assert client.post("/mcp", json=init, headers=h).status_code == 404                        # no token configured: the route is off
 
@@ -235,6 +278,9 @@ def test_stage_changes_validates_the_fields_the_cleaner_does_not(cfg, tmp_path):
     assert res["staged"] == 3 and len(res["rejected"]) == 3
     kept = json.loads(one(w, "SELECT changes_json FROM proposals")["changes_json"])
     assert [c["fields"] for c in kept] == [{"snoozed_until": "2026-11-09"}, {"manual_priority": "P1"}, {"longterm": 1}]
+    upsert_task(w, task(id=2, status="dropped")); w.commit()
+    bad = _rpc(ctx, 2, "tools/call", {"name": "stage_changes", "arguments": {"changes": [{"task_id": 2, "op": "done"}, {"task_id": 1, "op": "set", "fields": {"project": "Nope Inc"}}]}})
+    assert bad["result"]["isError"] and "not open" in _text(bad) and "project" in _text(bad)
 
 
 # --- Slack and Discord read tools --------------------------------------------------------------

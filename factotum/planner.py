@@ -12,9 +12,10 @@ attached to THAT task by the sweep (an automatic close always leaves a link to t
 evidence with no task can justify a `create` and nothing else; a proposal that is uncited, or whose
 evidence the model merely attributed, becomes a "Planner suggests" item in Review with the thread
 linked; dismissals reach only evidence about listed rows; everything else is rejected and reported.
-All changes to existing rows and every verdict on evidence (applied, staged, dismissed) ride in one
+All changes to existing rows and the verdicts the batch can honour (applied, dismissed) ride in one
 batch (source `planner`) so the Log tab undoes a morning; a created row is not in the batch (like
-every import) and shows as New in Review instead.
+every import) and shows as New in Review instead, and its evidence is moved onto it and judged
+outside the batch, like the evidence behind a staged proposal, so an undo cannot make twins.
 """
 from __future__ import annotations
 
@@ -120,8 +121,9 @@ def apply(conn: sqlite3.Connection, cfg: dict, data: dict, b: dict, today: date)
                 rejected.append(f"{label}: no name"); continue
             if p.get("evidence") and not cited:
                 rejected.append(f"{label}: cites evidence that does not exist or was already judged"); continue
-            if not cited:   # an announcement or a hunch: shown in the brief, created by nobody but the user
-                conn.execute("INSERT INTO evidence (task_id, kind, ref, label, excerpt, at) VALUES (NULL, 'proposal', NULL, ?, ?, ?)", (label, reason, now_iso()))
+            if not cited:   # an announcement or a hunch: a suggestion card in Review, created by nobody but the user
+                conn.execute("INSERT INTO evidence (task_id, kind, ref, label, excerpt, at) VALUES (NULL, 'proposal', ?, ?, ?, ?)",
+                             (json.dumps({"op": "create", "fields": f}), label, reason, now_iso()))
                 staged.append(label); continue
             if any(e.get("task_id") is not None for e in cited):
                 rejected.append(f"{label}: cites evidence that belongs to a task"); continue
@@ -131,7 +133,10 @@ def apply(conn: sqlite3.Connection, cfg: dict, data: dict, b: dict, today: date)
             for e in cited:
                 if e.get("ref"):
                     add_link(conn, tid, "mail_thread", e["ref"], label=e.get("label"), account=e.get("account"))
-                judged[e["id"]] = "applied"
+                # The create is not in the batch (like every creation), so its evidence is judged outside it
+                # too and now belongs to the new task: an undo of the morning cannot make a twin.
+                conn.execute("UPDATE evidence SET task_id = ?, judged_at = ?, verdict = 'applied' WHERE id = ?", (tid, now_iso(), e["id"]))
+                judged[e["id"]] = None
             created.append(tid); applied.append(label)
             continue
         if op not in TASK_OPS or not isinstance(tid, int) or tid not in allowed:
@@ -150,13 +155,20 @@ def apply(conn: sqlite3.Connection, cfg: dict, data: dict, b: dict, today: date)
                 rejected.append(f"{label}: nothing settable"); continue
             ch = {"task_id": tid, "op": "set", "fields": f}
         elif op == "add_reminder":
-            ch = {"task_id": tid, "op": "add_reminder", "fields": {"fire_at": fields.get("fire_at"), "label": fields.get("label"), "repeat": fields.get("repeat")}}
+            try:
+                ch = {"task_id": tid, "op": "add_reminder", "fields": batches._reminder_fields({"fields": fields})}
+            except ValueError as e:   # a malformed reminder is rejected here, never judged "applied" for a change the batch skipped
+                rejected.append(f"{label}: {e}"); continue
         else:
             ch = {"task_id": tid, "op": op, "fields": {}}
         for e in cited:
             if e.get("ref"):
                 add_link(conn, tid, "mail_thread", e["ref"], label=e.get("label"), account=e.get("account"))
-            judged[e["id"]] = "applied" if proven else "staged"
+            if proven:
+                judged[e["id"]] = "applied"                   # in the batch: undoing the change un-judges the evidence
+            else:                                             # the proposal row lives outside the batch, so its verdict does too
+                conn.execute("UPDATE evidence SET judged_at = ?, verdict = 'staged' WHERE id = ?", (now_iso(), e["id"]))
+                judged[e["id"]] = None
         if proven:
             changes.append(ch)
             applied.append(label)
@@ -174,7 +186,8 @@ def apply(conn: sqlite3.Connection, cfg: dict, data: dict, b: dict, today: date)
     # Every verdict rides in the planner's batch (a judge_evidence change each), so undoing the
     # morning in the Log tab un-judges the evidence as well as reverting the rows.
     for eid, verdict in judged.items():
-        changes.append({"task_id": evidence[eid].get("task_id"), "op": "judge_evidence", "fields": {"evidence_id": eid, "verdict": verdict}})
+        if verdict:   # None = already judged outside the batch (a create or a staged proposal)
+            changes.append({"task_id": evidence[eid].get("task_id"), "op": "judge_evidence", "fields": {"evidence_id": eid, "verdict": verdict}})
     res = batches.apply(conn, changes, "planner", today, closed_by="planner") if changes else {"skipped": [], "batch_id": None}
     for s in res["skipped"]:
         rejected.append(f"Task-{s.get('task_id')}: {s.get('why')}")
