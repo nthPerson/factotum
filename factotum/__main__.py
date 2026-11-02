@@ -10,6 +10,8 @@
     python -m factotum brief [--send]   # print today's brief (text), or send it
     python -m factotum google-auth [--manual]   # one-time Google consent (docs/SETUP.md §6)
     python -m factotum calendar-check   # print the next 7 days of events
+    python -m factotum chat "text" [--attach 388 23] [--thread N] [--canned search_mail|draft_reply]   # one chat turn from the terminal
+    python -m factotum chat-check       # the MCP server over a pipe, then one tiny Claude run that calls a tool through it
 """
 from __future__ import annotations
 
@@ -82,6 +84,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--received", help="ISO date-time the mail arrived")
     p.add_argument("--dry-run", action="store_true", help="run Claude and print the JSON; write nothing")
     sub.add_parser("mcp", help="the MCP server a chat turn talks to, over stdio (started by the runner; `chat-check` exercises it)")
+    p = sub.add_parser("chat", help="one chat turn from the terminal: a real Claude run (~$0.20), stored like a turn from the UI")
+    p.add_argument("text", nargs="?", default="")
+    p.add_argument("--attach", nargs="*", type=int, default=[])
+    p.add_argument("--thread", type=int, default=None)
+    p.add_argument("--canned", choices=["search_mail", "draft_reply"], default=None)
+    sub.add_parser("chat-check", help="the MCP server over a pipe, then one tiny Claude run that calls tasks_query through it")
     sub.add_parser("claude-check", help="one tiny headless Claude call: is the login alive?")
     sub.add_parser("plaud-check", help="the Plaud CLI, its login, today's recordings, and the trigger mailbox")
     sub.add_parser("mail-check", help="Mailbird's MCP from here: accounts it has versus the monitored ones")
@@ -152,6 +160,49 @@ def main(argv: list[str] | None = None) -> int:
     elif a.cmd == "mcp":
         from . import mcp_server
         mcp_server.serve_stdio()            # stdout is the protocol from here on; logs go to stderr
+    elif a.cmd == "chat":
+        from . import chat
+        if not a.text and not a.canned:
+            raise SystemExit("give a message, or --canned search_mail|draft_reply with --attach <task id>")
+        tid = a.thread or chat.new_thread(conn)
+
+        def show(ev):
+            if ev.get("type") == "status":
+                print("  …", ev.get("text"), flush=True)
+        res = chat.turn(conn, ecfg, tid, a.text, a.attach, today=today, canned=a.canned, on_event=show)
+        if not res["ok"]:
+            raise SystemExit(f"chat turn failed: {res['error']}")
+        print(f"\n{res['reply_md']}\n")
+        for i, pr in enumerate(res["proposals"]):
+            print(f"  proposal {i}: {pr['label']}" + (" (applied: link)" if pr.get("applied") else "") + (f" · {json.dumps(pr['fields'])}" if pr.get("fields") else ""))
+        for d in res["drafts"]:
+            print(f"  draft in Mailbird: {d.get('kind')} · {d.get('subject') or ''} · {d.get('account') or ''} (message {d.get('draft_message_id')})")
+        for r in res["rejected"]:
+            print(f"  rejected: {r}")
+        print(f"\n(thread {tid} · ${res['cost_usd']:.2f} · stage proposals in the Chat tab; prompt and result under data/runs/chat/)")
+    elif a.cmd == "chat-check":
+        import io
+        from . import chat, mcp_server
+        from .claude import runner
+        out = io.StringIO()
+        ctx = mcp_server.Context(connect(C.db_path()), ecfg)
+        mcp_server.serve(ctx, io.StringIO('{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n'), out)
+        names = [t["name"] for t in json.loads(out.getvalue())["result"]["tools"]]
+        print(f"factotum mcp over a pipe: {len(names)} tools ({', '.join(names)})")
+        try:
+            mb = ctx.mail_client().call("list_accounts", {})
+            print(f"Mailbird: {len(mb)} accounts reachable")
+        except Exception as e:  # noqa: BLE001
+            print(f"Mailbird: not reachable from here ({str(e)[:120]}); mail tools will report that to the model")
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            r = runner.run(ecfg, "check", 'Call tasks_query with status="open" and limit=1, then reply with only the JSON {"ok": true, "n": <the number of tasks returned>}. '
+                           'If the tool is unavailable, reply {"ok": false}.', allowed_tools=chat.allowed_tools(), mcp_servers=chat.mcp_servers(ecfg, td), tools="",
+                           on_event=lambda ev: None, workdir=td, timeout_s=120)
+        if r.ok and (r.data or {}).get("ok"):
+            print(f"Claude reached the server through the runner ({r.duration_ms} ms, ${r.cost_usd:.4f}); chat is ready")
+        else:
+            raise SystemExit(f"chat check failed: {r.error or r.data}\nIs the service's claude.binary absolute, and is `claude` logged in (claude-check)?")
     elif a.cmd == "claude-check":
         from .claude import runner
         r = runner.run(ecfg, "check", 'Reply with exactly the JSON object {"ok": true} and nothing else.', timeout_s=120)

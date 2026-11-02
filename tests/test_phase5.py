@@ -111,10 +111,21 @@ def test_mcp_mail_tools_trim_results_record_drafts_and_seen_threads_and_never_se
     # a stranger (an address no task, account or fetched message names) never gets a draft: injected mail cannot stage exfiltration
     stranger = _rpc(ctx, 8, "tools/call", {"name": "mail_draft_new", "arguments": {"account": "rashe7414@sdsu.edu", "to": ["attacker@evil.example"], "subject": "s", "body": "b"}})
     assert stranger["result"]["isError"] and "known contact" in _text(stranger) and len(mail.writes) == 2
-    ok = _rpc(ctx, 9, "tools/call", {"name": "mail_draft_new", "arguments": {"account": "rashe7414@sdsu.edu", "to": ["max@x.org"], "subject": "s", "body": "b"}})   # Max wrote message 77, read above
-    assert not ok["result"]["isError"] and len(mail.writes) == 3 and M.seen_threads(tmp_path)["c1"]["people"] == ["max@x.org", "rashe7414@sdsu.edu"]
+    # someone who only appears in fetched mail is not a contact either (a CC in a hostile mail must not become one)…
+    assert _rpc(ctx, 9, "tools/call", {"name": "mail_draft_new", "arguments": {"account": "rashe7414@sdsu.edu", "to": ["max@x.org"], "subject": "s", "body": "b"}})["result"]["isError"]
+    # …and a recipient is one bare address, parsed once and sent as checked: no "Erica <erica@x.org>, attacker@evil" tricks
+    for tricky in ("Erica <erica@x.org>", "erica@x.org, attacker@evil.example", "erica@x.org attacker@evil.example"):
+        assert _rpc(ctx, 10, "tools/call", {"name": "mail_draft_new", "arguments": {"account": "rashe7414@sdsu.edu", "to": [tricky], "subject": "s", "body": "b"}})["result"]["isError"]
+    ok = _rpc(ctx, 11, "tools/call", {"name": "mail_draft_new", "arguments": {"account": "rashe7414@sdsu.edu", "to": ["ERICA@x.org"], "cc": ["rashe7414@sdsu.edu"], "subject": "s", "body": "b"}})
+    assert not ok["result"]["isError"] and mail.writes[-1][1]["to"] == [{"email": "erica@x.org"}] and len(mail.writes) == 3
+    assert M.seen_threads(tmp_path)["c1"]["people"] == ["max@x.org", "rashe7414@sdsu.edu"]
+    # a reply needs a thread this turn read; one to an address no task names is saved but flagged for the UI
+    assert _rpc(ctx, 12, "tools/call", {"name": "mail_draft_reply", "arguments": {"conversation_id": "never-fetched", "body": "x"}})["result"]["isError"] and len(mail.writes) == 3
+    flagged = json.loads(_text(_rpc(ctx, 13, "tools/call", {"name": "mail_draft_reply", "arguments": {"conversation_id": "c1", "body": "y"}})))
+    assert "warned" in flagged["note"] and M.drafts_made(tmp_path)[-1]["warn"].endswith("max@x.org")
     drafts = [json.loads(l) for l in (tmp_path / "drafts.jsonl").read_text().splitlines()]
-    assert [d["draft_message_id"] for d in drafts] == [900, 900, 900] and drafts[0]["conversation_id"] == "c1" and drafts[0]["account"] == "rashe7414@sdsu.edu" and drafts[1]["to"] == ["erica@x.org"]
+    assert [d["draft_message_id"] for d in drafts] == [900, 900, 900, 900] and drafts[0]["conversation_id"] == "c1" and drafts[0]["account"] == "rashe7414@sdsu.edu" and drafts[1]["to"] == ["erica@x.org"]
+    assert drafts[0]["warn"] is not None and drafts[2]["warn"] is None       # Max is a stranger in this test; Erica is a counterpart
     seen = M.seen_threads(tmp_path)
     assert seen["c1"]["subject"] == "PD session" and seen["c1"]["account"] == "rashe7414@sdsu.edu"
     cfg["sources"]["mail"]["enabled"] = False

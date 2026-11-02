@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import sys
 from dataclasses import dataclass, field
@@ -242,18 +243,31 @@ def _addr_of(x) -> str:
     return s[s.find("<") + 1: s.rfind(">")].lower() if "<" in s else s.strip().lower()
 
 
+EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+EMAIL_FULL = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
+
+
 def known_recipients(ctx: Context) -> set[str]:
-    """Addresses a NEW draft may be sent to: the user's own accounts, every task's counterpart or
-    waiting_on address, and anyone on a message this run actually read. A mail that tells the model to
-    "forward this to x@y" cannot reach a stranger (security review 2026-11-02)."""
-    import re
-    out: set[str] = set(ctx.accounts()["by_email"])
+    """Addresses a NEW draft may be sent to: the user's own accounts and every address a task names
+    (counterpart, waiting_on, account). Nothing read from mail counts — a message that CCs a stranger
+    must not make that stranger a valid recipient — so to write to someone who only appears in a thread
+    the model replies on that thread (security review 2026-11-02)."""
+    out: set[str] = set(ctx.accounts()["by_email"]) | {str(r["address"] or "").lower() for r in rows(ctx.conn, "SELECT address FROM accounts")}
     for r in rows(ctx.conn, "SELECT counterpart, waiting_on, account FROM tasks"):
         for v in r.values():
-            out.update(m.lower() for m in re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", str(v or "")))
-    if ctx.run_dir:
-        for t in seen_threads(ctx.run_dir).values():
-            out.update(t.get("people") or [])
+            out.update(m.lower() for m in EMAIL_RE.findall(str(v or "")))
+    return out
+
+
+def _strict_addrs(values, what: str) -> list[str]:
+    """Each recipient must be exactly one bare address; the normalised form is what gets sent, so the
+    address checked and the address Mailbird receives are the same string."""
+    out = []
+    for v in values or []:
+        a = str(v or "").strip().lower()
+        if not EMAIL_FULL.match(a):
+            raise ToolError(f"{what}: {str(v)[:80]!r} is not a bare email address (one address per entry, no names or brackets)")
+        out.append(a)
     return out
 
 
@@ -318,7 +332,8 @@ def _draft_record(ctx: Context, res, **extra) -> dict:
         mid = int(mid) if mid is not None else None
     except (TypeError, ValueError):
         pass
-    rec = dict(draft_message_id=mid, at=datetime.now().isoformat(timespec="seconds"), **extra)
+    rec = dict(draft_message_id=mid, at=datetime.now().isoformat(timespec="seconds"), warn=None, people=[])
+    rec.update(extra)
     ctx.record("drafts", rec)
     return rec
 
@@ -330,29 +345,34 @@ def mail_draft_reply(ctx: Context, args: dict) -> dict:
     cid, body = _str(args, "conversation_id", None, 200), _str(args, "body", "", 20_000)
     if not cid or not body.strip():
         raise ToolError("conversation_id and a non-empty body are required")
-    seen = seen_threads(ctx.run_dir).get(cid, {}) if ctx.run_dir else {}
+    seen = seen_threads(ctx.run_dir).get(cid) if ctx.run_dir else None
+    if not seen:
+        raise ToolError("reply only on a conversation you fetched in this turn (mail_search / mail_thread / mail_message first)")
     tool_name = "reply_all_to_conversation" if args.get("reply_all") else "reply_to_conversation"
     res = ctx.mail_client().call_write(tool_name, {"conversationId": cid, "body": body, "showInUi": False})
-    rec = _draft_record(ctx, res, kind="reply", conversation_id=cid, account=seen.get("account"), subject=seen.get("subject"), to=None)
-    return {"draft_message_id": rec["draft_message_id"], "conversation_id": cid, "note": "draft saved in Mailbird, not sent"}
+    known = known_recipients(ctx)
+    strangers = sorted(p for p in (seen.get("people") or []) if p not in known)
+    rec = _draft_record(ctx, res, kind="reply", conversation_id=cid, account=seen.get("account"), subject=seen.get("subject"), to=None,
+                        people=seen.get("people") or [], warn=(f"goes to an address no task names: {', '.join(strangers)}" if strangers else None))
+    return {"draft_message_id": rec["draft_message_id"], "conversation_id": cid, "note": "draft saved in Mailbird, not sent" + ("; the user will be warned that " + rec["warn"] if rec["warn"] else "")}
 
 
-@tool("mail_draft_new", "Save a NEW message as a DRAFT in Mailbird from one of the user's accounts (never sent). Recipients must be people "
-      "Factotum knows: a task's counterpart, the user's own accounts, or someone on a message read in this conversation.",
+@tool("mail_draft_new", "Save a NEW message as a DRAFT in Mailbird from one of the user's accounts (never sent). Recipients: bare addresses that a "
+      "task names (counterpart, waiting_on) or the user's own accounts; to write to someone else, reply on their thread instead.",
       {"account": {"type": "string", "description": "sending account's email address"}, "to": {"type": "array", "items": {"type": "string"}},
        "cc": {"type": "array", "items": {"type": "string"}}, "subject": {"type": "string"}, "body": {"type": "string"}}, ["account", "to", "subject", "body"])
 def mail_draft_new(ctx: Context, args: dict) -> dict:
     aid = _account_id(ctx, args.get("account"))
-    to = [str(x) for x in (args.get("to") or []) if str(x).strip()][:20]
+    to = _strict_addrs((args.get("to") or [])[:20], "to")
+    cc = _strict_addrs((args.get("cc") or [])[:20], "cc")
     if aid is None or not to:
         raise ToolError("account and at least one recipient are required")
     known = known_recipients(ctx)
-    strangers = [a for a in to + [str(x) for x in (args.get("cc") or [])] if _addr_of(a) not in known]
+    strangers = [a for a in to + cc if a not in known]
     if strangers:
-        raise ToolError(f"not a known contact: {', '.join(strangers)}. New drafts go only to task counterparts, the user's accounts, "
-                        "or people on mail read in this conversation; reply on their thread with mail_draft_reply, or tell the user.")
+        raise ToolError(f"not a known contact: {', '.join(strangers)}. New drafts go only to a task's counterpart or the user's own accounts; "
+                        "to write to someone who appears in a thread, reply on that thread with mail_draft_reply, or tell the user.")
     payload = {"accountId": aid, "to": [{"email": a} for a in to], "subject": _str(args, "subject", "", 300), "body": _str(args, "body", "", 20_000), "showInUi": False}
-    cc = [str(x) for x in (args.get("cc") or []) if str(x).strip()][:20]
     if cc:
         payload["cc"] = [{"email": a} for a in cc]
     res = ctx.mail_client().call_write("create_draft", payload)
