@@ -196,11 +196,11 @@
         <button class="btn small" data-bulk="top">Pin to Top</button><button class="btn small" data-bulk="longterm">Long-term</button>
         <span class="spacer"></span><button class="btn small" data-bulk="clear">Clear</button></div>`;
   }
-  function group(title, rows, cls) {
+  function group(title, rows, cls, tag) {
     if (!rows.length) return '';
-    return `<section class="group"><h3 class="${cls || ''}">${title}<span class="n">${rows.length}</span></h3><div class="rows">${rows.map(row).join('')}</div></section>`;
+    return `<section class="group"><h3 class="${cls || ''}">${title}<span class="n">${rows.length}</span></h3><div class="rows">${rows.map(x => row(x, tag ? tag(x) : '')).join('')}</div></section>`;
   }
-  function row(x) {
+  function row(x, extraChip) {
     const d = fmtDue(x.due);
     const st = staged.get(x.id);
     const dueCls = d ? (d.days < 0 ? 'crit' : d.days <= 1 ? 'warn' : '') : '';
@@ -212,6 +212,7 @@
       fadeDays !== null && fadeDays <= 7 && !x.top_rank ? `<span class="chip fade">fades ${fadeDays <= 0 ? 'now' : 'in ' + fadeDays + 'd'}</span>` : '',
       (x.reminders || []).length ? `<span class="chip rem">⏰ ${fmtWhen(x.reminders[0].fire_at)}</span>` : '',
       `<span class="chip proj">${esc(x.project || '—')}</span>`,
+      extraChip || '',
       d ? `<span class="chip due ${dueCls} ${x.hard ? 'hard' : ''}" data-due="${x.id}" title="${x.hard ? 'Hard deadline' : 'Soft date'} · click to cycle">${d.label}</span>` : `<span class="chip due" data-due="${x.id}" title="No date · click to set">no date</span>`,
       `<span class="chip eff">${esc(x.effort || '?')}</span>`,
       st ? `<span class="chip staged">${esc(st.label)}</span>` : '',
@@ -262,6 +263,7 @@
       (o.length ? '' : '<div class="empty">No open tasks. Run <code>python -m factotum import-notion --apply</code> or add some.</div>') +
       `<div class="note">Soft dates that slipped, new items, and fading backlog are not here. They wait in <b>Review</b> so this screen stays short.</div>`;
   }
+  const RECENT_CAP = 30;
   function renderTimeline() {
     const o = openOnes();
     const dd = x => x.due ? fmtDue(x.due).days : null;
@@ -269,7 +271,10 @@
     return composer() + group('Overdue', o.filter(x => dd(x) !== null && dd(x) < 0).sort(sortDue), 'crit') + group('Today', o.filter(x => dd(x) === 0), 'warn') +
       group('This week', o.filter(x => dd(x) > 0 && dd(x) <= 7).sort(sortDue)) + group('Next week', o.filter(x => dd(x) > 7 && dd(x) <= 14).sort(sortDue)) +
       group('Later', o.filter(x => dd(x) > 14).sort(sortDue)) + group('Undated · long-term', o.filter(x => dd(x) === null && x.longterm_effective)) +
-      group('Undated · backlog', o.filter(x => dd(x) === null && !x.longterm_effective).sort((a, b) => (b.score || 0) - (a.score || 0)));
+      group('Undated · backlog', o.filter(x => dd(x) === null && !x.longterm_effective).sort((a, b) => (b.score || 0) - (a.score || 0))) +
+      // Newest first, by creation date: the place to look for what a recording or sweep just added.
+      group('Recently added · newest first', o.slice().sort((a, b) => (b.created_at || '').localeCompare(a.created_at || '')).slice(0, RECENT_CAP), '',
+        x => `<span class="chip" title="Created ${esc(x.created_at || '')}">added ${x.created_at ? new Date(x.created_at).toLocaleDateString([], { month: 'short', day: 'numeric' }) : '?'}</span>`);
   }
   function renderProjects() {
     const o = openOnes();

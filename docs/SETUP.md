@@ -161,6 +161,11 @@ differently for you, the old names are in brackets. Use the search box at the to
 
 Check: `.venv/bin/python -m factotum calendar-check` prints the next 7 days of events. A
 `401`/`invalid_grant` there means the token expired or was revoked: run `google-auth` again.
+`0 events` in a week that is not empty means you consented with the wrong Google account: the
+token sees only that account's calendars. Sign in with the account whose calendar holds the
+events (the one the old sync wrote to), which may differ from the account that owns the Cloud
+project; delete `config/google-token.json` and run step 6 again. While the app is in Testing,
+that account must also be listed under Audience → Test users.
 
 **Service account instead of OAuth** (an alternative, not needed): a service account can read a
 calendar you share with its email address, with no consent screen and no expiry, but Google

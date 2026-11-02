@@ -265,7 +265,9 @@ so it works on a phone); a double-tap opens its details; Esc clears the selectio
 floats at the bottom of the screen with any selection (it never shifts the list, so the second
 tap of a double-tap lands on the same row) and offers Done, Drop, Snooze, a due date to set or
 clear, Top and Long-term. Due dates can also be set or cleared from a row's
-details and from a Review card, staged beside the decision rather than replacing it. The Log tab
+details and from a Review card, staged beside the decision rather than replacing it. Timeline groups
+open tasks by due date and ends with "Recently added", the newest 30 by creation date, so what a
+recording or a sweep just added is one scroll away. The Log tab
 lists recent batches with every field change (old → new, task named) and an Undo per batch, and
 the Claude runs with their cost. Assets are served with `no-cache` and version-stamped URLs so a
 deploy reaches the phone without a hard refresh. Tray with one Apply and
