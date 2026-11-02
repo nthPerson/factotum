@@ -36,6 +36,7 @@ ROW_CAP = 60
 WHY_CAP = 15
 PROPOSAL_CAP = 12
 TASK_OPS = {"done", "drop", "set", "add_reminder", "pin_top", "longterm"}
+NON_PROVING = {"slack_mention"}       # anyone in a workspace can write "Task-42 is done": a hint to cite, never proof to act on
 
 
 def bundle(conn: sqlite3.Connection, cfg: dict, today: date, events: list[dict] | None = None) -> dict:
@@ -148,7 +149,7 @@ def apply(conn: sqlite3.Connection, cfg: dict, data: dict, b: dict, today: date)
         # Only evidence the sweep itself attached to this task proves anything; evidence with no task
         # (a confirmation, an invitation) attributed by the model is a judgment, so the proposal goes to
         # Review with the thread attached rather than being applied.
-        proven = bool(cited) and all(e.get("task_id") == tid for e in cited)
+        proven = bool(cited) and all(e.get("task_id") == tid and e.get("kind") not in NON_PROVING for e in cited)
         if op == "set":
             f = _clean_task_fields(cfg, fields)
             if not f:
@@ -163,7 +164,7 @@ def apply(conn: sqlite3.Connection, cfg: dict, data: dict, b: dict, today: date)
             ch = {"task_id": tid, "op": op, "fields": {}}
         for e in cited:
             if e.get("ref"):
-                add_link(conn, tid, "mail_thread", e["ref"], label=e.get("label"), account=e.get("account"))
+                add_link(conn, tid, "slack_message" if e.get("kind") == "slack_mention" else "mail_thread", e["ref"], label=e.get("label"), account=e.get("account"))
             if proven:
                 judged[e["id"]] = "applied"                   # in the batch: undoing the change un-judges the evidence
             else:                                             # the proposal row lives outside the batch, so its verdict does too

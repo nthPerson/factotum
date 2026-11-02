@@ -105,6 +105,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--all", action="store_true", help="every row (the first pass after enabling the mirror)")
     p.add_argument("--task", nargs="+", type=int, metavar="ID", help="re-push these rows only (a row Notion refused, once the cause is fixed)")
     p.add_argument("--dry-run", action="store_true", help="count what would be pushed, write nothing")
+    p = sub.add_parser("connectors", help="the OAuth connectors (claude.ai, Claude Desktop) that registered against /mcp; --revoke CLIENT_ID")
+    p.add_argument("--revoke", metavar="CLIENT_ID")
     sub.add_parser("score")
     sub.add_parser("review")
     p = sub.add_parser("expire")
@@ -325,6 +327,14 @@ def main(argv: list[str] | None = None) -> int:
             print("  !", f)
         if not a.dry_run:
             print(f"done: created {total['created']}, updated {total['updated']}, failed {len(total['failed'])}")
+    elif a.cmd == "connectors":
+        from . import oauth
+        if a.revoke:
+            print("revoked" if oauth.revoke_client(conn, a.revoke) else "no such connector (or already revoked)")
+        print(f"connector {'on' if oauth.enabled(ecfg) else 'OFF (Settings → Connections)'}; URL for claude.ai: {oauth.resource(ecfg)}")
+        for c in oauth.connectors(conn):
+            state = f"revoked {c['revoked_at'][:10]}" if c["revoked_at"] else f"{c['tokens']} live token(s)"
+            print(f"  {c['client_id']:34} {(c['name'] or '')[:24]:24} registered {c['created_at'][:10]}  last used {(c['last_used_at'] or '—')[:16]}  {state}")
     elif a.cmd == "planner":
         from . import brief, gcal, planner
         res = planner.run(conn, ecfg, today, calendar=gcal, dry_run=a.dry_run)

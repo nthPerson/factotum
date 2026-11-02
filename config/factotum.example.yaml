@@ -265,3 +265,9 @@ server:
   host: 127.0.0.1
   port: 8750
   public_url: https://factotum.nthperson.dev
+  oauth:                        # claude.ai / Claude Desktop custom connector: Factotum is its own OAuth server (docs/SETUP.md §16)
+    enabled: false              # Settings → Connections toggles it; the consent page lists what the connector may do
+    consent_gate: cloudflare_access   # the consent page trusts Cf-Access-Authenticated-User-Email ∈ owner.emails; `none` only on a port nobody else reaches
+    redirect_uris: ["https://claude.ai/api/mcp/auth_callback", "https://claude.com/api/mcp/auth_callback"]
+    access_token_hours: 24
+    refresh_token_days: 90

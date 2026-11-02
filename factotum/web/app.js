@@ -8,6 +8,7 @@
   let data = { tasks: [], projects: [], today: new Date().toISOString().slice(0, 10), top_cap: 7 };
   let review = null;        // /api/review payload
   let settings = null;      // /api/settings payload
+  let connectors = null;    // /api/connectors payload (Settings → Connections)
   let staged = new Map();   // task id -> {op, fields, label}
   let lastBatch = null;
   let chat = { threads: null, current: null, messages: [], live: null, busy: false, from: null };   // from: {review: id} when a turn was asked from a Review card
@@ -509,7 +510,7 @@
       : '<div class="note">Nothing has run yet. Reminders, the review push, the expire pass and the morning brief land here when they do something (cost $0.00); Claude runs with their cost start in phase 3.</div>';
     return `<div class="log"><h3>Changes</h3>${batches}<h3>Runs · automations and Claude</h3>${runs}</div>`;
   }
-  async function loadSettings() { settings = await api('/api/settings'); render(); }
+  async function loadSettings() { [settings, connectors] = await Promise.all([api('/api/settings'), api('/api/connectors').catch(() => null)]); render(); }
   function renderSettings() {
     if (!settings) { loadSettings(); return '<div class="empty">Loading settings…</div>'; }
     const e = settings.effective;
@@ -546,6 +547,9 @@
       <h3>Claude</h3>
       ${f('claude.planner.enabled', 'Morning planner', 'One Claude run before the brief: the verdict, why-now lines and proposals. Off = the plain brief.', bool('claude.planner.enabled'))}
       ${f('claude.budgets_usd.chat_turn', 'Chat turn budget', 'Dollars a single chat turn may spend before Claude stops.', '$ ' + num('claude.budgets_usd.chat_turn', 0.05, 5) )}
+      <h3>Connections</h3>
+      ${f('server.oauth.enabled', 'claude.ai / Claude Desktop connector', `Factotum is the OAuth server behind <code>${esc(connectors ? connectors.url : '')}</code>: add that URL as a custom connector and approve it once on the consent page (docs/SETUP.md §16). Connectors read and stage; they never change a task.`, bool('server.oauth.enabled'))}
+      ${connectors && connectors.connectors.length ? `<table><tr><td class="code">connector</td><td class="code">registered</td><td class="code">last used</td><td class="code">live tokens</td><td></td></tr>${connectors.connectors.map(c => `<tr class="${c.revoked_at ? 'muted' : ''}"><td>${esc(c.name || c.client_id)}</td><td>${esc((c.created_at || '').slice(0, 10))}</td><td>${esc((c.last_used_at || '—').slice(0, 16).replace('T', ' '))}</td><td>${c.revoked_at ? 'revoked ' + esc(c.revoked_at.slice(0, 10)) : c.tokens}</td><td>${c.revoked_at ? '' : `<button class="btn small" data-conn-revoke="${esc(c.client_id)}">Revoke</button>`}</td></tr>`).join('')}</table>` : '<p class="hint">No connector has registered yet.</p>'}
       <p style="margin-top:16px" class="hint">Every control saves when it changes. <button class="btn small" id="settings-save">Save now</button> <span id="settings-state"></span></p>
     </div>`;
   }
@@ -661,6 +665,10 @@
     document.getElementById('tray-apply').onclick = applyAll;
     document.getElementById('tray-discard').onclick = () => { staged = new Map(); try { localStorage.removeItem('factotum.staged'); } catch (_) {} render(); };
     const save = document.getElementById('settings-save'); if (save) save.onclick = saveSettings;
+    panel.querySelectorAll('[data-conn-revoke]').forEach(b => b.onclick = async () => {
+      if (!confirm('Revoke this connector? Its tokens stop working at once; it can connect again through the consent page.')) return;
+      try { await api(`/api/connectors/${encodeURIComponent(b.dataset.connRevoke)}/revoke`, { method: 'POST' }); await loadSettings(); toast('Connector revoked'); } catch (e) { toast('Revoke failed: ' + e.message); }
+    });
     if (ui.tab === 'settings') panel.querySelectorAll('[data-key], [data-acc]').forEach(el => el.addEventListener('change', () => { clearTimeout(saveSettings.t); saveSettings.t = setTimeout(saveSettings, 300); }));
     const accAdd = document.getElementById('acc-add'); if (accAdd) accAdd.onclick = () => { settings.accounts.push({ address: '', display: '', roles: ['monitor'], enabled: true }); render(); };
     panel.querySelectorAll('[data-accdel]').forEach(b => b.onclick = () => { settings.accounts.splice(+b.dataset.accdel, 1); render(); });

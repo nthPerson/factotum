@@ -15,7 +15,10 @@
   POST /api/chat/create {message_id, index}                 create the task a proposal describes
   POST /api/chat/drafts/open {draft}                        show a draft the run saved in Mailbird's window
   GET  /api/proposals · POST /api/proposals/{id}/apply|dismiss   batches a skill staged (SPEC.md §15); Apply makes a batch
-  POST /mcp                                  `factotum mcp` over HTTP for a remote skill (bearer FACTOTUM_MCP_TOKEN)
+  POST /mcp                                  `factotum mcp` over HTTP for a remote skill (bearer FACTOTUM_MCP_TOKEN or an OAuth access token)
+  GET  /.well-known/oauth-protected-resource · /.well-known/oauth-authorization-server   the connector's discovery documents (SPEC.md §15)
+  POST /oauth/register · GET|POST /oauth/authorize · POST /oauth/token   registration, the consent page (behind Access), tokens
+  GET  /api/connectors · POST /api/connectors/{client_id}/revoke   Settings → Connections
 """
 from __future__ import annotations
 
@@ -33,7 +36,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
-from . import batches, commands, config as C, lifecycle, reminders, scoring
+from . import batches, commands, config as C, lifecycle, oauth, reminders, scoring
 from .db import connect, get_settings, get_task, init_db, rows, seed_accounts, set_setting
 from .dates import parse_date
 
@@ -71,6 +74,32 @@ class DraftOpenBody(BaseModel):
 
 
 SUGGESTION_KINDS = ("proposal", "slack_mention")      # evidence with no task that Review offers as a Create / Dismiss card
+
+
+def _consent_page(req: dict, csrf: str, base: str, who: str, tools: int) -> str:
+    """The one human step of the connector flow: what the client is, what it will be able to do."""
+    name = escape(str(req["client"].get("name") or "a connector"))
+    hidden = "".join(f'<input type="hidden" name="{k}" value="{escape(str(v))}">' for k, v in
+                     (("response_type", "code"), ("client_id", req["client_id"]), ("redirect_uri", req["redirect_uri"]), ("state", req["state"]),
+                      ("code_challenge", req["code_challenge"]), ("code_challenge_method", "S256"), ("scope", req["scope"]), ("resource", req["resource"]), ("csrf", csrf)))
+    return f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Factotum · connect</title>
+<style>body{{font:16px/1.5 system-ui,sans-serif;margin:0;background:#f6f7f8;color:#111}} main{{max-width:520px;margin:48px auto;padding:24px;background:#fff;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,.06)}}
+h1{{font-size:20px;margin:0 0 12px}} p{{margin:8px 0}} ul{{margin:8px 0 16px 20px;padding:0}} .who{{color:#666;font-size:13px}} form{{display:flex;gap:12px;margin-top:20px}}
+button{{font:inherit;padding:10px 18px;border-radius:8px;border:1px solid #0f766e;background:#0f766e;color:#fff;cursor:pointer}} button.deny{{background:#fff;color:#111;border-color:#bbb}}</style></head>
+<body><main><h1>Connect <b>{name}</b> to Factotum?</h1>
+<p>It will be able to, as you:</p>
+<ul><li>read your tasks, reminders, mail, calendar, Slack and Discord through {tools} read tools</li>
+<li>stage task changes that appear in Factotum's tray for you to Apply or Dismiss — it never changes a task itself</li>
+<li>nothing is ever sent on your behalf</li></ul>
+<p class="who">Signed in as {escape(who)} · you can revoke this any time in Settings → Connections at <a href="{escape(base)}/#settings">{escape(base)}</a>.</p>
+<form method="post" action="{escape(base)}/oauth/authorize">{hidden}<button type="submit" name="decision" value="allow">Allow</button><button type="submit" name="decision" value="deny" class="deny">Deny</button></form>
+</main></body></html>"""
+
+
+def _form(body: bytes) -> dict:
+    """application/x-www-form-urlencoded without the multipart dependency."""
+    from urllib.parse import parse_qs
+    return {k: v[0] for k, v in parse_qs(body.decode("utf-8", "replace"), keep_blank_values=True).items()}
 
 
 def _page(title: str, text: str, base: str, undo: bool = False) -> str:
@@ -450,22 +479,161 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         conn.commit()
         return {"ok": True}
 
+    def _oauth_on() -> bool:
+        return oauth.enabled(eff_cfg())
+
+    def _oauth_db():
+        return connect(db_path or C.db_path())
+
+    def _oauth_json(e: oauth.OAuthError):
+        return JSONResponse(e.body(), status_code=e.status, headers={"Cache-Control": "no-store"})
+
+    @app.get("/.well-known/oauth-protected-resource")
+    @app.get("/.well-known/oauth-protected-resource/mcp")
+    def oauth_prm():
+        """RFC 9728: where /mcp's authorization server is (SPEC.md §15). Only while the connector is on."""
+        if not _oauth_on():
+            raise HTTPException(404)
+        return oauth.resource_metadata(eff_cfg())
+
+    @app.get("/.well-known/oauth-authorization-server")
+    def oauth_asm():
+        if not _oauth_on():
+            raise HTTPException(404)
+        return oauth.server_metadata(eff_cfg())
+
+    @app.post("/oauth/register", status_code=201)
+    async def oauth_register(request: Request):
+        """RFC 7591 dynamic registration, restricted to the claude.ai callbacks (oauth.register)."""
+        if not _oauth_on():
+            raise HTTPException(404)
+        try:
+            body = json.loads(await request.body() or b"{}")
+        except ValueError:
+            return _oauth_json(oauth.OAuthError("invalid_client_metadata", "the body must be JSON"))
+        w = _oauth_db()
+        try:
+            return JSONResponse(oauth.register(w, eff_cfg(), body), status_code=201, headers={"Cache-Control": "no-store"})
+        except oauth.OAuthError as e:
+            return _oauth_json(e)
+        finally:
+            w.close()
+
+    def _consent(request: Request, params: dict, decision: str | None):
+        """GET renders the consent page, POST (with the page's token) answers it. Identity comes from
+        Cloudflare Access (oauth.consent_identity); a bad client or redirect never redirects."""
+        ecfg = eff_cfg()
+        base = oauth.base_url(ecfg)
+        w = _oauth_db()
+        try:
+            try:
+                who = oauth.consent_identity(ecfg, request.headers)
+            except oauth.OAuthError as e:
+                return HTMLResponse(_page("Factotum", e.description, base), status_code=e.status)
+            try:
+                req = oauth.authorize_request(w, ecfg, params)
+            except oauth.OAuthError as e:
+                if e.redirect:
+                    return RedirectResponse(oauth.error_url(e.redirect, e), status_code=302, headers={"Cache-Control": "no-store"})
+                return HTMLResponse(_page("Factotum", f"This connection request is not valid: {e.description}", base), status_code=e.status)
+            heads = {"Cache-Control": "no-store", "X-Frame-Options": "DENY", "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' " + base,
+                     "Referrer-Policy": "no-referrer"}
+            if decision is None:
+                from . import mcp_server
+                n = len([t for t in mcp_server.TOOLS if not t.get("skill_only")])
+                return HTMLResponse(_consent_page(req, oauth.consent_token(req), base, who, n), headers=heads)
+            if not oauth.consent_ok(req, params.get("csrf")):
+                return HTMLResponse(_page("Factotum", "This consent page has expired; go back to the connector and try again.", base), status_code=400, headers=heads)
+            if decision != "allow":
+                return RedirectResponse(oauth.error_url(req, oauth.OAuthError("access_denied", "the user declined")), status_code=302, headers=heads)
+            return RedirectResponse(oauth.issue_code(w, ecfg, req), status_code=302, headers=heads)
+        finally:
+            w.close()
+
+    @app.get("/oauth/authorize")
+    def oauth_authorize_get(request: Request):
+        if not _oauth_on():
+            raise HTTPException(404)
+        return _consent(request, dict(request.query_params), None)
+
+    @app.post("/oauth/authorize")
+    async def oauth_authorize_post(request: Request):
+        if not _oauth_on():
+            raise HTTPException(404)
+        form = _form(await request.body())
+        return _consent(request, form, str(form.get("decision") or "deny"))
+
+    @app.post("/oauth/token")
+    async def oauth_token(request: Request):
+        """Code → tokens (PKCE verified), or refresh → rotated tokens (oauth.token). Form-encoded,
+        the client either public (client_id in the form) or with its secret (form or Basic)."""
+        if not _oauth_on():
+            raise HTTPException(404)
+        form = _form(await request.body())
+        auth = request.headers.get("authorization") or ""
+        if auth.lower().startswith("basic ") and "client_id" not in form:
+            import base64
+            try:
+                cid, _, secret = base64.b64decode(auth[6:].strip()).decode("utf-8").partition(":")
+                form["client_id"], form["client_secret"] = cid, secret
+            except (ValueError, UnicodeDecodeError):
+                pass
+        w = _oauth_db()
+        try:
+            return JSONResponse(oauth.token(w, eff_cfg(), form), headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
+        except oauth.OAuthError as e:
+            return _oauth_json(e)
+        finally:
+            w.close()
+
+    @app.get("/api/connectors")
+    def connectors():
+        """Settings → Connections: every connector that registered, when it last spoke, live tokens."""
+        ecfg = eff_cfg()
+        return {"enabled": oauth.enabled(ecfg), "url": oauth.resource(ecfg), "connectors": oauth.connectors(conn)}
+
+    @app.post("/api/connectors/{client_id}/revoke")
+    def connector_revoke(client_id: str):
+        if not oauth.revoke_client(conn, client_id):
+            raise HTTPException(404, "no such connector, or already revoked")
+        return {"ok": True}
+
+    def _oauth_ok(bearer: str) -> bool:
+        w = _oauth_db()
+        try:
+            return oauth.check_access(w, bearer) is not None
+        finally:
+            w.close()
+
     @app.post("/mcp")
     async def mcp_http(request: Request):
-        """`factotum mcp` over streamable HTTP for a skill on another machine: one JSON-RPC message
-        (or a batch) per POST, answered as JSON; notifications get 202. Needs `Authorization: Bearer
-        $FACTOTUM_MCP_TOKEN`; with no token configured the route does not exist. Each request gets its
-        own read-only connection (the Context's query_only pragma must not touch the API's connection)
-        and a writer for stage_changes; sidecars go under data/runs/mcp-http/<day>."""
+        """`factotum mcp` over streamable HTTP for a skill on another machine or a claude.ai
+        connector: one JSON-RPC message (or a batch) per POST, answered as JSON; notifications get
+        202. The bearer is either `$FACTOTUM_MCP_TOKEN` or an OAuth access token this server issued
+        (SPEC.md §15); with neither configured the route does not exist, and a bad token gets 401 with
+        the metadata pointer a connector needs. Each request gets its own read-only connection (the
+        Context's query_only pragma must not touch the API's connection) and a writer for stage_changes."""
         import hmac
         import os
-        from . import mcp_server
         token = os.environ.get("FACTOTUM_MCP_TOKEN") or ""
-        if not token:
+        oa = _oauth_on()
+        if not token and not oa:
             raise HTTPException(404)
         auth = request.headers.get("authorization") or ""
-        if not (auth.lower().startswith("bearer ") and hmac.compare_digest(auth[7:].strip(), token)):
-            raise HTTPException(401, "bad or missing bearer token")
+        bearer = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+        try:
+            ok = bool(token and bearer and hmac.compare_digest(bearer, token))
+        except TypeError:                                    # a non-ASCII header is just a wrong token
+            ok = False
+        if not ok and oa and bearer:
+            ok = await run_in_threadpool(_oauth_ok, bearer)
+        if not ok:
+            www = 'Bearer realm="factotum"'
+            if oa:
+                www += f', resource_metadata="{oauth.base_url(eff_cfg())}/.well-known/oauth-protected-resource"'
+            if bearer:
+                www += ', error="invalid_token"'
+            return JSONResponse({"detail": "bad or missing bearer token"}, status_code=401, headers={"WWW-Authenticate": www})
         body = await request.body()
         return await run_in_threadpool(_mcp_handle, body)     # tool calls block (Mailbird, Slack, SQLite): never on the event loop
 

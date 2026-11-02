@@ -97,6 +97,18 @@ CREATE TABLE IF NOT EXISTS proposals (             -- batches staged by a skill 
   source TEXT NOT NULL, label TEXT, changes_json TEXT NOT NULL, created_at TEXT NOT NULL,
   applied_at TEXT, batch_id INTEGER, dismissed_at TEXT
 );
+CREATE TABLE IF NOT EXISTS oauth_clients (         -- connectors registered through /oauth/register (SPEC §15); tokens are hashes
+  client_id TEXT PRIMARY KEY, name TEXT, secret_hash TEXT, redirect_uris_json TEXT NOT NULL, auth_method TEXT NOT NULL,
+  created_at TEXT NOT NULL, revoked_at TEXT, last_used_at TEXT
+);
+CREATE TABLE IF NOT EXISTS oauth_codes (
+  code_hash TEXT PRIMARY KEY, client_id TEXT NOT NULL, redirect_uri TEXT NOT NULL, code_challenge TEXT NOT NULL, scope TEXT, resource TEXT,
+  expires_at TEXT NOT NULL, used_at TEXT
+);
+CREATE TABLE IF NOT EXISTS oauth_tokens (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, token_hash TEXT NOT NULL UNIQUE, kind TEXT NOT NULL, client_id TEXT NOT NULL, scope TEXT,
+  expires_at TEXT NOT NULL, created_at TEXT NOT NULL, revoked_at TEXT, last_used_at TEXT
+);
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY, value_json TEXT NOT NULL
 );

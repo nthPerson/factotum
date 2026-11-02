@@ -206,6 +206,7 @@ body.bulk-on main { padding-bottom: 190px; }
 .settings input, .settings select { font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); color: var(--fg); max-width: 100%; }
 .settings input[type=number] { width: 90px; }
 .settings table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.settings tr.muted td { color: var(--muted); }
 .settings td { padding: 4px 6px 4px 0; vertical-align: middle; }
 .settings td input[type=text] { width: 100%; }
 .note { font-size: 12px; color: var(--muted); border-left: 3px solid var(--line); padding-left: 10px; margin: 14px 0; }
