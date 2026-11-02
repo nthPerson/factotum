@@ -65,7 +65,8 @@ class OAuthError(Exception):
 
 
 def enabled(cfg: dict) -> bool:
-    return bool(C.get(cfg, "server.oauth.enabled", False))
+    """On only with a public URL: without one there is nothing to advertise as issuer or resource."""
+    return bool(C.get(cfg, "server.oauth.enabled", False)) and bool(base_url(cfg))
 
 
 def base_url(cfg: dict) -> str:
@@ -112,11 +113,14 @@ def client(conn: sqlite3.Connection, client_id: str | None) -> dict | None:
 
 
 def register(conn: sqlite3.Connection, cfg: dict, body) -> dict:
-    """RFC 7591 with a short leash: every redirect_uri must be one of `server.oauth.redirect_uris`
-    (the claude.ai callbacks by default), PKCE public clients need no secret, and the number of live
-    registrations is capped because the endpoint is reachable by anyone."""
+    """RFC 7591 with a short leash: only while the owner has armed Settings → Connections (so a
+    public endpoint cannot be filled by strangers), every redirect_uri must be one of
+    `server.oauth.redirect_uris` (the claude.ai callbacks by default), PKCE public clients need no
+    secret, and the number of live registrations is capped."""
     if not isinstance(body, dict):
         raise OAuthError("invalid_client_metadata", "a JSON object is required")
+    if not armed(conn):
+        raise OAuthError("invalid_client_metadata", f"Factotum is not expecting a new connector: tap \"Allow a new connector\" in Settings → Connections ({ARM_MINUTES} minutes), then connect again")
     uris = body.get("redirect_uris")
     if not isinstance(uris, list) or not uris or not all(isinstance(u, str) and u for u in uris):
         raise OAuthError("invalid_redirect_uri", "redirect_uris must list at least one URI")
@@ -205,9 +209,15 @@ def verify_access_jwt(token: str, team: str, aud: str) -> dict:
         head, claims, sig = json.loads(_b64d(h64)), json.loads(_b64d(p64)), _b64d(s64)
     except (ValueError, TypeError) as e:
         raise OAuthError("access_denied", "the Access assertion is not a JWT", 403) from e
-    if head.get("alg") != "RS256":
-        raise OAuthError("access_denied", "the Access assertion is not RS256", 403)
-    jwk = next((k for k in _certs(team, str(head.get("kid") or "")) if k.get("kid") == head.get("kid") and k.get("kty") == "RSA"), None)
+    if not isinstance(head, dict) or not isinstance(claims, dict):
+        raise OAuthError("access_denied", "the Access assertion is not a JWT", 403)
+    if head.get("alg") != "RS256" or not head.get("kid"):
+        raise OAuthError("access_denied", "the Access assertion is not RS256 with a key id", 403)
+    try:
+        keys = _certs(team, str(head.get("kid")))
+    except (httpx.HTTPError, ValueError) as e:
+        raise OAuthError("access_denied", f"the team's signing keys could not be fetched ({type(e).__name__}); try again", 403) from e
+    jwk = next((k for k in keys if isinstance(k, dict) and k.get("kid") == head.get("kid") and k.get("kty") == "RSA"), None)
     if not jwk:
         raise OAuthError("access_denied", "the Access assertion was signed by a key the team does not publish", 403)
     try:
@@ -229,9 +239,9 @@ def verify_access_jwt(token: str, team: str, aud: str) -> dict:
 def consent_identity(cfg: dict, headers) -> str:
     """Who is on the consent page. `cloudflare_access` (default): the JWT Access attaches to every
     request it let through, verified against the team's certs for this application, and its email
-    must be one of owner.emails (when that list is set; Access's own policy already chose who may
-    log in). A bare identity header is never enough: anything that can reach the origin can send
-    one. `none`: no identity (a deployment where nothing but the owner can reach the port)."""
+    must be one of owner.emails (fail closed when that list is empty). A bare identity header is
+    never enough: anything that can reach the origin can send one. `none`: no identity (a
+    deployment where nothing but the owner can reach the port)."""
     gate = str(C.get(cfg, "server.oauth.consent_gate", "cloudflare_access") or "cloudflare_access")
     if gate == "none":
         return "local"
@@ -244,7 +254,9 @@ def consent_identity(cfg: dict, headers) -> str:
     claims = verify_access_jwt(token, team, aud)
     email = str(claims.get("email") or "").strip().lower()
     allowed = {str(e).strip().lower() for e in (C.get(cfg, "owner.emails", []) or []) if e}
-    if not email or (allowed and email not in allowed):
+    if not allowed:
+        raise OAuthError("access_denied", "owner.emails is empty in the config; the consent page needs to know who the owner is", 403)
+    if not email or email not in allowed:
         raise OAuthError("access_denied", f"{email or 'that identity'} is not an owner address (owner.emails)", 403)
     return email
 
@@ -328,13 +340,15 @@ def token(conn: sqlite3.Connection, cfg: dict, form: dict) -> dict:
         res = str(form.get("resource") or "").rstrip("/")
         if res and res != row["resource"]:
             raise OAuthError("invalid_target", f"this server is {row['resource']}")
-        conn.execute("UPDATE oauth_codes SET used_at = ? WHERE code_hash = ?", (_now(), row["code_hash"]))
+        if conn.execute("UPDATE oauth_codes SET used_at = ? WHERE code_hash = ? AND used_at IS NULL", (_now(), row["code_hash"])).rowcount != 1:
+            raise OAuthError("invalid_grant", "the code was redeemed concurrently")        # the claim is atomic: two racing exchanges get one token
         return _issue(conn, cfg, cl["client_id"], row["scope"] or SCOPE)
     if gt == "refresh_token":
         row = one(conn, "SELECT * FROM oauth_tokens WHERE token_hash = ? AND kind = 'refresh'", (_h(str(form.get("refresh_token") or "")),))
         if not row or row["revoked_at"] or row["expires_at"] < _now() or row["client_id"] != cl["client_id"]:
             raise OAuthError("invalid_grant", "the refresh token is unknown, revoked, expired, or not this client's")
-        conn.execute("UPDATE oauth_tokens SET revoked_at = ? WHERE id = ?", (_now(), row["id"]))      # rotation: the old one dies here
+        if conn.execute("UPDATE oauth_tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL", (_now(), row["id"])).rowcount != 1:   # rotation: the old one dies here, once
+            raise OAuthError("invalid_grant", "the refresh token was used concurrently")
         return _issue(conn, cfg, cl["client_id"], row["scope"] or SCOPE)
     raise OAuthError("unsupported_grant_type", "authorization_code or refresh_token")
 

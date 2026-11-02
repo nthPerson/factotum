@@ -483,9 +483,11 @@ def test_discord_forums_and_threads_are_listed_read_and_searched(conn, cfg, tmp_
 
 class FakeSlackSweep:
     """One workspace: the token's user is U1; #general has a mention naming Task-42, a mention with no
-    task, and the user's own message; #papers is quiet; #random is not joined."""
-    def __init__(self):
-        self.calls = []
+    task, a thread broadcast mention, a join notice, a mention of a closed task and the user's own
+    message; #papers refuses the first pass (not_in_channel); #random is not joined. Records whether
+    the sweep's connection held a transaction while Slack was on the line."""
+    def __init__(self, conn=None):
+        self.calls, self.locked, self.conn, self.papers_ok, self.fail_general = [], [], conn, False, False
 
     def transport(self):
         def handler(req: httpx.Request):
@@ -498,10 +500,19 @@ class FakeSlackSweep:
                 return httpx.Response(200, json={"ok": True, "channels": [{"id": "C1", "name": "general", "is_member": True}, {"id": "C2", "name": "papers", "is_member": True},
                                                                             {"id": "C3", "name": "random", "is_member": False}], "response_metadata": {"next_cursor": ""}})
             if method == "conversations.history":
+                if self.conn is not None:
+                    self.locked.append(self.conn.in_transaction)
+                if params["channel"] == "C2" and not self.papers_ok:
+                    return httpx.Response(200, json={"ok": False, "error": "not_in_channel"})
+                if params["channel"] == "C1" and self.fail_general:
+                    raise httpx.ConnectError("boom")
                 if params["channel"] != "C1" or float(params.get("oldest") or 0) >= 1793536050.0001:
                     return httpx.Response(200, json={"ok": True, "messages": []})
                 return httpx.Response(200, json={"ok": True, "messages": [
                     {"ts": "1793536050.000100", "user": "U2", "text": "<@U1> lunch tomorrow?"},
+                    {"ts": "1793536040.000100", "user": "U2", "text": "<@U1> Task-43 is long gone", },
+                    {"ts": "1793536030.000100", "user": "U2", "text": "<@U1> see the thread", "subtype": "thread_broadcast"},
+                    {"ts": "1793536020.000100", "user": "U4", "text": "<@U1> has joined the channel", "subtype": "channel_join"},
                     {"ts": "1793536000.000100", "user": "U2", "text": "<@U1> can you send the slides for Task-42 by Friday?", "reply_count": 1, "thread_ts": "1793536000.000100"},
                     {"ts": "1793535000.000100", "user": "U1", "text": "<@U2> done"},
                     {"ts": "1793534000.000100", "user": "U3", "text": "no mention here"}]})
@@ -523,27 +534,39 @@ def test_slack_sweep_turns_mentions_into_evidence_and_task_mentions(conn, cfg, m
     from factotum.mail_sweep import review_flags
     _sweep_cfg(cfg)
     monkeypatch.setenv("SLACK_TOKEN_DICE", "xoxp-dice")
-    upsert_task(conn, task(id=42, name="Slides for Max", mentions=1, last_mention_at="2026-10-01")); conn.commit()
-    fake = FakeSlackSweep()
+    upsert_task(conn, task(id=42, name="Slides for Max", mentions=1, last_mention_at="2026-10-01"))
+    upsert_task(conn, task(id=43, name="Long gone", status="done", completed_at="2026-10-20")); conn.commit()
+    fake = FakeSlackSweep(conn)
     now = datetime(2026, 11, 2, 9, 0)
-    out = slack_sweep.sweep(conn, cfg, now, clients=lambda tok: slack.Client(tok, transport=fake.transport()))
-    assert out and "2 mention" in out and "1 on a task" in out
+    mk = lambda tok: slack.Client(tok, transport=fake.transport())
+    out = slack_sweep.sweep(conn, cfg, now, clients=mk)
+    assert out and "3 mentions" in out and "1 on a task" in out and "#papers" in out                  # the failed channel is named
+    assert fake.locked and not any(fake.locked)                                                        # never a transaction open while Slack is on the line
     assert {c["channel"] for m, c in fake.calls if m == "conversations.history"} == {"C1", "C2"}           # joined channels only
     ev = rows(conn, "SELECT * FROM evidence ORDER BY id")
-    assert [(e["kind"], e["task_id"], e["account"]) for e in ev] == [("slack_mention", None, "DiCE Lab"), ("slack_mention", 42, "DiCE Lab")]
-    on_task = ev[1]
+    assert [(e["kind"], e["task_id"], e["account"]) for e in ev] == [("slack_mention", None, "DiCE Lab"), ("slack_mention", None, "DiCE Lab"), ("slack_mention", 42, "DiCE Lab")]
+    assert "see the thread" in ev[1]["excerpt"] and not any("joined" in e["excerpt"] or "long gone" in e["excerpt"] for e in ev)   # broadcasts count; joins and closed tasks do not
+    on_task = ev[2]
     assert on_task["ref"] == "https://dice.slack.com/archives/C1/p1793536000000100" and on_task["label"].startswith("#general · Max M") and "@Robert can you send" in on_task["excerpt"]
     t = one(conn, "SELECT mentions, last_mention_at FROM tasks WHERE id = 42")
     assert t["mentions"] == 2 and t["last_mention_at"].startswith("2026-11-01")                             # ts 1793536000 → 2026-11-01T11:06:40Z
     assert one(conn, "SELECT ref, account FROM links WHERE task_id = 42 AND kind = 'slack_message'")["account"] == "DiCE Lab"
+    assert one(conn, "SELECT mentions FROM tasks WHERE id = 43")["mentions"] == 1
     assert review_flags(conn)[42] == {"mentioned": True} and "mentioned" in lifecycle.REVIEW_LABELS
     assert lifecycle.review_reasons(one(conn, "SELECT * FROM tasks WHERE id = 42"), TODAY, cfg, None, {"mentioned": True})[0] == "mentioned"
-    assert get_settings(conn)["state.slack_sweep.last_ts.DiCE Lab"] == "1793536050.000100"
-    # the next pass starts at the watermark and finds nothing new; the first pass looked back lookback_days
+    # one watermark per channel: #general advanced, #papers (which failed) has none and is re-read from the lookback
+    assert get_settings(conn)["state.slack_sweep.last_ts.DiCE Lab"] == {"C1": "1793536050.000100"}
     assert fake.calls[2][1].get("oldest") and float(fake.calls[2][1]["oldest"]) < 1793536000
-    assert slack_sweep.sweep(conn, cfg, now, clients=lambda tok: slack.Client(tok, transport=fake.transport())) is None
-    assert [c for m, c in fake.calls if m == "conversations.history" and c["channel"] == "C1"][-1]["oldest"] == "1793536050.000100"
-    assert len(rows(conn, "SELECT * FROM evidence")) == 2
+    fake.papers_ok = True
+    assert slack_sweep.sweep(conn, cfg, now, clients=mk) is None
+    hist = {c["channel"]: c["oldest"] for m, c in fake.calls[-2:] if m == "conversations.history"}
+    assert hist["C1"] == "1793536050.000100" and float(hist["C2"]) < 1793536000
+    assert len(rows(conn, "SELECT * FROM evidence")) == 3
+    # a transport error on one channel is a note, not a failed sweep, and the watermark stays
+    fake.fail_general = True
+    out = slack_sweep.sweep(conn, cfg, now, clients=mk)
+    assert out and out.startswith("0 mentions") and "ConnectError" in out
+    assert get_settings(conn)["state.slack_sweep.last_ts.DiCE Lab"]["C1"] == "1793536050.000100"
 
 
 def test_review_shows_a_slack_mention_as_a_suggestion_and_creates_the_task_from_it(cfg, tmp_path, monkeypatch):
@@ -561,13 +584,19 @@ def test_review_shows_a_slack_mention_as_a_suggestion_and_creates_the_task_from_
     client = TestClient(app)
     r = client.get("/api/review").json()
     sg = [s for s in r["suggestions"] if s["kind"] == "slack_mention"]
-    assert len(sg) == 1 and sg[0]["fields"]["name"] == "lunch tomorrow?" and sg[0]["label"].startswith("#general · Max M") and sg[0]["fields"]["project"] == "DiCE Lab"
+    assert len(sg) == 3                                                                                   # lunch, the thread broadcast, and Task-43 (unknown here: a plain mention)
+    sg = [s for s in sg if s["fields"]["name"] == "lunch tomorrow?"]
+    assert len(sg) == 1 and sg[0]["label"].startswith("#general · Max M") and sg[0]["fields"]["project"] == "DiCE Lab"
     tid = client.post(f"/api/review/suggestions/{sg[0]['id']}/create", json={}).json()["task_id"]
     t = one(conn, "SELECT * FROM tasks WHERE id = ?", (tid,))
     assert t["source"] == "Slack" and t["project"] == "DiCE Lab" and t["source_link"] == "https://dice.slack.com/archives/C1/p1793536050000100" and t["name"] == "lunch tomorrow?"
     assert "Max M in #general (DiCE Lab)" in t["context"] and one(conn, "SELECT 1 AS x FROM links WHERE task_id = ? AND kind = 'slack_message'", (tid,))
     assert one(conn, "SELECT verdict FROM evidence WHERE id = ?", (sg[0]["id"],))["verdict"] == "applied"
-    assert not [s for s in client.get("/api/review").json()["suggestions"] if s["kind"] == "slack_mention"]
+    assert not [s for s in client.get("/api/review").json()["suggestions"] if s["fields"]["name"] == "lunch tomorrow?"]
+    cfg["sources"]["slack"]["workspaces"][0]["project"] = "Nowhere"
+    conn.execute("INSERT INTO evidence (task_id, kind, ref, account, label, excerpt, at) VALUES (NULL, 'slack_mention', 'https://dice.slack.com/x', 'DiCE Lab', '#general · Max M: more', 'more', '2026-11-02T10:00:00Z')"); conn.commit()
+    sg = [s for s in client.get("/api/review").json()["suggestions"] if s["fields"]["name"] == "more"]
+    assert len(sg) == 1 and sg[0]["fields"]["project"] is None                                            # not a project in the taxonomy: no promise on the card
 
 
 def test_scheduler_runs_the_slack_sweep_on_its_interval_when_slack_is_on(conn, cfg):

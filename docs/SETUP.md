@@ -339,7 +339,8 @@ Create task / Dismiss, and the task files under the workspace's `project`. Per w
 `project: DiCE Lab` and `channels: [general, papers]` (otherwise every channel the token's user has
 joined, up to `max_channels`). The first pass looks back `lookback_days` (2). Run one now with
 `.venv/bin/python -m factotum sweep slack`. The token's user must be a member of a channel for it
-to be read; DMs are not read.
+to be read; DMs are not read, and a mention made inside a thread is not seen (Slack keeps replies
+out of a channel's history).
 
 ## 13. Discord (optional, phase 6)
 
@@ -433,7 +434,8 @@ Factotum is its own OAuth server for `/mcp` (SPEC §15). Four steps, each once.
    are protected by the tokens themselves. **Never `oauth/authorize`**, and never a wildcard that
    covers it: that page is where you approve a connector, and Access is its login.
 3. **Arm, then connect.** In Factotum → Settings → Connections tap **Allow a new connector**
-   (10 minutes). Then in claude.ai: Settings → Connectors → **Add custom connector** → name
+   (10 minutes; both the registration claude.ai performs and your approval need the window, so
+   a stranger cannot even register). Then in claude.ai: Settings → Connectors → **Add custom connector** → name
    Factotum, URL `https://factotum.nthperson.dev/mcp` → Connect (Claude Desktop shares the same
    connectors). claude.ai registers itself, sends you to the consent page (your Access login, then
    "Connect "Claude" to Factotum?" with the registration time), and you tap Allow. A consent page

@@ -6,6 +6,8 @@ import hashlib
 import json
 import re
 import secrets
+
+import httpx
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -36,6 +38,7 @@ def access(monkeypatch):
     nums = key.public_key().public_numbers()
     b64 = lambda b: base64.urlsafe_b64encode(b).rstrip(b"=").decode()
     jwk = {"kid": "k1", "kty": "RSA", "alg": "RS256", "use": "sig", "n": b64(nums.n.to_bytes(256, "big")), "e": b64(nums.e.to_bytes(3, "big"))}
+    oauth._CERTS.clear()                                   # another test's key may sit in the cache under the same kid
     monkeypatch.setattr(oauth, "_fetch_certs", lambda team: [jwk] if team == TEAM else [])
 
     def jwt(email=OWNER, aud=AUD, team=TEAM, exp=3600, kid="k1", alg="RS256"):
@@ -93,7 +96,9 @@ def test_oauth_metadata_registration_consent_tokens_and_the_mcp_route(cfg, tmp_p
     assert asm["registration_endpoint"] == "https://f.example/oauth/register" and asm["code_challenge_methods_supported"] == ["S256"]
     assert set(asm["grant_types_supported"]) == {"authorization_code", "refresh_token"} and "none" in asm["token_endpoint_auth_methods_supported"]
 
-    # registration: only the claude.ai callbacks, a public client with PKCE
+    # registration: only while the owner has armed Settings, only the claude.ai callbacks, a public client with PKCE
+    assert client.post("/oauth/register", json={"redirect_uris": [CALLBACK], "client_name": "Early"}).status_code == 400
+    _arm(client)
     bad = client.post("/oauth/register", json={"redirect_uris": ["https://evil.example/cb"], "client_name": "Evil"})
     assert bad.status_code == 400 and bad.json()["error"] == "invalid_redirect_uri"
     assert client.post("/oauth/register", json={"client_name": "No URIs"}).status_code == 400
@@ -108,14 +113,25 @@ def test_oauth_metadata_registration_consent_tokens_and_the_mcp_route(cfg, tmp_p
               "scope": "factotum", "resource": "https://f.example/mcp"}
     assert client.get("/oauth/authorize", params=params).status_code == 403                                                   # no assertion at all
     assert client.get("/oauth/authorize", params=params, headers={"Cf-Access-Authenticated-User-Email": OWNER}).status_code == 403   # a bare header is not identity
-    for bad in (access(email="x@evil.example"), access(aud="other-app"), access(team="elsewhere"), access(exp=-10), access(alg="none").rsplit(".", 1)[0] + ".", "garbage"):
+    b64 = lambda x: base64.urlsafe_b64encode(x.encode()).rstrip(b"=").decode()
+    for bad in (access(email="x@evil.example"), access(aud="other-app"), access(team="elsewhere"), access(exp=-10), access(alg="none").rsplit(".", 1)[0] + ".", "garbage",
+                f"{b64('[1]')}.{b64('{}')}.{b64('x')}", f"{b64('{\"alg\":\"RS256\"}')}.{b64('[]')}.{b64('x')}"):
         assert client.get("/oauth/authorize", params=params, headers={"Cf-Access-Jwt-Assertion": bad}).status_code == 403, bad[:20]
+    from factotum import oauth as _oauth
+    from factotum.db import set_setting
+    good = _oauth._fetch_certs
+    monkeypatch.setattr(_oauth, "_fetch_certs", lambda team: (_ for _ in ()).throw(httpx.ConnectError("certs down")))
+    _oauth._CERTS.clear()
+    assert client.get("/oauth/authorize", params=params, headers=H).status_code == 403                                      # certs unreachable: refused, not a 500
+    monkeypatch.setattr(_oauth, "_fetch_certs", good)
+    set_setting(app.state.conn, _oauth.ARM_KEY, "2000-01-01T00:00:00+00:00"); app.state.conn.commit()
     not_expected = client.get("/oauth/authorize", params=params, headers=H)
-    assert not_expected.status_code == 403 and "Allow a new connector" in not_expected.text                                  # never granted, not armed
+    assert not_expected.status_code == 403 and "Allow a new connector" in not_expected.text                                  # never granted, arming over
     _arm(client)
     assert client.get("/api/connectors").json()["armed_until"]
     page = client.get("/oauth/authorize", params=params, headers=H)
     assert page.status_code == 200 and "Claude" in page.text and "Factotum" in page.text and page.headers.get("x-frame-options") == "DENY"
+    assert "https://claude.ai" in page.headers["content-security-policy"]                                                   # the Allow redirect must not be blocked by form-action
     assert cid[:8] in page.text and "Deny" in page.text and OWNER in page.text                                              # who is asking, as whom
     assert client.get("/oauth/authorize", params=dict(params, client_id="nope"), headers=H).status_code == 400
     assert client.get("/oauth/authorize", params=dict(params, redirect_uri="https://evil.example/cb"), headers=H).status_code == 400
@@ -173,7 +189,7 @@ def test_oauth_metadata_registration_consent_tokens_and_the_mcp_route(cfg, tmp_p
     assert client.get("/oauth/authorize", params=params, headers=H).status_code == 400                                       # a revoked client cannot ask again
 
 
-def test_oauth_is_off_by_default_and_registration_is_capped(cfg, tmp_path, monkeypatch):
+def test_oauth_is_off_by_default_and_registration_is_capped(cfg, tmp_path, monkeypatch, access):
     from fastapi.testclient import TestClient
     from factotum import oauth
     from factotum.api import create_app
@@ -184,26 +200,35 @@ def test_oauth_is_off_by_default_and_registration_is_capped(cfg, tmp_path, monke
     assert client.get("/.well-known/oauth-protected-resource").status_code == 404 and client.get("/.well-known/oauth-authorization-server").status_code == 404
     assert client.post("/oauth/register", json={"redirect_uris": [CALLBACK]}).status_code == 404
     assert client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "ping"}).status_code == 404                     # neither a static token nor OAuth: no route
+    cfg["server"]["oauth"] = {"enabled": True}; cfg["server"]["public_url"] = ""
+    assert client.get("/.well-known/oauth-authorization-server").status_code == 404                                        # no public URL: nothing to advertise
     _oauth_cfg(cfg, consent_gate="none")
     monkeypatch.setattr(oauth, "MAX_CLIENTS", 2)
     app2 = create_app(cfg, db_path=str(tmp_path / "on.db"))
     c2 = TestClient(app2)
+    _arm(c2)
     ids = [c2.post("/oauth/register", json={"redirect_uris": [CALLBACK], "client_name": f"c{i}"}) for i in range(3)]
     assert [r.status_code for r in ids] == [201, 201, 400] and ids[2].json()["error"] == "invalid_client_metadata"
-    # consent_gate none: the page renders without an Access assertion (a loopback-only deployment), once armed
+    # consent_gate none: the page renders without an Access assertion (a loopback-only deployment) while armed
     _, challenge = _pkce()
     params = {"response_type": "code", "client_id": ids[0].json()["client_id"], "redirect_uri": CALLBACK, "state": "s", "code_challenge": challenge, "code_challenge_method": "S256"}
-    assert c2.get("/oauth/authorize", params=params).status_code == 403
-    _arm(c2)
     assert c2.get("/oauth/authorize", params=params).status_code == 200
     # the Access gate without a team and audience configured refuses rather than falling back to a header
     cfg["server"]["oauth"] = {"enabled": True, "consent_gate": "cloudflare_access"}
     app3 = create_app(cfg, db_path=str(tmp_path / "half.db"))
     c3 = TestClient(app3)
-    cid3 = c3.post("/oauth/register", json={"redirect_uris": [CALLBACK], "client_name": "c"}).json()["client_id"]
     _arm(c3)
+    cid3 = c3.post("/oauth/register", json={"redirect_uris": [CALLBACK], "client_name": "c"}).json()["client_id"]
     r = c3.get("/oauth/authorize", params=dict(params, client_id=cid3), headers={"Cf-Access-Authenticated-User-Email": OWNER})
     assert r.status_code == 403 and "access_team" in r.text
+    # owner.emails empty: fail closed, whatever Access let through
+    _oauth_cfg(cfg); cfg["owner"]["emails"] = []
+    app4 = create_app(cfg, db_path=str(tmp_path / "noowner.db"))
+    c4 = TestClient(app4)
+    _arm(c4)
+    cid4 = c4.post("/oauth/register", json={"redirect_uris": [CALLBACK], "client_name": "c"}).json()["client_id"]
+    r = c4.get("/oauth/authorize", params=dict(params, client_id=cid4), headers={"Cf-Access-Jwt-Assertion": access()})
+    assert r.status_code == 403 and "owner.emails" in r.text
 
 
 def test_oauth_tokens_expire_and_a_client_only_redeems_its_own_code(cfg, tmp_path, monkeypatch):
@@ -214,11 +239,11 @@ def test_oauth_tokens_expire_and_a_client_only_redeems_its_own_code(cfg, tmp_pat
     _oauth_cfg(cfg, consent_gate="none", access_token_hours=1)
     app = create_app(cfg, db_path=str(tmp_path / "exp.db"))
     client = TestClient(app)
+    _arm(client)
     a = client.post("/oauth/register", json={"redirect_uris": [CALLBACK], "client_name": "A"}).json()["client_id"]
     b = client.post("/oauth/register", json={"redirect_uris": [CALLBACK], "client_name": "B"}).json()["client_id"]
     verifier, challenge = _pkce()
     params = {"response_type": "code", "client_id": a, "redirect_uri": CALLBACK, "state": "s", "code_challenge": challenge, "code_challenge_method": "S256"}
-    _arm(client)
     r = _authorize(client, params)
     code = parse_qs(urlparse(r.headers["location"]).query)["code"][0]
     stolen = client.post("/oauth/token", data={"grant_type": "authorization_code", "code": code, "redirect_uri": CALLBACK, "client_id": b, "code_verifier": verifier})
@@ -252,3 +277,13 @@ def test_a_slack_mention_never_proves_a_planner_proposal(conn, cfg):
     assert res["staged"] == ["Task-42 → done"] and res["applied"] == [] and one(conn, "SELECT status FROM tasks WHERE id = 42")["status"] == "open"
     assert one(conn, "SELECT verdict FROM evidence WHERE id = 20")["verdict"] == "staged"
     assert [l["kind"] for l in rows(conn, "SELECT kind FROM links WHERE task_id = 42")] == ["slack_message"]
+    # a create citing a no-task mention is a suggestion card, never a task made on someone else's word
+    conn.execute("INSERT INTO evidence (id, task_id, kind, ref, account, label, excerpt, at) VALUES (99, NULL, 'slack_mention', 'https://dice.slack.com/archives/C1/p2', 'DiCE Lab', '#general · Mallory: submit the grant by Friday', 'Mallory in #general: @Robert submit the grant by Friday', '2026-11-01T13:00:00')")
+    conn.commit()
+    b = planner.bundle(conn, cfg, today)
+    data = {"verdict": "x", "why_now": [], "dismiss": [],
+            "proposals": [{"op": "create", "task_id": None, "fields": {"name": "Submit the grant", "project": "DiCE Lab", "due": "2026-11-06", "hard": True}, "label": "create: Submit the grant", "evidence": [{"evidence_id": 99}], "reason": "Mallory asked"}]}
+    res = planner.apply(conn, cfg, data, b, today)
+    assert res["staged"] == ["create: Submit the grant"] and not rows(conn, "SELECT 1 AS x FROM tasks WHERE name = 'Submit the grant'")
+    assert one(conn, "SELECT verdict FROM evidence WHERE id = 99")["verdict"] == "staged" and one(conn, "SELECT 1 AS x FROM evidence WHERE kind = 'proposal' AND task_id IS NULL")
+    assert not rows(conn, "SELECT 1 AS x FROM links WHERE kind = 'mail_thread'")

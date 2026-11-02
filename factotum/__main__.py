@@ -314,6 +314,10 @@ def main(argv: list[str] | None = None) -> int:
         if not C.get(ecfg, "sinks.notion_tasks_mirror.enabled") and not a.dry_run:
             print("the mirror is off (Settings → Notion tasks mirror); pushing anyway because you asked")
         total = {"created": 0, "updated": 0, "failed": []}
+        if a.task and not a.dry_run:
+            fresh = [r["id"] for r in rows(conn, f"SELECT id FROM tasks WHERE notion_page_id IS NULL AND id IN ({','.join('?' * len(a.task))})", tuple(a.task))]
+            if fresh:
+                print(f"  note: Task-{', Task-'.join(map(str, fresh))} ha{'s' if len(fresh) == 1 else 've'} no Notion page yet; creating out of id order lets Notion's Task ID counter drift from Factotum's ids")
         while True:
             res = notion_mirror.sweep(conn, ecfg, all_rows=a.all, dry_run=a.dry_run, cap=10**6 if a.all or a.task else 200, ids=a.task)
             if a.dry_run:

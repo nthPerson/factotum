@@ -33,6 +33,7 @@ from .sync_file import _clean_task_fields
 PROMPT = C.ROOT / "prompts" / "planner-morning.md"
 RUNS_DIR = C.ROOT / "data" / "runs" / "planner"
 ROW_CAP = 60
+CAND_CAP = 40          # newest unjudged evidence rows the prompt carries; older ones wait for Review
 WHY_CAP = 15
 PROPOSAL_CAP = 12
 TASK_OPS = {"done", "drop", "set", "add_reminder", "pin_top", "longterm"}
@@ -45,7 +46,7 @@ def bundle(conn: sqlite3.Connection, cfg: dict, today: date, events: list[dict] 
     for t in open_tasks:
         t["score"], t["priority"], _ = scoring.score(t, today, cfg)
     ordered = sorted(open_tasks, key=lambda t: (0 if t.get("top_rank") else 1, t.get("top_rank") or 0, -(t["score"] or 0), t["id"]))
-    cands = rows(conn, "SELECT e.*, t.name AS task_name FROM evidence e LEFT JOIN tasks t ON t.id = e.task_id WHERE e.judged_at IS NULL AND e.kind != 'proposal' ORDER BY e.id")
+    cands = rows(conn, "SELECT e.*, t.name AS task_name FROM evidence e LEFT JOIN tasks t ON t.id = e.task_id WHERE e.judged_at IS NULL AND e.kind != 'proposal' ORDER BY e.id DESC LIMIT ?", (CAND_CAP,))[::-1]
     anns = get_settings(conn).get("state.canvas.announcements") or []
     if isinstance(anns, str):
         try:
@@ -122,9 +123,14 @@ def apply(conn: sqlite3.Connection, cfg: dict, data: dict, b: dict, today: date)
                 rejected.append(f"{label}: no name"); continue
             if p.get("evidence") and not cited:
                 rejected.append(f"{label}: cites evidence that does not exist or was already judged"); continue
-            if not cited:   # an announcement or a hunch: a suggestion card in Review, created by nobody but the user
+            if not cited or any(e.get("kind") in NON_PROVING for e in cited):
+                # An announcement, a hunch, or someone's Slack message: a suggestion card in Review, created
+                # by nobody but the user. A non-proving citation is judged staged so no second card appears.
                 conn.execute("INSERT INTO evidence (task_id, kind, ref, label, excerpt, at) VALUES (NULL, 'proposal', ?, ?, ?, ?)",
                              (json.dumps({"op": "create", "fields": f}), label, reason, now_iso()))
+                for e in cited:
+                    conn.execute("UPDATE evidence SET judged_at = ?, verdict = 'staged' WHERE id = ?", (now_iso(), e["id"]))
+                    judged[e["id"]] = None
                 staged.append(label); continue
             if any(e.get("task_id") is not None for e in cited):
                 rejected.append(f"{label}: cites evidence that belongs to a task"); continue
@@ -133,7 +139,7 @@ def apply(conn: sqlite3.Connection, cfg: dict, data: dict, b: dict, today: date)
             add_mention(conn, tid, "planner", cited[0].get("ref"))
             for e in cited:
                 if e.get("ref"):
-                    add_link(conn, tid, "mail_thread", e["ref"], label=e.get("label"), account=e.get("account"))
+                    add_link(conn, tid, "slack_message" if e.get("kind") == "slack_mention" else "mail_thread", e["ref"], label=e.get("label"), account=e.get("account"))
                 # The create is not in the batch (like every creation), so its evidence is judged outside it
                 # too and now belongs to the new task: an undo of the morning cannot make a twin.
                 conn.execute("UPDATE evidence SET task_id = ?, judged_at = ?, verdict = 'applied' WHERE id = ?", (tid, now_iso(), e["id"]))

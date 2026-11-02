@@ -32,6 +32,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from html import escape
+from urllib.parse import urlparse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
@@ -95,7 +96,7 @@ form{{display:flex;gap:12px;margin-top:20px}} button{{font:inherit;padding:10px 
 <body><main><h1>Connect "{name}" to Factotum?</h1><p class="reg">{reg} · says it is {name}</p>
 {prov}
 <p>It will be able to, as you:</p>
-<ul><li>read your tasks, reminders, mail, calendar, Slack and Discord through {tools} read tools</li>
+<ul><li>use {tools} Factotum tools: read your tasks, reminders, mail, calendar, Slack and Discord</li>
 <li>stage task changes that appear in Factotum's tray for you to Apply or Dismiss — it never changes a task itself</li>
 <li>nothing is ever sent on your behalf</li></ul>
 <p class="who">Signed in as {escape(who)} · revoke any time in Settings → Connections at <a href="{escape(base)}/#settings">{escape(base)}</a>.</p>
@@ -270,7 +271,8 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         if e["kind"] == "slack_mention":
             ws = next((w for w in (C.get(ecfg, "sources.slack.workspaces", []) or []) if str(w.get("name") or "").strip() == (e.get("account") or "")), {})
             name = str(e.get("label") or "").split(": ", 1)[-1].strip()[:80] or "(untitled)"
-            return {"name": name, "project": ws.get("project"), "context": f"{e.get('excerpt') or ''}\n{e.get('ref') or ''}".strip(), "source_link": e.get("ref")}
+            project = ws.get("project") if ws.get("project") in C.project_names(ecfg) else None     # a name outside the taxonomy would become Unknown
+            return {"name": name, "project": project, "context": f"{e.get('excerpt') or ''}\n{e.get('ref') or ''}".strip(), "source_link": e.get("ref")}
         try:
             d = json.loads(e["ref"]) if e.get("ref") else {}
         except ValueError:
@@ -543,7 +545,9 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
                 if e.redirect:
                     return RedirectResponse(oauth.error_url(e.redirect, e), status_code=302, headers={"Cache-Control": "no-store"})
                 return HTMLResponse(_page("Factotum", f"This connection request is not valid: {e.description}", base), status_code=e.status)
-            heads = {"Cache-Control": "no-store", "X-Frame-Options": "DENY", "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' " + base,
+            # form-action must also allow the callback origins: Chrome applies it to the redirect that follows the POST
+            origins = " ".join(sorted({f"{u.scheme}://{u.netloc}" for u in (urlparse(str(x)) for x in (C.get(ecfg, "server.oauth.redirect_uris", None) or oauth.DEFAULT_REDIRECTS)) if u.scheme and u.netloc}))
+            heads = {"Cache-Control": "no-store", "X-Frame-Options": "DENY", "Content-Security-Policy": f"default-src 'none'; style-src 'unsafe-inline'; form-action 'self' {base} {origins}".strip(),
                      "Referrer-Policy": "no-referrer"}
             again = oauth.granted_before(w, req["client_id"])
             if not again and not oauth.armed(w):
@@ -553,9 +557,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
                                           f"Open Factotum → Settings → Connections, tap \"Allow a new connector\" ({oauth.ARM_MINUTES} minutes), then try again from the app that asked. "
                                           f"If you did not start this, nothing happened: close this page.", base), status_code=403, headers=heads)
             if decision is None:
-                from . import mcp_server
-                n = len([t for t in mcp_server.TOOLS if not t.get("skill_only")])
-                return HTMLResponse(_consent_page(req, oauth.consent_token(req), base, who, n, again), headers=heads)
+                return HTMLResponse(_consent_page(req, oauth.consent_token(req), base, who, len(_mcp_allowed(ecfg)), again), headers=heads)
             if not oauth.consent_ok(req, params.get("csrf")):
                 return HTMLResponse(_page("Factotum", "This consent page has expired; go back to the connector and try again.", base), status_code=400, headers=heads)
             if decision != "allow":
@@ -656,6 +658,19 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         body = await request.body()
         return await run_in_threadpool(_mcp_handle, body)     # tool calls block (Mailbird, Slack, SQLite): never on the event loop
 
+    def _mcp_allowed(ecfg: dict) -> set:
+        """What the HTTP route (a remote skill or a connector) may call. Reads and stage_changes by
+        default; a new draft (a leaked token must not fill Mailbird with drafts) and the Plaud
+        subprocess only when server.mcp_http_tools opts in (a list, or "all"). A reply draft is never
+        offered here: each request is its own run, so no thread was "seen"."""
+        from . import mcp_server
+        allowed = C.get(ecfg, "server.mcp_http_tools")
+        if allowed == "all":
+            allowed = {t["name"] for t in mcp_server.TOOLS}
+        elif not isinstance(allowed, list):
+            allowed = {t["name"] for t in mcp_server.TOOLS} - {"mail_draft_new", "plaud_search", "plaud_summary"}
+        return set(allowed) - {"mail_draft_reply"}
+
     def _mcp_handle(body: bytes):
         from . import mcp_server
         try:
@@ -665,15 +680,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         db = db_path or C.db_path()
         reader = connect(db)
         ecfg = eff_cfg()
-        # Reads and stage_changes by default; a new draft (a leaked token must not fill Mailbird with
-        # drafts) and the Plaud subprocess only when server.mcp_http_tools opts in (a list, or "all").
-        # A reply draft is never offered here: each request is its own run, so no thread was "seen".
-        allowed = C.get(ecfg, "server.mcp_http_tools")
-        if allowed == "all":
-            allowed = {t["name"] for t in mcp_server.TOOLS}
-        elif not isinstance(allowed, list):
-            allowed = {t["name"] for t in mcp_server.TOOLS} - {"mail_draft_new", "plaud_search", "plaud_summary"}
-        allowed = set(allowed) - {"mail_draft_reply"}
+        allowed = _mcp_allowed(ecfg)
         try:
             ctx = mcp_server.Context(reader, ecfg, run_dir=None, writer=lambda: connect(db), allowed=allowed)
             if isinstance(msg, list):

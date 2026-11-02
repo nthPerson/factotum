@@ -223,8 +223,11 @@ reason "Mentioned in Slack". Any other becomes evidence with no task: Review sho
 suggestion card (Create task / Dismiss; the task files under the workspace's `project`, source
 Slack, the message linked) and the planner sees it in its §3. A Slack mention never *proves* a
 planner proposal: anyone in a workspace can write "Task-42 is done", so a proposal resting on one
-is staged for Review, not applied. Permalinks are built from `auth.test`'s team URL; channels
-only, no DMs.
+is staged for Review, not applied (a planner `create` citing one becomes a suggestion card).
+Permalinks are built from `auth.test`'s team URL; channels only, no DMs, and replies inside
+threads are not in a channel's history, so a mention made in a thread is not swept. Each channel
+keeps its own watermark, so a channel that fails one pass is re-read next time; nothing is written
+while Slack is on the line (one short commit per channel).
 
 **Discord** (`sources.discord`, read-only; built 2026-11-02). One bot token, invited to each server
 listed under `guilds`; `factotum/discord.py` has only `get`. Tools: `discord_channels` (text
@@ -528,7 +531,8 @@ reads and `stage_changes` by default, drafts and the Plaud subprocess only when
 custom connector cannot send a bearer header, so Factotum is its own OAuth 2.1 authorization server
 for `/mcp` when `server.oauth.enabled` is on: RFC 9728 protected-resource metadata (and a 401 on
 `/mcp` that points at it) → RFC 8414 server metadata → RFC 7591 dynamic registration, which accepts
-only the claude.ai / claude.com callbacks (`server.oauth.redirect_uris`) and caps live clients →
+only the claude.ai / claude.com callbacks (`server.oauth.redirect_uris`), only while Settings →
+Connections is armed, and caps live clients →
 the consent page → PKCE S256 code exchange (`resource` = `<public_url>/mcp`) → opaque tokens stored
 as SHA-256 hashes, refresh rotation, 24 h access / 90 day refresh by default. The consent page is
 the one human step and the one place identity matters: it stays behind Cloudflare Access and

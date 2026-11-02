@@ -731,7 +731,7 @@ def _discord_channel_id(ctx: Context, gid: str, channel: str) -> dict:
         return hit[0]
     by_id = {c["id"]: c for c in chans}
     th = next((t for t in _discord_threads(ctx, gid) if t.get("id") == ch), None)    # an active thread, by id
-    if th is None and " " not in ch:                                                # an archived one: ask Discord
+    if th is None and ch.isdigit():                                                 # an archived one, by snowflake: ask Discord
         try:
             th = ctx.discord_client().get(f"/channels/{ch}")
         except discord.DiscordError:
