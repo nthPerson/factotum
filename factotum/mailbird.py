@@ -17,6 +17,10 @@ from . import config as C
 
 READ_TOOLS = {"list_accounts", "list_folders", "list_conversations", "search_conversations", "get_conversation",
               "get_message", "list_attachments", "get_attachment_content", "get_ui_state", "get_help", "get_send_status"}
+# The only writes anything here may ask Mailbird for: drafts (never sent) and showing something in its
+# window. Chat's `factotum mcp` server uses them (SPEC.md §8.3); nothing else does.
+DRAFT_TOOLS = {"create_draft", "reply_to_conversation", "reply_all_to_conversation", "forward_conversation", "update_draft",
+               "show_notification", "select_conversation"}
 LOOPBACK = {"127.0.0.1", "localhost", "::1"}
 
 
@@ -68,6 +72,16 @@ class Client:
     def call(self, tool: str, args: dict | None = None):
         if tool not in READ_TOOLS:
             raise MailbirdError(f"{tool} is not a read tool; the sweep never writes to mail")
+        return self._call(tool, args)
+
+    def call_write(self, tool: str, args: dict | None = None):
+        """A draft or a window action, nothing else: send, trash, move, archive, spam, block, read
+        flags and unsubscribe are refused before any request (SPEC.md §2 "Mailbird's role")."""
+        if tool not in DRAFT_TOOLS:
+            raise MailbirdError(f"{tool} is not a draft tool; Factotum never sends, moves or deletes mail")
+        return self._call(tool, args)
+
+    def _call(self, tool: str, args: dict | None):
         res = self._rpc("tools/call", {"name": tool, "arguments": args or {}})
         content = res.get("content") or []
         text = "".join(c.get("text", "") for c in content if c.get("type") == "text")
