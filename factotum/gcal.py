@@ -150,3 +150,30 @@ def sweep_job(conn: sqlite3.Connection, cfg: dict, now_local: datetime) -> str |
     evs = events(cfg, now_local - timedelta(days=1), now_local + timedelta(days=days))
     _cache.update(at=now_local, events=evs)
     return sweep(conn, cfg, evs, now_local)
+
+
+def create_event(cfg: dict, token: str, ev: dict, transport=None) -> dict:
+    """One event on the configured calendar (SPEC.md §8.1 `calendar`). `start`/`end` are local wall
+    time (`YYYY-MM-DDTHH:MM`) or a date for all-day; a timed event without an end lasts an hour.
+    Returns {"id", "link"}."""
+    tz = str(C.get(cfg, "owner.timezone", "UTC"))
+    cal = str(C.get(cfg, "sources.calendar.calendar_id", "primary"))
+    start, end = str(ev.get("start") or "")[:16], str(ev.get("end") or "")[:16] or None
+    if "T" in start:
+        s = datetime.fromisoformat(start)
+        e = datetime.fromisoformat(end) if end and "T" in end else s + timedelta(hours=1)
+        body_start, body_end = {"dateTime": s.strftime("%Y-%m-%dT%H:%M:%S"), "timeZone": tz}, {"dateTime": e.strftime("%Y-%m-%dT%H:%M:%S"), "timeZone": tz}
+    else:
+        s = datetime.fromisoformat(start[:10])
+        e = datetime.fromisoformat(end[:10]) if end else s + timedelta(days=1)
+        body_start, body_end = {"date": s.strftime("%Y-%m-%d")}, {"date": e.strftime("%Y-%m-%d")}
+    body = {"summary": str(ev.get("title") or "Untitled")[:200], "start": body_start, "end": body_end}
+    if ev.get("description"):
+        body["description"] = str(ev["description"])[:4000]
+    if ev.get("location"):
+        body["location"] = str(ev["location"])[:200]
+    with httpx.Client(timeout=30, transport=transport) as client:
+        r = client.post(f"{API}/calendars/{cal}/events", headers={"Authorization": f"Bearer {token}"}, json=body)
+        r.raise_for_status()
+        d = r.json()
+    return {"id": d.get("id"), "link": d.get("htmlLink")}

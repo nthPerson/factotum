@@ -213,3 +213,90 @@ def test_apply_result_creates_updates_instructs_reminds_and_undoes_as_one_batch(
     assert len(bs) == 1 and bs[0]["source"] == "plaud" and res["batch_id"] == bs[0]["id"]
     batches.undo(conn, res["batch_id"])
     assert one(conn, "SELECT status FROM tasks WHERE id = 11")["status"] == "open" and one(conn, "SELECT status FROM reminders WHERE id = ?", (rem["id"],))["status"] == "cancelled"
+
+
+# --- T5 the Notion notes sink -----------------------------------------------------------------
+
+def test_markdown_becomes_notion_blocks_with_chunking():
+    from factotum import notion_notes as nn
+    md = ("## Summary\nHello **Robert** here.\n\n- one\n- two\n1. first\n```mermaid\n---\nconfig:\n  layout: cose-bilkent\n---\nmindmap\n  root((Gist))\n```\n### Deep\n" + "x" * 4500)
+    blocks = nn.md_to_blocks(md)
+    types = [b["type"] for b in blocks]
+    assert types[:7] == ["heading_2", "paragraph", "bulleted_list_item", "bulleted_list_item", "numbered_list_item", "code", "heading_3"]
+    assert blocks[0]["heading_2"]["rich_text"][0]["text"]["content"] == "Summary"
+    para = blocks[1]["paragraph"]["rich_text"]
+    assert [r["text"]["content"] for r in para] == ["Hello ", "Robert", " here."] and para[1]["annotations"]["bold"]
+    assert blocks[5]["code"]["language"] == "mermaid" and blocks[5]["code"]["rich_text"][0]["text"]["content"].startswith("---\nconfig:")
+    long = blocks[7]["paragraph"]["rich_text"]
+    assert len(long) == 3 and all(len(r["text"]["content"]) <= 2000 for r in long)
+
+
+def test_notes_sink_creates_then_updates_on_source_link(cfg):
+    import httpx
+    from factotum import notion_notes as nn
+    requests, state = [], {"exists": False}
+
+    def handler(req):
+        requests.append(req)
+        url, m = req.url.path, req.method
+        if url.endswith("/query"):
+            return httpx.Response(200, json={"results": [{"id": "page1", "url": "https://www.notion.so/page1"}] if state["exists"] else [], "has_more": False})
+        if url.endswith("/v1/pages") and m == "POST":
+            state["exists"] = True
+            return httpx.Response(200, json={"id": "page1", "url": "https://www.notion.so/page1"})
+        if url.endswith("/v1/pages/page1") and m == "PATCH":
+            return httpx.Response(200, json={"id": "page1", "url": "https://www.notion.so/page1"})
+        if url.endswith("/v1/blocks/page1/children") and m == "GET":
+            return httpx.Response(200, json={"results": [{"id": "b1"}, {"id": "b2"}], "has_more": False})
+        if url.endswith("/v1/blocks/page1/children") and m == "PATCH":
+            return httpx.Response(200, json={"results": []})
+        if "/v1/blocks/b" in url and m == "DELETE":
+            return httpx.Response(200, json={})
+        return httpx.Response(404, json={"message": url})
+    transport = httpx.MockTransport(handler)
+    note = {"properties": {"area": "Personal", "project": "Personal", "type": "Meeting", "tags": ["Task", "Meeting"], "meeting_date": "2026-11-01T21:40"},
+            "body_md": "## Summary\n" + "p\n\n" * 150, "followups": ["call the bank"]}
+    transcript = "[00:05 - 00:28] Speaker 1: Hello there.\n[00:29 - 00:37] Speaker 2: Hi.\n"
+    url = nn.upsert(cfg, REC, note, transcript, task_page_ids=["abc"], transport=transport)
+    assert url == "https://www.notion.so/page1"
+    q = json.loads(next(r for r in requests if str(r.url).endswith("/query")).content)
+    assert q["filter"] == {"property": "Source Link", "url": {"equals": "https://web.plaud.ai/file/" + REC["id"]}}
+    body = json.loads(next(r for r in requests if r.method == "POST" and str(r.url).endswith("/v1/pages")).content)
+    assert body["parent"] == {"type": "data_source_id", "data_source_id": cfg["sinks"]["notion_notes"]["data_source_id"]}
+    props = body["properties"]
+    assert props["Name"]["title"][0]["text"]["content"] == REC["name"] and props["Source Link"]["url"].endswith(REC["id"])
+    assert props["Area"]["select"]["name"] == "Personal" and props["Type"]["select"]["name"] == "Meeting"
+    assert [t["name"] for t in props["Tags"]["multi_select"]] == ["Task", "Meeting"]
+    assert props["Meeting Date"]["date"]["start"] == "2026-11-01T21:40" and props["Date"]["date"]["start"] == "2026-11-01"
+    assert props["Tasks"]["relation"] == [{"id": "abc"}]
+    assert len(body["children"]) == 100
+    appends = [r for r in requests if r.method == "PATCH" and str(r.url).endswith("/blocks/page1/children")]
+    total = len(body["children"]) + sum(len(json.loads(r.content)["children"]) for r in appends)
+    assert total == 1 + 150 + 2 + 1 + 2      # Summary heading, 150 paragraphs, follow-ups heading + bullet, transcript heading + 2 lines
+    last = json.loads(appends[-1].content)["children"][-1]["paragraph"]["rich_text"]
+    assert last[0]["annotations"]["bold"] and last[0]["text"]["content"] == "Speaker 2" and "00:29" in last[1]["text"]["content"]
+    requests.clear()
+    assert nn.upsert(cfg, REC, note, transcript, task_page_ids=[], transport=transport) == url
+    assert not any(r.method == "POST" and str(r.url).endswith("/v1/pages") for r in requests)
+    assert any(r.method == "PATCH" and str(r.url).endswith("/pages/page1") for r in requests)
+    assert sum(1 for r in requests if r.method == "DELETE") == 2
+
+
+# --- T6 calendar events -----------------------------------------------------------------------
+
+def test_calendar_create_event_builds_timed_and_all_day_payloads(cfg):
+    import httpx
+    from factotum import gcal
+    reqs = []
+
+    def handler(req):
+        reqs.append(json.loads(req.content))
+        return httpx.Response(200, json={"id": "ev1", "htmlLink": "https://cal/ev1"})
+    tp = httpx.MockTransport(handler)
+    made = gcal.create_event(cfg, "tok", {"title": "Dentist", "start": "2026-11-10T14:00", "end": None, "description": "d"}, transport=tp)
+    assert made == {"id": "ev1", "link": "https://cal/ev1"}
+    tz = cfg["owner"]["timezone"]
+    assert reqs[0]["summary"] == "Dentist" and reqs[0]["description"] == "d"
+    assert reqs[0]["start"] == {"dateTime": "2026-11-10T14:00:00", "timeZone": tz} and reqs[0]["end"] == {"dateTime": "2026-11-10T15:00:00", "timeZone": tz}
+    gcal.create_event(cfg, "tok", {"title": "Conf", "start": "2026-11-12", "end": None}, transport=tp)
+    assert reqs[1]["start"] == {"date": "2026-11-12"} and reqs[1]["end"] == {"date": "2026-11-13"}
