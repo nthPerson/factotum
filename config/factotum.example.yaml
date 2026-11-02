@@ -267,7 +267,9 @@ server:
   public_url: https://factotum.nthperson.dev
   oauth:                        # claude.ai / Claude Desktop custom connector: Factotum is its own OAuth server (docs/SETUP.md §16)
     enabled: false              # Settings → Connections toggles it; the consent page lists what the connector may do
-    consent_gate: cloudflare_access   # the consent page trusts Cf-Access-Authenticated-User-Email ∈ owner.emails; `none` only on a port nobody else reaches
+    consent_gate: cloudflare_access   # the consent page verifies Cloudflare Access's signed assertion (team + aud below) and needs an owner.emails address; `none` only on a port nobody else reaches
+    access_team: ""             # the Zero Trust team name: the <team> in https://<team>.cloudflareaccess.com
+    access_aud: ""              # the Access application's Audience (AUD) tag: Zero Trust → Access → Applications → Factotum → Overview
     redirect_uris: ["https://claude.ai/api/mcp/auth_callback", "https://claude.com/api/mcp/auth_callback"]
     access_token_hours: 24
     refresh_token_days: 90

@@ -107,6 +107,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dry-run", action="store_true", help="count what would be pushed, write nothing")
     p = sub.add_parser("connectors", help="the OAuth connectors (claude.ai, Claude Desktop) that registered against /mcp; --revoke CLIENT_ID")
     p.add_argument("--revoke", metavar="CLIENT_ID")
+    p.add_argument("--arm", action="store_true", help="allow a never-granted connector to be approved for the next 10 minutes (the Settings button)")
     sub.add_parser("score")
     sub.add_parser("review")
     p = sub.add_parser("expire")
@@ -331,7 +332,9 @@ def main(argv: list[str] | None = None) -> int:
         from . import oauth
         if a.revoke:
             print("revoked" if oauth.revoke_client(conn, a.revoke) else "no such connector (or already revoked)")
-        print(f"connector {'on' if oauth.enabled(ecfg) else 'OFF (Settings → Connections)'}; URL for claude.ai: {oauth.resource(ecfg)}")
+        if a.arm:
+            print(f"armed until {oauth.arm(conn)}: approve the connector in the app that asked")
+        print(f"connector {'on' if oauth.enabled(ecfg) else 'OFF (Settings → Connections)'}; URL for claude.ai: {oauth.resource(ecfg)}" + (f"; armed until {oauth.armed(conn)}" if oauth.armed(conn) else ""))
         for c in oauth.connectors(conn):
             state = f"revoked {c['revoked_at'][:10]}" if c["revoked_at"] else f"{c['tokens']} live token(s)"
             print(f"  {c['client_id']:34} {(c['name'] or '')[:24]:24} registered {c['created_at'][:10]}  last used {(c['last_used_at'] or '—')[:16]}  {state}")

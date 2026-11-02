@@ -18,7 +18,7 @@
   POST /mcp                                  `factotum mcp` over HTTP for a remote skill (bearer FACTOTUM_MCP_TOKEN or an OAuth access token)
   GET  /.well-known/oauth-protected-resource · /.well-known/oauth-authorization-server   the connector's discovery documents (SPEC.md §15)
   POST /oauth/register · GET|POST /oauth/authorize · POST /oauth/token   registration, the consent page (behind Access), tokens
-  GET  /api/connectors · POST /api/connectors/{client_id}/revoke   Settings → Connections
+  GET  /api/connectors · POST /api/connectors/arm · POST /api/connectors/{client_id}/revoke   Settings → Connections
 """
 from __future__ import annotations
 
@@ -76,23 +76,30 @@ class DraftOpenBody(BaseModel):
 SUGGESTION_KINDS = ("proposal", "slack_mention")      # evidence with no task that Review offers as a Create / Dismiss card
 
 
-def _consent_page(req: dict, csrf: str, base: str, who: str, tools: int) -> str:
-    """The one human step of the connector flow: what the client is, what it will be able to do."""
-    name = escape(str(req["client"].get("name") or "a connector"))
+def _consent_page(req: dict, csrf: str, base: str, who: str, tools: int, again: bool) -> str:
+    """The one human step of the connector flow: what the client is, when it registered, what it
+    will be able to do. The name is whatever the client sent; the registration line is ours."""
+    cl = req["client"]
+    name = escape(str(cl.get("name") or "a connector"))
     hidden = "".join(f'<input type="hidden" name="{k}" value="{escape(str(v))}">' for k, v in
                      (("response_type", "code"), ("client_id", req["client_id"]), ("redirect_uri", req["redirect_uri"]), ("state", req["state"]),
                       ("code_challenge", req["code_challenge"]), ("code_challenge_method", "S256"), ("scope", req["scope"]), ("resource", req["resource"]), ("csrf", csrf)))
+    reg = f"registered {escape(str(cl.get('created_at') or '')[:16].replace('T', ' '))} UTC · id {escape(req['client_id'][:8])}…"
+    prov = ("<p class=\"warn\">This connector was approved before; allowing again issues it fresh access.</p>" if again else
+            "<p class=\"warn\">A new connector, approved only because you armed Settings → Connections just now. "
+            "If you did not add this connector yourself a moment ago, choose <b>Deny</b>.</p>")
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Factotum · connect</title>
 <style>body{{font:16px/1.5 system-ui,sans-serif;margin:0;background:#f6f7f8;color:#111}} main{{max-width:520px;margin:48px auto;padding:24px;background:#fff;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,.06)}}
-h1{{font-size:20px;margin:0 0 12px}} p{{margin:8px 0}} ul{{margin:8px 0 16px 20px;padding:0}} .who{{color:#666;font-size:13px}} form{{display:flex;gap:12px;margin-top:20px}}
-button{{font:inherit;padding:10px 18px;border-radius:8px;border:1px solid #0f766e;background:#0f766e;color:#fff;cursor:pointer}} button.deny{{background:#fff;color:#111;border-color:#bbb}}</style></head>
-<body><main><h1>Connect <b>{name}</b> to Factotum?</h1>
+h1{{font-size:20px;margin:0 0 4px}} p{{margin:8px 0}} ul{{margin:8px 0 16px 20px;padding:0}} .who,.reg{{color:#666;font-size:13px}} .warn{{background:#fff7e6;border:1px solid #f0d9a8;border-radius:8px;padding:8px 12px;font-size:14px}}
+form{{display:flex;gap:12px;margin-top:20px}} button{{font:inherit;padding:10px 18px;border-radius:8px;border:1px solid #0f766e;background:#0f766e;color:#fff;cursor:pointer}} button.deny{{background:#fff;color:#111;border-color:#bbb}}</style></head>
+<body><main><h1>Connect "{name}" to Factotum?</h1><p class="reg">{reg} · says it is {name}</p>
+{prov}
 <p>It will be able to, as you:</p>
 <ul><li>read your tasks, reminders, mail, calendar, Slack and Discord through {tools} read tools</li>
 <li>stage task changes that appear in Factotum's tray for you to Apply or Dismiss — it never changes a task itself</li>
 <li>nothing is ever sent on your behalf</li></ul>
-<p class="who">Signed in as {escape(who)} · you can revoke this any time in Settings → Connections at <a href="{escape(base)}/#settings">{escape(base)}</a>.</p>
-<form method="post" action="{escape(base)}/oauth/authorize">{hidden}<button type="submit" name="decision" value="allow">Allow</button><button type="submit" name="decision" value="deny" class="deny">Deny</button></form>
+<p class="who">Signed in as {escape(who)} · revoke any time in Settings → Connections at <a href="{escape(base)}/#settings">{escape(base)}</a>.</p>
+<form method="post" action="{escape(base)}/oauth/authorize">{hidden}<button type="submit" name="decision" value="deny" class="deny">Deny</button><button type="submit" name="decision" value="allow">Allow</button></form>
 </main></body></html>"""
 
 
@@ -538,10 +545,17 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
                 return HTMLResponse(_page("Factotum", f"This connection request is not valid: {e.description}", base), status_code=e.status)
             heads = {"Cache-Control": "no-store", "X-Frame-Options": "DENY", "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' " + base,
                      "Referrer-Policy": "no-referrer"}
+            again = oauth.granted_before(w, req["client_id"])
+            if not again and not oauth.armed(w):
+                # A link anyone can mint must not be approvable by reflex: a never-granted client needs the
+                # owner to have said "I am adding a connector now" in Settings first.
+                return HTMLResponse(_page("Factotum was not expecting a new connector",
+                                          f"Open Factotum → Settings → Connections, tap \"Allow a new connector\" ({oauth.ARM_MINUTES} minutes), then try again from the app that asked. "
+                                          f"If you did not start this, nothing happened: close this page.", base), status_code=403, headers=heads)
             if decision is None:
                 from . import mcp_server
                 n = len([t for t in mcp_server.TOOLS if not t.get("skill_only")])
-                return HTMLResponse(_consent_page(req, oauth.consent_token(req), base, who, n), headers=heads)
+                return HTMLResponse(_consent_page(req, oauth.consent_token(req), base, who, n, again), headers=heads)
             if not oauth.consent_ok(req, params.get("csrf")):
                 return HTMLResponse(_page("Factotum", "This consent page has expired; go back to the connector and try again.", base), status_code=400, headers=heads)
             if decision != "allow":
@@ -590,7 +604,12 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
     def connectors():
         """Settings → Connections: every connector that registered, when it last spoke, live tokens."""
         ecfg = eff_cfg()
-        return {"enabled": oauth.enabled(ecfg), "url": oauth.resource(ecfg), "connectors": oauth.connectors(conn)}
+        return {"enabled": oauth.enabled(ecfg), "url": oauth.resource(ecfg), "armed_until": oauth.armed(conn), "connectors": oauth.connectors(conn)}
+
+    @app.post("/api/connectors/arm")
+    def connectors_arm():
+        """'Allow a new connector': for the next few minutes a never-granted client may reach the consent page."""
+        return {"armed_until": oauth.arm(conn)}
 
     @app.post("/api/connectors/{client_id}/revoke")
     def connector_revoke(client_id: str):

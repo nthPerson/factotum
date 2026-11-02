@@ -4,13 +4,17 @@ discovers this server (RFC 9728 protected-resource metadata → RFC 8414 server 
 itself (RFC 7591, only the claude.ai callbacks are accepted), sends the user to the consent page,
 and trades the code for tokens (PKCE S256 only, RFC 8707 resource = <public_url>/mcp). Tokens are
 opaque, stored as SHA-256 hashes, and refresh tokens rotate. The consent page is the one place a
-human is needed; it stays behind Cloudflare Access and trusts the identity header Access sets
-(`consent_identity`). Everything a connector may do afterwards is what `/mcp` serves.
+human is needed; it stays behind Cloudflare Access and verifies the signed assertion Access adds
+to every request (`consent_identity`: RS256 against the team's published certs, audience = the
+Access application, email ∈ owner.emails), and a connector that was never granted is approved only
+while the owner has armed Settings → Connections for it (`armed`), so a link somebody else sends
+cannot be approved by reflex. Everything a connector may do afterwards is what `/mcp` serves.
 
     resource_metadata(cfg), server_metadata(cfg)   -> the two well-known documents
     register(conn, cfg, body)                      -> RFC 7591 response (raises OAuthError)
     authorize_request(conn, cfg, params)           -> validated request for the consent page
     consent_identity(cfg, headers)                 -> the owner's email, or raises (403)
+    arm(conn) / armed(conn)                        -> the window in which a new connector may be approved
     consent_token(req) / consent_ok(req, token)    -> the consent form's CSRF token
     issue_code(conn, req) / error_url(req, err)    -> where to send the browser
     token(conn, cfg, form)                         -> the token response (raises OAuthError)
@@ -30,8 +34,10 @@ import time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 
+import httpx
+
 from . import config as C
-from .db import one, rows
+from .db import get_settings, one, rows, set_setting
 
 DEFAULT_REDIRECTS = ["https://claude.ai/api/mcp/auth_callback", "https://claude.com/api/mcp/auth_callback"]
 SCOPE = "factotum"
@@ -41,6 +47,10 @@ CODE_TTL_S = 300
 MAX_CLIENTS = 25                      # a registration endpoint is public: beyond this, revoke one in Settings
 UNUSED_CLIENT_TTL_S = 3600            # a registration that never finished its flow is dropped after an hour
 CONSENT_WINDOW_S = 600
+ARM_MINUTES = 10                      # Settings → "Allow a new connector": how long a never-granted client may be approved
+ARM_KEY = "state.oauth.arm_until"
+CERTS_TTL_S = 3600
+_CERTS: dict[str, tuple[float, list]] = {}
 _SECRET = secrets.token_bytes(32)     # signs the consent form; per process, so a restart only re-renders the page
 _VERIFIER = re.compile(r"^[A-Za-z0-9._~-]{43,128}$")
 
@@ -165,21 +175,94 @@ def authorize_request(conn: sqlite3.Connection, cfg: dict, p: dict) -> dict:
     return req
 
 
+def _b64d(x: str) -> bytes:
+    return base64.urlsafe_b64decode(x + "=" * (-len(x) % 4))
+
+
+def _fetch_certs(team: str) -> list[dict]:
+    """The team's current signing keys (JWKS). Monkeypatched by tests."""
+    r = httpx.get(f"https://{team}.cloudflareaccess.com/cdn-cgi/access/certs", timeout=10)
+    r.raise_for_status()
+    return list((r.json() or {}).get("keys") or [])
+
+
+def _certs(team: str, kid: str) -> list[dict]:
+    at, keys = _CERTS.get(team, (0.0, []))
+    if not keys or time.time() - at > CERTS_TTL_S or (kid and not any(k.get("kid") == kid for k in keys) and time.time() - at > 60):
+        keys = _fetch_certs(team)
+        _CERTS[team] = (time.time(), keys)
+    return keys
+
+
+def verify_access_jwt(token: str, team: str, aud: str) -> dict:
+    """Cloudflare Access's `Cf-Access-Jwt-Assertion`: RS256, signed by one of the team's published
+    keys, for this application (aud), from this team (iss), within its validity. Returns the claims."""
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import padding, rsa
+    try:
+        h64, p64, s64 = str(token or "").split(".")
+        head, claims, sig = json.loads(_b64d(h64)), json.loads(_b64d(p64)), _b64d(s64)
+    except (ValueError, TypeError) as e:
+        raise OAuthError("access_denied", "the Access assertion is not a JWT", 403) from e
+    if head.get("alg") != "RS256":
+        raise OAuthError("access_denied", "the Access assertion is not RS256", 403)
+    jwk = next((k for k in _certs(team, str(head.get("kid") or "")) if k.get("kid") == head.get("kid") and k.get("kty") == "RSA"), None)
+    if not jwk:
+        raise OAuthError("access_denied", "the Access assertion was signed by a key the team does not publish", 403)
+    try:
+        key = rsa.RSAPublicNumbers(int.from_bytes(_b64d(jwk["e"]), "big"), int.from_bytes(_b64d(jwk["n"]), "big")).public_key()
+        key.verify(sig, f"{h64}.{p64}".encode(), padding.PKCS1v15(), hashes.SHA256())
+    except (InvalidSignature, ValueError, KeyError) as e:
+        raise OAuthError("access_denied", "the Access assertion's signature does not verify", 403) from e
+    now = time.time()
+    auds = claims.get("aud") if isinstance(claims.get("aud"), list) else [claims.get("aud")]
+    if aud not in auds:
+        raise OAuthError("access_denied", "the Access assertion is for another application (aud)", 403)
+    if claims.get("iss") != f"https://{team}.cloudflareaccess.com":
+        raise OAuthError("access_denied", "the Access assertion is from another team (iss)", 403)
+    if not isinstance(claims.get("exp"), (int, float)) or claims["exp"] < now or (claims.get("nbf") or 0) > now + 60:
+        raise OAuthError("access_denied", "the Access assertion has expired; reload the page", 403)
+    return claims
+
+
 def consent_identity(cfg: dict, headers) -> str:
-    """Who is on the consent page. `cloudflare_access` (default): the email header Access sets after
-    its login, and it must be one of owner.emails — the origin listens on loopback, so only Cloudflare
-    can set it, and /oauth/authorize must never be in an Access bypass policy. `none`: no identity
-    (a deployment where nothing but the owner can reach the port)."""
+    """Who is on the consent page. `cloudflare_access` (default): the JWT Access attaches to every
+    request it let through, verified against the team's certs for this application, and its email
+    must be one of owner.emails (when that list is set; Access's own policy already chose who may
+    log in). A bare identity header is never enough: anything that can reach the origin can send
+    one. `none`: no identity (a deployment where nothing but the owner can reach the port)."""
     gate = str(C.get(cfg, "server.oauth.consent_gate", "cloudflare_access") or "cloudflare_access")
     if gate == "none":
         return "local"
-    email = str(headers.get("cf-access-authenticated-user-email") or "").strip().lower()
-    if not email:
-        raise OAuthError("access_denied", "open this page through the Access-protected hostname; no identity arrived with the request", 403)
+    team, aud = str(C.get(cfg, "server.oauth.access_team", "") or "").strip(), str(C.get(cfg, "server.oauth.access_aud", "") or "").strip()
+    if not team or not aud:
+        raise OAuthError("access_denied", "server.oauth.access_team and server.oauth.access_aud must name the Access team and the application's Audience tag (docs/SETUP.md §16)", 403)
+    token = str(headers.get("cf-access-jwt-assertion") or "").strip()
+    if not token:
+        raise OAuthError("access_denied", "open this page through the Access-protected hostname; no Access assertion arrived with the request", 403)
+    claims = verify_access_jwt(token, team, aud)
+    email = str(claims.get("email") or "").strip().lower()
     allowed = {str(e).strip().lower() for e in (C.get(cfg, "owner.emails", []) or []) if e}
-    if email not in allowed:
-        raise OAuthError("access_denied", f"{email} is not an owner address (owner.emails)", 403)
+    if not email or (allowed and email not in allowed):
+        raise OAuthError("access_denied", f"{email or 'that identity'} is not an owner address (owner.emails)", 403)
     return email
+
+
+def arm(conn: sqlite3.Connection) -> str:
+    until = _plus(ARM_MINUTES * 60)
+    set_setting(conn, ARM_KEY, until)
+    conn.commit()
+    return until
+
+
+def armed(conn: sqlite3.Connection) -> str | None:
+    until = str(get_settings(conn).get(ARM_KEY) or "")
+    return until if until and until > _now() else None
+
+
+def granted_before(conn: sqlite3.Connection, client_id: str) -> bool:
+    return conn.execute("SELECT 1 FROM oauth_tokens WHERE client_id = ? LIMIT 1", (client_id,)).fetchone() is not None
 
 
 def _consent_msg(req: dict, window: int) -> bytes:

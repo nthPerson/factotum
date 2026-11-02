@@ -16,12 +16,40 @@ from conftest import task
 
 CALLBACK = "https://claude.ai/api/mcp/auth_callback"
 OWNER = "rashe7414@sdsu.edu"
+TEAM, AUD = "nthperson", "aud-tag-123"
 
 
 def _oauth_cfg(cfg, **extra):
     cfg["server"]["public_url"] = "https://f.example"
-    cfg["server"]["oauth"] = dict({"enabled": True, "consent_gate": "cloudflare_access"}, **extra)
+    cfg["server"]["oauth"] = dict({"enabled": True, "consent_gate": "cloudflare_access", "access_team": TEAM, "access_aud": AUD}, **extra)
     return cfg
+
+
+@pytest.fixture
+def access(monkeypatch):
+    """A Cloudflare Access team: one RSA signing key served as the team's certs, and a JWT maker."""
+    import time
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import padding, rsa
+    from factotum import oauth
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    nums = key.public_key().public_numbers()
+    b64 = lambda b: base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+    jwk = {"kid": "k1", "kty": "RSA", "alg": "RS256", "use": "sig", "n": b64(nums.n.to_bytes(256, "big")), "e": b64(nums.e.to_bytes(3, "big"))}
+    monkeypatch.setattr(oauth, "_fetch_certs", lambda team: [jwk] if team == TEAM else [])
+
+    def jwt(email=OWNER, aud=AUD, team=TEAM, exp=3600, kid="k1", alg="RS256"):
+        now = int(time.time())
+        head = b64(json.dumps({"alg": alg, "kid": kid, "typ": "JWT"}).encode())
+        body = b64(json.dumps({"aud": [aud], "email": email, "exp": now + exp, "iat": now - 5, "nbf": now - 5, "iss": f"https://{team}.cloudflareaccess.com", "sub": "u1", "type": "app"}).encode())
+        sig = key.sign(f"{head}.{body}".encode(), padding.PKCS1v15(), hashes.SHA256())
+        return f"{head}.{body}.{b64(sig)}"
+    return jwt
+
+
+def _arm(client):
+    r = client.post("/api/connectors/arm", json={})
+    assert r.status_code == 200 and r.json()["armed_until"]
 
 
 def _pkce():
@@ -36,17 +64,18 @@ def _csrf(html: str) -> str:
     return m.group(1)
 
 
-def _authorize(client, params, decision="allow", email=OWNER):
-    r = client.get("/oauth/authorize", params=params, headers={"Cf-Access-Authenticated-User-Email": email})
+def _authorize(client, params, decision="allow", headers=None):
+    r = client.get("/oauth/authorize", params=params, headers=headers or {})
     assert r.status_code == 200, r.text
     form = dict(params, csrf=_csrf(r.text), decision=decision)
-    return client.post("/oauth/authorize", data=form, headers={"Cf-Access-Authenticated-User-Email": email}, follow_redirects=False)
+    return client.post("/oauth/authorize", data=form, headers=headers or {}, follow_redirects=False)
 
 
-def test_oauth_metadata_registration_consent_tokens_and_the_mcp_route(cfg, tmp_path, monkeypatch):
+def test_oauth_metadata_registration_consent_tokens_and_the_mcp_route(cfg, tmp_path, monkeypatch, access):
     from fastapi.testclient import TestClient
     from factotum.api import create_app
     _oauth_cfg(cfg)
+    H = {"Cf-Access-Jwt-Assertion": access()}
     monkeypatch.delenv("FACTOTUM_MCP_TOKEN", raising=False)
     app = create_app(cfg, db_path=str(tmp_path / "api.db"))
     upsert_task(app.state.conn, task(id=7, name="OAuth one")); app.state.conn.commit()
@@ -73,23 +102,30 @@ def test_oauth_metadata_registration_consent_tokens_and_the_mcp_route(cfg, tmp_p
     cid = reg.json()["client_id"]
     assert reg.json()["redirect_uris"] == [CALLBACK] and reg.json()["token_endpoint_auth_method"] == "none" and "client_secret" not in reg.json()
 
-    # consent: Access identity required, the owner's email only; bad client / redirect never redirect
+    # consent: a verified Access assertion for an owner address, and Factotum must be expecting a new connector
     verifier, challenge = _pkce()
     params = {"response_type": "code", "client_id": cid, "redirect_uri": CALLBACK, "state": "xyz", "code_challenge": challenge, "code_challenge_method": "S256",
               "scope": "factotum", "resource": "https://f.example/mcp"}
-    assert client.get("/oauth/authorize", params=params).status_code == 403                                                   # no Access header
-    assert client.get("/oauth/authorize", params=params, headers={"Cf-Access-Authenticated-User-Email": "x@evil.example"}).status_code == 403
-    page = client.get("/oauth/authorize", params=params, headers={"Cf-Access-Authenticated-User-Email": OWNER})
+    assert client.get("/oauth/authorize", params=params).status_code == 403                                                   # no assertion at all
+    assert client.get("/oauth/authorize", params=params, headers={"Cf-Access-Authenticated-User-Email": OWNER}).status_code == 403   # a bare header is not identity
+    for bad in (access(email="x@evil.example"), access(aud="other-app"), access(team="elsewhere"), access(exp=-10), access(alg="none").rsplit(".", 1)[0] + ".", "garbage"):
+        assert client.get("/oauth/authorize", params=params, headers={"Cf-Access-Jwt-Assertion": bad}).status_code == 403, bad[:20]
+    not_expected = client.get("/oauth/authorize", params=params, headers=H)
+    assert not_expected.status_code == 403 and "Allow a new connector" in not_expected.text                                  # never granted, not armed
+    _arm(client)
+    assert client.get("/api/connectors").json()["armed_until"]
+    page = client.get("/oauth/authorize", params=params, headers=H)
     assert page.status_code == 200 and "Claude" in page.text and "Factotum" in page.text and page.headers.get("x-frame-options") == "DENY"
-    assert client.get("/oauth/authorize", params=dict(params, client_id="nope"), headers={"Cf-Access-Authenticated-User-Email": OWNER}).status_code == 400
-    assert client.get("/oauth/authorize", params=dict(params, redirect_uri="https://evil.example/cb"), headers={"Cf-Access-Authenticated-User-Email": OWNER}).status_code == 400
-    plain = client.get("/oauth/authorize", params=dict(params, code_challenge_method="plain"), headers={"Cf-Access-Authenticated-User-Email": OWNER}, follow_redirects=False)
+    assert cid[:8] in page.text and "Deny" in page.text and OWNER in page.text                                              # who is asking, as whom
+    assert client.get("/oauth/authorize", params=dict(params, client_id="nope"), headers=H).status_code == 400
+    assert client.get("/oauth/authorize", params=dict(params, redirect_uri="https://evil.example/cb"), headers=H).status_code == 400
+    plain = client.get("/oauth/authorize", params=dict(params, code_challenge_method="plain"), headers=H, follow_redirects=False)
     assert plain.status_code == 302 and "error=invalid_request" in plain.headers["location"] and "state=xyz" in plain.headers["location"]
-    nocsrf = client.post("/oauth/authorize", data=dict(params, decision="allow"), headers={"Cf-Access-Authenticated-User-Email": OWNER}, follow_redirects=False)
+    nocsrf = client.post("/oauth/authorize", data=dict(params, decision="allow"), headers=H, follow_redirects=False)
     assert nocsrf.status_code == 400
-    deny = _authorize(client, params, decision="deny")
+    deny = _authorize(client, params, decision="deny", headers=H)
     assert deny.status_code == 302 and "error=access_denied" in deny.headers["location"]
-    r = _authorize(client, params)
+    r = _authorize(client, params, headers=H)
     assert r.status_code == 302
     loc = urlparse(r.headers["location"])
     assert loc.scheme == "https" and loc.netloc == "claude.ai" and loc.path == "/api/mcp/auth_callback"
@@ -134,7 +170,7 @@ def test_oauth_metadata_registration_consent_tokens_and_the_mcp_route(cfg, tmp_p
     assert client.post("/mcp", json=init, headers=h2).status_code == 401
     assert client.post("/oauth/token", data={"grant_type": "refresh_token", "refresh_token": rf.json()["refresh_token"], "client_id": cid}).json()["error"] == "invalid_client"
     assert client.get("/api/connectors").json()["connectors"][0]["revoked_at"]
-    assert client.get("/oauth/authorize", params=params, headers={"Cf-Access-Authenticated-User-Email": OWNER}).status_code == 400   # a revoked client cannot ask again
+    assert client.get("/oauth/authorize", params=params, headers=H).status_code == 400                                       # a revoked client cannot ask again
 
 
 def test_oauth_is_off_by_default_and_registration_is_capped(cfg, tmp_path, monkeypatch):
@@ -154,10 +190,20 @@ def test_oauth_is_off_by_default_and_registration_is_capped(cfg, tmp_path, monke
     c2 = TestClient(app2)
     ids = [c2.post("/oauth/register", json={"redirect_uris": [CALLBACK], "client_name": f"c{i}"}) for i in range(3)]
     assert [r.status_code for r in ids] == [201, 201, 400] and ids[2].json()["error"] == "invalid_client_metadata"
-    # consent_gate none: the page renders without an Access header (a loopback-only deployment)
+    # consent_gate none: the page renders without an Access assertion (a loopback-only deployment), once armed
     _, challenge = _pkce()
     params = {"response_type": "code", "client_id": ids[0].json()["client_id"], "redirect_uri": CALLBACK, "state": "s", "code_challenge": challenge, "code_challenge_method": "S256"}
+    assert c2.get("/oauth/authorize", params=params).status_code == 403
+    _arm(c2)
     assert c2.get("/oauth/authorize", params=params).status_code == 200
+    # the Access gate without a team and audience configured refuses rather than falling back to a header
+    cfg["server"]["oauth"] = {"enabled": True, "consent_gate": "cloudflare_access"}
+    app3 = create_app(cfg, db_path=str(tmp_path / "half.db"))
+    c3 = TestClient(app3)
+    cid3 = c3.post("/oauth/register", json={"redirect_uris": [CALLBACK], "client_name": "c"}).json()["client_id"]
+    _arm(c3)
+    r = c3.get("/oauth/authorize", params=dict(params, client_id=cid3), headers={"Cf-Access-Authenticated-User-Email": OWNER})
+    assert r.status_code == 403 and "access_team" in r.text
 
 
 def test_oauth_tokens_expire_and_a_client_only_redeems_its_own_code(cfg, tmp_path, monkeypatch):
@@ -172,7 +218,8 @@ def test_oauth_tokens_expire_and_a_client_only_redeems_its_own_code(cfg, tmp_pat
     b = client.post("/oauth/register", json={"redirect_uris": [CALLBACK], "client_name": "B"}).json()["client_id"]
     verifier, challenge = _pkce()
     params = {"response_type": "code", "client_id": a, "redirect_uri": CALLBACK, "state": "s", "code_challenge": challenge, "code_challenge_method": "S256"}
-    r = _authorize(client, params, email=None) if False else client.post("/oauth/authorize", data=dict(params, csrf=_csrf(client.get("/oauth/authorize", params=params).text), decision="allow"), follow_redirects=False)
+    _arm(client)
+    r = _authorize(client, params)
     code = parse_qs(urlparse(r.headers["location"]).query)["code"][0]
     stolen = client.post("/oauth/token", data={"grant_type": "authorization_code", "code": code, "redirect_uri": CALLBACK, "client_id": b, "code_verifier": verifier})
     assert stolen.status_code == 400 and stolen.json()["error"] == "invalid_grant"

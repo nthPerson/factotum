@@ -549,6 +549,7 @@
       ${f('claude.budgets_usd.chat_turn', 'Chat turn budget', 'Dollars a single chat turn may spend before Claude stops.', '$ ' + num('claude.budgets_usd.chat_turn', 0.05, 5) )}
       <h3>Connections</h3>
       ${f('server.oauth.enabled', 'claude.ai / Claude Desktop connector', `Factotum is the OAuth server behind <code>${esc(connectors ? connectors.url : '')}</code>: add that URL as a custom connector and approve it once on the consent page (docs/SETUP.md §16). Connectors read and stage; they never change a task.`, bool('server.oauth.enabled'))}
+      <p class="hint" style="margin:6px 0 10px"><button class="btn small" id="conn-arm">Allow a new connector (10 min)</button> ${connectors && connectors.armed_until ? `armed until ${esc(new Date(connectors.armed_until).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))} — approve the connector in the app that asked` : 'Tap this right before approving a connector for the first time; the consent page refuses a connector nobody is expecting.'}</p>
       ${connectors && connectors.connectors.length ? `<table><tr><td class="code">connector</td><td class="code">registered</td><td class="code">last used</td><td class="code">live tokens</td><td></td></tr>${connectors.connectors.map(c => `<tr class="${c.revoked_at ? 'muted' : ''}"><td>${esc(c.name || c.client_id)}</td><td>${esc((c.created_at || '').slice(0, 10))}</td><td>${esc((c.last_used_at || '—').slice(0, 16).replace('T', ' '))}</td><td>${c.revoked_at ? 'revoked ' + esc(c.revoked_at.slice(0, 10)) : c.tokens}</td><td>${c.revoked_at ? '' : `<button class="btn small" data-conn-revoke="${esc(c.client_id)}">Revoke</button>`}</td></tr>`).join('')}</table>` : '<p class="hint">No connector has registered yet.</p>'}
       <p style="margin-top:16px" class="hint">Every control saves when it changes. <button class="btn small" id="settings-save">Save now</button> <span id="settings-state"></span></p>
     </div>`;
@@ -665,6 +666,7 @@
     document.getElementById('tray-apply').onclick = applyAll;
     document.getElementById('tray-discard').onclick = () => { staged = new Map(); try { localStorage.removeItem('factotum.staged'); } catch (_) {} render(); };
     const save = document.getElementById('settings-save'); if (save) save.onclick = saveSettings;
+    const arm = document.getElementById('conn-arm'); if (arm) arm.onclick = async () => { try { await api('/api/connectors/arm', { method: 'POST' }); await loadSettings(); toast('A new connector may be approved for 10 minutes'); } catch (e) { toast('Failed: ' + e.message); } };
     panel.querySelectorAll('[data-conn-revoke]').forEach(b => b.onclick = async () => {
       if (!confirm('Revoke this connector? Its tokens stop working at once; it can connect again through the consent page.')) return;
       try { await api(`/api/connectors/${encodeURIComponent(b.dataset.connRevoke)}/revoke`, { method: 'POST' }); await loadSettings(); toast('Connector revoked'); } catch (e) { toast('Revoke failed: ' + e.message); }
