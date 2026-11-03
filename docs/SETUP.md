@@ -377,10 +377,28 @@ A skill never writes task state: `stage_changes` records a batch that appears ab
 the UI with **Apply** / **Dismiss**.
 
 From another machine, the same server answers `POST /mcp` on the service. Set
-`FACTOTUM_MCP_TOKEN` in `.env` (`openssl rand -hex 32`), restart, add a Cloudflare Access
-**bypass** policy for the path `/mcp` (Zero Trust → Access → Applications → the Factotum app →
-add a policy, action Bypass, include Everyone, path `/mcp`; the bearer token is the gate), then on
-the other machine:
+`FACTOTUM_MCP_TOKEN` in `.env` (`openssl rand -hex 32`), restart, let `/mcp` through Access (the
+box below: a second application scoped to that path, not a policy on the existing one; the bearer
+token is the gate), then on the other machine:
+
+> **Letting a path through Access.** A policy has no path field: policies attach to an
+> *application*, and an application is a hostname **plus an optional path**. The Factotum
+> application you have is the bare hostname, so its policy editor cannot name `/mcp`. Create a
+> second application for the path: Zero Trust → Access → Applications → **Add an application** →
+> Self-hosted → name `Factotum MCP` → under the application's public hostname enter subdomain
+> `factotum`, domain `nthperson.dev` and **Path** `mcp` (the Path box sits to the right of the
+> domain; no leading slash) → policy: name `token-gated`, action **Bypass**, include **Everyone**
+> → Save. Requests to `factotum.nthperson.dev/mcp` now match the more specific application and
+> skip the login; everything else still matches the bare-hostname one. More paths go in the same
+> application with **Add public hostname** (one entry per path, same policy), which is what §16
+> needs. Check from any machine without an Access session:
+>
+> ```bash
+> curl -si -X POST https://factotum.nthperson.dev/mcp -H 'Content-Type: application/json' -d '{}' | head -3
+> ```
+> `HTTP/2 401` with a `www-authenticate` line is Factotum answering (the path is through);
+> a `302` to `cloudflareaccess.com` means Access still owns it (the path or hostname is wrong,
+> or the application has not propagated yet, which takes a minute).
 
 ```bash
 claude mcp add --transport http factotum https://factotum.nthperson.dev/mcp --header "Authorization: Bearer <token>"
@@ -426,13 +444,16 @@ Factotum is its own OAuth server for `/mcp` (SPEC §15). Four steps, each once.
    consent page refuses to render until both are set: it verifies the signed assertion Access adds
    to every request against the team's certificates, and a plain identity header is never trusted.
    Restart the service.
-2. **Access bypass for the paths a connector's servers call** (they cannot log in to Access):
-   Zero Trust → Access → Applications → Add an application → Self-hosted, domain
-   `factotum.nthperson.dev`, one application per path with a policy of action **Bypass**, include
-   Everyone: `mcp`, `oauth/register`, `oauth/token`, `.well-known/oauth-protected-resource`,
+2. **Access bypass for the paths a connector's servers call** (they cannot log in to Access).
+   Policies attach to applications and an application is hostname + path (the box in §14), so
+   this is the `Factotum MCP` application from §14 with more public hostname entries, all
+   `factotum.nthperson.dev` with one of these paths, under its single Bypass / Everyone policy:
+   `mcp`, `oauth/register`, `oauth/token`, `.well-known/oauth-protected-resource`,
    `.well-known/oauth-protected-resource/mcp`, `.well-known/oauth-authorization-server`. These paths
    are protected by the tokens themselves. **Never `oauth/authorize`**, and never a wildcard that
-   covers it: that page is where you approve a connector, and Access is its login.
+   covers it: that page is where you approve a connector, and Access is its login. Check:
+   `curl -s https://factotum.nthperson.dev/.well-known/oauth-authorization-server` prints JSON with
+   `"issuer"` once the connector is enabled; a login page means the path is still behind Access.
 3. **Arm, then connect.** In Factotum → Settings → Connections tap **Allow a new connector**
    (10 minutes; both the registration claude.ai performs and your approval need the window, so
    a stranger cannot even register). Then in claude.ai: Settings → Connectors → **Add custom connector** → name

@@ -379,7 +379,11 @@ planner's suggestions (creates it could not prove) as cards with Create / Dismis
 batch. A Slack mention naming a task is the Review reason "Mentioned in Slack"; one naming none is
 a suggestion card beside the planner's (Create task files it under the workspace's project with the
 message linked). A batch a skill staged (§15) appears as a banner above every tab with Apply /
-Dismiss. Settings saves on change and exposes the sweep intervals (Slack's too), the planner toggle
+Dismiss. The tray's summary opens a checklist of the staged changes with Apply selected / Discard
+selected beside Apply all / Discard all (a wrong decision deep into a review is undone alone). On
+the Review card, Later's "Pick a date…" opens a date field with a "Use this date" button: only
+that button stages, never the field's own change event (a phone's wheel fires it mid-scroll), and
+every context gets a More / Less button on phones. Settings saves on change and exposes the sweep intervals (Slack's too), the planner toggle
 and the chat budget; Settings → Connections turns the claude.ai connector on, arms it for a new
 client, and lists every connector with Revoke.
 

@@ -13,7 +13,7 @@
   let lastBatch = null;
   let chat = { threads: null, current: null, messages: [], live: null, busy: false, from: null };   // from: {review: id} when a turn was asked from a Review card
   let lastTap = { id: null, at: 0 };   // for the hand-rolled double-click on rows
-  let ui = { tab: 'today', focus: null, sel: new Set(), open: new Set(), reviewIdx: 0, laterOpen: false, reviewPaused: false, rvNote: { id: null, text: '' }, remOpen: null, dueOpen: null, rvReply: null,
+  let ui = { tab: 'today', focus: null, sel: new Set(), open: new Set(), reviewIdx: 0, laterOpen: false, datePick: false, trayOpen: false, trayOff: new Set(), reviewPaused: false, rvNote: { id: null, text: '' }, remOpen: null, dueOpen: null, rvReply: null,
              railOpen: !window.matchMedia('(max-width: 860px)').matches, chatDrawer: false };
   try { const h = location.hash.replace('#', ''); if (TABS.includes(h)) ui.tab = h; } catch (_) {}
   try { const s = JSON.parse(localStorage.getItem('factotum.staged') || '[]'); staged = new Map(s); } catch (_) {}
@@ -119,6 +119,12 @@
   }
 
   // ---------- staging ----------
+  function persistStaged() { try { localStorage.setItem('factotum.staged', JSON.stringify([...staged])); } catch (_) {} }
+  function discardStaged(keys) {   // keys as strings; undefined = every one
+    [...staged.keys()].filter(k => !keys || keys.has(String(k))).forEach(k => staged.delete(k));
+    if (!staged.size) { ui.trayOpen = false; ui.trayOff = new Set(); }
+    persistStaged(); render();
+  }
   function stage(id, op, fields, label) {
     staged.set(id, { task_id: id, op, fields: fields || {}, label });
     try { localStorage.setItem('factotum.staged', JSON.stringify([...staged])); } catch (_) {}
@@ -141,13 +147,16 @@
     };
     (ops[kind] || (() => {}))();
   }
-  async function applyAll() {
-    const changes = [...staged.values()].map(s => ({ task_id: s.task_id, op: s.op, fields: s.fields }));
+  // keys: the staged entries to apply (the tray's dropdown); undefined = every one
+  async function applyAll(keys) {
+    const picked = keys ? [...staged].filter(([k]) => keys.has(String(k))) : [...staged];
+    const changes = picked.map(([, s]) => ({ task_id: s.task_id, op: s.op, fields: s.fields }));
     if (!changes.length) return;
     try {
       const res = await api('/api/batches/apply', { method: 'POST', body: JSON.stringify({ source: ui.tab === 'review' ? 'review' : 'ui', changes }) });
       lastBatch = res.batch_id;
-      staged = new Map(); try { localStorage.removeItem('factotum.staged'); } catch (_) {}
+      if (keys) { picked.forEach(([k]) => staged.delete(k)); persistStaged(); } else { staged = new Map(); try { localStorage.removeItem('factotum.staged'); } catch (_) {} }
+      ui.trayOpen = false; ui.trayOff = new Set();
       ui.sel.clear(); logData = null;
       if (ui.tab !== 'review') review = null;   // a stale Review page would still show the old due date; re-fetch on the next visit
       await load();
@@ -340,11 +349,12 @@
         <div class="why ${cls}">${esc(review.labels[primary])}${reasons.length > 1 ? ' · also ' + reasons.slice(1).map(r => review.labels[r]).join(', ') : ''}${flags && flags.planner ? ` · <b>${esc(flags.planner)}</b>` : ''}</div>
         <h2>${esc(x.name)}</h2>
         <div class="sub"><span class="code">Task-${x.id}</span><span class="chip proj">${esc(x.project || '—')}</span>${d ? `<span class="chip due ${d.days < 0 ? 'crit' : ''} ${x.hard ? 'hard' : ''}">${d.label}</span>` : '<span class="chip">no date</span>'}<span class="chip eff">${esc(x.effort || '?')}</span><span class="chip">${x.mentions} mention${x.mentions === 1 ? '' : 's'}</span><span class="chip">score ${x.score}</span></div>
-        <p>${esc(x.why_now || (x.score_reasons || []).join(' · '))}</p>${x.context ? `<p class="ctx ${ui.ctxOpen === x.id ? 'open' : ''}">${esc(x.context)}</p>${x.context.length > 280 ? `<button class="btn small more" data-ctx-more="${x.id}">${ui.ctxOpen === x.id ? 'Less' : 'Show all context'}</button>` : ''}` : ''}
+        <p>${esc(x.why_now || (x.score_reasons || []).join(' · '))}</p>${x.context ? `<p class="ctx ${ui.ctxOpen === x.id ? 'open' : ''}">${esc(x.context)}</p><button class="btn small more" data-ctx-more="${x.id}">${ui.ctxOpen === x.id ? 'Less' : 'More'}</button>` : ''}
         <textarea id="rv-note" rows="2" placeholder="Note to save with this decision (optional) — appended to the task's context">${esc(note)}</textarea>
         <div class="links">${x.source_link ? `<a href="${esc(x.source_link)}" target="_blank" rel="noopener">${x.source === 'Plaud' ? 'Plaud note' : 'Source'}</a>` : ''}</div>
         <div class="big"><button class="done" data-rv="done">Done <kbd>d</kbd></button><button data-rv="keep">Keep <kbd>k</kbd></button><button class="later" data-rv="later">Later <kbd>s</kbd></button><button class="drop" data-rv="drop">Drop <kbd>x</kbd></button></div>
-        <div class="later-menu ${ui.laterOpen ? 'on' : ''}"><span class="hint">Comes back on:</span><button class="btn small" data-rv="tomorrow">Tomorrow</button><button class="btn small" data-rv="fri">Friday</button><button class="btn small" data-rv="nextweek">Next week</button><input type="date" id="rv-date" min="${data.today}" aria-label="Pick a date"></div>
+        <div class="later-menu ${ui.laterOpen ? 'on' : ''}"><span class="hint">Comes back on:</span><button class="btn small" data-rv="tomorrow">Tomorrow</button><button class="btn small" data-rv="fri">Friday</button><button class="btn small" data-rv="nextweek">Next week</button><button class="btn small" data-rv="pickdate">📅 ${ui.datePick ? 'Hide date' : 'Pick a date…'}</button></div>
+        ${ui.laterOpen && ui.datePick ? `<div class="remform datepick"><label for="rv-date" class="hint">Comes back on</label><input type="date" id="rv-date" min="${data.today}" value="${isoPlus(1)}" aria-label="Pick a date"><button class="btn small primary" id="rv-date-go">Use this date</button></div>` : ''}
         ${(items[0].evidence || []).filter(e => e.change && !staged.has('e:' + e.id)).map(e => `<div class="extra"><span class="chip">Planner suggests</span><span>${esc(e.label)}${e.reason ? ` <span class="hint" style="margin:0">— ${esc(e.reason)}</span>` : ''}</span><button class="btn small primary" data-rv-accept="${e.id}">Accept</button></div>`).join('')}
         <div class="extra"><button class="btn small" data-rv="top">★ Pin to Top</button><button class="btn small" data-rv="longterm">Mark long-term (never fades)</button>${dueForm(x.id, x.due)}${reminderForm(x.id)}</div>
         ${reviewAsk(x.id)}
@@ -559,6 +569,18 @@
     document.getElementById('tray').classList.toggle('on', n > 0);
     document.getElementById('tray-count').textContent = `${n} change${n === 1 ? '' : 's'}`;
     document.getElementById('tray-list').textContent = [...staged.values()].map(s => (s.task_id ? `Task-${s.task_id} ` : '') + s.label).join(' · ');
+    const open = ui.trayOpen && n > 0;
+    const tg = document.getElementById('tray-toggle'); tg.setAttribute('aria-expanded', open); tg.querySelector('.caret').textContent = open ? '▾' : '▴';
+    const panel = document.getElementById('tray-panel'); panel.hidden = !open;
+    document.body.classList.toggle('tray-open', open);
+    if (!open) { panel.innerHTML = ''; return; }
+    const picked = [...staged].filter(([k]) => !ui.trayOff.has(String(k))).length;
+    panel.innerHTML = `<div class="rows">${[...staged].map(([k, s]) => `<label><input type="checkbox" data-tray-key="${esc(String(k))}" ${ui.trayOff.has(String(k)) ? '' : 'checked'}><span>${s.task_id ? `<span class="code">Task-${s.task_id}</span> ${esc((byId(s.task_id) || {}).name || '')}` : ''}</span><span class="what">${esc(s.label)}</span></label>`).join('')}</div>
+      <div class="acts"><span class="hint">${picked} of ${n} selected</span><button class="btn small" id="tray-discard-sel" ${picked ? '' : 'disabled'}>Discard selected</button><button class="btn small primary" id="tray-apply-sel" ${picked ? '' : 'disabled'}>Apply selected</button></div>`;
+    panel.querySelectorAll('[data-tray-key]').forEach(ck => ck.onchange = () => { if (ck.checked) ui.trayOff.delete(ck.dataset.trayKey); else ui.trayOff.add(ck.dataset.trayKey); renderTray(); });
+    const sel = () => new Set([...staged.keys()].map(String).filter(k => !ui.trayOff.has(k)));
+    document.getElementById('tray-apply-sel').onclick = () => applyAll(sel());
+    document.getElementById('tray-discard-sel').onclick = () => discardStaged(sel());
   }
 
   // ---------- wiring ----------
@@ -631,7 +653,10 @@
       try { const r = await api(`/api/review/suggestions/${id}/create`, { method: 'POST' }); const sg = (review.suggestions || []).find(x => x.id === id); if (sg) sg.created = r.task_id; toast(`Created Task-${r.task_id} · it shows as New in Review`); await load(); }
       catch (e) { toast('Create failed: ' + e.message); }
     });
-    const rd = document.getElementById('rv-date'); if (rd) rd.onchange = () => reviewAct('date', rd.value);
+    // The date is used only on the button: a date input's own change event fires while the phone's
+    // wheel is still moving, which once staged a date nobody chose.
+    const rg = document.getElementById('rv-date-go'); if (rg) rg.onclick = () => { const rd = document.getElementById('rv-date'); if (!rd || !rd.value) { toast('Pick a date first'); return; } reviewAct('date', rd.value); };
+    const rd = document.getElementById('rv-date'); if (rd) rd.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); if (rd.value) reviewAct('date', rd.value); } e.stopPropagation(); });
     const rn = document.getElementById('rv-note'); if (rn) rn.oninput = () => { ui.rvNote = { id: +rn.closest('.card').dataset.id, text: rn.value }; };
     const rm = document.getElementById('review-more'); if (rm) rm.onclick = () => loadReview();
     wireReminders(panel); wireDue(panel);
@@ -663,8 +688,9 @@
     panel.querySelectorAll('[data-goto-chat]').forEach(a => a.onclick = e => { e.preventDefault(); chat.current = +a.dataset.gotoChat; chat.threads = null; ui.tab = 'chat'; location.hash = 'chat'; render(); });
     const cmdGo = document.getElementById('cmd-go'); if (cmdGo) cmdGo.onclick = () => { const i = document.getElementById('cmd'); const v = i.value.trim(); i.value = ''; sendPrompt(v); };
     const cmd = document.getElementById('cmd'); if (cmd) cmd.addEventListener('keydown', e => { if (e.key === 'Escape') return; if (e.key === 'Enter') { const v = cmd.value.trim(); cmd.value = ''; sendPrompt(v); } e.stopPropagation(); });
-    document.getElementById('tray-apply').onclick = applyAll;
-    document.getElementById('tray-discard').onclick = () => { staged = new Map(); try { localStorage.removeItem('factotum.staged'); } catch (_) {} render(); };
+    document.getElementById('tray-apply').onclick = () => applyAll();
+    document.getElementById('tray-discard').onclick = () => discardStaged();
+    document.getElementById('tray-toggle').onclick = () => { ui.trayOpen = !ui.trayOpen; renderTray(); };
     const save = document.getElementById('settings-save'); if (save) save.onclick = saveSettings;
     const arm = document.getElementById('conn-arm'); if (arm) arm.onclick = async () => { try { await api('/api/connectors/arm', { method: 'POST' }); await loadSettings(); toast('A new connector may be approved for 10 minutes'); } catch (e) { toast('Failed: ' + e.message); } };
     panel.querySelectorAll('[data-conn-revoke]').forEach(b => b.onclick = async () => {
@@ -698,7 +724,8 @@
   function reviewAct(kind, dateStr) {
     const items = review.items.filter(i => !staged.has(i.task.id)); if (!items.length) return;
     const x = items[0].task, id = x.id;
-    if (kind === 'later') { ui.laterOpen = !ui.laterOpen; render(); return; }
+    if (kind === 'later') { ui.laterOpen = !ui.laterOpen; ui.datePick = false; render(); return; }
+    if (kind === 'pickdate') { ui.datePick = !ui.datePick; render(); return; }
     if (kind === 'top' || kind === 'longterm') { act(id, kind); return; }   // extras, not decisions
     // A decision is a review: it sets last_reviewed_at (Keep does so server-side). An optional note
     // is appended to the task's context, dated, in the same change.
@@ -717,7 +744,7 @@
     // The flags that brought the card here (a thread update, a planner proposal) are judged in the
     // same batch, so the card does not come back tomorrow for the same reason.
     (items[0].evidence || []).forEach(e => { if (!staged.has('e:' + e.id)) stageJudge(e.id, id, 'reviewed', (e.kind === 'proposal' ? 'suggestion seen' : 'thread seen')); });
-    ui.laterOpen = false; ui.rvNote = { id: null, text: '' };
+    ui.laterOpen = false; ui.datePick = false; ui.rvNote = { id: null, text: '' };
   }
   async function sendPrompt(text) {
     if (!text) return;

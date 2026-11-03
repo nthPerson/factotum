@@ -29,10 +29,10 @@
     <div class="panel" id="panel"><div class="empty">Loading…</div></div>
   </main>
   <div class="tray" id="tray">
-    <span class="count" id="tray-count">0 changes</span>
-    <span class="list" id="tray-list"></span>
-    <button class="btn" id="tray-discard">Discard</button>
-    <button class="btn primary" id="tray-apply">Apply</button>
+    <button class="summary" id="tray-toggle" aria-expanded="false" title="Show the changes"><span class="count" id="tray-count">0 changes</span><span class="list" id="tray-list"></span><span class="caret">▴</span></button>
+    <button class="btn" id="tray-discard">Discard all</button>
+    <button class="btn primary" id="tray-apply">Apply all</button>
+    <div class="tray-panel" id="tray-panel" hidden></div>
   </div>
   <div class="toast" id="toast"></div>
 </div>
