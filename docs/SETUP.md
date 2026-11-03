@@ -439,7 +439,8 @@ Factotum is its own OAuth server for `/mcp` (SPEC §15). Four steps, each once.
 
 1. **Config.** In `config/factotum.yaml` under `server.oauth`: `enabled: true` (or the toggle in
    Settings → Connections), `access_team: <team>` (the `<team>` in `https://<team>.cloudflareaccess.com`,
-   shown under Zero Trust → Settings → Custom Pages) and `access_aud: <tag>` (Zero Trust → Access →
+   shown under Zero Trust → Settings → **Team domain**; renaming it there only ends every Access
+   session and changes an external IdP's callback URL, so do it before this step) and `access_aud: <tag>` (Zero Trust → Access →
    Applications → the Factotum application → Overview → **Application Audience (AUD) Tag**). The
    consent page refuses to render until both are set: it verifies the signed assertion Access adds
    to every request against the team's certificates, and a plain identity header is never trusted.
