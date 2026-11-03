@@ -287,3 +287,69 @@ def test_a_slack_mention_never_proves_a_planner_proposal(conn, cfg):
     assert res["staged"] == ["create: Submit the grant"] and not rows(conn, "SELECT 1 AS x FROM tasks WHERE name = 'Submit the grant'")
     assert one(conn, "SELECT verdict FROM evidence WHERE id = 99")["verdict"] == "staged" and one(conn, "SELECT 1 AS x FROM evidence WHERE kind = 'proposal' AND task_id IS NULL")
     assert not rows(conn, "SELECT 1 AS x FROM links WHERE kind = 'mail_thread'")
+
+
+CIMD = "https://claude.ai/oauth/claude-client-metadata"
+CIMD_DOC = {"client_id": CIMD, "client_name": "Claude", "client_uri": "https://claude.ai", "redirect_uris": [CALLBACK, "http://localhost/callback"],
+            "grant_types": ["authorization_code", "refresh_token"], "response_types": ["code"], "token_endpoint_auth_method": "none"}
+
+
+def test_a_client_id_metadata_document_identifies_claude_without_registration(cfg, tmp_path, monkeypatch, access):
+    """CIMD (the connector dialog's recommended option): the client_id is an https URL on claude.ai
+    or claude.com whose document names the client; no registration, so the consent page shows the
+    URL's host as the requester, redirect URIs must be in the document AND in the callback allowlist
+    (loopback excepted, port ignored), and because the client_id is public, every consent needs the
+    arming window, not just the first."""
+    from fastapi.testclient import TestClient
+    from factotum import oauth
+    from factotum.api import create_app
+    _oauth_cfg(cfg)
+    docs = {CIMD: dict(CIMD_DOC), "https://claude.ai/oauth/other": {"client_id": "https://claude.ai/oauth/mismatch", "redirect_uris": [CALLBACK], "token_endpoint_auth_method": "none"},
+            "https://evil.example/oauth/claude": {"client_id": "https://evil.example/oauth/claude", "redirect_uris": [CALLBACK], "token_endpoint_auth_method": "none"}}
+    fetched = []
+    monkeypatch.setattr(oauth, "_fetch_cimd", lambda url: (fetched.append(url), docs[url])[1])
+    oauth._CIMD.clear()
+    app = create_app(cfg, db_path=str(tmp_path / "cimd.db"))
+    client = TestClient(app)
+    H = {"Cf-Access-Jwt-Assertion": access()}
+    asm = client.get("/.well-known/oauth-authorization-server").json()
+    assert asm["client_id_metadata_document_supported"] is True and "none" in asm["token_endpoint_auth_methods_supported"]
+    verifier, challenge = _pkce()
+    params = {"response_type": "code", "client_id": CIMD, "redirect_uri": CALLBACK, "state": "s1", "code_challenge": challenge, "code_challenge_method": "S256", "resource": "https://f.example/mcp"}
+    # never granted and not armed: refused before anything is fetched or stored
+    r = client.get("/oauth/authorize", params=params, headers=H)
+    assert r.status_code == 403 and "Allow a new connector" in r.text and not rows(app.state.conn, "SELECT 1 AS x FROM oauth_clients")
+    _arm(client)
+    page = client.get("/oauth/authorize", params=params, headers=H)
+    assert page.status_code == 200 and "claude.ai" in page.text and fetched == [CIMD]
+    assert one(app.state.conn, "SELECT auth_method, name FROM oauth_clients WHERE client_id = ?", (CIMD,)) == {"auth_method": "cimd", "name": "Claude"}
+    # the document is the authority on redirect URIs, and the server's allowlist still applies
+    assert client.get("/oauth/authorize", params=dict(params, redirect_uri="https://claude.ai/other"), headers=H).status_code == 400
+    docs[CIMD]["redirect_uris"].append("https://evil.example/cb"); oauth._CIMD.clear()
+    assert client.get("/oauth/authorize", params=dict(params, redirect_uri="https://evil.example/cb"), headers=H).status_code == 400
+    loop = client.get("/oauth/authorize", params=dict(params, redirect_uri="http://localhost:3118/callback"), headers=H)
+    assert loop.status_code == 200                                                                         # loopback: port ignored, allowlist not needed
+    # a document that does not name itself, or a host outside server.oauth.cimd_hosts, is no client
+    assert client.get("/oauth/authorize", params=dict(params, client_id="https://claude.ai/oauth/other"), headers=H).status_code == 400
+    assert client.get("/oauth/authorize", params=dict(params, client_id="https://evil.example/oauth/claude"), headers=H).status_code == 400
+    assert client.get("/oauth/authorize", params=dict(params, client_id="http://claude.ai/oauth/x"), headers=H).status_code == 400
+    # consent → code → tokens, the client_id URL as the public client
+    r = _authorize(client, params, headers=H)
+    code = parse_qs(urlparse(r.headers["location"]).query)["code"][0]
+    tok = client.post("/oauth/token", data={"grant_type": "authorization_code", "code": code, "redirect_uri": CALLBACK, "client_id": CIMD, "code_verifier": verifier})
+    assert tok.status_code == 200, tok.text
+    h = {"Authorization": f"Bearer {tok.json()['access_token']}"}
+    assert client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "ping"}, headers=h).status_code == 200
+    assert client.post("/oauth/token", data={"grant_type": "refresh_token", "refresh_token": tok.json()["refresh_token"], "client_id": CIMD}).status_code == 200
+    cons = client.get("/api/connectors").json()["connectors"]
+    assert cons[0]["client_id"] == CIMD and cons[0]["auth_method"] == "cimd"
+    # a public client_id can be put in anyone's link: once the window closes, a new consent needs arming again
+    from factotum.db import set_setting
+    set_setting(app.state.conn, oauth.ARM_KEY, "2000-01-01T00:00:00+00:00"); app.state.conn.commit()
+    assert client.get("/oauth/authorize", params=dict(params, state="s2"), headers=H).status_code == 403
+    # revoke kills the tokens; arming and a fresh consent bring the same client back
+    assert client.post(f"/api/connectors/{CIMD}/revoke", json={}).status_code == 200
+    assert client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "ping"}, headers=h).status_code == 401
+    _arm(client)
+    assert client.get("/oauth/authorize", params=dict(params, state="s3"), headers=H).status_code == 200
+    assert one(app.state.conn, "SELECT revoked_at FROM oauth_clients WHERE client_id = ?", (CIMD,))["revoked_at"] is None

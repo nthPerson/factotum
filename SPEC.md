@@ -534,9 +534,13 @@ reads and `stage_changes` by default, drafts and the Plaud subprocess only when
 **The claude.ai connector (built 2026-11-02, `factotum/oauth.py`).** A claude.ai or Claude Desktop
 custom connector cannot send a bearer header, so Factotum is its own OAuth 2.1 authorization server
 for `/mcp` when `server.oauth.enabled` is on: RFC 9728 protected-resource metadata (and a 401 on
-`/mcp` that points at it) → RFC 8414 server metadata → RFC 7591 dynamic registration, which accepts
-only the claude.ai / claude.com callbacks (`server.oauth.redirect_uris`), only while Settings →
-Connections is armed, and caps live clients →
+`/mcp` that points at it) → RFC 8414 server metadata (advertising `client_id_metadata_document_supported`)
+→ the client identifies itself either by its Client ID Metadata Document (the client_id is an https
+URL on a host in `server.oauth.cimd_hosts`, claude.ai / claude.com; the document must name itself
+and is the authority on its redirect URIs, which must still be in `server.oauth.redirect_uris`
+unless loopback; stored once the owner reaches its consent page, and because that id is public
+every consent needs the arming window) or by RFC 7591 dynamic registration, which accepts only
+the allowlisted callbacks, only while Settings → Connections is armed, and caps live clients →
 the consent page → PKCE S256 code exchange (`resource` = `<public_url>/mcp`) → opaque tokens stored
 as SHA-256 hashes, refresh rotation, 24 h access / 90 day refresh by default. The consent page is
 the one human step and the one place identity matters: it stays behind Cloudflare Access and

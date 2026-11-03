@@ -437,14 +437,16 @@ Everything below is reversible or archival; nothing in Factotum depends on it.
 
 Factotum is its own OAuth server for `/mcp` (SPEC §15). Four steps, each once.
 
-1. **Config.** In `config/factotum.yaml` under `server.oauth`: `enabled: true` (or the toggle in
-   Settings → Connections), `access_team: <team>` (the `<team>` in `https://<team>.cloudflareaccess.com`,
+1. **Config.** Turn the connector on in **Settings → Connections**, not in the YAML: the Settings
+   tab stores that toggle as an override in the database, and an override beats the file (an
+   earlier auto-save of the unticked box leaves `false` there, and a later `enabled: true` in the
+   YAML changes nothing). Then in `config/factotum.yaml` under `server.oauth`: `access_team: <team>` (the `<team>` in `https://<team>.cloudflareaccess.com`,
    shown under Zero Trust → Settings → **Team domain**; renaming it there only ends every Access
    session and changes an external IdP's callback URL, so do it before this step) and `access_aud: <tag>` (Zero Trust → Access →
    Applications → the Factotum application → Overview → **Application Audience (AUD) Tag**). The
    consent page refuses to render until both are set: it verifies the signed assertion Access adds
    to every request against the team's certificates, and a plain identity header is never trusted.
-   Restart the service.
+   Restart the service (the YAML is read at start; the Settings toggle is live at once).
 2. **Add the connector's paths to the `Factotum MCP` application from §14.** No new application:
    open that one (Zero Trust → Access → Applications → Factotum MCP → edit), and in its domain
    section use **Add domain** (the current dashboard lets one self-hosted application list several
@@ -461,9 +463,13 @@ Factotum is its own OAuth server for `/mcp` (SPEC §15). Four steps, each once.
 3. **Arm, then connect.** In Factotum → Settings → Connections tap **Allow a new connector**
    (10 minutes; both the registration claude.ai performs and your approval need the window, so
    a stranger cannot even register). Then in claude.ai: Settings → Connectors → **Add custom connector** → name
-   Factotum, URL `https://factotum.nthperson.dev/mcp` → Connect (Claude Desktop shares the same
-   connectors). claude.ai registers itself, sends you to the consent page (your Access login, then
-   "Connect "Claude" to Factotum?" with the registration time), and you tap Allow. A consent page
+   Factotum, URL `https://factotum.nthperson.dev/mcp`, Authentication "Sign in now", OAuth client
+   either **Use Claude's published identity** (recommended; Claude identifies itself by a document
+   it hosts on claude.ai and nothing is registered) or **Register automatically** (Claude registers
+   a client each time it connects) → Connect. Claude Desktop shares the same connectors. claude.ai
+   sends you to the consent page (your Access login, then "Connect claude.ai to Factotum?" with
+   how the client identified itself), and you tap Allow. With the published identity the client
+   id is public, so every consent, not only the first, needs the arming window. A consent page
    that arrives when you did not just do this is someone else's: Deny.
 4. **Check and revoke.** Settings → Connections (or `.venv/bin/python -m factotum connectors`)
    lists every connector, when it last spoke and its live tokens; Revoke kills them all at once.

@@ -1,7 +1,9 @@
 """Factotum as the OAuth 2.1 authorization server behind its own `/mcp` (SPEC.md §15 "the claude.ai
 connector"). A claude.ai or Claude Desktop custom connector cannot send a bearer header, so it
-discovers this server (RFC 9728 protected-resource metadata → RFC 8414 server metadata), registers
-itself (RFC 7591, only the claude.ai callbacks are accepted), sends the user to the consent page,
+discovers this server (RFC 9728 protected-resource metadata → RFC 8414 server metadata), identifies
+itself — by its published Client ID Metadata Document (CIMD: the client_id is an https URL on
+claude.ai / claude.com whose JSON names the client and its redirect URIs; nothing is registered)
+or by registering (RFC 7591, only the claude.ai callbacks are accepted) — sends the user to the consent page,
 and trades the code for tokens (PKCE S256 only, RFC 8707 resource = <public_url>/mcp). Tokens are
 opaque, stored as SHA-256 hashes, and refresh tokens rotate. The consent page is the one place a
 human is needed; it stays behind Cloudflare Access and verifies the signed assertion Access adds
@@ -12,6 +14,7 @@ cannot be approved by reflex. Everything a connector may do afterwards is what `
 
     resource_metadata(cfg), server_metadata(cfg)   -> the two well-known documents
     register(conn, cfg, body)                      -> RFC 7591 response (raises OAuthError)
+    client(conn, client_id, cfg) / remember_client -> a registered client, or a CIMD client from its document (stored once consented)
     authorize_request(conn, cfg, params)           -> validated request for the consent page
     consent_identity(cfg, headers)                 -> the owner's email, or raises (403)
     arm(conn) / armed(conn)                        -> the window in which a new connector may be approved
@@ -47,6 +50,11 @@ CODE_TTL_S = 300
 MAX_CLIENTS = 25                      # a registration endpoint is public: beyond this, revoke one in Settings
 UNUSED_CLIENT_TTL_S = 3600            # a registration that never finished its flow is dropped after an hour
 CONSENT_WINDOW_S = 600
+CIMD_HOSTS = ["claude.ai", "claude.com"]   # hosts whose published client documents are accepted as client_ids (server.oauth.cimd_hosts)
+CIMD_TTL_S = 3600
+CIMD_MAX_BYTES = 16384
+_CIMD: dict[str, tuple[float, dict]] = {}
+LOOPBACK = ("localhost", "127.0.0.1", "[::1]")
 ARM_MINUTES = 10                      # Settings → "Allow a new connector": how long a never-granted client may be approved
 ARM_KEY = "state.oauth.arm_until"
 CERTS_TTL_S = 3600
@@ -101,15 +109,98 @@ def server_metadata(cfg: dict) -> dict:
     return {"issuer": b, "authorization_endpoint": f"{b}/oauth/authorize", "token_endpoint": f"{b}/oauth/token", "registration_endpoint": f"{b}/oauth/register",
             "response_types_supported": ["code"], "response_modes_supported": ["query"], "grant_types_supported": list(GRANTS),
             "code_challenge_methods_supported": ["S256"], "token_endpoint_auth_methods_supported": list(AUTH_METHODS), "scopes_supported": [SCOPE],
-            "authorization_response_iss_parameter_supported": True, "service_documentation": b + "/"}
+            "client_id_metadata_document_supported": True, "authorization_response_iss_parameter_supported": True, "service_documentation": b + "/"}
 
 
 # ---- clients --------------------------------------------------------------------------------------
 
-def client(conn: sqlite3.Connection, client_id: str | None) -> dict | None:
+def is_cimd(cfg: dict | None, client_id: str | None) -> bool:
+    """A client_id that is a Client ID Metadata Document URL: https, a host from
+    server.oauth.cimd_hosts (no port, no user info), a real path, no query or fragment."""
+    from urllib.parse import urlsplit
+    try:
+        u = urlsplit(str(client_id or ""))
+    except ValueError:
+        return False
+    hosts = [str(h).lower() for h in (C.get(cfg or {}, "server.oauth.cimd_hosts", None) or CIMD_HOSTS)]
+    return u.scheme == "https" and u.netloc.lower() in hosts and len(u.path) > 1 and not u.query and not u.fragment and "@" not in u.netloc
+
+
+def _fetch_cimd(url: str) -> dict:
+    """The document itself. Monkeypatched by tests."""
+    r = httpx.get(url, timeout=10, follow_redirects=False, headers={"Accept": "application/json"})
+    r.raise_for_status()
+    if len(r.content) > CIMD_MAX_BYTES:
+        raise ValueError("client metadata document too large")
+    return r.json()
+
+
+def cimd_document(cfg: dict, url: str) -> dict:
+    """Fetch (cached) and validate a client's published document: it must name itself (client_id ==
+    the URL it came from), be a public client, and list redirect URIs."""
+    at, doc = _CIMD.get(url, (0.0, None))
+    if doc is None or time.time() - at > CIMD_TTL_S:
+        try:
+            doc = _fetch_cimd(url)
+        except (httpx.HTTPError, ValueError) as e:
+            raise OAuthError("invalid_client", f"the client's metadata document could not be read ({type(e).__name__})", 400) from e
+        _CIMD[url] = (time.time(), doc)
+    if not isinstance(doc, dict) or doc.get("client_id") != url:
+        raise OAuthError("invalid_client", "the client's metadata document does not name itself (client_id must equal its URL)", 400)
+    if str(doc.get("token_endpoint_auth_method") or "none") != "none":
+        raise OAuthError("invalid_client", "a client identified by its document is a public client (token_endpoint_auth_method none)", 400)
+    uris = doc.get("redirect_uris")
+    if not isinstance(uris, list) or not uris or not all(isinstance(u, str) and u for u in uris):
+        raise OAuthError("invalid_client", "the client's metadata document lists no redirect_uris", 400)
+    return doc
+
+
+def client(conn: sqlite3.Connection, client_id: str | None, cfg: dict | None = None) -> dict | None:
+    """A live registered client; or, for a CIMD client_id, the client its document describes — not
+    stored until the owner reaches the consent page (`remember_client`), and revived there after a
+    revocation. None for anything else."""
     if not client_id:
         return None
-    return one(conn, "SELECT * FROM oauth_clients WHERE client_id = ? AND revoked_at IS NULL", (str(client_id),))
+    row = one(conn, "SELECT * FROM oauth_clients WHERE client_id = ?", (str(client_id),))
+    if row and not row["revoked_at"]:
+        return row
+    if cfg is not None and is_cimd(cfg, client_id):
+        doc = cimd_document(cfg, str(client_id))
+        name = " ".join(str(doc.get("client_name") or "connector").split())[:100]
+        return {"client_id": str(client_id), "name": name, "secret_hash": None, "redirect_uris_json": json.dumps(doc["redirect_uris"]), "auth_method": "cimd",
+                "created_at": row["created_at"] if row else _now(), "revoked_at": None, "last_used_at": row["last_used_at"] if row else None, "_unsaved": True}
+    return None
+
+
+def remember_client(conn: sqlite3.Connection, cl: dict) -> None:
+    """Store (or revive) a CIMD client once the owner is on its consent page."""
+    if not cl.get("_unsaved"):
+        return
+    conn.execute("INSERT INTO oauth_clients (client_id, name, secret_hash, redirect_uris_json, auth_method, created_at) VALUES (?, ?, NULL, ?, 'cimd', ?) "
+                 "ON CONFLICT(client_id) DO UPDATE SET name = excluded.name, redirect_uris_json = excluded.redirect_uris_json, revoked_at = NULL",
+                 (cl["client_id"], cl["name"], cl["redirect_uris_json"], cl["created_at"]))
+    conn.commit()
+
+
+def _loopback(uri: str):
+    from urllib.parse import urlsplit
+    u = urlsplit(uri)
+    return (u.hostname or "").lower() in ("localhost", "127.0.0.1", "::1") and u.scheme == "http"
+
+
+def _redirect_ok(cfg: dict, cl: dict, ru: str) -> bool:
+    """A registered client's URIs are already allowlisted. A CIMD document's URIs are the client's own
+    word, so a non-loopback one must also be in server.oauth.redirect_uris; a loopback one matches
+    with the port ignored (Claude Code picks an ephemeral port)."""
+    from urllib.parse import urlsplit
+    uris = json.loads(cl["redirect_uris_json"])
+    if cl.get("auth_method") != "cimd":
+        return ru in uris
+    if _loopback(ru):
+        r = urlsplit(ru)
+        return any(_loopback(u) and urlsplit(u).path == r.path and (urlsplit(u).hostname or "").lower() == (r.hostname or "").lower() for u in uris)
+    allowed = [str(u).rstrip("/") for u in (C.get(cfg, "server.oauth.redirect_uris", None) or DEFAULT_REDIRECTS)]
+    return ru in uris and ru.rstrip("/") in allowed
 
 
 def register(conn: sqlite3.Connection, cfg: dict, body) -> dict:
@@ -159,13 +250,13 @@ def authorize_request(conn: sqlite3.Connection, cfg: dict, p: dict) -> dict:
     """Validate an authorization request. A bad client or redirect_uri raises with no redirect (the
     browser must not be sent to an unknown place); anything after that raises with `redirect` set,
     and the caller sends the error back to the client's callback."""
-    cl = client(conn, p.get("client_id"))
+    cl = client(conn, p.get("client_id"), cfg)
     if not cl:
         raise OAuthError("invalid_client", "unknown or revoked client_id", 400)
     uris = json.loads(cl["redirect_uris_json"])
-    ru = p.get("redirect_uri") or (uris[0] if len(uris) == 1 else None)
-    if not ru or ru not in uris:
-        raise OAuthError("invalid_request", "redirect_uri is not one this client registered", 400)
+    ru = str(p.get("redirect_uri") or (uris[0] if len(uris) == 1 else "") or "")
+    if not ru or not _redirect_ok(cfg, cl, ru):
+        raise OAuthError("invalid_request", "redirect_uri is not one this client may use", 400)
     req = {"client": cl, "client_id": cl["client_id"], "redirect_uri": ru, "state": str(p.get("state") or "")}
     if p.get("response_type") != "code":
         raise OAuthError("unsupported_response_type", "response_type must be code", redirect=req)
@@ -323,7 +414,7 @@ def _issue(conn: sqlite3.Connection, cfg: dict, client_id: str, scope: str) -> d
 
 
 def token(conn: sqlite3.Connection, cfg: dict, form: dict) -> dict:
-    cl = client(conn, form.get("client_id"))
+    cl = client(conn, form.get("client_id"), cfg)
     if not cl:
         raise OAuthError("invalid_client", "unknown or revoked client_id", 401)
     if cl["secret_hash"] and not hmac.compare_digest(_h(str(form.get("client_secret") or "")), cl["secret_hash"]):

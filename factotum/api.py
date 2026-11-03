@@ -80,20 +80,24 @@ SUGGESTION_KINDS = ("proposal", "slack_mention")      # evidence with no task th
 def _consent_page(req: dict, csrf: str, base: str, who: str, tools: int, again: bool) -> str:
     """The one human step of the connector flow: what the client is, when it registered, what it
     will be able to do. The name is whatever the client sent; the registration line is ours."""
+    from urllib.parse import urlsplit
     cl = req["client"]
+    cimd = cl.get("auth_method") == "cimd"
     name = escape(str(cl.get("name") or "a connector"))
+    asks = escape(urlsplit(req["client_id"]).netloc) if cimd else f'"{name}"'      # a document is self-asserted: its host is the requester
     hidden = "".join(f'<input type="hidden" name="{k}" value="{escape(str(v))}">' for k, v in
                      (("response_type", "code"), ("client_id", req["client_id"]), ("redirect_uri", req["redirect_uri"]), ("state", req["state"]),
                       ("code_challenge", req["code_challenge"]), ("code_challenge_method", "S256"), ("scope", req["scope"]), ("resource", req["resource"]), ("csrf", csrf)))
-    reg = f"registered {escape(str(cl.get('created_at') or '')[:16].replace('T', ' '))} UTC · id {escape(req['client_id'][:8])}…"
-    prov = ("<p class=\"warn\">This connector was approved before; allowing again issues it fresh access.</p>" if again else
-            "<p class=\"warn\">A new connector, approved only because you armed Settings → Connections just now. "
-            "If you did not add this connector yourself a moment ago, choose <b>Deny</b>.</p>")
+    reg = (f"identified by its published document {escape(req['client_id'])} · says it is {name}" if cimd else
+           f"registered {escape(str(cl.get('created_at') or '')[:16].replace('T', ' '))} UTC · id {escape(req['client_id'][:8])}… · says it is {name}")
+    prov = ("<p class=\"warn\">This connector was approved before; allowing again issues it fresh access.</p>" if again and not cimd else
+            "<p class=\"warn\">Approved only because you armed Settings → Connections just now. "
+            "If you did not start this from the connector yourself a moment ago, choose <b>Deny</b>: this link may have been made by someone else.</p>")
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Factotum · connect</title>
 <style>body{{font:16px/1.5 system-ui,sans-serif;margin:0;background:#f6f7f8;color:#111}} main{{max-width:520px;margin:48px auto;padding:24px;background:#fff;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,.06)}}
 h1{{font-size:20px;margin:0 0 4px}} p{{margin:8px 0}} ul{{margin:8px 0 16px 20px;padding:0}} .who,.reg{{color:#666;font-size:13px}} .warn{{background:#fff7e6;border:1px solid #f0d9a8;border-radius:8px;padding:8px 12px;font-size:14px}}
 form{{display:flex;gap:12px;margin-top:20px}} button{{font:inherit;padding:10px 18px;border-radius:8px;border:1px solid #0f766e;background:#0f766e;color:#fff;cursor:pointer}} button.deny{{background:#fff;color:#111;border-color:#bbb}}</style></head>
-<body><main><h1>Connect "{name}" to Factotum?</h1><p class="reg">{reg} · says it is {name}</p>
+<body><main><h1>Connect {asks} to Factotum?</h1><p class="reg">{reg}</p>
 {prov}
 <p>It will be able to, as you:</p>
 <ul><li>use {tools} Factotum tools: read your tasks, reminders, mail, calendar, Slack and Discord</li>
@@ -550,12 +554,14 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
             heads = {"Cache-Control": "no-store", "X-Frame-Options": "DENY", "Content-Security-Policy": f"default-src 'none'; style-src 'unsafe-inline'; form-action 'self' {base} {origins}".strip(),
                      "Referrer-Policy": "no-referrer"}
             again = oauth.granted_before(w, req["client_id"])
-            if not again and not oauth.armed(w):
-                # A link anyone can mint must not be approvable by reflex: a never-granted client needs the
-                # owner to have said "I am adding a connector now" in Settings first.
+            # A link anyone can mint must not be approvable by reflex: a never-granted client needs the owner
+            # to have said "I am adding a connector now" in Settings first — and a CIMD client every time,
+            # since its client_id is public.
+            if (not again or req["client"].get("auth_method") == "cimd") and not oauth.armed(w):
                 return HTMLResponse(_page("Factotum was not expecting a new connector",
                                           f"Open Factotum → Settings → Connections, tap \"Allow a new connector\" ({oauth.ARM_MINUTES} minutes), then try again from the app that asked. "
                                           f"If you did not start this, nothing happened: close this page.", base), status_code=403, headers=heads)
+            oauth.remember_client(w, req["client"])
             if decision is None:
                 return HTMLResponse(_consent_page(req, oauth.consent_token(req), base, who, len(_mcp_allowed(ecfg)), again), headers=heads)
             if not oauth.consent_ok(req, params.get("csrf")):
@@ -613,8 +619,8 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         """'Allow a new connector': for the next few minutes a never-granted client may reach the consent page."""
         return {"armed_until": oauth.arm(conn)}
 
-    @app.post("/api/connectors/{client_id}/revoke")
-    def connector_revoke(client_id: str):
+    @app.post("/api/connectors/{client_id:path}/revoke")
+    def connector_revoke(client_id: str):                   # a CIMD client_id is a URL, slashes and all
         if not oauth.revoke_client(conn, client_id):
             raise HTTPException(404, "no such connector, or already revoked")
         return {"ok": True}

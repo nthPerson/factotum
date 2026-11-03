@@ -158,6 +158,10 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
 - **A `slack_mention` never proves a planner proposal** (2026-11-02): anyone in a workspace can
   write "Task-42 is done". `planner.NON_PROVING` stages such a proposal for Review; and its link is
   `slack_message`, never `mail_thread` (the mail sweep polls those through Mailbird).
+- **A Settings-tab override hides a YAML edit** (2026-11-02): every `SETTINGS_KEYS` control auto-saves,
+  so once a box has been seen unticked the database holds `false` and `C.effective` prefers it to the
+  file. `server.oauth.enabled: true` in the YAML did nothing until the toggle was ticked in Settings.
+  Change such keys in Settings; the YAML is their default for a fresh database.
 - **`expire` only touches rows Review has shown** (`last_offered_at`, stamped by `GET /api/review`).
   A row that was never on a Review page stays open however old it is; that is by design.
 

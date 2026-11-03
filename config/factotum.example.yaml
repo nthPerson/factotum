@@ -271,5 +271,6 @@ server:
     access_team: ""             # the Zero Trust team name: the <team> in https://<team>.cloudflareaccess.com
     access_aud: ""              # the Access application's Audience (AUD) tag: Zero Trust → Access → Applications → Factotum → Overview
     redirect_uris: ["https://claude.ai/api/mcp/auth_callback", "https://claude.com/api/mcp/auth_callback"]
+    cimd_hosts: [claude.ai, claude.com]   # hosts whose published client documents may serve as a client_id (the dialog's recommended option)
     access_token_hours: 24
     refresh_token_days: 90
