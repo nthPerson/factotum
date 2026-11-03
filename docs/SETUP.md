@@ -445,14 +445,17 @@ Factotum is its own OAuth server for `/mcp` (SPEC §15). Four steps, each once.
    consent page refuses to render until both are set: it verifies the signed assertion Access adds
    to every request against the team's certificates, and a plain identity header is never trusted.
    Restart the service.
-2. **Access bypass for the paths a connector's servers call** (they cannot log in to Access).
-   Policies attach to applications and an application is hostname + path (the box in §14), so
-   this is the `Factotum MCP` application from §14 with more public hostname entries, all
-   `factotum.nthperson.dev` with one of these paths, under its single Bypass / Everyone policy:
-   `mcp`, `oauth/register`, `oauth/token`, `.well-known/oauth-protected-resource`,
-   `.well-known/oauth-protected-resource/mcp`, `.well-known/oauth-authorization-server`. These paths
-   are protected by the tokens themselves. **Never `oauth/authorize`**, and never a wildcard that
-   covers it: that page is where you approve a connector, and Access is its login. Check:
+2. **Add the connector's paths to the `Factotum MCP` application from §14.** No new application:
+   open that one (Zero Trust → Access → Applications → Factotum MCP → edit), and in its domain
+   section use **Add domain** (the current dashboard lets one self-hosted application list several
+   hostname + path entries) to add five more entries, each `factotum.nthperson.dev` with one of
+   these paths: `oauth/register`, `oauth/token`, `.well-known/oauth-protected-resource`,
+   `.well-known/oauth-protected-resource/mcp`, `.well-known/oauth-authorization-server`. The
+   application's existing Bypass / Everyone policy covers them all; the tokens are the gate. Two
+   applications is the whole picture: the original Factotum one is the login for the UI and the
+   consent page, `Factotum MCP` is everything a token protects, and they cannot be merged because
+   a policy applies to the whole application. **Never add `oauth/authorize`**, and never a wildcard
+   that covers it: that page is where you approve a connector, and Access is its login. Check:
    `curl -s https://factotum.nthperson.dev/.well-known/oauth-authorization-server` prints JSON with
    `"issuer"` once the connector is enabled; a login page means the path is still behind Access.
 3. **Arm, then connect.** In Factotum → Settings → Connections tap **Allow a new connector**
