@@ -561,13 +561,13 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
                 return HTMLResponse(_page("Factotum was not expecting a new connector",
                                           f"Open Factotum → Settings → Connections, tap \"Allow a new connector\" ({oauth.ARM_MINUTES} minutes), then try again from the app that asked. "
                                           f"If you did not start this, nothing happened: close this page.", base), status_code=403, headers=heads)
-            oauth.remember_client(w, req["client"])
             if decision is None:
                 return HTMLResponse(_consent_page(req, oauth.consent_token(req), base, who, len(_mcp_allowed(ecfg)), again), headers=heads)
             if not oauth.consent_ok(req, params.get("csrf")):
                 return HTMLResponse(_page("Factotum", "This consent page has expired; go back to the connector and try again.", base), status_code=400, headers=heads)
             if decision != "allow":
                 return RedirectResponse(oauth.error_url(req, oauth.OAuthError("access_denied", "the user declined")), status_code=302, headers=heads)
+            oauth.remember_client(w, req["client"])            # a CIMD client exists for Factotum from the moment it is allowed
             return RedirectResponse(oauth.issue_code(w, ecfg, req), status_code=302, headers=heads)
         finally:
             w.close()

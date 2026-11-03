@@ -322,7 +322,7 @@ def test_a_client_id_metadata_document_identifies_claude_without_registration(cf
     _arm(client)
     page = client.get("/oauth/authorize", params=params, headers=H)
     assert page.status_code == 200 and "claude.ai" in page.text and fetched == [CIMD]
-    assert one(app.state.conn, "SELECT auth_method, name FROM oauth_clients WHERE client_id = ?", (CIMD,)) == {"auth_method": "cimd", "name": "Claude"}
+    assert not rows(app.state.conn, "SELECT 1 AS x FROM oauth_clients")                                   # viewing the page stores nothing; Allow does
     # the document is the authority on redirect URIs, and the server's allowlist still applies
     assert client.get("/oauth/authorize", params=dict(params, redirect_uri="https://claude.ai/other"), headers=H).status_code == 400
     docs[CIMD]["redirect_uris"].append("https://evil.example/cb"); oauth._CIMD.clear()
@@ -336,6 +336,7 @@ def test_a_client_id_metadata_document_identifies_claude_without_registration(cf
     # consent → code → tokens, the client_id URL as the public client
     r = _authorize(client, params, headers=H)
     code = parse_qs(urlparse(r.headers["location"]).query)["code"][0]
+    assert one(app.state.conn, "SELECT auth_method, name FROM oauth_clients WHERE client_id = ?", (CIMD,)) == {"auth_method": "cimd", "name": "Claude"}
     tok = client.post("/oauth/token", data={"grant_type": "authorization_code", "code": code, "redirect_uri": CALLBACK, "client_id": CIMD, "code_verifier": verifier})
     assert tok.status_code == 200, tok.text
     h = {"Authorization": f"Bearer {tok.json()['access_token']}"}
@@ -347,9 +348,18 @@ def test_a_client_id_metadata_document_identifies_claude_without_registration(cf
     from factotum.db import set_setting
     set_setting(app.state.conn, oauth.ARM_KEY, "2000-01-01T00:00:00+00:00"); app.state.conn.commit()
     assert client.get("/oauth/authorize", params=dict(params, state="s2"), headers=H).status_code == 403
-    # revoke kills the tokens; arming and a fresh consent bring the same client back
+    # revoke kills the tokens AND a code issued just before it; the token endpoint never revives a revoked client
+    _arm(client)
+    v2, c2 = _pkce()
+    r = _authorize(client, dict(params, state="s2b", code_challenge=c2), headers=H)
+    pending = parse_qs(urlparse(r.headers["location"]).query)["code"][0]
     assert client.post(f"/api/connectors/{CIMD}/revoke", json={}).status_code == 200
     assert client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "ping"}, headers=h).status_code == 401
+    dead = client.post("/oauth/token", data={"grant_type": "authorization_code", "code": pending, "redirect_uri": CALLBACK, "client_id": CIMD, "code_verifier": v2})
+    assert dead.status_code in (400, 401) and dead.json()["error"] in ("invalid_client", "invalid_grant")
+    assert client.post("/oauth/token", data={"grant_type": "refresh_token", "refresh_token": tok.json()["refresh_token"], "client_id": CIMD}).json()["error"] in ("invalid_client", "invalid_grant")
     _arm(client)
     assert client.get("/oauth/authorize", params=dict(params, state="s3"), headers=H).status_code == 200
-    assert one(app.state.conn, "SELECT revoked_at FROM oauth_clients WHERE client_id = ?", (CIMD,))["revoked_at"] is None
+    assert one(app.state.conn, "SELECT revoked_at FROM oauth_clients WHERE client_id = ?", (CIMD,))["revoked_at"]      # viewing revives nothing
+    assert _authorize(client, dict(params, state="s3"), headers=H).status_code == 302
+    assert one(app.state.conn, "SELECT revoked_at FROM oauth_clients WHERE client_id = ?", (CIMD,))["revoked_at"] is None   # Allow does

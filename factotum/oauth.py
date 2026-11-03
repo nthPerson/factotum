@@ -156,9 +156,10 @@ def cimd_document(cfg: dict, url: str) -> dict:
 
 
 def client(conn: sqlite3.Connection, client_id: str | None, cfg: dict | None = None) -> dict | None:
-    """A live registered client; or, for a CIMD client_id, the client its document describes — not
-    stored until the owner reaches the consent page (`remember_client`), and revived there after a
-    revocation. None for anything else."""
+    """A live registered or stored client; or, with `cfg` (the consent path only), the client a CIMD
+    client_id's document describes — not stored until the owner allows it (`remember_client`), and
+    revived there after a revocation. The token endpoint passes no cfg: a revoked client stays
+    revoked there, so a code or refresh token from before the revoke is dead. None for anything else."""
     if not client_id:
         return None
     row = one(conn, "SELECT * FROM oauth_clients WHERE client_id = ?", (str(client_id),))
@@ -173,7 +174,7 @@ def client(conn: sqlite3.Connection, client_id: str | None, cfg: dict | None = N
 
 
 def remember_client(conn: sqlite3.Connection, cl: dict) -> None:
-    """Store (or revive) a CIMD client once the owner is on its consent page."""
+    """Store (or revive) a CIMD client once the owner has allowed it."""
     if not cl.get("_unsaved"):
         return
     conn.execute("INSERT INTO oauth_clients (client_id, name, secret_hash, redirect_uris_json, auth_method, created_at) VALUES (?, ?, NULL, ?, 'cimd', ?) "
@@ -414,7 +415,7 @@ def _issue(conn: sqlite3.Connection, cfg: dict, client_id: str, scope: str) -> d
 
 
 def token(conn: sqlite3.Connection, cfg: dict, form: dict) -> dict:
-    cl = client(conn, form.get("client_id"), cfg)
+    cl = client(conn, form.get("client_id"))                  # no revival here: see client()
     if not cl:
         raise OAuthError("invalid_client", "unknown or revoked client_id", 401)
     if cl["secret_hash"] and not hmac.compare_digest(_h(str(form.get("client_secret") or "")), cl["secret_hash"]):
@@ -473,5 +474,6 @@ def revoke_client(conn: sqlite3.Connection, client_id: str) -> bool:
     now = _now()
     cur = conn.execute("UPDATE oauth_clients SET revoked_at = ? WHERE client_id = ? AND revoked_at IS NULL", (now, client_id))
     conn.execute("UPDATE oauth_tokens SET revoked_at = COALESCE(revoked_at, ?) WHERE client_id = ?", (now, client_id))
+    conn.execute("UPDATE oauth_codes SET used_at = COALESCE(used_at, ?) WHERE client_id = ?", (now, client_id))     # a code minted before the revoke dies with it
     conn.commit()
     return cur.rowcount > 0
