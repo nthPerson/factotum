@@ -441,8 +441,10 @@ Factotum is its own OAuth server for `/mcp` (SPEC §15). Four steps, each once.
    tab stores that toggle as an override in the database, and an override beats the file (an
    earlier auto-save of the unticked box leaves `false` there, and a later `enabled: true` in the
    YAML changes nothing). Then in `config/factotum.yaml` under `server.oauth`: `access_team: <team>` (the `<team>` in `https://<team>.cloudflareaccess.com`,
-   shown under Zero Trust → Settings → **Team domain**; renaming it there only ends every Access
-   session and changes an external IdP's callback URL, so do it before this step) and `access_aud: <tag>` (Zero Trust → Access →
+   shown under Zero Trust → Settings → **Team domain**; renaming it changes an external IdP's
+   callback URL, and a browser session from before the rename keeps the old issuer until you sign
+   out at `https://factotum.nthperson.dev/cdn-cgi/access/logout` and back in — the consent page
+   says so when it sees one) and `access_aud: <tag>` (Zero Trust → Access →
    Applications → the Factotum application → Overview → **Application Audience (AUD) Tag**). The
    consent page refuses to render until both are set: it verifies the signed assertion Access adds
    to every request against the team's certificates, and a plain identity header is never trusted.

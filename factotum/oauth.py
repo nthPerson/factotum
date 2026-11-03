@@ -85,6 +85,13 @@ def resource(cfg: dict) -> str:
     return base_url(cfg) + "/mcp"
 
 
+_BASE_HINT = ""          # the public URL, for the logout hint in an error page (set by consent_identity)
+
+
+def base_url_hint() -> str:
+    return _BASE_HINT
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -322,7 +329,9 @@ def verify_access_jwt(token: str, team: str, aud: str) -> dict:
     if aud not in auds:
         raise OAuthError("access_denied", "the Access assertion is for another application (aud)", 403)
     if claims.get("iss") != f"https://{team}.cloudflareaccess.com":
-        raise OAuthError("access_denied", "the Access assertion is from another team (iss)", 403)
+        # A session from before a team rename still carries the old issuer: log out of Access and in again.
+        raise OAuthError("access_denied", f"the Access assertion was issued by {claims.get('iss') or 'no team'}, not https://{team}.cloudflareaccess.com; "
+                         f"if the team was renamed, sign out at {base_url_hint()}/cdn-cgi/access/logout and back in", 403)
     if not isinstance(claims.get("exp"), (int, float)) or claims["exp"] < now or (claims.get("nbf") or 0) > now + 60:
         raise OAuthError("access_denied", "the Access assertion has expired; reload the page", 403)
     return claims
@@ -340,6 +349,8 @@ def consent_identity(cfg: dict, headers) -> str:
     team, aud = str(C.get(cfg, "server.oauth.access_team", "") or "").strip(), str(C.get(cfg, "server.oauth.access_aud", "") or "").strip()
     if not team or not aud:
         raise OAuthError("access_denied", "server.oauth.access_team and server.oauth.access_aud must name the Access team and the application's Audience tag (docs/SETUP.md §16)", 403)
+    global _BASE_HINT
+    _BASE_HINT = base_url(cfg)
     token = str(headers.get("cf-access-jwt-assertion") or "").strip()
     if not token:
         raise OAuthError("access_denied", "open this page through the Access-protected hostname; no Access assertion arrived with the request", 403)
