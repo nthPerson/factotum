@@ -331,7 +331,7 @@ def verify_access_jwt(token: str, team: str, aud: str) -> dict:
     if claims.get("iss") != f"https://{team}.cloudflareaccess.com":
         # A session from before a team rename still carries the old issuer: log out of Access and in again.
         raise OAuthError("access_denied", f"the Access assertion was issued by {claims.get('iss') or 'no team'}, not https://{team}.cloudflareaccess.com; "
-                         f"if the team was renamed, sign out at {base_url_hint()}/cdn-cgi/access/logout and back in", 403)
+                         f"if the team was renamed, end the old session: open https://{team}.cloudflareaccess.com/cdn-cgi/access/logout, or delete this site's cookies, or revoke the application's tokens in Zero Trust, then sign in again", 403)
     if not isinstance(claims.get("exp"), (int, float)) or claims["exp"] < now or (claims.get("nbf") or 0) > now + 60:
         raise OAuthError("access_denied", "the Access assertion has expired; reload the page", 403)
     return claims

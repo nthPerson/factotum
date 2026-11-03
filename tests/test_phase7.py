@@ -115,7 +115,7 @@ def test_oauth_metadata_registration_consent_tokens_and_the_mcp_route(cfg, tmp_p
     assert client.get("/oauth/authorize", params=params, headers={"Cf-Access-Authenticated-User-Email": OWNER}).status_code == 403   # a bare header is not identity
     b64 = lambda x: base64.urlsafe_b64encode(x.encode()).rstrip(b"=").decode()
     stale = client.get("/oauth/authorize", params=params, headers={"Cf-Access-Jwt-Assertion": access(team="lark-dev")})
-    assert stale.status_code == 403 and "issued by https://lark-dev.cloudflareaccess.com" in stale.text and "/cdn-cgi/access/logout" in stale.text   # a session from before a rename
+    assert stale.status_code == 403 and "issued by https://lark-dev.cloudflareaccess.com" in stale.text and f"https://{TEAM}.cloudflareaccess.com/cdn-cgi/access/logout" in stale.text   # a session from before a rename
     for bad in (access(email="x@evil.example"), access(aud="other-app"), access(team="elsewhere"), access(exp=-10), access(alg="none").rsplit(".", 1)[0] + ".", "garbage",
                 f"{b64('[1]')}.{b64('{}')}.{b64('x')}", f"{b64('{\"alg\":\"RS256\"}')}.{b64('[]')}.{b64('x')}"):
         assert client.get("/oauth/authorize", params=params, headers={"Cf-Access-Jwt-Assertion": bad}).status_code == 403, bad[:20]
