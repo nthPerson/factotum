@@ -191,9 +191,12 @@ time watermark and writes rows to `evidence`: a reply from the ADDRESS a task wa
 `waiting_on` (a display-name match is only flagged: names are forgeable); a message the account
 itself sent to a task's `counterpart` after the task was created closes a "reply to …" task
 (closed_by `mail-evidence`, link kept) and is a candidate for any other; a task under a watch
-(`close_on_sent_since`, set by the `watch_sent` op: "close this when I have sent the mail") closes
-when a message to its counterpart's address is sent after the watch began, whatever it is called
-(evidence `sent_watched`, judged in the same batch); a linked thread
+(`close_on_sent_since` and `close_on_sent_to`, set by the `watch_sent` op: "close this when I have
+sent the mail") closes when a message to the watched address is sent after the watch began,
+whatever it is called, and the watch ends with it (evidence `sent_watched`, judged in the same
+batch; a reopened task is not closed again; a watched task is closed by its watch only). The Inbox
+and Sent folders keep separate watermarks and Sent re-reads a ten-minute overlap, because a sent
+message can reach Mailbird after a newer Inbox one was swept; a linked thread
 (`links.kind = mail_thread`) that moved is flagged; `.ics` invitations and confirmation-shaped
 subjects are candidates with a 500-character excerpt. Review shows the flags as "Thread updated";
 the planner judges the candidates. Bodies are fetched for candidates only and treated as data.
@@ -564,8 +567,16 @@ changes go through `batches.apply` and nothing else: source `connector` (the HTT
 sent-mail watch in the same batch; undo drops the row, never deletes it, since ids are forever and
 the mirror may have a page), `reopen`, `watch_sent` / `unwatch_sent`. Validation is shared:
 existing rows in the right state, settable fields only (score, priority, status and mentions stay
-derived), taxonomy projects, well-formed reminders and addresses, at most 40 changes, and no
-twin of an open task's name. Tools carry MCP annotations (reads `readOnlyHint`; `apply_changes`
+derived), taxonomy projects, well-formed dates, efforts, reminders and addresses, integer ids,
+at most 40 changes a call (the cut is reported), and no twin of an open task's name (compared
+case- and space-insensitively, within the call too). Nothing is dropped quietly: a value the
+cleaner would lose rejects its change, and a key that is not settable comes back in `ignored`.
+Because nobody taps Apply on a direct write, three more bounds apply to it: direct changes are
+capped per hour (`server.mcp_apply_hourly_cap`, 100; beyond it Claude must stage), an address a
+direct batch put on a task is not a contact `mail_draft_new` may write to (the same address through
+the tray, the UI or an input is), and a watch keeps its address in its own column, never in
+`counterpart`. The Stage setting is read on every call, so switching back reaches a running Claude
+Code session at once. Tools carry MCP annotations (reads `readOnlyHint`; `apply_changes`
 `destructiveHint`) so the client can ask the user first. The cost of `apply` is stated on the
 consent page: text Claude read in the same conversation (a mail, a Slack message) can steer what
 it writes, and the remedy is the Log's Undo rather than a tap beforehand. `/mcp` takes the static token or an access token and serves the same allowlist

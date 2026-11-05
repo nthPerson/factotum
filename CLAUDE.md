@@ -74,7 +74,7 @@ pages and plaud-sync is the user's checklist (SETUP §15). Update this paragraph
 | a skill staging a batch, the tray banner, the HTTP MCP route and its allowlist | SPEC §15 | `factotum/mcp_server.py` (`stage_changes`, `Context.allowed`), `api.py` (`/api/proposals`, `/mcp`), `skills/` |
 | Slack / Discord read tools, workspaces and servers, tokens | SPEC §6 | `factotum/slack.py`, `factotum/discord.py`, `mcp_server.py` (`slack_*`, `discord_*`) |
 | verdicts on evidence (dismiss, accept, reviewed), planner suggestions on Review | SPEC §9 | `factotum/batches.py` (`judge_evidence`), `api.py` (`/api/review`, `/api/review/suggestions`, `SUGGESTION_KINDS`) |
-| what a connector or skill may write: validation, staging vs direct apply, create, the sent-mail watch | SPEC §15 "Writing from a connector" | `factotum/mcp_server.py` (`_validate_changes`, `stage_changes`, `apply_changes`), `batches.py` (`_create`, `watch_fields`), `mail_sweep.py` (`close_on_sent_since`) |
+| what a connector or skill may write: validation, staging vs direct apply, create, the sent-mail watch | SPEC §15 "Writing from a connector" | `factotum/mcp_server.py` (`_validate_changes`, `stage_changes`, `apply_changes`), `batches.py` (`_create`, `watch_fields`), `mail_sweep.py` (`watched`), `mcp_server.known_recipients` |
 | the Slack mention sweep, "Mentioned in Slack", a mention as a suggestion card | SPEC §6 "Slack" | `factotum/slack_sweep.py` (`sweep`), `lifecycle.REVIEW_ORDER`, `mail_sweep.review_flags`, `planner.NON_PROVING` |
 | the claude.ai connector: metadata, registration, consent gate, arming, tokens, `/mcp` auth | SPEC §15, SETUP §16 | `factotum/oauth.py` (`consent_identity`, `verify_access_jwt`, `armed`, `token`, `check_access`), `api.py` (`/oauth/*`, `/api/connectors`) |
 
@@ -167,8 +167,20 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
   suggestion cards still create outside a batch (upsert by `source_key`); only connector / skill
   creates ride in one.
 - **`apply_changes` exists only when `server.mcp_writes` is `apply`** (2026-11-04): hidden from
-  `tools/list` and refused on call otherwise, on both the HTTP route and the stdio skill server. A
-  chat turn never has it (no writer). Whatever the mode, the write is `batches.apply`.
+  `tools/list` and refused on call otherwise, on both the HTTP route and the stdio skill server
+  (which re-reads the setting on every call). A chat turn never has it (no writer). Whatever the
+  mode, the write is `batches.apply`.
+- **Nobody taps Apply on a direct write, so the validator is the check** (review 2026-11-04):
+  `_validate_changes` rejects a value the cleaner would drop (a bad due, an unknown effort or
+  project, a name over 80) instead of losing it; `task_id` must be `type(...) is int` (True is
+  Task-1); direct changes are capped per hour; and an address a direct batch put on a task is not
+  in `known_recipients`. A new settable field needs a line in that validator, not only in `SETTABLE`.
+- **The watch columns are not `SETTABLE`** (2026-11-04): `close_on_sent_since` / `close_on_sent_to`
+  are written by `watch_sent` / `unwatch_sent` only, and the watched address never goes into
+  `counterpart`. The sweep ends the watch when it fires, so a reopened task is not closed again.
+- **The mail sweep keeps one watermark per folder** (2026-11-04): `state.mail_sweep.last_at.<address>.inbox|sent`
+  (the bare key is the old shared one, still read as a starting point); with one shared mark a sent
+  message that reached Mailbird after a newer Inbox conversation was swept was skipped for good.
 - **A Settings-tab override hides a YAML edit** (2026-11-02): every `SETTINGS_KEYS` control auto-saves,
   so once a box has been seen unticked the database holds `false` and `C.effective` prefers it to the
   file. `server.oauth.enabled: true` in the YAML did nothing until the toggle was ticked in Settings.

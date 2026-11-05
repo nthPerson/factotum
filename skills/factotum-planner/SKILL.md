@@ -68,8 +68,11 @@ instead of creating its twin (a create with an open task's exact name is refused
 | close it once I have emailed `<person>` | `{"op": "watch_sent", "task_id": n, "fields": {"to": "person@example.org"}}` — find the address with `mail_search` if the user gave a name; the mail sweep closes the task when a message to it is sent from now on. On a new task: `"watch_sent_to": "…"` beside `fields` |
 | stop watching / bring a closed task back | `{"op": "unwatch_sent"}` / `{"op": "reopen"}` |
 
-Every op but `create` needs `task_id`. A watch needs an email address, not a name; if the search
-finds two candidates, ask which.
+Every op but `create` needs `task_id` (an integer). A watch needs an email address, not a name; if
+the search finds two candidates, ask which. Read the result: `rejected` says why a change was left
+out (a due that is not a date, a project outside the taxonomy, a name over 80 characters) and
+`ignored` names keys that are not settable, so never report a field as set unless it was. Direct
+writes are capped per hour; past the cap, stage.
 
 ## Invariants
 

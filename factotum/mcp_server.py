@@ -52,7 +52,8 @@ class Context:
     allowed: set | None = None               # tool names this context serves; None = every tool (chat turns pass their own --allowedTools)
     slack: object = None                     # factory(token) → slack.Client (tests)
     discord: object = None                   # factory(token) → discord.Client (tests)
-    apply_writes: bool = False               # server.mcp_writes == "apply": apply_changes is offered and writes a batch at once
+    apply_writes: object = False             # server.mcp_writes == "apply": apply_changes is offered and writes a batch at once; a bool, or a
+                                             # callable read on every list / call (the stdio server outlives a change of the setting)
     source: str = "skill"                    # the batch / proposal source: "skill" (stdio from Claude Code) or "connector" (the HTTP route)
     tool_log: list = field(default_factory=list)
     _mail: object = field(default=None, repr=False)
@@ -61,7 +62,11 @@ class Context:
     _slack: dict = field(default_factory=dict, repr=False)      # token → client; (token, user id) → name; token → {channel name: id}
     _discord: object = field(default=None, repr=False)
 
+    def may_apply(self) -> bool:
+        return bool(self.apply_writes() if callable(self.apply_writes) else self.apply_writes) and self.writer is not None
+
     def __post_init__(self):
+        self._auto_today = self.today is None                 # a long-lived server follows the calendar
         self.conn.execute("PRAGMA query_only = 1")
         self.run_dir = Path(self.run_dir) if self.run_dir else None      # created lazily by record(): an HTTP request that reads nothing leaves no directory
         self.today = self.today or date.today()
@@ -185,7 +190,7 @@ def tool(name: str, description: str, properties: dict, required: list[str] = ()
 
 
 def _offered(ctx, t: dict) -> bool:
-    return (ctx.allowed is None or t["name"] in ctx.allowed) and (not t.get("apply_only") or ctx.apply_writes)
+    return (ctx.allowed is None or t["name"] in ctx.allowed) and (not t.get("apply_only") or ctx.may_apply())
 
 
 def _int(args: dict, key: str, default=None, lo=None, hi=None):
@@ -319,11 +324,28 @@ def known_recipients(ctx: Context) -> set[str]:
     """Addresses a NEW draft may be sent to: the user's own accounts and every address a task names
     (counterpart, waiting_on, account). Nothing read from mail counts — a message that CCs a stranger
     must not make that stranger a valid recipient — so to write to someone who only appears in a thread
-    the model replies on that thread (security review 2026-11-02)."""
+    the model replies on that thread (security review 2026-11-02). Nor does an address that Claude
+    itself put on a task with a direct write (`apply_changes`): nobody tapped Apply on it, so text
+    Claude read could otherwise name a stranger and then draft to them (review 2026-11-04). The same
+    address through the tray, the UI, a recording or an import counts."""
     out: set[str] = set(ctx.accounts()["by_email"]) | {str(r["address"] or "").lower() for r in rows(ctx.conn, "SELECT address FROM accounts")}
-    for r in rows(ctx.conn, "SELECT counterpart, waiting_on, account FROM tasks"):
-        for v in r.values():
-            out.update(m.lower() for m in EMAIL_RE.findall(str(v or "")))
+    emails = lambda v: {m.lower() for m in EMAIL_RE.findall(v if isinstance(v, str) else json.dumps(v) if v else "")}
+    untrusted: dict[int, set] = {}
+    direct = {r["id"] for r in rows(ctx.conn, "SELECT id FROM batches WHERE source IN ('skill', 'connector') AND id NOT IN (SELECT batch_id FROM proposals WHERE batch_id IS NOT NULL)")}
+    if direct:
+        for ch in rows(ctx.conn, "SELECT batch_id, task_id, field, old, new FROM changes WHERE field IN ('counterpart', 'waiting_on', 'created') ORDER BY id"):
+            try:
+                old, new = json.loads(ch["old"]) if ch["old"] else None, json.loads(ch["new"]) if ch["new"] else None
+            except ValueError:
+                continue
+            added = emails(new) - emails(old)
+            if ch["batch_id"] in direct:
+                untrusted.setdefault(int(ch["task_id"]), set()).update(added)
+            else:                                            # the user (or an input) put it there since: a contact again
+                untrusted.get(int(ch["task_id"]), set()).difference_update(added)
+    for r in rows(ctx.conn, "SELECT id, counterpart, waiting_on, account FROM tasks"):
+        found = emails(r["counterpart"]) | emails(r["waiting_on"]) | emails(r["account"])
+        out.update(found - untrusted.get(int(r["id"]), set()))
     return out
 
 
@@ -535,50 +557,77 @@ def _extra_fields(fields: dict) -> dict:
     return out
 
 
-def _validate_changes(ctx: Context, changes) -> tuple[list[dict], list[str]]:
+MAX_CHANGES, MAX_REMINDERS, NAME_MAX = 40, 10, 80
+
+
+def _norm_name(v) -> str:
+    return " ".join(str(v or "").split()).casefold()
+
+
+def _validate_changes(ctx: Context, changes) -> tuple[list[dict], list[str], list[str]]:
     """What a skill or connector may ask for, cleaned: existing rows in the right state, settable
-    fields, taxonomy projects, well-formed reminders and addresses, no twin of an open task. Returns
-    (changes batches.apply will take, reasons for the ones left out)."""
+    fields, taxonomy projects, well-formed dates, efforts, reminders and addresses, no twin of an
+    open task. In apply mode nobody taps Apply, so nothing is dropped quietly: a value the cleaner
+    would lose rejects its change, and a key that is not settable is named in `ignored`. Returns
+    (changes batches.apply will take, reasons for the ones left out, keys ignored)."""
     from . import batches
     from .sync_file import _clean_task_fields
     if not isinstance(changes, list) or not changes:
         raise ToolError("changes must be a non-empty list")
-    kept, rejected = [], []
+    kept, rejected, ignored = [], [], []
+    efforts = C.get(ctx.cfg, "taxonomy.efforts", []) or ["XS", "S", "M", "L"]
+    names = {_norm_name(r["name"]) : r["id"] for r in rows(ctx.conn, "SELECT id, name FROM tasks WHERE status = 'open'")}
 
     def cleaned(i, fields):
+        if len(str(fields.get("name") or "").strip()) > NAME_MAX:
+            rejected.append(f"#{i}: name is over {NAME_MAX} characters; shorten it and put the rest in context"); return None
         f = _clean_task_fields(ctx.cfg, fields)
         if fields.get("project") and f.get("project") != fields["project"]:      # the cleaner maps an unknown project to Unknown or None: never silently
             rejected.append(f"#{i}: project {fields['project']!r} is not in the taxonomy (" + ", ".join(C.project_names(ctx.cfg)[:12]) + ")"); return None
+        if fields.get("due") and not f.get("due"):
+            rejected.append(f"#{i}: due {fields['due']!r} is not a date; use YYYY-MM-DD or YYYY-MM-DDTHH:MM"); return None
+        if fields.get("effort") and f.get("effort") != fields["effort"]:
+            rejected.append(f"#{i}: effort must be one of {', '.join(efforts)}, not {fields['effort']!r}"); return None
         try:
             f.update(_extra_fields(fields))
         except ToolError as e:
             rejected.append(f"#{i}: {e}"); return None
+        for k in fields:
+            if k not in f:
+                ignored.append(f"#{i}: {k} is not settable (derived, or not a task field)")
         return f
 
-    for i, ch in enumerate(changes[:40]):
+    if len(changes) > MAX_CHANGES:
+        rejected.append(f"#{MAX_CHANGES}+: {len(changes) - MAX_CHANGES} more change(s) not read; at most {MAX_CHANGES} per call")
+    for i, ch in enumerate(changes[:MAX_CHANGES]):
         if not isinstance(ch, dict):
             rejected.append(f"#{i}: not an object"); continue
         op, tid = ch.get("op"), ch.get("task_id")
         if op not in STAGE_OPS:
             rejected.append(f"#{i}: op {op!r} is not one of {sorted(STAGE_OPS)}"); continue
-        fields = dict(ch.get("fields") or {})
+        fields = ch.get("fields") if ch.get("fields") is not None else {}
+        if not isinstance(fields, dict):
+            rejected.append(f"#{i}: fields must be an object"); continue
         if op == "create":
             f = cleaned(i, fields)
             if f is None:
                 continue
             if not f.get("name"):
                 rejected.append(f"#{i}: a create needs fields.name"); continue
-            twin = one(ctx.conn, "SELECT id FROM tasks WHERE status = 'open' AND LOWER(name) = ?", (f["name"].lower(),))
-            if twin:
-                rejected.append(f"#{i}: Task-{twin['id']} already has this name; edit it instead"); continue
+            twin = names.get(_norm_name(f["name"]))
+            if twin is not None:
+                rejected.append(f"#{i}: {'Task-' + str(twin) if twin else 'an earlier create in this call'} already has this name; edit it instead"); continue
             out = {"op": "create", "fields": f}
             to = ch.get("watch_sent_to")
             if to:
                 if not batches.EMAIL_RE.fullmatch(str(to).strip()):
                     rejected.append(f"#{i}: watch_sent_to {to!r} is not an email address"); continue
                 out["watch_sent_to"] = str(to).strip().lower()
+            rs = ch.get("reminders") or []
+            if not isinstance(rs, list) or len(rs) > MAX_REMINDERS:
+                rejected.append(f"#{i}: reminders must be a list of at most {MAX_REMINDERS}"); continue
             rems, bad = [], None
-            for r in (ch.get("reminders") or [])[:10]:
+            for r in rs:
                 try:
                     rems.append(batches._reminder_fields({"fields": r if isinstance(r, dict) else {}}))
                 except ValueError as e:
@@ -587,8 +636,11 @@ def _validate_changes(ctx: Context, changes) -> tuple[list[dict], list[str]]:
                 rejected.append(f"#{i}: reminder: {bad}"); continue
             if rems:
                 out["reminders"] = rems
+            names[_norm_name(f["name"])] = 0                  # a second create of the same name in this call is a twin too
             kept.append(out); continue
-        row = one(ctx.conn, "SELECT * FROM tasks WHERE id = ?", (tid,)) if isinstance(tid, int) else None
+        if type(tid) is not int:                             # True is an int in Python, and Task-1 is somebody's task
+            rejected.append(f"#{i}: task_id must be an integer, not {tid!r}"); continue
+        row = one(ctx.conn, "SELECT * FROM tasks WHERE id = ?", (tid,))
         if not row:
             rejected.append(f"#{i}: no task {tid}"); continue
         if op == "reopen":
@@ -617,7 +669,7 @@ def _validate_changes(ctx: Context, changes) -> tuple[list[dict], list[str]]:
             kept.append({"task_id": tid, "op": "watch_sent", "fields": {"to": str(fields["to"]).strip().lower()} if fields.get("to") else {}})
         else:
             kept.append({"task_id": tid, "op": op, "fields": {}})
-    return kept, rejected
+    return kept, rejected, ignored
 
 
 @tool("stage_changes", "Stage task changes for the user to apply: ONE batch the Factotum tray shows with Apply / Dismiss. Nothing changes "
@@ -628,7 +680,7 @@ def stage_changes(ctx: Context, args: dict) -> dict:
     query_only). The tray applies it as one batch or dismisses it; nothing is written before that."""
     if ctx.writer is None:
         raise ToolError("staging is not available in this run (no writer); describe the changes to the user instead")
-    kept, rejected = _validate_changes(ctx, args.get("changes"))
+    kept, rejected, ignored = _validate_changes(ctx, args.get("changes"))
     if not kept:
         raise ToolError("nothing stageable: " + "; ".join(rejected)[:600])
     label = _cut(args.get("label"), 200) or f"{len(kept)} change{'s' if len(kept) != 1 else ''} from Claude"
@@ -644,7 +696,7 @@ def stage_changes(ctx: Context, args: dict) -> dict:
         except Exception:   # noqa: BLE001
             pass
     ctx.record("proposals", {"proposal_id": pid, "staged": len(kept)})
-    return {"proposal_id": pid, "staged": len(kept), "rejected": rejected,
+    return {"proposal_id": pid, "staged": len(kept), "rejected": rejected, "ignored": ignored,
             "note": "Staged, not applied: the user sees this batch in Factotum's tray and taps Apply (or Dismiss). Tell them so."}
 
 
@@ -656,12 +708,19 @@ def apply_changes(ctx: Context, args: dict) -> dict:
     """The direct write (SPEC §15): offered only when `server.mcp_writes` is `apply`, and still
     nothing but `batches.apply` — validated like a staged batch, one batch per call, source
     `connector` or `skill`, every change with its old value in the Log and an Undo."""
-    if ctx.writer is None or not ctx.apply_writes:
+    if not ctx.may_apply():
         raise ToolError("direct writes are off in this deployment; use stage_changes")
     from . import batches
-    kept, rejected = _validate_changes(ctx, args.get("changes"))
+    kept, rejected, ignored = _validate_changes(ctx, args.get("changes"))
     if not kept:
         raise ToolError("nothing applicable: " + "; ".join(rejected)[:600])
+    # One bad conversation must not rewrite the list: direct changes are capped per hour (tray-applied batches do not count).
+    cap = int(C.get(ctx.cfg, "server.mcp_apply_hourly_cap", 100))
+    since = (datetime.now(timezone.utc) - timedelta(hours=1)).replace(microsecond=0).isoformat()
+    used = ctx.conn.execute("SELECT COUNT(*) FROM changes c JOIN batches b ON b.id = c.batch_id WHERE b.source IN ('skill', 'connector') AND b.applied_at > ? "
+                            "AND b.id NOT IN (SELECT batch_id FROM proposals WHERE batch_id IS NOT NULL)", (since,)).fetchone()[0]
+    if used + len(kept) > cap:
+        raise ToolError(f"direct writes are capped at {cap} changes an hour and {used} are used; stage these with stage_changes (the user applies them in the tray), or wait")
     w = ctx.writer()
     try:
         res = batches.apply(w, kept, ctx.source, ctx.today)
@@ -672,7 +731,7 @@ def apply_changes(ctx: Context, args: dict) -> dict:
             pass
     created = [{"task_id": i, "name": (one(ctx.conn, "SELECT name FROM tasks WHERE id = ?", (i,)) or {}).get("name")} for i in res["created"]]
     ctx.record("applied", {"batch_id": res["batch_id"], "applied": res["applied"], "label": _cut(args.get("label"), 200)})
-    return {"batch_id": res["batch_id"], "applied": res["applied"], "created": created, "skipped": res["skipped"], "rejected": rejected,
+    return {"batch_id": res["batch_id"], "applied": res["applied"], "created": created, "skipped": res["skipped"], "rejected": rejected, "ignored": ignored,
             "note": f"Applied as batch {res['batch_id']}. The user can undo it in Factotum → Log. A watch_sent closes its task when the mail sweep next sees the sent message."}
 
 
@@ -981,6 +1040,8 @@ def dispatch(ctx: Context, msg) -> dict | None:
         if not isinstance(args, dict):
             ctx.tool_log.append((name, False))
             return _ok(id_, _tool_result("arguments must be an object", True))
+        if getattr(ctx, "_auto_today", False):
+            ctx.today = date.today()
         try:
             res = t["fn"](ctx, args)
             ctx.tool_log.append((name, True))
@@ -1017,15 +1078,15 @@ def serve_stdio() -> None:
     """`python -m factotum mcp`: the DB and config as the service sees them, the run directory from
     $FACTOTUM_RUN_DIR (set by the runner), logs to stderr only — stdout is the protocol."""
     from .db import connect, get_settings
-    cfg = C.load()
+    raw = C.load()
     conn = connect(C.db_path())
-    cfg = C.effective(cfg, get_settings(conn))
+    cfg = C.effective(raw, get_settings(conn))
     # Chat turns set FACTOTUM_RUN_DIR and get no writer (their proposals travel in the run's JSON);
     # a skill's server (Claude Code's own `claude mcp add`, no run dir) may stage proposals.
     run_dir = os.environ.get("FACTOTUM_RUN_DIR") or None
     writer = None if run_dir else (lambda: connect(C.db_path()))
     # one directory per skill process: "seen this run" (what a reply draft may answer) never spans sessions
     ctx = Context(conn, cfg, run_dir=run_dir or (C.ROOT / "data" / "runs" / "skill" / f"{date.today().isoformat()}-{os.getpid()}"), writer=writer,
-                  apply_writes=bool(writer) and str(C.get(cfg, "server.mcp_writes", "stage")) == "apply", source="skill")
+                  apply_writes=lambda: str(C.get(C.effective(raw, get_settings(conn)), "server.mcp_writes", "stage")) == "apply", source="skill")
     print(f"factotum mcp: {len(TOOLS)} tools, db {C.db_path()}, {'skill (may stage)' if writer else 'chat turn'}", file=sys.stderr, flush=True)
     serve(ctx, sys.stdin, sys.stdout)

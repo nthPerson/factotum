@@ -4,8 +4,9 @@ Python (no Claude) reads each monitored account's new Inbox and Sent conversatio
     "Thread updated"); a match on the display name alone is only flagged, since names are forgeable,
   - closes a "reply to X" task when a message was sent to X after the task was created
     (closed_by `mail-evidence`), and records any other sent-to-counterpart as a candidate,
-  - closes a WATCHED task (`close_on_sent_since`, set by the `watch_sent` op) when a message to its
-    counterpart's address is sent after the watch began, whatever the task is called,
+  - closes a WATCHED task (`close_on_sent_since` / `close_on_sent_to`, set by the `watch_sent` op) when a
+    message to the watched address is sent after the watch began, whatever the task is called, and
+    ends the watch; a watched task is closed by its watch only,
   - watches linked threads (links.kind = mail_thread) and flags new messages,
   - collects .ics invitations and confirmation-shaped mail as candidates for the planner.
 Everything it finds is a row in `evidence`; the planner judges the candidates, Review shows the
@@ -32,6 +33,7 @@ REPLY_VERB_RE = re.compile(r"^\s*(reply|respond|answer|send|email|e-mail|forward
 CONFIRM_RE = re.compile(r"\b(confirm(ed|ation)?|registered|registration|receipt|accepted|approved|your submission|has been received|scheduled|enrolled|appointment)\b", re.I)
 ICS_RE = re.compile(r"\b(invitation|invite|updated invitation|accepted:|declined:|tentative:)\b|\.ics\b", re.I)
 EXCERPT = 500
+SENT_OVERLAP_MIN = 10
 
 
 def _utc_str(local: datetime, cfg: dict) -> str:
@@ -94,6 +96,8 @@ def sweep(conn: sqlite3.Connection, cfg: dict, client, now_local: datetime) -> s
     waiting = [t for t in open_tasks if t.get("waiting_on")]
     owed = [(t, {e.lower() for e in EMAIL_RE.findall(str(t.get("counterpart") or ""))}) for t in open_tasks if t.get("counterpart")]
     owed = [(t, es) for t, es in owed if es]
+    watched = [(t, {e.lower() for e in EMAIL_RE.findall(str(t.get("close_on_sent_to") or ""))}) for t in open_tasks if t.get("close_on_sent_since")]
+    fired: set[int] = set()
     links = rows(conn, "SELECT l.*, t.status FROM links l JOIN tasks t ON t.id = l.task_id WHERE l.kind = 'mail_thread' AND t.status = 'open'")
     changes: list[dict] = []
     flipped = closed = threads = candidates = 0
@@ -117,16 +121,23 @@ def sweep(conn: sqlite3.Connection, cfg: dict, client, now_local: datetime) -> s
             continue
         folders = {str(f.get("name") or "").lower(): f["id"] for f in client.call("list_folders", {"accountId": mb["id"]})}
         key = f"state.mail_sweep.last_at.{address}"
-        wm = str(st.get(key) or _utc_str(now_local - timedelta(days=lookback), cfg))
-        newest = wm
+        start = str(st.get(key) or _utc_str(now_local - timedelta(days=lookback), cfg))     # `key` alone is the pre-2026-11-04 shared watermark
+        wms = {f: str(st.get(f"{key}.{f}") or start) for f in ("inbox", "sent")}
+        newest = dict(wms)
         for folder in ("inbox", "sent"):
             fid = folders.get(folder)
             if fid is None:
                 continue
+            wm = wms[folder]
+            if folder == "sent":           # evidence is deduplicated, so re-reading ten minutes costs a few reads and loses nothing
+                try:
+                    wm = (datetime.fromisoformat(wm[:19]) - timedelta(minutes=SENT_OVERLAP_MIN)).isoformat()
+                except ValueError:
+                    pass
             convs = [c for c in client.call("list_conversations", {"folderId": fid, "limit": limit}) if str(c.get("receivedAtUtc") or "") > wm]
             for c in convs:
                 cid, when, subject = c["conversationId"], str(c.get("receivedAtUtc") or ""), str(c.get("subject") or "")
-                newest = max(newest, when)
+                newest[folder] = max(newest[folder], when)
                 conv = conversation(cid)
                 msgs = (conv or {}).get("messages") or []
                 if not msgs:
@@ -135,19 +146,24 @@ def sweep(conn: sqlite3.Connection, cfg: dict, client, now_local: datetime) -> s
                 if folder == "sent":
                     # only what this account itself sent counts, each message on its own clock
                     mine = [m for m in msgs if _addr(m)[0] == address]
-                    for t, emails in owed:
-                        # A watch (`watch_sent`): the user said "close this when I have sent the mail", so a
-                        # message to the address after the watch began closes the row, whatever its name.
-                        watch = str(t.get("close_on_sent_since") or "")
-                        if watch and any(emails & _recipients(m) and str(m.get("receivedAtUtc") or "")[:19] > watch[:19] for m in mine):
-                            add_link(conn, t["id"], "mail_thread", cid, label=subject[:120], account=address)
-                            conn.execute("UPDATE links SET last_seen_at = ? WHERE task_id = ? AND kind = 'mail_thread' AND ref = ?", (when, t["id"], cid))
-                            if _evidence(conn, t["id"], "sent_watched", cid, address, subject, c.get("lastSender"), when):
-                                eid = conn.execute("SELECT id FROM evidence WHERE kind = 'sent_watched' AND ref = ? AND task_id = ?", (cid, t["id"])).fetchone()[0]
-                                changes.append({"task_id": t["id"], "op": "done", "fields": {}})
-                                changes.append({"task_id": t["id"], "op": "judge_evidence", "fields": {"evidence_id": eid, "verdict": "applied"}})
-                                closed += 1
+                    # A watch (`watch_sent`): the user said "close this when I have sent the mail", so a message
+                    # to the watched address after the watch began closes the row, whatever it is called; the
+                    # watch ends with it (a reopened task is not closed again by the next mail).
+                    for t, wemails in watched:
+                        since = str(t["close_on_sent_since"])[:19]
+                        if t["id"] in fired or not any(wemails & _recipients(m) and str(m.get("receivedAtUtc") or "")[:19] > since for m in mine):
                             continue
+                        fired.add(t["id"])
+                        add_link(conn, t["id"], "mail_thread", cid, label=subject[:120], account=address)
+                        conn.execute("UPDATE links SET last_seen_at = ? WHERE task_id = ? AND kind = 'mail_thread' AND ref = ?", (when, t["id"], cid))
+                        if _evidence(conn, t["id"], "sent_watched", cid, address, subject, c.get("lastSender"), when):
+                            eid = conn.execute("SELECT id FROM evidence WHERE kind = 'sent_watched' AND ref = ? AND task_id = ?", (cid, t["id"])).fetchone()[0]
+                            changes += [{"task_id": t["id"], "op": "done", "fields": {}}, {"task_id": t["id"], "op": "unwatch_sent"},
+                                        {"task_id": t["id"], "op": "judge_evidence", "fields": {"evidence_id": eid, "verdict": "applied"}}]
+                            closed += 1
+                    for t, emails in owed:
+                        if t.get("close_on_sent_since"):
+                            continue                                 # under a watch: only the watch closes it (above), never the reply-verb rule
                         hits = [m for m in mine if emails & _recipients(m) and str(m.get("receivedAtUtc") or "")[:19] > str(t.get("created_at") or "")[:19]]
                         if hits:
                             add_link(conn, t["id"], "mail_thread", cid, label=subject[:120], account=address)
@@ -189,8 +205,9 @@ def sweep(conn: sqlite3.Connection, cfg: dict, client, now_local: datetime) -> s
                 body = re.sub(r"\s+", " ", str(m.get("body") or m.get("bodyPreview") or "")).strip()
                 if _evidence(conn, None, kind, cid, address, subject, f"from {header}: {body}", when):
                     candidates += 1
-        if newest != wm:
-            set_setting(conn, key, newest)
+        for f in ("inbox", "sent"):
+            if newest[f] != wms[f]:
+                set_setting(conn, f"{key}.{f}", newest[f])
     for link in links:
         conv = conversation(link["ref"])
         msgs = (conv or {}).get("messages") or []

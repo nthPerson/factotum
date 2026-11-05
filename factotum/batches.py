@@ -13,7 +13,7 @@ from .db import get_task, now_iso, upsert_task
 SETTABLE = {
     "name", "project", "area", "due", "due_is_datetime", "hard", "effort", "context", "counterpart",
     "waiting_on", "manual_priority", "snoozed_until", "top_rank", "longterm", "legacy_status",
-    "last_reviewed_at", "why_now", "calendar_event", "close_on_sent_since",
+    "last_reviewed_at", "why_now", "calendar_event",
 }
 OPS = {"set", "done", "drop", "reopen", "pin_top", "unpin", "keep", "longterm", "fade", "lapse", "add_reminder", "judge_evidence",
        "create", "watch_sent", "unwatch_sent"}
@@ -47,21 +47,19 @@ def _reminder_fields(change: dict) -> dict:
 
 
 def watch_fields(task: dict, to) -> dict:
-    """`watch_sent`: the task closes when mail to an address is sent from now on (the mail sweep
-    reads `close_on_sent_since`). `to` joins the task's counterpart; without it the counterpart must
-    already hold an address. Raises ValueError."""
-    cp = str(task.get("counterpart") or "")
+    """`watch_sent`: the task closes when mail to an address is sent from now on. The mail sweep
+    reads the two columns this returns; they are set by this op only (not SETTABLE), and the watched
+    address never touches `counterpart`, so watching does not make anyone a contact. With `to`, that
+    address alone; without, the addresses already in the task's counterpart. Raises ValueError."""
     if to:
         addr = str(to).strip().lower()
         if not EMAIL_RE.fullmatch(addr):
             raise ValueError(f"{to!r} is not an email address")
-        out = {"close_on_sent_since": now_iso()}
-        if addr not in cp.lower():
-            out["counterpart"] = f"{cp}; {addr}" if cp else addr
-        return out
-    if not EMAIL_RE.search(cp):
+        return {"close_on_sent_since": now_iso(), "close_on_sent_to": addr}
+    found = list(dict.fromkeys(e.lower() for e in EMAIL_RE.findall(str(task.get("counterpart") or ""))))
+    if not found:
         raise ValueError("no address to watch: give `to`, or set the task's counterpart to an email address")
-    return {"close_on_sent_since": now_iso()}
+    return {"close_on_sent_since": now_iso(), "close_on_sent_to": "; ".join(found)}
 
 
 def _add_reminder(cur, task_id: int, rf: dict, batch_id: int, source: str, undo: list) -> None:
@@ -76,10 +74,10 @@ def _create(conn, cur, ch: dict, batch_id: int, source: str, today: date, undo: 
     """A new open task (Source "Claude"), with its reminders and an optional sent-mail watch, as
     part of the batch: recorded as a `created` change, and undone by dropping the row (never
     deleting it: ids are forever and the mirror may already have a page). Returns what it wrote."""
-    f = dict(ch.get("fields") or {})
-    name = str(f.get("name") or "").strip()
+    f = ch.get("fields")
+    name = str(f.get("name") or "").strip() if isinstance(f, dict) else ""
     if not name:
-        skipped.append({"task_id": None, "why": "a create needs a name"})
+        skipped.append({"task_id": None, "why": "a create needs fields with a name"})
         return 0
     vals = {k: v for k, v in f.items() if k in CREATABLE}
     vals["name"] = name[:200]
@@ -96,13 +94,15 @@ def _create(conn, cur, ch: dict, batch_id: int, source: str, today: date, undo: 
         except ValueError as e:
             skipped.append({"task_id": None, "why": f"{name[:40]}: watch not set: {e}"})
     now = now_iso()
-    tid = upsert_task(conn, dict(vals, status="open", source=CREATED_SOURCE, source_key=f"{source}:{batch_id}:{len(created)}", hard=vals.get("hard", 0),
+    tid = upsert_task(conn, dict(vals, status="open", source=CREATED_SOURCE, source_key=f"batch:{batch_id}:{len(created)}", hard=vals.get("hard", 0),
                                  mentions=1, last_mention_at=today.isoformat(), created_at=now, edited_at=now))
-    cur.execute("INSERT INTO changes (batch_id, task_id, field, old, new) VALUES (?, ?, 'created', NULL, ?)", (batch_id, tid, json.dumps(vals["name"])))
+    # `new` keeps who the create named: an address a direct batch introduced is not a contact (mcp_server.known_recipients)
+    cur.execute("INSERT INTO changes (batch_id, task_id, field, old, new) VALUES (?, ?, 'created', NULL, ?)",
+                (batch_id, tid, json.dumps({"name": vals["name"], "counterpart": vals.get("counterpart"), "waiting_on": vals.get("waiting_on")})))
     undo.append({"created_task_id": tid})
     created.append(tid)
     wrote = 1
-    for r in ch.get("reminders") or []:
+    for r in (ch.get("reminders") if isinstance(ch.get("reminders"), list) else []):
         try:
             _add_reminder(cur, tid, _reminder_fields({"fields": r if isinstance(r, dict) else {}}), batch_id, source, undo)
             wrote += 1
@@ -189,14 +189,13 @@ def _apply_one(conn, cur, ch: dict, batch_id: int, source: str, today: date, clo
             return False
         _add_reminder(cur, task["id"], rf, batch_id, source, undo)
         return True
-    if ch.get("op") in ("watch_sent", "unwatch_sent"):       # both become a plain set, so the diff and the undo below serve them
-        try:
-            ch = dict(ch, op="set", fields=watch_fields(task, (ch.get("fields") or {}).get("to")) if ch["op"] == "watch_sent" else {"close_on_sent_since": None})
-        except ValueError as e:
-            skipped.append({"task_id": task["id"], "why": str(e)})
-            return False
     try:
-        fields = _resolve(conn, ch, today, closed_by)
+        if ch.get("op") == "watch_sent":                     # the watch columns are written by these two ops only
+            fields = watch_fields(task, (ch.get("fields") or {}).get("to"))
+        elif ch.get("op") == "unwatch_sent":
+            fields = {"close_on_sent_since": None, "close_on_sent_to": None}
+        else:
+            fields = _resolve(conn, ch, today, closed_by)
     except ValueError as e:
         skipped.append({"task_id": task["id"], "why": str(e)})
         return False
@@ -254,8 +253,8 @@ def undo(conn: sqlite3.Connection, batch_id: int) -> dict:
             conn.execute("UPDATE reminders SET status = 'cancelled' WHERE id = ?", (u["reminder_id"],))
         elif "evidence_id" in u:
             conn.execute("UPDATE evidence SET judged_at = NULL, verdict = NULL WHERE id = ?", (u["evidence_id"],))
-        elif "created_task_id" in u:                         # a created task is dropped, not deleted
-            conn.execute("UPDATE tasks SET status = 'dropped', completed_at = ?, closed_by = 'undo', top_rank = NULL, edited_at = ? WHERE id = ?",
+        elif "created_task_id" in u:                         # a created task is dropped, not deleted — and left alone once a later decision closed it
+            conn.execute("UPDATE tasks SET status = 'dropped', completed_at = ?, closed_by = 'undo', top_rank = NULL, edited_at = ? WHERE id = ? AND status = 'open'",
                          (date.today().isoformat(), now_iso(), u["created_task_id"]))
         else:
             conn.execute(f"UPDATE tasks SET {u['field']} = ?, edited_at = ? WHERE id = ?", (u["old"], now_iso(), u["task_id"]))

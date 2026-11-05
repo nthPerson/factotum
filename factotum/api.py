@@ -101,7 +101,7 @@ form{{display:flex;gap:12px;margin-top:20px}} button{{font:inherit;padding:10px 
 {prov}
 <p>It will be able to, as you:</p>
 <ul><li>use {tools} Factotum tools: read your tasks, reminders, mail, calendar, Slack and Discord</li>
-<li>{"create and change your tasks directly: each call is one batch you can undo in Factotum's Log (Settings → Connections switches this to staging)" if direct else "stage task changes that appear in Factotum's tray for you to Apply or Dismiss — it never changes a task itself"}</li>
+<li>{"create and change your tasks directly: each call is one batch you can undo in Factotum's Log. Nobody taps Apply first, so something it read in the same chat (a mail, a Slack message) can steer what it writes; Settings → Connections switches this to staging" if direct else "stage task changes that appear in Factotum's tray for you to Apply or Dismiss — it never changes a task itself"}</li>
 <li>nothing is ever sent on your behalf</li></ul>
 <p class="who">Signed in as {escape(who)} · revoke any time in Settings → Connections at <a href="{escape(base)}/#settings">{escape(base)}</a>.</p>
 <form method="post" action="{escape(base)}/oauth/authorize">{hidden}<button type="submit" name="decision" value="deny" class="deny">Deny</button><button type="submit" name="decision" value="allow">Allow</button></form>
@@ -476,11 +476,21 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         source `skill` or `connector` as staged, undoable like any other; a `create` in it makes its task now."""
         from .db import now_iso
         p = _proposal(pid)
+        # Claim it first: two quick taps must not apply it twice (a create would make a twin).
+        claimed = conn.execute("UPDATE proposals SET applied_at = ? WHERE id = ? AND applied_at IS NULL AND dismissed_at IS NULL", (now_iso(), pid)).rowcount
+        conn.commit()
+        if claimed != 1:
+            raise HTTPException(409, "already applied")
         try:
             res = batches.apply(conn, json.loads(p["changes_json"] or "[]"), p["source"] if p["source"] in ("skill", "connector") else "skill", date.today())
-        except ValueError as e:
-            raise HTTPException(400, str(e))
-        conn.execute("UPDATE proposals SET applied_at = ?, batch_id = ? WHERE id = ?", (now_iso(), res["batch_id"], pid))
+        except Exception as e:
+            conn.rollback()
+            conn.execute("UPDATE proposals SET applied_at = NULL WHERE id = ?", (pid,))
+            conn.commit()
+            if isinstance(e, ValueError):
+                raise HTTPException(400, str(e))
+            raise
+        conn.execute("UPDATE proposals SET batch_id = ? WHERE id = ?", (res["batch_id"], pid))
         conn.commit()
         return res
 
@@ -562,8 +572,10 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
                                           f"Open Factotum → Settings → Connections, tap \"Allow a new connector\" ({oauth.ARM_MINUTES} minutes), then try again from the app that asked. "
                                           f"If you did not start this, nothing happened: close this page.", base), status_code=403, headers=heads)
             if decision is None:
-                direct = str(C.get(ecfg, "server.mcp_writes", "stage")) == "apply"
-                n = len(_mcp_allowed(ecfg)) - (0 if direct else 1)       # apply_changes is offered only in apply mode
+                from . import mcp_server
+                allowed = _mcp_allowed(ecfg)
+                direct = str(C.get(ecfg, "server.mcp_writes", "stage")) == "apply" and "apply_changes" in allowed
+                n = len([t for t in mcp_server.TOOLS if t["name"] in allowed and (direct or not t.get("apply_only"))])
                 return HTMLResponse(_consent_page(req, oauth.consent_token(req), base, who, n, again, direct), headers=heads)
             if not oauth.consent_ok(req, params.get("csrf")):
                 return HTMLResponse(_page("Factotum", "This consent page has expired; go back to the connector and try again.", base), status_code=400, headers=heads)
