@@ -129,9 +129,13 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
-def connect(path: str | Path) -> sqlite3.Connection:
+def connect(path: str | Path, shared: bool = False) -> sqlite3.Connection:
+    """`shared`: the connection will be used by several threads at once (the API's: every sync route
+    runs on a thread pool). Python caches prepared statements per connection, and two threads that
+    run the same SQL are handed the same statement, so one resets it under the other and a read
+    comes back short. A shared connection keeps no cache; SQLite itself serialises the calls."""
     Path(path).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path), check_same_thread=False)
+    conn = sqlite3.connect(str(path), check_same_thread=False, **({"cached_statements": 0} if shared else {}))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")

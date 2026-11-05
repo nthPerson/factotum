@@ -236,3 +236,29 @@ def test_the_summary_endpoint_reports_staleness_and_a_refresh_goes_through_the_s
     assert client.get("/api/summary").json()["refresh"]["state"] == "requested"
     client.post("/api/summary/refresh", json={})
     assert woke == [1]                                                                       # already asked: one refresh, not two
+
+
+def test_the_apis_connection_survives_requests_running_at_once(cfg, tmp_path):
+    """Sync routes run on a thread pool and share one connection. Python's sqlite3 caches prepared
+    statements per connection, and two threads running the same SQL got the same statement: one
+    reset it under the other, and a read came back short (a 500 on roughly one request in twenty
+    when two arrived together, measured 2026-11-04). The API's connection keeps no statement cache."""
+    import threading
+    from factotum.api import create_app
+    app = create_app(cfg, db_path=str(tmp_path / "api.db"))
+    c = app.state.conn
+    for i in range(60):
+        set_setting(c, f"state.pad.{i}", {"i": i, "pad": "x" * 200})
+    c.commit()
+    bad = []
+
+    def work():
+        for _ in range(150):
+            try:
+                assert len(get_settings(c)) >= 60
+            except Exception as e:   # noqa: BLE001 — any failure is the bug
+                bad.append(f"{type(e).__name__}: {e}")
+    ts = [threading.Thread(target=work) for _ in range(8)]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    assert not bad, f"{len(bad)} of 1200 reads failed, e.g. {bad[0]}"
