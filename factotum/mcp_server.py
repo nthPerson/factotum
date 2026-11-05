@@ -52,6 +52,8 @@ class Context:
     allowed: set | None = None               # tool names this context serves; None = every tool (chat turns pass their own --allowedTools)
     slack: object = None                     # factory(token) → slack.Client (tests)
     discord: object = None                   # factory(token) → discord.Client (tests)
+    apply_writes: bool = False               # server.mcp_writes == "apply": apply_changes is offered and writes a batch at once
+    source: str = "skill"                    # the batch / proposal source: "skill" (stdio from Claude Code) or "connector" (the HTTP route)
     tool_log: list = field(default_factory=list)
     _mail: object = field(default=None, repr=False)
     _accounts: dict | None = field(default=None, repr=False)
@@ -165,14 +167,25 @@ def drafts_made(run_dir: Path | str) -> list[dict]:
 TOOLS: list[dict] = []
 
 
-def tool(name: str, description: str, properties: dict, required: list[str] = (), skill_only: bool = False):
+READ_ONLY = {"readOnlyHint": True}
+WRITES = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False}      # a draft, a staged batch: nothing is lost
+WRITES_NOW = dict(WRITES, destructiveHint=True)                                                                    # changes task state at once (undoable in the Log)
+
+
+def tool(name: str, description: str, properties: dict, required: list[str] = (), skill_only: bool = False, apply_only: bool = False, annotations: dict | None = None):
     """`skill_only` tools are served to skills (stdio from Claude Code, the HTTP route) but left out
-    of a chat turn's allowlist: a chat turn proposes in its JSON and the UI stages that."""
+    of a chat turn's allowlist: a chat turn proposes in its JSON and the UI stages that. `apply_only`
+    tools exist only when the deployment lets a connector write directly (`server.mcp_writes: apply`).
+    `annotations` are MCP's hints to the client (what to ask the user about); reads by default."""
     def deco(fn):
-        TOOLS.append({"name": name, "description": description, "skill_only": skill_only,
+        TOOLS.append({"name": name, "description": description, "skill_only": skill_only, "apply_only": apply_only, "annotations": dict(annotations or READ_ONLY),
                       "inputSchema": {"type": "object", "properties": properties, "required": list(required), "additionalProperties": False}, "fn": fn})
         return fn
     return deco
+
+
+def _offered(ctx, t: dict) -> bool:
+    return (ctx.allowed is None or t["name"] in ctx.allowed) and (not t.get("apply_only") or ctx.apply_writes)
 
 
 def _int(args: dict, key: str, default=None, lo=None, hi=None):
@@ -401,7 +414,7 @@ def _draft_record(ctx: Context, res, **extra) -> dict:
 
 @tool("mail_draft_reply", "Save a reply DRAFT in Mailbird on a conversation (never sent; the user reviews it in Mailbird). Write the body from "
       "the thread; Mailbird adds the signature and quotes the original.",
-      {"conversation_id": {"type": "string"}, "body": {"type": "string"}, "reply_all": {"type": "boolean"}}, ["conversation_id", "body"])
+      {"conversation_id": {"type": "string"}, "body": {"type": "string"}, "reply_all": {"type": "boolean"}}, ["conversation_id", "body"], annotations=WRITES)
 def mail_draft_reply(ctx: Context, args: dict) -> dict:
     cid, body = _str(args, "conversation_id", None, 200), _str(args, "body", "", 20_000)
     if not cid or not body.strip():
@@ -421,7 +434,7 @@ def mail_draft_reply(ctx: Context, args: dict) -> dict:
 @tool("mail_draft_new", "Save a NEW message as a DRAFT in Mailbird from one of the user's accounts (never sent). Recipients: bare addresses that a "
       "task names (counterpart, waiting_on) or the user's own accounts; to write to someone else, reply on their thread instead.",
       {"account": {"type": "string", "description": "sending account's email address"}, "to": {"type": "array", "items": {"type": "string"}},
-       "cc": {"type": "array", "items": {"type": "string"}}, "subject": {"type": "string"}, "body": {"type": "string"}}, ["account", "to", "subject", "body"])
+       "cc": {"type": "array", "items": {"type": "string"}}, "subject": {"type": "string"}, "body": {"type": "string"}}, ["account", "to", "subject", "body"], annotations=WRITES)
 def mail_draft_new(ctx: Context, args: dict) -> dict:
     aid = _account_id(ctx, args.get("account"))
     to = _strict_addrs((args.get("to") or [])[:20], "to")
@@ -480,8 +493,18 @@ def plaud_summary(ctx: Context, args: dict) -> dict:
     return {"recording_id": rid, "summary": text[:cap], "truncated": len(text) > cap}
 
 
-STAGE_OPS = {"set", "done", "drop", "pin_top", "longterm", "add_reminder"}
+STAGE_OPS = {"set", "done", "drop", "reopen", "pin_top", "longterm", "add_reminder", "create", "watch_sent", "unwatch_sent"}
 PRIORITIES = {"P0", "P1", "P2", "P3"}
+CHANGES_SCHEMA = {"type": "array", "items": {"type": "object", "properties": {
+    "op": {"type": "string", "enum": sorted(STAGE_OPS)}, "task_id": {"type": "integer", "description": "every op but create"},
+    "fields": {"type": "object"},
+    "reminders": {"type": "array", "description": "create only: reminders for the new task", "items": {"type": "object", "properties": {"fire_at": {"type": "string"}, "label": {"type": "string"}, "repeat": {"type": ["string", "null"]}}}},
+    "watch_sent_to": {"type": "string", "description": "create only: an email address; the task closes when mail to it is sent"}}, "required": ["op"]}}
+OPS_HELP = ("ops: create (fields: name, project, due YYYY-MM-DD or YYYY-MM-DDTHH:MM, hard, effort, context, counterpart, waiting_on, manual_priority, longterm; "
+            "plus reminders [{fire_at, label, repeat}] and watch_sent_to), set (the same fields plus snoozed_until), done, drop, reopen (a closed task), pin_top, "
+            "longterm, add_reminder (fields: fire_at ISO local, label, repeat daily|weekdays|weekly|monthly), watch_sent (fields: to = an email address; the task "
+            "closes itself when the mail sweep sees a message sent to it from now on; without `to` the task's counterpart address is used), unwatch_sent. "
+            "Look first (tasks_query) so you edit an existing task rather than create its twin.")
 
 
 def _extra_fields(fields: dict) -> dict:
@@ -512,43 +535,72 @@ def _extra_fields(fields: dict) -> dict:
     return out
 
 
-@tool("stage_changes", "Stage task changes for the user to apply: ONE batch the Factotum tray shows with Apply / Dismiss. Nothing changes "
-      "until the user taps Apply, so say so. ops: set (fields: due, hard, effort, context, counterpart, waiting_on, project, name, "
-      "manual_priority, snoozed_until, longterm), done, drop, pin_top, longterm, add_reminder (fields: fire_at ISO, label, repeat daily|weekdays|weekly|monthly).",
-      {"changes": {"type": "array", "items": {"type": "object", "properties": {"task_id": {"type": "integer"}, "op": {"type": "string"}, "fields": {"type": "object"}}, "required": ["task_id", "op"]}},
-       "label": {"type": "string", "description": "one line saying what this batch does and why"}}, ["changes"], skill_only=True)
-def stage_changes(ctx: Context, args: dict) -> dict:
-    """The skills' only write: a `proposals` row, through a separate writable connection (the tool
-    connection stays query_only). Validated like a chat proposal: existing open rows, settable fields,
-    a well-formed reminder. The tray applies it as one batch (source `skill`) or dismisses it."""
-    if ctx.writer is None:
-        raise ToolError("staging is not available in this run (no writer); describe the changes to the user instead")
+def _validate_changes(ctx: Context, changes) -> tuple[list[dict], list[str]]:
+    """What a skill or connector may ask for, cleaned: existing rows in the right state, settable
+    fields, taxonomy projects, well-formed reminders and addresses, no twin of an open task. Returns
+    (changes batches.apply will take, reasons for the ones left out)."""
     from . import batches
     from .sync_file import _clean_task_fields
-    changes = args.get("changes")
     if not isinstance(changes, list) or not changes:
         raise ToolError("changes must be a non-empty list")
     kept, rejected = [], []
+
+    def cleaned(i, fields):
+        f = _clean_task_fields(ctx.cfg, fields)
+        if fields.get("project") and f.get("project") != fields["project"]:      # the cleaner maps an unknown project to Unknown or None: never silently
+            rejected.append(f"#{i}: project {fields['project']!r} is not in the taxonomy (" + ", ".join(C.project_names(ctx.cfg)[:12]) + ")"); return None
+        try:
+            f.update(_extra_fields(fields))
+        except ToolError as e:
+            rejected.append(f"#{i}: {e}"); return None
+        return f
+
     for i, ch in enumerate(changes[:40]):
         if not isinstance(ch, dict):
             rejected.append(f"#{i}: not an object"); continue
         op, tid = ch.get("op"), ch.get("task_id")
         if op not in STAGE_OPS:
             rejected.append(f"#{i}: op {op!r} is not one of {sorted(STAGE_OPS)}"); continue
-        row = one(ctx.conn, "SELECT status FROM tasks WHERE id = ?", (tid,)) if isinstance(tid, int) else None
+        fields = dict(ch.get("fields") or {})
+        if op == "create":
+            f = cleaned(i, fields)
+            if f is None:
+                continue
+            if not f.get("name"):
+                rejected.append(f"#{i}: a create needs fields.name"); continue
+            twin = one(ctx.conn, "SELECT id FROM tasks WHERE status = 'open' AND LOWER(name) = ?", (f["name"].lower(),))
+            if twin:
+                rejected.append(f"#{i}: Task-{twin['id']} already has this name; edit it instead"); continue
+            out = {"op": "create", "fields": f}
+            to = ch.get("watch_sent_to")
+            if to:
+                if not batches.EMAIL_RE.fullmatch(str(to).strip()):
+                    rejected.append(f"#{i}: watch_sent_to {to!r} is not an email address"); continue
+                out["watch_sent_to"] = str(to).strip().lower()
+            rems, bad = [], None
+            for r in (ch.get("reminders") or [])[:10]:
+                try:
+                    rems.append(batches._reminder_fields({"fields": r if isinstance(r, dict) else {}}))
+                except ValueError as e:
+                    bad = str(e); break
+            if bad:
+                rejected.append(f"#{i}: reminder: {bad}"); continue
+            if rems:
+                out["reminders"] = rems
+            kept.append(out); continue
+        row = one(ctx.conn, "SELECT * FROM tasks WHERE id = ?", (tid,)) if isinstance(tid, int) else None
         if not row:
             rejected.append(f"#{i}: no task {tid}"); continue
+        if op == "reopen":
+            if row["status"] == "open":
+                rejected.append(f"#{i}: Task-{tid} is already open"); continue
+            kept.append({"task_id": tid, "op": "reopen", "fields": {}}); continue
         if row["status"] != "open":
             rejected.append(f"#{i}: Task-{tid} is not open ({row['status']})"); continue
-        fields = dict(ch.get("fields") or {})
         if op == "set":
-            f = _clean_task_fields(ctx.cfg, fields)
-            if fields.get("project") and f.get("project") != fields["project"]:     # the cleaner maps an unknown project to Unknown or None: a skill must not stage that silently
-                rejected.append(f"#{i}: project {fields['project']!r} is not in the taxonomy (" + ", ".join(C.project_names(ctx.cfg)[:12]) + ")"); continue
-            try:
-                f.update(_extra_fields(fields))
-            except ToolError as e:
-                rejected.append(f"#{i}: {e}"); continue
+            f = cleaned(i, fields)
+            if f is None:
+                continue
             if not f:
                 rejected.append(f"#{i}: nothing settable in {sorted(fields)}"); continue
             kept.append({"task_id": tid, "op": "set", "fields": f})
@@ -557,14 +609,33 @@ def stage_changes(ctx: Context, args: dict) -> dict:
                 kept.append({"task_id": tid, "op": "add_reminder", "fields": batches._reminder_fields({"fields": fields})})
             except ValueError as e:
                 rejected.append(f"#{i}: {e}")
+        elif op == "watch_sent":
+            try:
+                batches.watch_fields(row, fields.get("to"))
+            except ValueError as e:
+                rejected.append(f"#{i}: {e}"); continue
+            kept.append({"task_id": tid, "op": "watch_sent", "fields": {"to": str(fields["to"]).strip().lower()} if fields.get("to") else {}})
         else:
             kept.append({"task_id": tid, "op": op, "fields": {}})
+    return kept, rejected
+
+
+@tool("stage_changes", "Stage task changes for the user to apply: ONE batch the Factotum tray shows with Apply / Dismiss. Nothing changes "
+      "until the user taps Apply, so say so. " + OPS_HELP,
+      {"changes": CHANGES_SCHEMA, "label": {"type": "string", "description": "one line saying what this batch does and why"}}, ["changes"], skill_only=True, annotations=WRITES)
+def stage_changes(ctx: Context, args: dict) -> dict:
+    """A `proposals` row, through a separate writable connection (the tool connection stays
+    query_only). The tray applies it as one batch or dismisses it; nothing is written before that."""
+    if ctx.writer is None:
+        raise ToolError("staging is not available in this run (no writer); describe the changes to the user instead")
+    kept, rejected = _validate_changes(ctx, args.get("changes"))
     if not kept:
         raise ToolError("nothing stageable: " + "; ".join(rejected)[:600])
-    label = _cut(args.get("label"), 200) or f"{len(kept)} change{'s' if len(kept) != 1 else ''} from a skill"
+    label = _cut(args.get("label"), 200) or f"{len(kept)} change{'s' if len(kept) != 1 else ''} from Claude"
     w = ctx.writer()
     try:
-        cur = w.execute("INSERT INTO proposals (source, label, changes_json, created_at) VALUES ('skill', ?, ?, ?)", (label, json.dumps(kept, default=str), datetime.now().astimezone().replace(microsecond=0).isoformat()))
+        cur = w.execute("INSERT INTO proposals (source, label, changes_json, created_at) VALUES (?, ?, ?, ?)",
+                        (ctx.source, label, json.dumps(kept, default=str), datetime.now().astimezone().replace(microsecond=0).isoformat()))
         pid = int(cur.lastrowid)
         w.commit()
     finally:
@@ -575,6 +646,34 @@ def stage_changes(ctx: Context, args: dict) -> dict:
     ctx.record("proposals", {"proposal_id": pid, "staged": len(kept)})
     return {"proposal_id": pid, "staged": len(kept), "rejected": rejected,
             "note": "Staged, not applied: the user sees this batch in Factotum's tray and taps Apply (or Dismiss). Tell them so."}
+
+
+@tool("apply_changes", "Create and change the user's tasks NOW: one batch, written at once and undoable from Factotum's Log tab. Use it when the user asks "
+      "for a change; use stage_changes instead when they want to look first. Report what changed with the task codes. " + OPS_HELP,
+      {"changes": CHANGES_SCHEMA, "label": {"type": "string", "description": "one line saying what this batch does and why"}}, ["changes"],
+      skill_only=True, apply_only=True, annotations=WRITES_NOW)
+def apply_changes(ctx: Context, args: dict) -> dict:
+    """The direct write (SPEC §15): offered only when `server.mcp_writes` is `apply`, and still
+    nothing but `batches.apply` — validated like a staged batch, one batch per call, source
+    `connector` or `skill`, every change with its old value in the Log and an Undo."""
+    if ctx.writer is None or not ctx.apply_writes:
+        raise ToolError("direct writes are off in this deployment; use stage_changes")
+    from . import batches
+    kept, rejected = _validate_changes(ctx, args.get("changes"))
+    if not kept:
+        raise ToolError("nothing applicable: " + "; ".join(rejected)[:600])
+    w = ctx.writer()
+    try:
+        res = batches.apply(w, kept, ctx.source, ctx.today)
+    finally:
+        try:
+            w.close()
+        except Exception:   # noqa: BLE001
+            pass
+    created = [{"task_id": i, "name": (one(ctx.conn, "SELECT name FROM tasks WHERE id = ?", (i,)) or {}).get("name")} for i in res["created"]]
+    ctx.record("applied", {"batch_id": res["batch_id"], "applied": res["applied"], "label": _cut(args.get("label"), 200)})
+    return {"batch_id": res["batch_id"], "applied": res["applied"], "created": created, "skipped": res["skipped"], "rejected": rejected,
+            "note": f"Applied as batch {res['batch_id']}. The user can undo it in Factotum → Log. A watch_sent closes its task when the mail sweep next sees the sent message."}
 
 
 # ---- Slack (read-only; SPEC §6) ----------------------------------------------------------------
@@ -868,7 +967,7 @@ def dispatch(ctx: Context, msg) -> dict | None:
     if method == "ping":
         return _ok(id_, {})
     if method == "tools/list":
-        return _ok(id_, {"tools": [{k: t[k] for k in ("name", "description", "inputSchema")} for t in TOOLS if ctx.allowed is None or t["name"] in ctx.allowed]})
+        return _ok(id_, {"tools": [{k: t[k] for k in ("name", "description", "inputSchema", "annotations")} for t in TOOLS if _offered(ctx, t)]})
     if method == "tools/call":
         name = str(params.get("name") or "")
         args = params.get("arguments") or {}
@@ -876,7 +975,7 @@ def dispatch(ctx: Context, msg) -> dict | None:
         if t is None:
             ctx.tool_log.append((name, False))
             return _ok(id_, _tool_result(f"unknown tool {name!r}", True))
-        if ctx.allowed is not None and name not in ctx.allowed:
+        if not _offered(ctx, t):
             ctx.tool_log.append((name, False))
             return _ok(id_, _tool_result(f"{name} is not available in this run", True))
         if not isinstance(args, dict):
@@ -926,6 +1025,7 @@ def serve_stdio() -> None:
     run_dir = os.environ.get("FACTOTUM_RUN_DIR") or None
     writer = None if run_dir else (lambda: connect(C.db_path()))
     # one directory per skill process: "seen this run" (what a reply draft may answer) never spans sessions
-    ctx = Context(conn, cfg, run_dir=run_dir or (C.ROOT / "data" / "runs" / "skill" / f"{date.today().isoformat()}-{os.getpid()}"), writer=writer)
+    ctx = Context(conn, cfg, run_dir=run_dir or (C.ROOT / "data" / "runs" / "skill" / f"{date.today().isoformat()}-{os.getpid()}"), writer=writer,
+                  apply_writes=bool(writer) and str(C.get(cfg, "server.mcp_writes", "stage")) == "apply", source="skill")
     print(f"factotum mcp: {len(TOOLS)} tools, db {C.db_path()}, {'skill (may stage)' if writer else 'chat turn'}", file=sys.stderr, flush=True)
     serve(ctx, sys.stdin, sys.stdout)

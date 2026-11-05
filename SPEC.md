@@ -190,7 +190,10 @@ tool outside its read list). Per monitored account it walks Inbox and Sent above
 time watermark and writes rows to `evidence`: a reply from the ADDRESS a task waits on clears
 `waiting_on` (a display-name match is only flagged: names are forgeable); a message the account
 itself sent to a task's `counterpart` after the task was created closes a "reply to …" task
-(closed_by `mail-evidence`, link kept) and is a candidate for any other; a linked thread
+(closed_by `mail-evidence`, link kept) and is a candidate for any other; a task under a watch
+(`close_on_sent_since`, set by the `watch_sent` op: "close this when I have sent the mail") closes
+when a message to its counterpart's address is sent after the watch began, whatever it is called
+(evidence `sent_watched`, judged in the same batch); a linked thread
 (`links.kind = mail_thread`) that moved is flagged; `.ics` invitations and confirmation-shaped
 subjects are candidates with a 500-character excerpt. Review shows the flags as "Thread updated";
 the planner judges the candidates. Bodies are fetched for candidates only and treated as data.
@@ -551,7 +554,21 @@ address; a bare identity header is never enough, since anything that can reach t
 one. A connector that was never granted is approved only while the owner has armed Settings →
 Connections ("Allow a new connector", 10 minutes), so a consent link somebody else minted cannot be
 approved by reflex; the page states when the client registered and warns to Deny anything the owner
-did not just add. `/mcp` takes the static token or an access token and serves the same allowlist
+did not just add. **Writing from a connector or a skill (2026-11-04).** Two tools, one validator, one write path.
+`stage_changes` records a batch for the tray (Apply / Dismiss); `apply_changes` writes the same
+batch at once and exists only when `server.mcp_writes` is `apply` (Settings → Connections; the
+default is `stage`, so the tray rule holds until the owner chooses otherwise). Either way the
+changes go through `batches.apply` and nothing else: source `connector` (the HTTP route) or
+`skill` (stdio), every old value in the Log, one Undo per call. The ops are the staged set plus
+`create` (a batch op now: an open task with Source "Claude", its reminders and an optional
+sent-mail watch in the same batch; undo drops the row, never deletes it, since ids are forever and
+the mirror may have a page), `reopen`, `watch_sent` / `unwatch_sent`. Validation is shared:
+existing rows in the right state, settable fields only (score, priority, status and mentions stay
+derived), taxonomy projects, well-formed reminders and addresses, at most 40 changes, and no
+twin of an open task's name. Tools carry MCP annotations (reads `readOnlyHint`; `apply_changes`
+`destructiveHint`) so the client can ask the user first. The cost of `apply` is stated on the
+consent page: text Claude read in the same conversation (a mail, a Slack message) can steer what
+it writes, and the remedy is the Log's Undo rather than a tap beforehand. `/mcp` takes the static token or an access token and serves the same allowlist
 either way. Settings → Connections and `factotum connectors` list every client, when it last spoke
 and its live tokens, with Revoke (every token at once). The Access bypass is for exactly the paths a
 connector's servers call — `/mcp`, `/oauth/register`, `/oauth/token`, the three `/.well-known`

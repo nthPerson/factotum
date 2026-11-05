@@ -265,6 +265,8 @@ server:
   host: 127.0.0.1
   port: 8750
   public_url: https://factotum.nthperson.dev
+  mcp_writes: stage             # what a skill or connector may do with tasks: `stage` = a batch waits in the tray for Apply;
+                                # `apply` = apply_changes writes at once (still one undoable batch in the Log). Settings → Connections.
   oauth:                        # claude.ai / Claude Desktop custom connector: Factotum is its own OAuth server (docs/SETUP.md §16)
     enabled: false              # Settings → Connections toggles it; the consent page lists what the connector may do
     consent_gate: cloudflare_access   # the consent page verifies Cloudflare Access's signed assertion (team + aud below) and needs an owner.emails address; `none` only on a port nobody else reaches

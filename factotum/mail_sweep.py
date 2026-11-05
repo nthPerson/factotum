@@ -4,6 +4,8 @@ Python (no Claude) reads each monitored account's new Inbox and Sent conversatio
     "Thread updated"); a match on the display name alone is only flagged, since names are forgeable,
   - closes a "reply to X" task when a message was sent to X after the task was created
     (closed_by `mail-evidence`), and records any other sent-to-counterpart as a candidate,
+  - closes a WATCHED task (`close_on_sent_since`, set by the `watch_sent` op) when a message to its
+    counterpart's address is sent after the watch began, whatever the task is called,
   - watches linked threads (links.kind = mail_thread) and flags new messages,
   - collects .ics invitations and confirmation-shaped mail as candidates for the planner.
 Everything it finds is a row in `evidence`; the planner judges the candidates, Review shows the
@@ -134,6 +136,18 @@ def sweep(conn: sqlite3.Connection, cfg: dict, client, now_local: datetime) -> s
                     # only what this account itself sent counts, each message on its own clock
                     mine = [m for m in msgs if _addr(m)[0] == address]
                     for t, emails in owed:
+                        # A watch (`watch_sent`): the user said "close this when I have sent the mail", so a
+                        # message to the address after the watch began closes the row, whatever its name.
+                        watch = str(t.get("close_on_sent_since") or "")
+                        if watch and any(emails & _recipients(m) and str(m.get("receivedAtUtc") or "")[:19] > watch[:19] for m in mine):
+                            add_link(conn, t["id"], "mail_thread", cid, label=subject[:120], account=address)
+                            conn.execute("UPDATE links SET last_seen_at = ? WHERE task_id = ? AND kind = 'mail_thread' AND ref = ?", (when, t["id"], cid))
+                            if _evidence(conn, t["id"], "sent_watched", cid, address, subject, c.get("lastSender"), when):
+                                eid = conn.execute("SELECT id FROM evidence WHERE kind = 'sent_watched' AND ref = ? AND task_id = ?", (cid, t["id"])).fetchone()[0]
+                                changes.append({"task_id": t["id"], "op": "done", "fields": {}})
+                                changes.append({"task_id": t["id"], "op": "judge_evidence", "fields": {"evidence_id": eid, "verdict": "applied"}})
+                                closed += 1
+                            continue
                         hits = [m for m in mine if emails & _recipients(m) and str(m.get("receivedAtUtc") or "")[:19] > str(t.get("created_at") or "")[:19]]
                         if hits:
                             add_link(conn, t["id"], "mail_thread", cid, label=subject[:120], account=address)

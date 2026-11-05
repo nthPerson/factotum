@@ -3,18 +3,24 @@ apply(). Every batch records old values and can be undone once (SPEC.md §2, §4
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from datetime import date, datetime
 
-from .db import get_task, now_iso
+from .db import get_task, now_iso, upsert_task
 
 # Fields a change may set directly. Everything else is derived or owned by an automation.
 SETTABLE = {
     "name", "project", "area", "due", "due_is_datetime", "hard", "effort", "context", "counterpart",
     "waiting_on", "manual_priority", "snoozed_until", "top_rank", "longterm", "legacy_status",
-    "last_reviewed_at", "why_now", "calendar_event",
+    "last_reviewed_at", "why_now", "calendar_event", "close_on_sent_since",
 }
-OPS = {"set", "done", "drop", "reopen", "pin_top", "unpin", "keep", "longterm", "fade", "lapse", "add_reminder", "judge_evidence"}
+OPS = {"set", "done", "drop", "reopen", "pin_top", "unpin", "keep", "longterm", "fade", "lapse", "add_reminder", "judge_evidence",
+       "create", "watch_sent", "unwatch_sent"}
+# What a `create` may carry; score, priority, status and mentions stay derived.
+CREATABLE = {"name", "project", "area", "due", "due_is_datetime", "hard", "effort", "context", "counterpart", "waiting_on", "manual_priority", "longterm", "snoozed_until"}
+CREATED_SOURCE = "Claude"          # the Source of a task a connector or skill created
+EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 REPEATS = {"daily", "weekdays", "weekly", "monthly"}
 VERDICTS = ("applied", "dismissed", "reviewed", "staged")
 
@@ -38,6 +44,71 @@ def _reminder_fields(change: dict) -> dict:
     if repeat is not None and repeat not in REPEATS:
         raise ValueError(f"repeat must be one of {sorted(REPEATS)}, not {repeat!r}")
     return {"fire_at": str(fire_at), "label": (f.get("label") or None), "repeat": repeat}
+
+
+def watch_fields(task: dict, to) -> dict:
+    """`watch_sent`: the task closes when mail to an address is sent from now on (the mail sweep
+    reads `close_on_sent_since`). `to` joins the task's counterpart; without it the counterpart must
+    already hold an address. Raises ValueError."""
+    cp = str(task.get("counterpart") or "")
+    if to:
+        addr = str(to).strip().lower()
+        if not EMAIL_RE.fullmatch(addr):
+            raise ValueError(f"{to!r} is not an email address")
+        out = {"close_on_sent_since": now_iso()}
+        if addr not in cp.lower():
+            out["counterpart"] = f"{cp}; {addr}" if cp else addr
+        return out
+    if not EMAIL_RE.search(cp):
+        raise ValueError("no address to watch: give `to`, or set the task's counterpart to an email address")
+    return {"close_on_sent_since": now_iso()}
+
+
+def _add_reminder(cur, task_id: int, rf: dict, batch_id: int, source: str, undo: list) -> None:
+    cur.execute("INSERT INTO reminders (task_id, fire_at, label, repeat, status, created_by, created_at) VALUES (?, ?, ?, ?, 'pending', ?, ?)",
+                (task_id, rf["fire_at"], rf["label"], rf["repeat"], source, now_iso()))
+    rid = cur.lastrowid
+    cur.execute("INSERT INTO changes (batch_id, task_id, field, old, new) VALUES (?, ?, 'reminder', NULL, ?)", (batch_id, task_id, json.dumps(dict(rf, id=rid))))
+    undo.append({"task_id": task_id, "reminder_id": rid})
+
+
+def _create(conn, cur, ch: dict, batch_id: int, source: str, today: date, undo: list, skipped: list, created: list) -> int:
+    """A new open task (Source "Claude"), with its reminders and an optional sent-mail watch, as
+    part of the batch: recorded as a `created` change, and undone by dropping the row (never
+    deleting it: ids are forever and the mirror may already have a page). Returns what it wrote."""
+    f = dict(ch.get("fields") or {})
+    name = str(f.get("name") or "").strip()
+    if not name:
+        skipped.append({"task_id": None, "why": "a create needs a name"})
+        return 0
+    vals = {k: v for k, v in f.items() if k in CREATABLE}
+    vals["name"] = name[:200]
+    if vals.get("due"):
+        vals.setdefault("due_is_datetime", 1 if "T" in str(vals["due"]) else 0)
+    if "hard" in vals:
+        vals["hard"] = 1 if vals["hard"] else 0
+    if "longterm" in vals:
+        vals["longterm"] = 1 if vals["longterm"] else 0
+    to = ch.get("watch_sent_to")
+    if to:
+        try:
+            vals.update(watch_fields(vals, to))
+        except ValueError as e:
+            skipped.append({"task_id": None, "why": f"{name[:40]}: watch not set: {e}"})
+    now = now_iso()
+    tid = upsert_task(conn, dict(vals, status="open", source=CREATED_SOURCE, source_key=f"{source}:{batch_id}:{len(created)}", hard=vals.get("hard", 0),
+                                 mentions=1, last_mention_at=today.isoformat(), created_at=now, edited_at=now))
+    cur.execute("INSERT INTO changes (batch_id, task_id, field, old, new) VALUES (?, ?, 'created', NULL, ?)", (batch_id, tid, json.dumps(vals["name"])))
+    undo.append({"created_task_id": tid})
+    created.append(tid)
+    wrote = 1
+    for r in ch.get("reminders") or []:
+        try:
+            _add_reminder(cur, tid, _reminder_fields({"fields": r if isinstance(r, dict) else {}}), batch_id, source, undo)
+            wrote += 1
+        except ValueError as e:
+            skipped.append({"task_id": tid, "why": str(e)})
+    return wrote
 
 
 def _resolve(conn: sqlite3.Connection, change: dict, today: date, closed_by: str) -> dict:
@@ -69,7 +140,8 @@ def _resolve(conn: sqlite3.Connection, change: dict, today: date, closed_by: str
 
 
 def apply(conn: sqlite3.Connection, changes: list[dict], source: str, today: date | None = None, closed_by: str | None = None) -> dict:
-    """Apply a list of changes atomically. Returns {"batch_id", "applied": n, "skipped": [...]}."""
+    """Apply a list of changes atomically. Returns {"batch_id", "applied": n, "skipped": [...],
+    "created": [task ids a `create` made]}."""
     today = today or date.today()
     closed_by = closed_by or source
     cur = conn.cursor()
@@ -78,16 +150,19 @@ def apply(conn: sqlite3.Connection, changes: list[dict], source: str, today: dat
     undo: list[dict] = []
     applied = 0
     skipped: list[dict] = []
+    created: list[int] = []
     try:
         for ch in changes:
-            if _apply_one(conn, cur, ch, batch_id, source, today, closed_by, undo, skipped):
+            if isinstance(ch, dict) and ch.get("op") == "create":
+                applied += _create(conn, cur, ch, batch_id, source, today, undo, skipped, created)
+            elif _apply_one(conn, cur, ch, batch_id, source, today, closed_by, undo, skipped):
                 applied += 1
     except Exception:
         conn.rollback()   # one shared connection serves every request; never leave it mid-transaction
         raise
     cur.execute("UPDATE batches SET undo_json = ? WHERE id = ?", (json.dumps(undo), batch_id))
     conn.commit()
-    return {"batch_id": batch_id, "applied": applied, "skipped": skipped}
+    return {"batch_id": batch_id, "applied": applied, "skipped": skipped, "created": created}
 
 
 def _apply_one(conn, cur, ch: dict, batch_id: int, source: str, today: date, closed_by: str, undo: list, skipped: list) -> bool:
@@ -112,12 +187,14 @@ def _apply_one(conn, cur, ch: dict, batch_id: int, source: str, today: date, clo
         except ValueError as e:
             skipped.append({"task_id": task["id"], "why": str(e)})
             return False
-        cur.execute("INSERT INTO reminders (task_id, fire_at, label, repeat, status, created_by, created_at) VALUES (?, ?, ?, ?, 'pending', ?, ?)",
-                    (task["id"], rf["fire_at"], rf["label"], rf["repeat"], source, now_iso()))
-        rid = cur.lastrowid
-        cur.execute("INSERT INTO changes (batch_id, task_id, field, old, new) VALUES (?, ?, 'reminder', NULL, ?)", (batch_id, task["id"], json.dumps(dict(rf, id=rid))))
-        undo.append({"task_id": task["id"], "reminder_id": rid})
+        _add_reminder(cur, task["id"], rf, batch_id, source, undo)
         return True
+    if ch.get("op") in ("watch_sent", "unwatch_sent"):       # both become a plain set, so the diff and the undo below serve them
+        try:
+            ch = dict(ch, op="set", fields=watch_fields(task, (ch.get("fields") or {}).get("to")) if ch["op"] == "watch_sent" else {"close_on_sent_since": None})
+        except ValueError as e:
+            skipped.append({"task_id": task["id"], "why": str(e)})
+            return False
     try:
         fields = _resolve(conn, ch, today, closed_by)
     except ValueError as e:
@@ -177,6 +254,9 @@ def undo(conn: sqlite3.Connection, batch_id: int) -> dict:
             conn.execute("UPDATE reminders SET status = 'cancelled' WHERE id = ?", (u["reminder_id"],))
         elif "evidence_id" in u:
             conn.execute("UPDATE evidence SET judged_at = NULL, verdict = NULL WHERE id = ?", (u["evidence_id"],))
+        elif "created_task_id" in u:                         # a created task is dropped, not deleted
+            conn.execute("UPDATE tasks SET status = 'dropped', completed_at = ?, closed_by = 'undo', top_rank = NULL, edited_at = ? WHERE id = ?",
+                         (date.today().isoformat(), now_iso(), u["created_task_id"]))
         else:
             conn.execute(f"UPDATE tasks SET {u['field']} = ?, edited_at = ? WHERE id = ?", (u["old"], now_iso(), u["task_id"]))
         restored += 1

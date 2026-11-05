@@ -35,7 +35,10 @@ batch changes, planner suggestions on Review, the phone layout. Wave 7 (2026-11-
 restart): the Slack mention sweep (`factotum/slack_sweep.py`: @-mentions → evidence, "Mentioned in
 Slack" on Review, suggestion cards), Discord forums and threads (`discord_threads`), the claude.ai
 connector (`factotum/oauth.py`: Factotum as the OAuth server behind `/mcp`, consent behind Access
-with the JWT verified, arming from Settings → Connections), `mirror --task`. Retiring the old Notion
+with the JWT verified, arming from Settings → Connections), `mirror --task`. Wave 8 (2026-11-04):
+Claude Client ID Metadata Documents; writing from a connector or skill (`create`, `reopen`,
+`watch_sent` as batch ops; `apply_changes` beside `stage_changes` when `server.mcp_writes` is
+`apply`; the mail sweep closes a watched task when the mail is sent). Retiring the old Notion
 pages and plaud-sync is the user's checklist (SETUP §15). Update this paragraph when something lands.
 
 ## Where things live
@@ -71,6 +74,7 @@ pages and plaud-sync is the user's checklist (SETUP §15). Update this paragraph
 | a skill staging a batch, the tray banner, the HTTP MCP route and its allowlist | SPEC §15 | `factotum/mcp_server.py` (`stage_changes`, `Context.allowed`), `api.py` (`/api/proposals`, `/mcp`), `skills/` |
 | Slack / Discord read tools, workspaces and servers, tokens | SPEC §6 | `factotum/slack.py`, `factotum/discord.py`, `mcp_server.py` (`slack_*`, `discord_*`) |
 | verdicts on evidence (dismiss, accept, reviewed), planner suggestions on Review | SPEC §9 | `factotum/batches.py` (`judge_evidence`), `api.py` (`/api/review`, `/api/review/suggestions`, `SUGGESTION_KINDS`) |
+| what a connector or skill may write: validation, staging vs direct apply, create, the sent-mail watch | SPEC §15 "Writing from a connector" | `factotum/mcp_server.py` (`_validate_changes`, `stage_changes`, `apply_changes`), `batches.py` (`_create`, `watch_fields`), `mail_sweep.py` (`close_on_sent_since`) |
 | the Slack mention sweep, "Mentioned in Slack", a mention as a suggestion card | SPEC §6 "Slack" | `factotum/slack_sweep.py` (`sweep`), `lifecycle.REVIEW_ORDER`, `mail_sweep.review_flags`, `planner.NON_PROVING` |
 | the claude.ai connector: metadata, registration, consent gate, arming, tokens, `/mcp` auth | SPEC §15, SETUP §16 | `factotum/oauth.py` (`consent_identity`, `verify_access_jwt`, `armed`, `token`, `check_access`), `api.py` (`/oauth/*`, `/api/connectors`) |
 
@@ -158,6 +162,13 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
 - **A `slack_mention` never proves a planner proposal** (2026-11-02): anyone in a workspace can
   write "Task-42 is done". `planner.NON_PROVING` stages such a proposal for Review; and its link is
   `slack_message`, never `mail_thread` (the mail sweep polls those through Mailbird).
+- **`create` is a batch op and its undo drops the row** (2026-11-04): never a DELETE — task ids are
+  forever and the mirror may already have a Notion page. Imports, sync-file, Canvas and the Review
+  suggestion cards still create outside a batch (upsert by `source_key`); only connector / skill
+  creates ride in one.
+- **`apply_changes` exists only when `server.mcp_writes` is `apply`** (2026-11-04): hidden from
+  `tools/list` and refused on call otherwise, on both the HTTP route and the stdio skill server. A
+  chat turn never has it (no writer). Whatever the mode, the write is `batches.apply`.
 - **A Settings-tab override hides a YAML edit** (2026-11-02): every `SETTINGS_KEYS` control auto-saves,
   so once a box has been seen unticked the database holds `false` and `C.effective` prefers it to the
   file. `server.oauth.enabled: true` in the YAML did nothing until the toggle was ticked in Settings.

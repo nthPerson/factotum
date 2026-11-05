@@ -32,17 +32,26 @@ from memory.
 | what is on the calendar | `calendar_events` |
 | what a recording said | `plaud_search` (title keyword, days back), then `plaud_summary` |
 | Slack / Discord, when the config enables them | `slack_search`, `slack_history`, `slack_thread`; `discord_channels`, `discord_threads` (forum posts are threads), `discord_messages` (a channel, or a thread by id), `discord_search` |
-| **change anything** | `stage_changes` — see below |
+| **create or change anything** | `apply_changes` when the server offers it, else `stage_changes` — see below |
 
 Results are trimmed on purpose (previews, capped bodies). Ask for one task in full rather than
 listing everything; the open list is sixty rows at most.
 
-## Writing: stage, never apply
+## Writing: apply when offered, otherwise stage
 
-`stage_changes` is the only write, and it does not write task state: it records **one batch**
-that the user sees in Factotum's tray with Apply and Dismiss. Say so every time: *"staged; tap
-Apply in Factotum to make it so"*. Never claim a change happened. Never stage the same batch
-twice because the first "did not take"; it took, it is waiting for Apply.
+Two tools take the same `changes` list. Which ones exist is the user's setting, so look at the
+tool list rather than assume:
+
+- **`apply_changes`** (only when Factotum is set to "Apply directly"): the batch is written at
+  once. Say what changed with the task codes, and that Factotum's Log tab has an Undo for it. Use
+  it when the user asks for a change.
+- **`stage_changes`** (always there): records **one batch** the user sees in Factotum's tray with
+  Apply and Dismiss. Say so every time: *"staged; tap Apply in Factotum to make it so"*, and never
+  claim the change happened. Use it when `apply_changes` is absent, or when the user wants to look
+  first. Never send the same batch twice because the first "did not take".
+
+Look before you write: `tasks_query` for the thing first, so you edit the row that exists
+instead of creating its twin (a create with an open task's exact name is refused).
 
 | Asked | Stage |
 |---|---|
@@ -54,10 +63,13 @@ twice because the first "did not take"; it took, it is waiting for Apply.
 | top of the pile / long-term, never fades | `{"op": "pin_top"}` / `{"op": "longterm"}` |
 | urgent / can wait | `{"op": "set", "fields": {"manual_priority": "P0"}}` … `P3` |
 | note `<text>` | `{"op": "set", "fields": {"context": "<existing context>\n<date>: <text>"}}` (read it first; `set` replaces) |
-| remind me `<when>` | `{"op": "add_reminder", "fields": {"fire_at": "YYYY-MM-DDTHH:MM", "label": "…", "repeat": null}}` |
+| remind me `<when>` | `{"op": "add_reminder", "task_id": n, "fields": {"fire_at": "YYYY-MM-DDTHH:MM", "label": "…", "repeat": null}}` |
+| add a task (with reminders) | `{"op": "create", "fields": {"name": "imperative, ≤ 80 chars", "project": "<one from the taxonomy>", "due": "YYYY-MM-DD", "hard": true, "effort": "S", "context": "…"}, "reminders": [{"fire_at": "…", "label": "…"}]}` |
+| close it once I have emailed `<person>` | `{"op": "watch_sent", "task_id": n, "fields": {"to": "person@example.org"}}` — find the address with `mail_search` if the user gave a name; the mail sweep closes the task when a message to it is sent from now on. On a new task: `"watch_sent_to": "…"` beside `fields` |
+| stop watching / bring a closed task back | `{"op": "unwatch_sent"}` / `{"op": "reopen"}` |
 
-Creating a task is not a tool: describe it and tell the user to add it in Factotum (the composer
-on any tab), or that a Plaud memo will file it.
+Every op but `create` needs `task_id`. A watch needs an email address, not a name; if the search
+finds two candidates, ask which.
 
 ## Invariants
 

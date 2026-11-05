@@ -77,7 +77,7 @@ class DraftOpenBody(BaseModel):
 SUGGESTION_KINDS = ("proposal", "slack_mention")      # evidence with no task that Review offers as a Create / Dismiss card
 
 
-def _consent_page(req: dict, csrf: str, base: str, who: str, tools: int, again: bool) -> str:
+def _consent_page(req: dict, csrf: str, base: str, who: str, tools: int, again: bool, direct: bool = False) -> str:
     """The one human step of the connector flow: what the client is, when it registered, what it
     will be able to do. The name is whatever the client sent; the registration line is ours."""
     from urllib.parse import urlsplit
@@ -101,7 +101,7 @@ form{{display:flex;gap:12px;margin-top:20px}} button{{font:inherit;padding:10px 
 {prov}
 <p>It will be able to, as you:</p>
 <ul><li>use {tools} Factotum tools: read your tasks, reminders, mail, calendar, Slack and Discord</li>
-<li>stage task changes that appear in Factotum's tray for you to Apply or Dismiss — it never changes a task itself</li>
+<li>{"create and change your tasks directly: each call is one batch you can undo in Factotum's Log (Settings → Connections switches this to staging)" if direct else "stage task changes that appear in Factotum's tray for you to Apply or Dismiss — it never changes a task itself"}</li>
 <li>nothing is ever sent on your behalf</li></ul>
 <p class="who">Signed in as {escape(who)} · revoke any time in Settings → Connections at <a href="{escape(base)}/#settings">{escape(base)}</a>.</p>
 <form method="post" action="{escape(base)}/oauth/authorize">{hidden}<button type="submit" name="decision" value="deny" class="deny">Deny</button><button type="submit" name="decision" value="allow">Allow</button></form>
@@ -472,12 +472,12 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
 
     @app.post("/api/proposals/{pid}/apply")
     def proposal_apply(pid: int):
-        """The one write a skill can cause, and only by the user's tap: its staged changes become a
-        batch (source `skill`, undoable like any other)."""
+        """A batch Claude staged (a skill, or the connector) becomes a real one by the user's tap:
+        source `skill` or `connector` as staged, undoable like any other; a `create` in it makes its task now."""
         from .db import now_iso
         p = _proposal(pid)
         try:
-            res = batches.apply(conn, json.loads(p["changes_json"] or "[]"), "skill", date.today())
+            res = batches.apply(conn, json.loads(p["changes_json"] or "[]"), p["source"] if p["source"] in ("skill", "connector") else "skill", date.today())
         except ValueError as e:
             raise HTTPException(400, str(e))
         conn.execute("UPDATE proposals SET applied_at = ?, batch_id = ? WHERE id = ?", (now_iso(), res["batch_id"], pid))
@@ -562,7 +562,9 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
                                           f"Open Factotum → Settings → Connections, tap \"Allow a new connector\" ({oauth.ARM_MINUTES} minutes), then try again from the app that asked. "
                                           f"If you did not start this, nothing happened: close this page.", base), status_code=403, headers=heads)
             if decision is None:
-                return HTMLResponse(_consent_page(req, oauth.consent_token(req), base, who, len(_mcp_allowed(ecfg)), again), headers=heads)
+                direct = str(C.get(ecfg, "server.mcp_writes", "stage")) == "apply"
+                n = len(_mcp_allowed(ecfg)) - (0 if direct else 1)       # apply_changes is offered only in apply mode
+                return HTMLResponse(_consent_page(req, oauth.consent_token(req), base, who, n, again, direct), headers=heads)
             if not oauth.consent_ok(req, params.get("csrf")):
                 return HTMLResponse(_page("Factotum", "This consent page has expired; go back to the connector and try again.", base), status_code=400, headers=heads)
             if decision != "allow":
@@ -688,7 +690,8 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         ecfg = eff_cfg()
         allowed = _mcp_allowed(ecfg)
         try:
-            ctx = mcp_server.Context(reader, ecfg, run_dir=None, writer=lambda: connect(db), allowed=allowed)
+            ctx = mcp_server.Context(reader, ecfg, run_dir=None, writer=lambda: connect(db), allowed=allowed,
+                                     apply_writes=str(C.get(ecfg, "server.mcp_writes", "stage")) == "apply", source="connector")
             if isinstance(msg, list):
                 out = [r for r in (mcp_server.dispatch(ctx, m) for m in msg) if r is not None]
                 return JSONResponse(out) if out else JSONResponse(None, status_code=202)

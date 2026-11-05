@@ -28,7 +28,9 @@ a prompt field on the Review card; and phase 6: the one-way Notion tasks mirror,
 Code skills on the same server (a skill stages a batch the tray applies), the server over HTTP
 behind a bearer token, and a phone layout; then the Slack mention sweep (@-mentions of you become
 Review items), Discord forums and threads, and the claude.ai / Claude Desktop connector (Factotum
-is its own OAuth server for `/mcp`; the consent page lives behind Cloudflare Access). Retiring the
+is its own OAuth server for `/mcp`; the consent page lives behind Cloudflare Access), which can
+read your tasks and, as you choose in Settings, stage changes for your Apply or create and edit
+tasks directly (every call an undoable batch). Retiring the
 old Notion pages and plaud-sync is a checklist in docs/SETUP.md §15.
 
 ## Quick start
@@ -42,7 +44,7 @@ cp config/factotum.example.yaml config/factotum.yaml   # edit projects, accounts
 .venv/bin/python -m factotum import-notion --apply
 .venv/bin/python -m factotum import-notion --new-only --apply   # hourly, until the old system stops writing
 .venv/bin/python -m factotum serve                     # http://127.0.0.1:8750
-.venv/bin/pytest                                       # 110 tests, no network
+.venv/bin/pytest                                       # 115 tests, no network
 ```
 
 ## Adapting it to your own workflow

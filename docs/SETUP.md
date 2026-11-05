@@ -480,4 +480,10 @@ Factotum is its own OAuth server for `/mcp` (SPEC §15). Four steps, each once.
    lists every connector, when it last spoke and its live tokens; Revoke kills them all at once.
    The connector gets the same tools as the bearer route (reads and `stage_changes`; drafts and
    Plaud only via `server.mcp_http_tools`), so a chat in claude.ai can read tasks and stage a batch
-   for your tray, never write one. Upload the skills (§14) so those chats know the recipes.
+   for your tray. **Settings → Connections → "What Claude may do with tasks"** decides the rest:
+   *Stage for my Apply* (the default: nothing changes until you tap Apply in Factotum) or *Apply
+   directly*, which adds the `apply_changes` tool: "create a task for the midterm with two
+   reminders", "set Task-212 due tomorrow and close it when I have emailed Max" then happen at
+   once, each call one batch with an Undo in the Log. The same setting governs the skills in
+   Claude Code. After changing it, reconnect the connector in claude.ai (or start a new chat) so
+   it reloads the tool list. Upload the skills (§14) so those chats know the recipes.
