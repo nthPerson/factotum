@@ -523,7 +523,8 @@ CHANGES_SCHEMA = {"type": "array", "items": {"type": "object", "properties": {
     "reminders": {"type": "array", "description": "create only: reminders for the new task", "items": {"type": "object", "properties": {"fire_at": {"type": "string"}, "label": {"type": "string"}, "repeat": {"type": ["string", "null"]}}}},
     "watch_sent_to": {"type": "string", "description": "create only: an email address; the task closes when mail to it is sent"}}, "required": ["op"]}}
 OPS_HELP = ("ops: create (fields: name, project, due YYYY-MM-DD or YYYY-MM-DDTHH:MM, hard, effort, context, counterpart, waiting_on, manual_priority, longterm; "
-            "plus reminders [{fire_at, label, repeat}] and watch_sent_to), set (the same fields plus snoozed_until), done, drop, reopen (a closed task), pin_top, "
+            "plus reminders [{fire_at, label, repeat}] and watch_sent_to), set (the same fields plus snoozed_until; null clears a field, so due: null "
+            "removes a due date), done, drop, reopen (a closed task), pin_top, "
             "longterm, add_reminder (fields: fire_at ISO local, label, repeat daily|weekdays|weekly|monthly), watch_sent (fields: to = an email address; the task "
             "closes itself when the mail sweep sees a message sent to it from now on; without `to` the task's counterpart address is used), unwatch_sent. "
             "Look first (tasks_query) so you edit an existing task rather than create its twin.")
@@ -566,7 +567,8 @@ def _rows_written(ch: dict) -> int:
     if ch["op"] == "create":
         return 1 + len(ch.get("reminders") or [])
     if ch["op"] == "set":
-        return max(1, len(ch.get("fields") or {}))
+        f = ch.get("fields") or {}
+        return max(1, len(f)) + (2 if "due" in f and not f["due"] else 0)     # removing a date clears hard and the time flag with it
     return ROWS_PER_OP.get(ch["op"], 1)
 
 

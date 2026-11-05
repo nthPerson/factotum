@@ -27,7 +27,7 @@ SETTINGS_KEYS = [
     "sources.slack.enabled", "sources.slack.sweep_minutes", "sources.discord.enabled",
     "sinks.notion_notes.enabled", "sinks.notion_tasks_mirror.enabled", "sinks.notion_tasks_mirror.sweep_minutes",
     "scoring.project_weights",
-    "claude.models", "claude.planner.enabled", "claude.budgets_usd.chat_turn",
+    "claude.models", "claude.planner.enabled", "claude.budgets_usd.chat_turn", "claude.summary.auto", "claude.summary.auto_minutes",
     "server.oauth.enabled", "server.mcp_writes",
 ]
 

@@ -37,7 +37,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
-from . import batches, commands, config as C, lifecycle, oauth, reminders, scoring
+from . import batches, commands, config as C, lifecycle, oauth, reminders, scoring, summary
 from .db import connect, get_settings, get_task, init_db, rows, seed_accounts, set_setting
 from .dates import parse_date
 
@@ -223,6 +223,29 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
             return batches.undo(conn, batch_id)
         except KeyError:
             raise HTTPException(404)
+
+    # The Today summary (SPEC §8.4). Its clock is the owner's, like the scheduler's that writes it.
+    @app.get("/api/summary")
+    def today_summary():
+        ecfg = eff_cfg()
+        now = reminders.local_now(ecfg)
+        return {"summary": summary.get(conn, now.date()), "refresh": summary.refresh_state(conn, now),
+                "auto": bool(C.get(ecfg, "claude.summary.auto", True)), "can_refresh": getattr(app.state, "scheduler", None) is not None}
+
+    @app.post("/api/summary/refresh")
+    def refresh_summary():
+        """Ask the scheduler thread for a refresh (every enabled sweep, then the planner). The request
+        is a settings row it reads on its next tick, and it is woken at once; the API never sweeps
+        itself, so there is still one sweeper per database."""
+        sch = getattr(app.state, "scheduler", None)
+        if sch is None:
+            raise HTTPException(409, "this instance runs no scheduler (serve --no-scheduler), so nothing here can sweep")
+        now = reminders.local_now(eff_cfg())
+        if summary.refresh_state(conn, now)["state"] == "idle":
+            summary.request_refresh(conn, now)
+            conn.commit()
+            sch.wake()
+        return today_summary()
 
     @app.get("/api/review")
     def review(exclude: str | None = None):

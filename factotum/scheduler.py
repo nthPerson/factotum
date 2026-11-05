@@ -9,6 +9,9 @@ the review time or turning the brief off takes effect at the next tick.
     calendar_sweep  every sources.calendar.sweep_minutes when the calendar is on
     slack_sweep     every sources.slack.sweep_minutes when Slack is on: @-mentions of the user into evidence
     notion_mirror   every sinks.notion_tasks_mirror.sweep_minutes when the mirror is on: rows edited since the last pass
+    refresh         when the Today tab asked (`state.refresh.requested`): every enabled sweep now, then the planner
+    today_summary   when the Today summary is stale (summary.get) and claude.summary.auto is on: one light run,
+                    no more often than claude.summary.auto_minutes
 
 Daily jobs are "at or after HH:MM, once per day", so a service that was down at 06:30 still sends
 the brief when it comes back. A failed job retries after an hour, not the next day. Everything
@@ -29,11 +32,13 @@ RETRY_AFTER = timedelta(hours=1)
 
 
 class Scheduler:
-    def __init__(self, cfg: dict, conn: sqlite3.Connection, push=notify.publish, mailer=None, calendar=None, canvas=None, mail=None, planner=None, mirror=None, slack=None):
+    def __init__(self, cfg: dict, conn: sqlite3.Connection, push=notify.publish, mailer=None, calendar=None, canvas=None, mail=None, planner=None, mirror=None, slack=None, summary=None):
         self.cfg, self.conn, self.push, self.mailer, self.calendar, self.canvas, self.mail, self.planner = cfg, conn, push, mailer, calendar, canvas, mail, planner
         self.mirror = mirror
         self.slack = slack
+        self.summary = summary
         self._stop = threading.Event()
+        self._wake = threading.Event()
         self._thread: threading.Thread | None = None
         self._rem_error_at: datetime | None = None
 
@@ -60,6 +65,10 @@ class Scheduler:
             self._every("slack_sweep", int(C.get(ecfg, "sources.slack.sweep_minutes", 20)), now, st, did, lambda: self.slack.sweep_job(self.conn, ecfg, now))
         if C.get(ecfg, "sinks.notion_tasks_mirror.enabled") and self.mirror:
             self._every("notion_mirror", int(C.get(ecfg, "sinks.notion_tasks_mirror.sweep_minutes", 10)), now, st, did, lambda: self.mirror.sweep_job(self.conn, ecfg, now))
+        if st.get("state.refresh.requested"):
+            self._refresh(ecfg, now, did)
+        else:
+            self._auto_summary(ecfg, now, st, did)
         return did
 
     def _reminders(self, ecfg: dict, now: datetime, did: list[str]) -> None:
@@ -160,18 +169,108 @@ class Scheduler:
             out += f" · planner failed: {pres.get('error')}"
         return out
 
+    def _refresh(self, ecfg: dict, now: datetime, did: list[str]) -> None:
+        """What the Today tab's Refresh asks for: every enabled sweep now (one that fails does not stop
+        the rest), then the planner, which judges what they found and writes the summary; the light
+        summary run when the planner is off. No brief is mailed. The request is cleared first, so a
+        crash here cannot loop; `state.refresh.last` is what the UI reports when it is over."""
+        stamp = now.strftime("%Y-%m-%dT%H:%M")
+        set_setting(self.conn, "state.refresh.requested", None)
+        set_setting(self.conn, "state.refresh.running", stamp)
+        self.conn.commit()
+        started = time.monotonic()
+        parts: list[str] = []
+        ok = True
+        try:
+            for name, mod, key in (("mail", self.mail, "sources.mail.enabled"), ("canvas", self.canvas, "sources.canvas.enabled"),
+                                   ("calendar", self.calendar, "sources.calendar.enabled"), ("slack", self.slack, "sources.slack.enabled")):
+                if not (mod and C.get(ecfg, key)):
+                    continue
+                try:
+                    out = mod.sweep_job(self.conn, ecfg, now)
+                    set_setting(self.conn, f"state.last_run.{name}_sweep", stamp)       # the interval restarts from here
+                    self.conn.commit()
+                    parts.append(f"{name}: {out or 'nothing new'}")
+                except Exception as e:
+                    self.conn.rollback()
+                    parts.append(f"{name} failed ({type(e).__name__}: {str(e)[:80]})")
+            res = None
+            try:
+                if self.planner is not None and C.get(ecfg, "claude.planner.enabled", True):
+                    res = self.planner.run(self.conn, ecfg, now.date(), calendar=self.calendar)
+                    if res.get("ok"):
+                        parts.append(f"planner: {res.get('line') or res.get('verdict') or 'ran'}")
+                elif self.summary is not None:
+                    res = self.summary.run(self.conn, ecfg, now.date(), calendar=self.calendar, at=stamp)
+                    if res.get("ok"):
+                        parts.append("summary rewritten")
+            except Exception as e:
+                self.conn.rollback()
+                res = {"ok": False, "error": f"{type(e).__name__}: {e}"[:300]}
+            if res is not None and not res.get("ok"):
+                ok = False
+                parts.append(f"Claude run failed ({res.get('error') or 'unknown error'})")
+        finally:
+            line = (" · ".join(parts) or "nothing is switched on to sweep")[:1000]
+            set_setting(self.conn, "state.refresh.running", None)
+            set_setting(self.conn, "state.refresh.last", {"at": stamp, "ok": ok, "line": line})
+            log_run(self.conn, "refresh", int((time.monotonic() - started) * 1000), ok=ok, summary=line if ok else None, error=None if ok else line)
+            self.conn.commit()
+        did.append(f"refresh: {line}")
+
+    def _auto_summary(self, ecfg: dict, now: datetime, st: dict, did: list[str]) -> None:
+        """Rewrite the Today summary when Python says it is stale (summary.stale): at once when the
+        last one is older than claude.summary.auto_minutes, otherwise when it is. Yesterday's summary,
+        or none at all, waits for the morning: the brief's planner writes it, and this covers a
+        deployment with no brief or a planner that failed."""
+        if self.summary is None or not C.get(ecfg, "claude.summary.auto", True):
+            return
+        today = now.date()
+        s = self.summary.get(self.conn, today)
+        if s is None or s.get("day") != today.isoformat():
+            if now.strftime("%H:%M") < str(C.get(ecfg, "notify.morning_brief.time", "06:30") or "06:30"):
+                return
+            if s is None and not self._open():
+                return
+        elif not s.get("stale"):
+            return
+        else:
+            try:
+                age = now - datetime.fromisoformat(str(s.get("at"))[:16])
+            except ValueError:
+                age = timedelta(days=1)
+            if age < timedelta(minutes=int(C.get(ecfg, "claude.summary.auto_minutes", 10))):
+                return
+
+        def job() -> None:
+            res = self.summary.run(self.conn, ecfg, today, calendar=self.calendar, at=now.strftime("%Y-%m-%dT%H:%M"))
+            if not res.get("ok"):
+                raise RuntimeError(res.get("error") or "no summary")
+            did.append("today_summary: rewritten")      # the run logged itself (kind today-summary, with its cost)
+        self._run("today_summary", now, st, did, job, mark=now.strftime("%Y-%m-%dT%H:%M"))
+
     # ---- the thread --------------------------------------------------------------------------
 
     def start(self, interval_s: int = 30) -> None:
+        if get_settings(self.conn).get("state.refresh.running"):       # a refresh the last process died in
+            set_setting(self.conn, "state.refresh.running", None)
+            self.conn.commit()
+
         def loop():
             while not self._stop.is_set():
+                self._wake.clear()
                 try:
                     self.tick()
                 except Exception:
                     traceback.print_exc()
-                self._stop.wait(interval_s)
+                self._wake.wait(interval_s)
         self._thread = threading.Thread(target=loop, name="factotum-scheduler", daemon=True)
         self._thread.start()
 
+    def wake(self) -> None:
+        """Tick now instead of at the next interval (the API calls this after storing a refresh request)."""
+        self._wake.set()
+
     def stop(self) -> None:
         self._stop.set()
+        self._wake.set()

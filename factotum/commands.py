@@ -5,6 +5,7 @@
     snooze 364            -> snoozed until tomorrow
     push 364 fri          -> due Friday
     defer 388 to next week
+    nodue 364             -> the due date removed (also: undate)
     top 23                -> pin to Top
     longterm 38           -> mark long-term
 
@@ -22,6 +23,7 @@ VERBS = {
     "done": "done", "finished": "done", "complete": "done", "completed": "done",
     "drop": "drop", "remove": "drop", "delete": "drop", "cancel": "drop",
     "snooze": "snooze", "defer": "push", "push": "push", "postpone": "push", "move": "push",
+    "nodue": "nodue", "undate": "nodue", "undue": "nodue",
     "top": "top", "pin": "top", "unpin": "unpin",
     "longterm": "longterm", "long-term": "longterm", "lt": "longterm",
     "start": "start", "reopen": "reopen",
@@ -70,6 +72,10 @@ def parse(text: str, today: date) -> list[dict] | None:
                 changes.append({"task_id": tid, "op": "set", "fields": {"due": d.isoformat(), "snoozed_until": None}})
             else:
                 changes.append({"task_id": tid, "op": "set", "fields": {"snoozed_until": (today + timedelta(days=1)).isoformat()}})
+        elif op == "nodue":
+            if when_text:
+                return None
+            changes.append({"task_id": tid, "op": "set", "fields": {"due": None}})
         elif op == "top":
             changes.append({"task_id": tid, "op": "pin_top", "fields": {}})
         elif op == "unpin":

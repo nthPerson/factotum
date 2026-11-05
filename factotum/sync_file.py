@@ -139,6 +139,8 @@ def _clean_task_fields(cfg: dict, t: dict) -> dict:
             datetime.fromisoformat(f["due"])
         except ValueError:
             f.pop("due"); f.pop("due_is_datetime", None)
+    elif "due" in f:
+        f["due"] = None                                      # null or "" both mean "no date"
     if "effort" in f and f["effort"] not in (C.get(cfg, "taxonomy.efforts", []) or ["XS", "S", "M", "L"]):
         f.pop("effort")
     for k in ("name", "context", "counterpart", "waiting_on"):

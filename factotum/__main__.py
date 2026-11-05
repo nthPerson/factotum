@@ -130,10 +130,13 @@ def main(argv: list[str] | None = None) -> int:
         from .api import create_app
         app = create_app(cfg)
         if not a.no_scheduler:
-            from . import brief, canvas, gcal, mail_sweep, notify, notion_mirror, planner, slack_sweep
+            from . import brief, canvas, gcal, mail_sweep, notify, notion_mirror, planner, slack_sweep, summary
             from .scheduler import Scheduler
             # its own connection: the API holds one, and SQLite serialises writers with busy_timeout
-            Scheduler(cfg, connect(C.db_path()), push=notify.publish, mailer=brief.smtp_mailer, calendar=gcal, canvas=canvas, mail=mail_sweep, planner=planner, mirror=notion_mirror, slack=slack_sweep).start()
+            sched = Scheduler(cfg, connect(C.db_path()), push=notify.publish, mailer=brief.smtp_mailer, calendar=gcal, canvas=canvas, mail=mail_sweep, planner=planner,
+                              mirror=notion_mirror, slack=slack_sweep, summary=summary)
+            sched.start()
+            app.state.scheduler = sched          # the Today tab's Refresh asks this thread; with --no-scheduler the button is off
             _start_plaud_trigger(cfg)
         uvicorn.run(app, host=a.host or C.get(cfg, "server.host", "127.0.0.1"), port=a.port or int(C.get(cfg, "server.port", 8750)))
     elif a.cmd == "tick":

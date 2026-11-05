@@ -199,6 +199,13 @@ def _apply_one(conn, cur, ch: dict, batch_id: int, source: str, today: date, clo
     except ValueError as e:
         skipped.append({"task_id": task["id"], "why": str(e)})
         return False
+    if "due" in fields and not fields["due"]:
+        # Removing the date: None (never ""), and what only means something beside a date goes with
+        # it, so an undated row is not left "hard" or flagged as carrying a time.
+        fields["due"] = None
+        for k in ("hard", "due_is_datetime"):
+            if task.get(k) and k not in fields:
+                fields[k] = 0
     diffs = {k: v for k, v in fields.items() if task.get(k) != v}
     if not diffs:
         return False

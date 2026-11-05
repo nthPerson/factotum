@@ -256,10 +256,12 @@ notify:
 
 claude:
   binary: claude                # absolute path (`which claude`) for the same reason; `factotum claude-check` says which
-  models: { sync_file: sonnet, planner_morning: sonnet, chat_turn: sonnet, check: haiku }
-  budgets_usd: { sync_file: 1.00, planner_morning: 0.75, chat_turn: 0.60, check: 0.05 }
+  models: { sync_file: sonnet, today_summary: sonnet, planner_morning: sonnet, chat_turn: sonnet, check: haiku }
+  budgets_usd: { sync_file: 1.00, today_summary: 0.30, planner_morning: 0.75, chat_turn: 0.60, check: 0.05 }
   planner: { enabled: true }   # the morning brief's verdict and proposals; off = the plain brief
-  timeouts_s: { sync_file: 600, planner_morning: 480, chat_turn: 240 }
+  summary: { auto: true, auto_minutes: 10 }   # the Today tab's summary: rewritten by one light run when it goes stale (a row it is about changed,
+                                # or something became urgent), at most this often; off = a badge and the Refresh button only. Settings → Claude.
+  timeouts_s: { sync_file: 600, today_summary: 180, planner_morning: 480, chat_turn: 240 }
 
 server:
   host: 127.0.0.1

@@ -3,7 +3,7 @@ applies what is proven and stages the rest.
 
     bundle(conn, cfg, today, events=None) -> dict
     build_prompt(cfg, bundle, today)      -> str
-    apply(conn, cfg, data, bundle, today) -> {verdict, why_now, applied, staged, rejected, created}
+    apply(conn, cfg, data, bundle, today) -> {verdict, verdict_tasks, why_now, applied, staged, rejected, created}
     run(conn, cfg, today, ...)            -> {ok, verdict, applied, staged, cost_usd, …} | {ok: False, error}
 
 Rules Python enforces, whatever the model says: `why_now` only on rows the bundle listed (≤ 15); a
@@ -60,15 +60,17 @@ def bundle(conn: sqlite3.Connection, cfg: dict, today: date, events: list[dict] 
     st = {r["key"]: r["value_json"] for r in rows(conn, "SELECT key, value_json FROM settings")}
     last = lifecycle.parse_date(st.get("state.last_review_at", "null").strip('"'))
     review_n = len(lifecycle.build_review_queue(open_tasks, today, cfg, last, flags_by_id=review_flags(conn), cap=10**9))
-    return {"rows": ordered[:ROW_CAP], "candidates": cands, "announcements": anns, "reminders": rem, "events": events or [], "waiting": waiting, "review_n": review_n}
+    pending = rows(conn, "SELECT label FROM evidence WHERE kind = 'proposal' AND judged_at IS NULL ORDER BY id DESC LIMIT 20")
+    return {"rows": ordered[:ROW_CAP], "candidates": cands, "announcements": anns, "reminders": rem, "events": events or [], "waiting": waiting, "review_n": review_n,
+            "pending": pending}
 
 
 def _esc(v) -> str:
     return html.escape(str(v or ""), quote=False).replace("\n", " ")
 
 
-def build_prompt(cfg: dict, b: dict, today: date) -> str:
-    tpl = PROMPT.read_text(encoding="utf-8")
+def sections(b: dict, today: date) -> dict[str, str]:
+    """The bundle as prompt text, one entry per {{placeholder}}; the Today summary's prompt uses the same."""
     row_lines = []
     for t in b["rows"]:
         due = (f"due {str(t['due'])[:16]}" + (" hard" if t.get("hard") else "")) if t.get("due") else "undated"
@@ -83,11 +85,16 @@ def build_prompt(cfg: dict, b: dict, today: date) -> str:
     rem_lines = [f"reminder {r['fire_at'][11:16]} Task-{r['id']} {_esc(r['name'])[:70]} ({_esc(r.get('label'))[:60]})" for r in b["reminders"]]
     ev_lines = [f"event {e.get('start')}{'' if e.get('all_day') else '–' + str(e.get('end') or '')[11:16]} {_esc(e.get('summary'))[:80]}" + (" (accepted)" if e.get("self_status") == "accepted" else "") for e in b["events"]]
     wait_lines = [f"waiting Task-{t['id']} {_esc(t['name'])[:70]} on {_esc(t['waiting_on'])[:60]}" for t in b["waiting"]]
-    fill = {"today": today.strftime("%A %Y-%m-%d") + f" · Review holds {b['review_n']} items",
+    return {"today": today.strftime("%A %Y-%m-%d") + f" · Review holds {b['review_n']} items",
             "rows": "\n".join(row_lines) or "(no open rows)", "candidates": "\n".join(cand_lines) or "(nothing collected)",
             "announcements": "\n".join(ann_lines) or "(none)", "reminders": "\n".join(rem_lines) or "no reminders today",
-            "events": "\n".join(ev_lines) or "calendar: off or empty", "waiting": "\n".join(wait_lines) or "nothing waiting on anyone"}
-    for k, v in fill.items():
+            "events": "\n".join(ev_lines) or "calendar: off or empty", "waiting": "\n".join(wait_lines) or "nothing waiting on anyone",
+            "pending": "\n".join("- " + _esc(p.get("label"))[:160] for p in b.get("pending") or []) or "(nothing)"}
+
+
+def build_prompt(cfg: dict, b: dict, today: date) -> str:
+    tpl = PROMPT.read_text(encoding="utf-8")
+    for k, v in sections(b, today).items():
         tpl = tpl.replace("{{" + k + "}}", v)
     return tpl
 
@@ -135,7 +142,7 @@ def apply(conn: sqlite3.Connection, cfg: dict, data: dict, b: dict, today: date)
             if any(e.get("task_id") is not None for e in cited):
                 rejected.append(f"{label}: cites evidence that belongs to a task"); continue
             n_create += 1
-            tid = upsert_task(conn, dict(f, status="open", source="Planner", source_key=f"planner:{today.isoformat()}:{n_create}", mentions=0, created_at=now_iso(), edited_at=now_iso()))
+            tid = upsert_task(conn, dict(f, status="open", source="Planner", source_key=f"planner:e{cited[0]['id']}", mentions=0, created_at=now_iso(), edited_at=now_iso()))
             add_mention(conn, tid, "planner", cited[0].get("ref"))
             for e in cited:
                 if e.get("ref"):
@@ -199,21 +206,25 @@ def apply(conn: sqlite3.Connection, cfg: dict, data: dict, b: dict, today: date)
     for s in res["skipped"]:
         rejected.append(f"Task-{s.get('task_id')}: {s.get('why')}")
     conn.commit()
-    return {"verdict": str(data.get("verdict") or "").strip()[:400], "why_now": n_why, "applied": applied, "staged": staged,
+    about = [i for i in (data.get("verdict_tasks") if isinstance(data.get("verdict_tasks"), list) else []) if type(i) is int and i in allowed]
+    return {"verdict": str(data.get("verdict") or "").strip()[:400], "verdict_tasks": about, "why_now": n_why, "applied": applied, "staged": staged,
             "rejected": rejected, "created": created, "batch_id": res.get("batch_id")}
+
+
+def week_events(cfg: dict, today: date, calendar) -> list[dict] | None:
+    if calendar is None or not C.get(cfg, "sources.calendar.enabled", False):
+        return None
+    try:
+        return calendar.events(cfg, datetime.combine(today, datetime.min.time()), datetime.combine(today + timedelta(days=7), datetime.min.time()))
+    except Exception:   # the planner runs without the calendar rather than not at all
+        return None
 
 
 def run(conn: sqlite3.Connection, cfg: dict, today: date, *, runner=None, calendar=None, dry_run: bool = False) -> dict:
     from .claude import runner as _runner
     runner = runner or _runner.run
     started = time.monotonic()
-    events = None
-    if calendar is not None and C.get(cfg, "sources.calendar.enabled", False):
-        try:
-            events = calendar.events(cfg, datetime.combine(today, datetime.min.time()), datetime.combine(today + timedelta(days=7), datetime.min.time()))
-        except Exception:   # the planner runs without the calendar rather than not at all
-            events = None
-    b = bundle(conn, cfg, today, events=events)
+    b = bundle(conn, cfg, today, events=week_events(cfg, today, calendar))
     prompt = build_prompt(cfg, b, today)
     workdir = Path(RUNS_DIR) / today.isoformat()
     workdir.mkdir(parents=True, exist_ok=True)
@@ -230,6 +241,13 @@ def run(conn: sqlite3.Connection, cfg: dict, today: date, *, runner=None, calend
         conn.commit()
         return {"ok": True, "dry_run": True, "data": res.data, "prompt": prompt, "cost_usd": res.cost_usd, "verdict": res.data.get("verdict")}
     s = apply(conn, cfg, res.data, b, today)
+    if s["verdict"]:
+        # The verdict is the Today tab's summary until something rewrites it (SPEC §8.4). A model that
+        # named no rows is taken to mean the ones nobody could leave out.
+        from . import reminders, summary
+        urgent = summary.focus(b["rows"], today)
+        summary.store(conn, s["verdict"], s["verdict_tasks"] or [t["id"] for t in b["rows"] if t["id"] in urgent], today, "planner",
+                      at=reminders.local_now(cfg).isoformat(timespec="minutes"))
     line = (f"{s['verdict'][:160]} · why_now {s['why_now']}, applied {len(s['applied'])}, for Review {len(s['staged'])}, rejected {len(s['rejected'])}"
             + (f"; batch {s['batch_id']}" if s.get("batch_id") else ""))
     log_run(conn, "planner-morning", ms, ok=True, summary=line[:1000], cost_usd=res.cost_usd)
