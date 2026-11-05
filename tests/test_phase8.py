@@ -205,6 +205,14 @@ def test_direct_writes_are_bounded_strict_and_never_make_a_contact(cfg, tmp_path
     cfg["server"]["mcp_apply_hourly_cap"] = 6
     over = call([{"task_id": 5, "op": "set", "fields": {"context": f"note {i}"}} for i in range(3)])
     assert over["result"]["isError"] and "hour" in _text(over)
+    # the cap counts rows the call would write (a create with reminders is not "one"), checked inside the write transaction
+    used = c.execute("SELECT COUNT(*) FROM changes c JOIN batches b ON b.id = c.batch_id WHERE b.source = 'connector' AND b.id NOT IN (SELECT batch_id FROM proposals WHERE batch_id IS NOT NULL)").fetchone()[0]
+    cfg["server"]["mcp_apply_hourly_cap"] = used + 5
+    rem = lambda n: [{"fire_at": f"2026-11-1{i}T09:00"} for i in range(n)]
+    big = call([{"op": "create", "fields": {"name": "Seven rows"}, "reminders": rem(6)}])
+    assert big["result"]["isError"] and "hour" in _text(big) and not rows(c, "SELECT 1 AS x FROM tasks WHERE name = 'Seven rows'")
+    small = json.loads(_text(call([{"op": "create", "fields": {"name": "Three rows"}, "reminders": rem(2)}])))
+    assert small["applied"] == 3
     cfg["server"]["mcp_apply_hourly_cap"] = 1000
     # switching Settings to Stage reaches a running server at once
     mode["apply"] = False

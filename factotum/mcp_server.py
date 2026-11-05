@@ -558,6 +558,16 @@ def _extra_fields(fields: dict) -> dict:
 
 
 MAX_CHANGES, MAX_REMINDERS, NAME_MAX = 40, 10, 80
+ROWS_PER_OP = {"done": 4, "drop": 4, "reopen": 3, "watch_sent": 2, "unwatch_sent": 2}     # status, completed_at, closed_by, top_rank …
+
+
+def _rows_written(ch: dict) -> int:
+    """An upper bound on the `changes` rows one validated change writes (the hourly cap's unit)."""
+    if ch["op"] == "create":
+        return 1 + len(ch.get("reminders") or [])
+    if ch["op"] == "set":
+        return max(1, len(ch.get("fields") or {}))
+    return ROWS_PER_OP.get(ch["op"], 1)
 
 
 def _norm_name(v) -> str:
@@ -714,16 +724,23 @@ def apply_changes(ctx: Context, args: dict) -> dict:
     kept, rejected, ignored = _validate_changes(ctx, args.get("changes"))
     if not kept:
         raise ToolError("nothing applicable: " + "; ".join(rejected)[:600])
-    # One bad conversation must not rewrite the list: direct changes are capped per hour (tray-applied batches do not count).
+    # One bad conversation must not rewrite the list: direct changes are capped per hour (tray-applied
+    # batches do not count). Both sides of the comparison are rows in `changes`, and the count is taken
+    # inside the write transaction (BEGIN IMMEDIATE holds the write lock), so two calls arriving together
+    # cannot both pass on the same remainder.
     cap = int(C.get(ctx.cfg, "server.mcp_apply_hourly_cap", 100))
     since = (datetime.now(timezone.utc) - timedelta(hours=1)).replace(microsecond=0).isoformat()
-    used = ctx.conn.execute("SELECT COUNT(*) FROM changes c JOIN batches b ON b.id = c.batch_id WHERE b.source IN ('skill', 'connector') AND b.applied_at > ? "
-                            "AND b.id NOT IN (SELECT batch_id FROM proposals WHERE batch_id IS NOT NULL)", (since,)).fetchone()[0]
-    if used + len(kept) > cap:
-        raise ToolError(f"direct writes are capped at {cap} changes an hour and {used} are used; stage these with stage_changes (the user applies them in the tray), or wait")
+    need = sum(_rows_written(ch) for ch in kept)
     w = ctx.writer()
     try:
-        res = batches.apply(w, kept, ctx.source, ctx.today)
+        w.execute("BEGIN IMMEDIATE")
+        used = w.execute("SELECT COUNT(*) FROM changes c JOIN batches b ON b.id = c.batch_id WHERE b.source IN ('skill', 'connector') AND b.applied_at > ? "
+                         "AND b.id NOT IN (SELECT batch_id FROM proposals WHERE batch_id IS NOT NULL)", (since,)).fetchone()[0]
+        if used + need > cap:
+            w.rollback()
+            raise ToolError(f"direct writes are capped at {cap} changes an hour; {used} are used and this call needs up to {need}. "
+                            "Stage it with stage_changes (the user applies it in the tray), or wait")
+        res = batches.apply(w, kept, ctx.source, ctx.today)     # same transaction; apply commits it
     finally:
         try:
             w.close()
