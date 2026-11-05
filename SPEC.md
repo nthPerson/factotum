@@ -527,7 +527,7 @@ The old Command Log relations are not imported; task history lives in `changes` 
 |---|---|---|
 | sync-file | $1.00 | 2–4 recordings → $1–3 |
 | planner-morning | $0.75 | $0.75 (measured ≈ $0.10 a run; each Refresh on the Today tab is one more) |
-| today-summary (§8.4) | $0.30 | a few cents a rewrite, at most one per `claude.summary.auto_minutes` while tasks change |
+| today-summary (§8.4) | $0.30 | ≈ $0.18 a rewrite measured on sonnet (2026-11-04), at most one per `claude.summary.auto_minutes` and only while the summary is stale; a busy day of edits is $1–3. `claude.models.today_summary: haiku` or a longer interval cuts it |
 | chat-turn / search / draft | $0.60 | on demand |
 | sweeps, UI, reminders, brief | $0 | $0 |
 

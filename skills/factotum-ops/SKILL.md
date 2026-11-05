@@ -79,8 +79,8 @@ Person-specific facts never go in a `.py` file; that is a bug, not a shortcut.
 ## Costs
 
 sync-file ≈ $0.15 per recording, planner ≈ $0.10–0.30 a run (each morning, and each Refresh on the
-Today tab), the Today summary's automatic rewrite a few cents (kind `today-summary`; Settings →
-Claude turns it off or spaces it out), a chat turn $0.05–0.20, chat-check $0.002. `GET /api/stats` reports the last 7 days; the Log tab shows each run.
+Today tab), the Today summary's automatic rewrite ≈ $0.18 each on sonnet, at most one per ten minutes and only
+while it is stale (kind `today-summary`; Settings → Claude turns it off or spaces it out), a chat turn $0.05–0.20, chat-check $0.002. `GET /api/stats` reports the last 7 days; the Log tab shows each run.
 
 ## What this skill may do
 
