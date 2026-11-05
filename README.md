@@ -44,7 +44,7 @@ cp config/factotum.example.yaml config/factotum.yaml   # edit projects, accounts
 .venv/bin/python -m factotum import-notion --apply
 .venv/bin/python -m factotum import-notion --new-only --apply   # hourly, until the old system stops writing
 .venv/bin/python -m factotum serve                     # http://127.0.0.1:8750
-.venv/bin/pytest                                       # 128 tests, no network
+.venv/bin/pytest                                       # 136 tests, no network
 ```
 
 ## Adapting it to your own workflow

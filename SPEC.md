@@ -312,15 +312,20 @@ and listed in the run row. `why_now` and the applied proposals ride in one batch
 beside the rows that have one, and lists what the planner did and what it left for Review. If the
 run fails, the plain brief goes out with the reason. `python -m factotum planner [--dry-run]
 [--send]` runs it by hand. The planner may run more than once a day (the Today tab's Refresh, §8.4),
-so the prompt lists the suggestions already waiting in Review ("do not propose these again") and a
-created row's `source_key` is the evidence it came from (`planner:e<id>`), never the date and a
-counter: a second run cannot overwrite the task the first one made.
+so the prompt lists the suggestions already waiting in Review ("do not propose these again"), Python
+refuses to stage a card that is already waiting (same op and task and fields; for a create, the same
+name), and a created row's `source_key` is the evidence it came from (`planner:e<id>`), never the
+date and a counter: a second run cannot overwrite the task the first one made. The prompt carries
+the time of day and what was closed today, so a run at 15:00 does not write a morning's verdict.
 
 ### 8.4 The Today summary (`factotum/summary.py`, added 2026-11-04)
 The planner's verdict is also the summary at the top of the Today tab, kept in the settings table
-(`state.summary`: the text, when it was written, by what, and the rows it is about). The model
-names those rows (`verdict_tasks`, ≤ 8, only rows the bundle listed; with none, the rows that are
-overdue-hard, due today or tomorrow, or pinned are assumed). **Python decides when it is out of
+(`state.summary`: the text, when it was written, by what, and the rows it is about). Those are the
+rows the model names (`verdict_tasks`, ≤ 8, only rows the bundle listed), the task codes in its
+text, and the urgent rows (overdue-hard, due today or tomorrow, pinned), which a summary of today
+is about whether it lists them or not. Each is remembered as the run READ it (the bundle's
+snapshot), not as it is when the text comes back, so a change made while Claude was writing shows
+as stale at once; rows the run itself changed or created are remembered as it left them. **Python decides when it is out of
 date, never a model**, and only for reasons a reader would care about: a row it is about was closed,
 re-dated, put off, handed to someone or changed hardness; a row it could not know became urgent
 (overdue and hard, due today or tomorrow, pinned to Top); or the day changed (one reason, "written
@@ -340,8 +345,9 @@ on what they found, or the light run when the planner is off; no brief is mailed
 settings row (`state.refresh.requested`) that the scheduler thread picks up, woken at once by
 `POST /api/summary/refresh`; the API never sweeps itself, so there is still one sweeper per
 database, and an instance started with `--no-scheduler` answers 409. `state.refresh.last` is what
-the UI reports when it is over; a request or a run older than 20 minutes was lost to a restart and
-reads as idle.
+the UI reports when it is over; a request or a run older than 20 minutes was lost to a restart: it
+reads as idle and the scheduler drops it instead of running it late. A failed automatic rewrite is
+retried after an hour, like every job.
 
 ### 8.3 `chat-turn` (Chat tab, "Search related emails", "Draft reply")
 Inputs: the prompt (`prompts/chat-turn.md` on a thread's first turn, a short continuation header
@@ -397,7 +403,9 @@ details and from a Review card, staged beside the decision rather than replacing
 date" sits beside "Change due", `nodue 364` is the command, and a connector sends `due: null`.
 Removing a date also clears `hard` and the time flag (an undated row is not a hard deadline), and
 the row then follows the undated lifecycle (§5): it leaves Today and can fade unless pinned or
-long-term. Timeline groups
+long-term. A Canvas row gets its date back at the next Canvas sweep (Canvas owns it), and a
+recording never removes a date: an empty `due` on an update or a re-synced recording means "not
+said", and the row keeps its date and hardness (`sync_file.apply_result`). Timeline groups
 open tasks by due date and ends with "Recently added", the newest 30 by creation date, so what a
 recording or a sweep just added is one scroll away. The Log tab
 lists recent batches with every field change (old → new, task named) and an Undo per batch, and

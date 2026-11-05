@@ -205,6 +205,11 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
 - **"Stale" for the Today summary is Python's call** (`summary.stale`), on a fingerprint of the rows
   the summary is about plus the urgent set; a new field that should invalidate a summary goes in
   `summary.FP`. The automatic rewrite (`summary.run`) must never write anything but `state.summary`.
+  `summary.store` is given the bundle's snapshot (`b["snap"]`), never the live rows: a run takes
+  seconds to minutes, and a row closed meanwhile would otherwise be forgotten, not flagged.
+- **An empty `due` from a recording is "not said"** (2026-11-04): `sync_file.apply_result` drops it
+  (with `hard`) on an update and on a re-synced create; only the UI, a command, Chat or a connector
+  removes a date. `_clean_task_fields` is shared with those paths, so the rule lives in apply_result.
 - **Removing a due date clears `hard` and `due_is_datetime` in `batches._apply_one`** (2026-11-04),
   and `""` means `None`. The connector's hourly cap counts those rows (`mcp_server._rows_written`).
 - **A folded section renders no rows** (2026-11-04): `jumpTo` must unfold (`setFold`) before
