@@ -13,9 +13,19 @@
   let lastBatch = null;
   let chat = { threads: null, current: null, messages: [], live: null, busy: false, from: null };   // from: {review: id} when a turn was asked from a Review card
   let lastTap = { id: null, at: 0 };   // for the hand-rolled double-click on rows
+  let railTap = { id: null, timer: null };   // a Top tile waits a moment for a second tap before it acts
+  let summary = null;       // /api/summary payload: the Today summary, what changed since, the refresh state
+  let sumTimer = null;
+  // Which sections are folded, per tab ("today:week", "timeline:later", "projects:<name>"); kept in
+  // this browser so the layout survives a reload and the next session.
+  let folds = {};
+  try { folds = JSON.parse(localStorage.getItem('factotum.folds') || '{}') || {}; } catch (_) { folds = {}; }
+  const folded = (key, dflt) => Object.prototype.hasOwnProperty.call(folds, key) ? !!folds[key] : !!dflt;
+  function setFold(key, shut) { folds[key] = !!shut; try { localStorage.setItem('factotum.folds', JSON.stringify(folds)); } catch (_) {} }
   let ui = { tab: 'today', focus: null, sel: new Set(), open: new Set(), reviewIdx: 0, laterOpen: false, datePick: false, trayOpen: false, trayOff: new Set(), reviewPaused: false, rvNote: { id: null, text: '' }, remOpen: null, dueOpen: null, rvReply: null,
              railOpen: !window.matchMedia('(max-width: 860px)').matches, chatDrawer: false };
   try { const h = location.hash.replace('#', ''); if (TABS.includes(h)) ui.tab = h; } catch (_) {}
+  try { const r = localStorage.getItem('factotum.rail'); if (r === '0' || r === '1') ui.railOpen = r === '1'; } catch (_) {}
   try { const s = JSON.parse(localStorage.getItem('factotum.staged') || '[]'); staged = new Map(s); } catch (_) {}
   for (const [k, v] of staged) { if (!v || typeof v !== 'object') staged.delete(k); else if (v.task_id == null) v.task_id = typeof k === 'number' ? k : parseInt(k, 10); }  // trays saved before entries carried task_id
 
@@ -38,6 +48,8 @@
     return v;
   }
   const openOnes = () => data.tasks.map(view).filter(t => t.status === 'open');
+  const topList = () => openOnes().filter(x => x.top_rank).sort((a, b) => a.top_rank - b.top_rank);
+  let topPos = new Map();   // task id -> its place in the Top list, rebuilt on every render
   const isoPlus = (n) => { const d = TODAY(); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10); };
   const nextFri = () => { const d = TODAY(); const delta = (5 - d.getDay() + 7) % 7 || 7; d.setDate(d.getDate() + delta); return d.toISOString().slice(0, 10); };
 
@@ -62,8 +74,57 @@
   async function load() {
     data = await api('/api/tasks?status=open');
     try { pending = (await api('/api/proposals')).proposals; } catch (_) { pending = []; }
+    try { summary = await api('/api/summary'); } catch (_) { summary = null; }
     document.getElementById('today-label').textContent = '· ' + TODAY().toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
     render();
+    watchSummary();
+  }
+
+  // ---------- the Today summary (SPEC §8.4) ----------
+  // The planner's verdict, kept by the server with what has changed since. Python decides "stale";
+  // this only shows it. Refresh asks the scheduler for the sweeps and the planner, then polls.
+  const sumBusy = () => !!(summary && summary.refresh && summary.refresh.state !== 'idle');
+  function summaryHtml() {
+    if (!summary) return '<section class="summary" id="summary" hidden></section>';
+    const s = summary.summary, rf = summary.refresh || {}, busy = sumBusy(), stale = s ? s.stale || [] : [];
+    const when = s && s.at ? new Date(s.at).toLocaleString([], s.day === data.today ? { hour: 'numeric', minute: '2-digit' } : { weekday: 'short', hour: 'numeric', minute: '2-digit' }) : '';
+    const btn = summary.can_refresh ? `<button class="btn small" id="sum-refresh" ${busy ? 'disabled' : ''} title="Sweeps mail, Canvas, the calendar and Slack now, then runs the planner on what they found. About a minute.">${busy ? '<span class="spin"></span>Refreshing…' : '↻ Refresh'}</button>` : '';
+    const reason = x => { const m = /^Task-(\d+) /.exec(x); return m ? `<a href="#" data-jump="${m[1]}">Task-${m[1]}</a> ${esc(x.slice(m[0].length))}` : esc(x); };
+    return `<section class="summary ${stale.length ? 'stale' : ''}" id="summary">
+      <div class="shead"><span class="lbl">Summary</span>${when ? `<span class="when">${esc(when)}${s.source === 'planner' ? ' · planner' : ''}</span>` : ''}${stale.length ? `<span class="chip stalechip">${stale.length === 1 && /^written /.test(stale[0]) ? esc(stale[0]) : `${stale.length} change${stale.length === 1 ? '' : 's'} since`}</span>` : ''}<span class="spacer"></span>${btn}</div>
+      ${s ? `<p class="stext">${esc(s.text)}</p>` : `<p class="hint">No summary yet. ${summary.can_refresh ? 'Refresh writes one.' : 'The morning planner writes one.'}</p>`}
+      ${stale.length && !busy ? `<ul class="since">${stale.slice(0, 4).map(x => `<li>${reason(x)}</li>`).join('')}${stale.length > 4 ? `<li>and ${stale.length - 4} more</li>` : ''}</ul><p class="hint">${summary.auto ? 'A new summary is written on its own within a few minutes.' : 'Automatic rewriting is off (Settings → Claude); Refresh writes a new one.'}</p>` : ''}
+      ${busy ? `<p class="hint"><span class="spin"></span>${rf.state === 'requested' ? 'Starting…' : 'Sweeping mail, Canvas, the calendar and Slack, then the planner. About a minute.'}</p>` : ''}
+      ${!busy && rf.last && !rf.last.ok ? `<p class="hint bad">The last refresh did not finish cleanly: ${esc(rf.last.line || '')}</p>` : ''}</section>`;
+  }
+  function swapSummary() {
+    const el = document.getElementById('summary'); if (!el) return;
+    el.outerHTML = summaryHtml(); wireSummary();
+  }
+  function wireSummary() {
+    const b = document.getElementById('sum-refresh'); if (b) b.onclick = refreshSummary;
+    document.querySelectorAll('#summary [data-jump]').forEach(a => a.onclick = e => { e.preventDefault(); jumpTo(+a.dataset.jump, false); });
+  }
+  async function refreshSummary() {
+    try { summary = await api('/api/summary/refresh', { method: 'POST' }); }
+    catch (e) { toast(e.message === '409' ? 'This instance runs no scheduler, so it cannot sweep' : 'Refresh failed: ' + e.message); return; }
+    swapSummary(); watchSummary();
+  }
+  function watchSummary() { clearTimeout(sumTimer); sumTimer = setTimeout(pollSummary, sumBusy() ? 3000 : 45000); }
+  async function pollSummary() {
+    const was = sumBusy();
+    if (document.hidden || (!was && ui.tab !== 'today')) { watchSummary(); return; }
+    let next; try { next = await api('/api/summary'); } catch (_) { watchSummary(); return; }
+    const changed = JSON.stringify(next) !== JSON.stringify(summary);
+    summary = next;
+    if (was && !sumBusy()) {     // a refresh just ended: the sweeps and the planner may have changed rows, Review and the Log
+      const last = (summary.refresh || {}).last || {};
+      review = null; logData = null; await load();
+      toast(last.ok ? 'Refreshed · ' + (last.line || '') : 'Refresh failed · ' + (last.line || ''));
+      return;
+    }
+    if (changed) swapSummary();
+    watchSummary();
   }
 
   // ---------- reminders ----------
@@ -87,12 +148,12 @@
     try { localStorage.setItem('factotum.staged', JSON.stringify([...staged])); } catch (_) {}
     render();
   }
-  function stageDue(id, due) { stageExtra(id + ':due', id, 'set', { due: due || null }, due ? 'due ' + due : 'due cleared'); toast('Due date staged · press Apply in the tray to save it'); }
+  function stageDue(id, due) { stageExtra(id + ':due', id, 'set', { due: due || null }, due ? 'due ' + due : 'due date removed'); toast((due ? 'Due date staged' : 'Removal of the due date staged') + ' · press Apply in the tray to save it'); }
   function dueForm(id, current) {
     const st = staged.get(id + ':due');
     if (st) return `<span class="chip staged">${esc(st.label)}</span><button class="btn small" data-due-clear="${id}">Undo</button>`;
-    if (ui.dueOpen !== id) return `<button class="btn small" data-due-open="${id}">📅 ${current ? 'Change due' : 'Set due'}</button>`;
-    return `<span class="remform" data-due-form="${id}"><input type="date" value="${esc((current || '').slice(0, 10))}" aria-label="Due date"><button class="btn small" data-due-set="${id}">Set</button>${current ? `<button class="btn small" data-due-none="${id}">Clear due</button>` : ''}<button class="btn small" data-due-cancel="${id}">Cancel</button></span>`;
+    if (ui.dueOpen !== id) return `<button class="btn small" data-due-open="${id}">📅 ${current ? 'Change due' : 'Set due'}</button>${current ? `<button class="btn small" data-due-none="${id}" title="The task keeps everything else and becomes undated">✕ Remove due date</button>` : ''}`;
+    return `<span class="remform" data-due-form="${id}"><input type="date" value="${esc((current || '').slice(0, 10))}" aria-label="Due date"><button class="btn small" data-due-set="${id}">Set</button>${current ? `<button class="btn small" data-due-none="${id}">Remove due date</button>` : ''}<button class="btn small" data-due-cancel="${id}">Cancel</button></span>`;
   }
   function wireDue(root) {
     root.querySelectorAll('[data-due-open]').forEach(b => b.onclick = () => { ui.dueOpen = +b.dataset.dueOpen; render(); });
@@ -181,6 +242,7 @@
 
   // ---------- rendering ----------
   function render() {
+    const bar = document.querySelector('header.bar'); if (bar) document.documentElement.style.setProperty('--bar-h', bar.offsetHeight + 'px');
     renderRail();
     const p = document.getElementById('panel');
     const fns = { today: renderToday, timeline: renderTimeline, projects: renderProjects, review: renderReview, chat: renderChat, log: renderLog, settings: renderSettings };
@@ -202,31 +264,58 @@
       <div class="pact"><button class="btn small primary" data-pending-apply="${p.id}">Apply ${p.changes.length} change${p.changes.length === 1 ? '' : 's'}</button><button class="btn small" data-pending-dismiss="${p.id}">Dismiss</button></div></div>`).join('');
   }
   function renderRail() {
-    const top = openOnes().filter(x => x.top_rank).sort((a, b) => a.top_rank - b.top_rank);
+    const top = topList();
+    topPos = new Map(top.map((x, i) => [x.id, i + 1]));
     const rail = document.getElementById('rail');
     rail.classList.toggle('collapsed', !ui.railOpen);
-    rail.innerHTML = `<h2 id="rail-head"><span class="lbl">Top <span>${top.length} of ${data.top_cap}</span></span><span class="tog" aria-hidden="true">${ui.railOpen ? '▾' : '▸'}</span></h2>
-      <ol id="rail-list">${top.map(x => { const d = fmtDue(x.due); return `<li draggable="true" data-id="${x.id}"><span class="grip">⋮⋮</span><span class="t" title="${esc(x.name)}">${esc(x.name)}</span>${d ? `<span class="due">${d.label}</span>` : ''}</li>`; }).join('')}</ol>
+    document.querySelector('main').classList.toggle('rail-min', !ui.railOpen);
+    // One tile per item: its rank, the name on up to three lines, then code, project and date. Folded,
+    // only the rank is left (ringed red or amber by the date), and it still takes a click.
+    rail.innerHTML = `<h2 id="rail-head" title="${ui.railOpen ? 'Fold the Top list' : 'Unfold the Top list'}"><span class="lbl">Top <span>${top.length} of ${data.top_cap}</span></span><button class="tog" aria-expanded="${ui.railOpen}" aria-label="${ui.railOpen ? 'Fold the Top list' : 'Unfold the Top list'}"></button></h2>
+      <ol id="rail-list">${top.map((x, i) => { const d = fmtDue(x.due); const u = d ? (d.days < 0 ? 'crit' : d.days <= 1 ? 'warn' : '') : '';
+        return `<li draggable="true" tabindex="0" data-id="${x.id}" class="${u}" title="${esc(x.name)}${d ? ' · ' + d.label : ''} — click to go to it, double-click to open its details"><span class="rank">${i + 1}</span><span class="tb"><span class="t">${esc(x.name)}</span><span class="m"><span class="code">Task-${x.id}</span><span>${esc(x.project || '—')}</span><span class="due ${u}">${d ? d.label + (x.hard ? ' · hard' : '') : 'no date'}</span></span></span></li>`; }).join('')}</ol>
       <div class="drop" id="rail-drop">Drag a row here, or press <b>t</b></div>`;
-    document.getElementById('rail-head').onclick = () => { ui.railOpen = !ui.railOpen; renderRail(); wireRail(); };
+    document.getElementById('rail-head').onclick = () => { ui.railOpen = !ui.railOpen; try { localStorage.setItem('factotum.rail', ui.railOpen ? '1' : '0'); } catch (_) {} renderRail(); wireRail(); };
+  }
+  // Where a task's row is: this tab if it lists it, else Today, else Timeline (which lists every
+  // open task). The section is unfolded, the row focused, scrolled to and flashed; `expand` opens its details.
+  function groupsOf(tab) {
+    return tab === 'today' ? todayGroups().groups : tab === 'timeline' ? timelineGroups() : tab === 'projects' ? projectGroups().map(([p, rows]) => ({ key: 'projects:' + p, rows })) : [];
+  }
+  function jumpTo(id, expand) {
+    const tabs = [ui.tab, 'today', 'timeline'].filter((t, i, a) => ['today', 'timeline', 'projects'].includes(t) && a.indexOf(t) === i);
+    let hit = null;
+    for (const tab of tabs) { const g = groupsOf(tab).find(g => g.rows.some(r => r.id === id)); if (g) { hit = { tab, key: g.key }; break; } }
+    if (!hit) { toast(`Task-${id} is not in a list right now`); return; }
+    const from = ui.tab;
+    if (folded(hit.key, hit.tab === 'projects')) setFold(hit.key, false);
+    ui.tab = hit.tab; ui.focus = id; if (expand) ui.open.add(id);
+    if (from !== hit.tab) location.hash = hit.tab;
+    render();
+    const el = document.querySelector(`#panel .row[data-id="${id}"]`);
+    if (el) { el.scrollIntoView({ block: 'center', behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' }); el.classList.add('flash'); }
+    if (hit.tab === 'timeline' && from !== 'timeline') toast(`Task-${id} has no place on Today (nothing due this week) · shown in Timeline`);
   }
   function attachedIds() { return ui.sel.size ? [...ui.sel] : (ui.focus ? [ui.focus] : []); }
   function composer() {
     const ids = attachedIds();
     return `<div class="composer"><div class="attach">${ids.length ? 'Attached: ' + ids.map(id => `<span class="chip">Task-${id}</span>`).join('') : 'Nothing attached · tap a row to attach it'}</div>
-      <div class="cmd"><input id="cmd" placeholder="${PHONE() ? 'done 389 · push 364 fri · or ask Claude' : 'Command: done 389 392 · push 364 fri · top 23 · longterm 38 · or ask Claude in plain words'}" aria-label="Prompt or command"><button class="btn primary" id="cmd-go">Send</button></div>
+      <div class="cmd"><input id="cmd" placeholder="${PHONE() ? 'done 389 · push 364 fri · or ask Claude' : 'Command: done 389 392 · push 364 fri · nodue 364 · top 23 · longterm 38 · or ask Claude in plain words'}" aria-label="Prompt or command"><button class="btn primary" id="cmd-go">Send</button></div>
       <p class="hint keys">Tap a row to select it (the bulk bar appears) · <kbd>j</kbd><kbd>k</kbd> move · <kbd>d</kbd> done · <kbd>x</kbd> drop · <kbd>s</kbd> snooze · <kbd>t</kbd> top · <kbd>l</kbd> long-term · <kbd>e</kbd> details · double-click a row for details · <kbd>Esc</kbd> deselect</p>
       <p class="hint touch">Tap a row to select it · double-tap or ▸ for details</p></div>
       <div class="bulk" id="bulk"><b id="bulk-n"></b> selected
         <button class="btn small" data-bulk="done">Done</button><button class="btn small" data-bulk="drop">Drop</button>
         <button class="btn small" data-bulk="snooze">Snooze to tomorrow</button>
-        <span class="remform"><input type="date" id="bulk-date" aria-label="Due date"><button class="btn small" data-bulk="setdue">Set due</button><button class="btn small" data-bulk="cleardue">Clear due</button></span>
+        <span class="remform"><input type="date" id="bulk-date" aria-label="Due date"><button class="btn small" data-bulk="setdue">Set due</button><button class="btn small" data-bulk="cleardue">Remove due date</button></span>
         <button class="btn small" data-bulk="top">Pin to Top</button><button class="btn small" data-bulk="longterm">Long-term</button>
         <span class="spacer"></span><button class="btn small" data-bulk="clear">Clear</button></div>`;
   }
-  function group(title, rows, cls, tag) {
-    if (!rows.length) return '';
-    return `<section class="group"><h3 class="${cls || ''}">${title}<span class="n">${rows.length}</span></h3><div class="rows">${rows.map(x => row(x, tag ? tag(x) : '')).join('')}</div></section>`;
+  // A section of rows with a heading that folds it: {key, title, rows, cls, tag}. A folded section
+  // renders no rows, so j/k and the bulk bar only ever see what is on screen.
+  function group(g) {
+    if (!g.rows.length) return '';
+    const shut = folded(g.key);
+    return `<section class="group ${shut ? 'folded' : ''}"><h3 class="${g.cls || ''}"><button class="fold" data-fold="${esc(g.key)}" aria-expanded="${!shut}">${g.title}<span class="n">${g.rows.length}</span></button></h3>${shut ? '' : `<div class="rows">${g.rows.map(x => row(x, g.tag ? g.tag(x) : '')).join('')}</div>`}</section>`;
   }
   function row(x, extraChip) {
     const d = fmtDue(x.due);
@@ -235,7 +324,7 @@
     const fadeDays = x.fade_at ? daysTo(x.fade_at) : null;
     const cls = ['row', x.status === 'done' ? 'done' : '', x.status === 'dropped' ? 'drop' : '', ui.open.has(x.id) ? 'open' : '', ui.sel.has(x.id) ? 'sel' : '', ui.focus === x.id ? 'focus' : ''].join(' ');
     const chips = [
-      x.top_rank ? `<span class="chip top">Top ${x.top_rank}</span>` : '',
+      x.top_rank ? `<span class="chip top">Top ${topPos.get(x.id) || x.top_rank}</span>` : '',
       x.longterm_effective ? `<span class="chip lt">Long-term</span>` : '',
       x.close_on_sent_since ? `<span class="chip" title="Closes itself when a message to ${esc(x.close_on_sent_to || 'the watched address')} is sent">✉ closes on send</span>` : '',
       fadeDays !== null && fadeDays <= 7 && !x.top_rank ? `<span class="chip fade">fades ${fadeDays <= 0 ? 'now' : 'in ' + fadeDays + 'd'}</span>` : '',
@@ -283,40 +372,52 @@
           <button class="btn small" data-chat-canned="draft_reply" data-id="${x.id}" title="A chat turn: saves a reply draft in Mailbird, never sends">✉ Draft reply</button>
         </div></div></div>`;
   }
-  function renderToday() {
+  const dueDays = x => x.due ? fmtDue(x.due).days : null;
+  function todayGroups() {
     const o = openOnes().filter(x => !(x.snoozed_until && x.snoozed_until > data.today));   // Later = hidden until its date
     const by = f => o.filter(f);
-    const overdueHard = by(x => x.due && x.hard && fmtDue(x.due).days < 0);
-    const today = by(x => x.due && fmtDue(x.due).days === 0);
-    const tomorrow = by(x => x.due && fmtDue(x.due).days === 1);
-    const week = by(x => x.due && fmtDue(x.due).days > 1 && fmtDue(x.due).days <= 7);
-    const starting = by(x => (x.reminders || []).some(r => daysTo(r.fire_at.slice(0, 10)) <= 1) && !today.includes(x) && !tomorrow.includes(x));
-    return composer() + group('Overdue · hard deadlines', overdueHard, 'crit') + group('Due today', today, 'warn') + group('Due tomorrow', tomorrow) +
-      group('Starting soon · reminders set', starting) + group('Rest of the week', week) +
-      (o.length ? '' : '<div class="empty">No open tasks. Run <code>python -m factotum import-notion --apply</code> or add some.</div>') +
+    const today = by(x => dueDays(x) === 0), tomorrow = by(x => dueDays(x) === 1);
+    return { open: o, groups: [
+      { key: 'today:overdue', title: 'Overdue · hard deadlines', cls: 'crit', rows: by(x => x.hard && dueDays(x) !== null && dueDays(x) < 0) },
+      { key: 'today:today', title: 'Due today', cls: 'warn', rows: today },
+      { key: 'today:tomorrow', title: 'Due tomorrow', rows: tomorrow },
+      { key: 'today:starting', title: 'Starting soon · reminders set', rows: by(x => (x.reminders || []).some(r => daysTo(r.fire_at.slice(0, 10)) <= 1) && !today.includes(x) && !tomorrow.includes(x)) },
+      { key: 'today:week', title: 'Rest of the week', rows: by(x => dueDays(x) > 1 && dueDays(x) <= 7) }] };
+  }
+  function renderToday() {
+    const { open, groups } = todayGroups();
+    return summaryHtml() + composer() + groups.map(group).join('') +
+      (open.length ? '' : '<div class="empty">No open tasks. Run <code>python -m factotum import-notion --apply</code> or add some.</div>') +
       `<div class="note">Soft dates that slipped, new items, and fading backlog are not here. They wait in <b>Review</b> so this screen stays short.</div>`;
   }
   const RECENT_CAP = 30;
-  function renderTimeline() {
-    const o = openOnes();
-    const dd = x => x.due ? fmtDue(x.due).days : null;
+  function timelineGroups() {
+    const o = openOnes(), dd = dueDays;
     const sortDue = (a, b) => (a.due || '').localeCompare(b.due || '');
-    return composer() + group('Overdue', o.filter(x => dd(x) !== null && dd(x) < 0).sort(sortDue), 'crit') + group('Today', o.filter(x => dd(x) === 0), 'warn') +
-      group('This week', o.filter(x => dd(x) > 0 && dd(x) <= 7).sort(sortDue)) + group('Next week', o.filter(x => dd(x) > 7 && dd(x) <= 14).sort(sortDue)) +
-      group('Later', o.filter(x => dd(x) > 14).sort(sortDue)) + group('Undated · long-term', o.filter(x => dd(x) === null && x.longterm_effective)) +
-      group('Undated · backlog', o.filter(x => dd(x) === null && !x.longterm_effective).sort((a, b) => (b.score || 0) - (a.score || 0))) +
+    return [
+      { key: 'timeline:overdue', title: 'Overdue', cls: 'crit', rows: o.filter(x => dd(x) !== null && dd(x) < 0).sort(sortDue) },
+      { key: 'timeline:today', title: 'Today', cls: 'warn', rows: o.filter(x => dd(x) === 0) },
+      { key: 'timeline:week', title: 'This week', rows: o.filter(x => dd(x) > 0 && dd(x) <= 7).sort(sortDue) },
+      { key: 'timeline:nextweek', title: 'Next week', rows: o.filter(x => dd(x) > 7 && dd(x) <= 14).sort(sortDue) },
+      { key: 'timeline:later', title: 'Later', rows: o.filter(x => dd(x) > 14).sort(sortDue) },
+      { key: 'timeline:longterm', title: 'Undated · long-term', rows: o.filter(x => dd(x) === null && x.longterm_effective) },
+      { key: 'timeline:backlog', title: 'Undated · backlog', rows: o.filter(x => dd(x) === null && !x.longterm_effective).sort((a, b) => (b.score || 0) - (a.score || 0)) },
       // Newest first, by creation date: the place to look for what a recording or sweep just added.
-      group('Recently added · newest first', o.slice().sort((a, b) => (b.created_at || '').localeCompare(a.created_at || '')).slice(0, RECENT_CAP), '',
-        x => `<span class="chip" title="Created ${esc(x.created_at || '')}">added ${x.created_at ? new Date(x.created_at).toLocaleDateString([], { month: 'short', day: 'numeric' }) : '?'}</span>`);
+      { key: 'timeline:recent', title: 'Recently added · newest first', rows: o.slice().sort((a, b) => (b.created_at || '').localeCompare(a.created_at || '')).slice(0, RECENT_CAP),
+        tag: x => `<span class="chip" title="Created ${esc(x.created_at || '')}">added ${x.created_at ? new Date(x.created_at).toLocaleDateString([], { month: 'short', day: 'numeric' }) : '?'}</span>` }];
+  }
+  function renderTimeline() { return composer() + timelineGroups().map(group).join(''); }
+  function projectGroups() {
+    const m = new Map();
+    openOnes().forEach(x => { const k = x.project || '—'; if (!m.has(k)) m.set(k, []); m.get(k).push(x); });
+    return [...m.entries()].sort((a, b) => b[1].length - a[1].length);
   }
   function renderProjects() {
-    const o = openOnes();
-    const m = new Map();
-    o.forEach(x => { const k = x.project || '—'; if (!m.has(k)) m.set(k, []); m.get(k).push(x); });
-    return composer() + [...m.entries()].sort((a, b) => b[1].length - a[1].length).map(([p, rows]) => {
+    return composer() + projectGroups().map(([p, rows]) => {
       const fading = rows.filter(x => x.fade_at && daysTo(x.fade_at) <= 7).length;
       const due = rows.filter(x => x.due && fmtDue(x.due).days <= 7).length;
-      return `<div class="proj-group ${ui.open.has('p:' + p) ? 'open' : ''}"><button data-proj="${esc(p)}">${esc(p)} <span class="n">${rows.length} open · ${due} due this week</span>${fading ? `<span class="warnn">${fading} fading</span>` : ''}</button><div class="rows">${rows.sort((a, b) => (a.due || '9').localeCompare(b.due || '9')).map(row).join('')}</div></div>`;
+      const open = !folded('projects:' + p, true);         // a project starts folded; what was opened stays open next time
+      return `<div class="proj-group ${open ? 'open' : ''}"><button data-proj="${esc(p)}" aria-expanded="${open}">${esc(p)} <span class="n">${rows.length} open · ${due} due this week</span>${fading ? `<span class="warnn">${fading} fading</span>` : ''}</button>${open ? `<div class="rows">${rows.sort((a, b) => (a.due || '9').localeCompare(b.due || '9')).map(x => row(x)).join('')}</div>` : ''}</div>`;
     }).join('');
   }
   // One page of the queue. Ids already staged in the tray are excluded server-side, so a page is
@@ -530,7 +631,7 @@
     const e = settings.effective;
     const f = (key, label, sub, control) => `<div class="field"><label for="s-${key}">${label}<span class="sub">${sub}</span></label><div>${control}</div></div>`;
     const num = (key, min, max) => `<input type="number" id="s-${key}" data-key="${key}" value="${e[key] == null ? '' : e[key]}" min="${min}" max="${max}" ${Number.isInteger(min) ? '' : 'step="0.05"'}>`;
-    const bool = key => `<input type="checkbox" id="s-${key}" data-key="${key}" ${e[key] ? 'checked' : ''}>`;
+    const bool = (key, dflt) => `<input type="checkbox" id="s-${key}" data-key="${key}" ${(e[key] == null ? dflt : e[key]) ? 'checked' : ''}>`;   // dflt: a key an older config file lacks
     const text = (key, w) => `<input type="text" id="s-${key}" data-key="${key}" value="${esc(e[key] || '')}" style="width:${w || '100%'}">`;
     const time = key => `<input type="time" id="s-${key}" data-key="${key}" value="${esc(e[key] || '')}">`;
     const accounts = (settings.accounts || []).map((a, i) => `<tr><td><input type="text" data-acc="${i}" data-f="address" value="${esc(a.address)}"></td><td><input type="text" data-acc="${i}" data-f="display" value="${esc(a.display || '')}" style="width:90px"></td><td><input type="text" data-acc="${i}" data-f="roles" value="${esc((a.roles || []).join(','))}" style="width:150px"></td><td><input type="checkbox" data-acc="${i}" data-f="enabled" ${a.enabled ? 'checked' : ''}></td><td><button class="btn small" data-accdel="${i}">×</button></td></tr>`).join('');
@@ -560,6 +661,7 @@
       ${f('notify.morning_brief.enabled', 'Morning brief', 'Email at this time: Top, due today, reminders.', bool('notify.morning_brief.enabled') + ' ' + time('notify.morning_brief.time') + ' to ' + text('notify.morning_brief.to', '240px'))}
       <h3>Claude</h3>
       ${f('claude.planner.enabled', 'Morning planner', 'One Claude run before the brief: the verdict, why-now lines and proposals. Off = the plain brief.', bool('claude.planner.enabled'))}
+      ${f('claude.summary.auto', 'Today summary', 'Rewritten by one light Claude run when a task it is about changes, something becomes urgent, or the day turns. Off: the Today tab still says what changed, and Refresh rewrites it.', bool('claude.summary.auto', true) + ' &nbsp; at most every ' + `<input type="number" id="s-claude.summary.auto_minutes" data-key="claude.summary.auto_minutes" value="${e['claude.summary.auto_minutes'] == null ? 10 : e['claude.summary.auto_minutes']}" min="1" max="240">` + ' min')}
       ${f('claude.budgets_usd.chat_turn', 'Chat turn budget', 'Dollars a single chat turn may spend before Claude stops.', '$ ' + num('claude.budgets_usd.chat_turn', 0.05, 5) )}
       <h3>Connections</h3>
       ${f('server.oauth.enabled', 'claude.ai / Claude Desktop connector', `Factotum is the OAuth server behind <code>${esc(connectors ? connectors.url : '')}</code>: add that URL as a custom connector and approve it once on the consent page (docs/SETUP.md §16). What a connector may do with tasks is the next setting.`, bool('server.oauth.enabled'))}
@@ -629,7 +731,9 @@
       const tray = document.getElementById('tray'); bulk.style.bottom = tray.classList.contains('on') ? (tray.offsetHeight + 8) + 'px' : '';
     }
     document.body.classList.toggle('bulk-on', ui.sel.size > 0);
-    panel.querySelectorAll('[data-proj]').forEach(b => b.addEventListener('click', () => { const k = 'p:' + b.dataset.proj; ui.open.has(k) ? ui.open.delete(k) : ui.open.add(k); render(); }));
+    panel.querySelectorAll('[data-proj]').forEach(b => b.addEventListener('click', () => { const k = 'projects:' + b.dataset.proj; setFold(k, !folded(k, true)); render(); }));
+    panel.querySelectorAll('[data-fold]').forEach(b => b.addEventListener('click', () => { setFold(b.dataset.fold, !folded(b.dataset.fold)); render(); }));
+    wireSummary();
     panel.querySelectorAll('[data-rv]').forEach(b => b.addEventListener('click', () => reviewAct(b.dataset.rv)));
     panel.querySelectorAll('[data-ctx-more]').forEach(b => b.onclick = () => { ui.ctxOpen = ui.ctxOpen === +b.dataset.ctxMore ? null : +b.dataset.ctxMore; render(); });
     panel.querySelectorAll('[data-rv-accept]').forEach(b => b.onclick = () => {
@@ -710,6 +814,16 @@
   function wireRail() {
     const list = document.getElementById('rail-list'); const drop = document.getElementById('rail-drop');
     list.querySelectorAll('li').forEach(li => {
+      // A click goes to the task's row; two in a row open its details as well. The first waits 260 ms
+      // for the second instead of acting at once: the jump scrolls the page, and on a phone the second
+      // tap of a double-tap would land on whatever had moved under the finger.
+      li.addEventListener('click', () => {
+        const id = +li.dataset.id;
+        if (railTap.timer && railTap.id === id) { clearTimeout(railTap.timer); railTap = { id: null, timer: null }; jumpTo(id, true); return; }
+        clearTimeout(railTap.timer);
+        railTap = { id, timer: setTimeout(() => { railTap = { id: null, timer: null }; jumpTo(id, false); }, 260) };
+      });
+      li.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); jumpTo(+li.dataset.id, true); } });
       li.addEventListener('dragstart', e => e.dataTransfer.setData('text/plain', li.dataset.id));
       li.addEventListener('dragover', e => { e.preventDefault(); li.classList.add('over'); });
       li.addEventListener('dragleave', () => li.classList.remove('over'));
@@ -795,5 +909,7 @@
     else return;
     e.preventDefault();
   });
+  window.addEventListener('resize', () => { const bar = document.querySelector('header.bar'); if (bar) document.documentElement.style.setProperty('--bar-h', bar.offsetHeight + 'px'); });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && ui.tab === 'today') { clearTimeout(sumTimer); pollSummary(); } });
   load().then(loadSettings).catch(e => { document.getElementById('panel').innerHTML = `<div class="empty">Could not load /api/tasks: ${esc(e.message)}</div>`; });
 })();

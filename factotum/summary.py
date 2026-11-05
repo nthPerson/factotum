@@ -32,6 +32,11 @@ FP = ("status", "due", "hard", "waiting_on", "snoozed_until")      # what a ment
 STUCK_AFTER = timedelta(minutes=20)  # a request or a run older than this was lost to a restart
 
 
+def _name(t: dict, n: int = 40) -> str:
+    name = str(t.get("name") or "")
+    return name if len(name) <= n else name[: n - 1].rstrip() + "…"
+
+
 def _fp(t: dict) -> list:
     return [t.get("status"), t.get("due"), 1 if t.get("hard") else 0, t.get("waiting_on"), t.get("snoozed_until")]
 
@@ -95,13 +100,13 @@ def stale(conn: sqlite3.Connection, s: dict, today: date) -> list[str]:
         for tid, was in about.items():
             t = cur.get(tid)
             if t and _fp(t) != list(was):
-                out.append(f"Task-{tid} {str(t['name'])[:40]}: " + _what(dict(zip(FP, was)), dict(zip(FP, _fp(t)))))
+                out.append(f"Task-{tid} {_name(t)}: " + _what(dict(zip(FP, was)), dict(zip(FP, _fp(t)))))
     known = set(about) | {int(i) for i in (s.get("focus") or [])}
     open_tasks = rows(conn, "SELECT * FROM tasks WHERE status = 'open'")
     by = {t["id"]: t for t in open_tasks}
     for tid, why in focus(open_tasks, today).items():
         if tid not in known:
-            out.append(f"Task-{tid} {str(by[tid]['name'])[:40]}: {why}, and not in the summary")
+            out.append(f"Task-{tid} {_name(by[tid])}: {why}, and not in the summary")
     return out[:STALE_CAP]
 
 
