@@ -65,9 +65,13 @@ class Scheduler:
             self._every("slack_sweep", int(C.get(ecfg, "sources.slack.sweep_minutes", 20)), now, st, did, lambda: self.slack.sweep_job(self.conn, ecfg, now))
         if C.get(ecfg, "sinks.notion_tasks_mirror.enabled") and self.mirror:
             self._every("notion_mirror", int(C.get(ecfg, "sinks.notion_tasks_mirror.sweep_minutes", 10)), now, st, did, lambda: self.mirror.sweep_job(self.conn, ecfg, now))
-        if st.get("state.refresh.requested"):
+        asked = st.get("state.refresh.requested")
+        if asked and self._recent(asked, now):
             self._refresh(ecfg, now, did)
         else:
+            if asked:                                        # asked while the service was down: the moment has passed
+                set_setting(self.conn, "state.refresh.requested", None)
+                self.conn.commit()
             self._auto_summary(ecfg, now, st, did)
         return did
 
@@ -169,6 +173,14 @@ class Scheduler:
             out += f" · planner failed: {pres.get('error')}"
         return out
 
+    @staticmethod
+    def _recent(stamp, now: datetime) -> bool:
+        from .summary import STUCK_AFTER
+        try:
+            return now - datetime.fromisoformat(str(stamp)[:16]) < STUCK_AFTER
+        except ValueError:
+            return False
+
     def _refresh(self, ecfg: dict, now: datetime, did: list[str]) -> None:
         """What the Today tab's Refresh asks for: every enabled sweep now (one that fails does not stop
         the rest), then the planner, which judges what they found and writes the summary; the light
@@ -239,7 +251,11 @@ class Scheduler:
                 age = now - datetime.fromisoformat(str(s.get("at"))[:16])
             except ValueError:
                 age = timedelta(days=1)
-            if age < timedelta(minutes=int(C.get(ecfg, "claude.summary.auto_minutes", 10))):
+            try:
+                floor = max(1, int(C.get(ecfg, "claude.summary.auto_minutes", 10)))
+            except (TypeError, ValueError):
+                floor = 10
+            if age < timedelta(minutes=floor):
                 return
 
         def job() -> None:

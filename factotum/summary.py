@@ -14,6 +14,7 @@ the summary), and a refresh the user asks for runs the sweeps and the whole plan
 """
 from __future__ import annotations
 
+import re
 import sqlite3
 import time
 from datetime import date, datetime, timedelta
@@ -26,7 +27,9 @@ from .lifecycle import parse_date
 KEY = "state.summary"
 PROMPT = C.ROOT / "prompts" / "today-summary.md"
 RUNS_DIR = C.ROOT / "data" / "runs" / "summary"
-TASKS_CAP = 8                       # rows a summary may be "about"
+TASKS_CAP = 8                       # rows the model may name as what the summary is "about"
+ABOUT_CAP = 40                      # those, the codes in its text and the urgent rows together
+CODE_RE = re.compile(r"\bTask-(\d{1,6})\b")
 STALE_CAP = 12
 FP = ("status", "due", "hard", "waiting_on", "snoozed_until")      # what a mentioned row is remembered by
 STUCK_AFTER = timedelta(minutes=20)  # a request or a run older than this was lost to a restart
@@ -60,18 +63,37 @@ def focus(tasks: list[dict], today: date) -> dict[int, str]:
     return out
 
 
-def store(conn: sqlite3.Connection, text, task_ids, today: date, source: str, at: str | None = None) -> dict | None:
+def snapshot(open_tasks: list[dict], today: date) -> dict:
+    """The open rows as a run is about to read them: {"fp": {id: fingerprint}, "focus": [ids]}."""
+    return {"fp": {t["id"]: _fp(t) for t in open_tasks}, "focus": sorted(focus(open_tasks, today))}
+
+
+def store(conn: sqlite3.Connection, text, task_ids, today: date, source: str, at: str | None = None, snap: dict | None = None, live=()) -> dict | None:
+    """Keep a summary with the rows it is about: the ones the model named, the task codes in its
+    text, and the urgent rows (a summary of today is about those whether it lists them or not).
+    `snap` is the snapshot the run READ (planner.bundle): a row the user changed while Claude was
+    writing is then remembered as the model saw it, and shows as stale at once. `live` names rows
+    this run itself changed or created, which are remembered as they are now. Without `snap`, now."""
     text = " ".join(str(text or "").split())[:600]
     if not text:
         return None
     ids: list[int] = []
-    for i in task_ids or []:
-        if type(i) is int and i not in ids:
+    for i in [i for i in (task_ids or []) if type(i) is int][:TASKS_CAP] + [int(m) for m in CODE_RE.findall(text)]:
+        if i not in ids:
             ids.append(i)
-    open_tasks = rows(conn, "SELECT * FROM tasks WHERE status = 'open'")
-    by = {t["id"]: t for t in open_tasks}
+    now = snapshot(rows(conn, "SELECT * FROM tasks WHERE status = 'open'"), today)
+    seen = snap or now
+    fps = dict(seen["fp"])
+    urgent = set(seen["focus"])
+    for i in live:
+        if i in now["fp"]:
+            fps[i] = now["fp"][i]
+            urgent.add(i)                                    # a row this run made or moved is known to it, whatever its date
+        else:
+            fps.pop(i, None)                                 # closed by this run: nothing to watch
+    about = [i for i in ids + sorted(urgent) if i in fps]
     s = {"text": text, "at": at or datetime.now().isoformat(timespec="minutes"), "day": today.isoformat(), "source": source,
-         "tasks": {str(i): _fp(by[i]) for i in ids[:TASKS_CAP] if i in by}, "focus": sorted(focus(open_tasks, today))}
+         "tasks": {str(i): fps[i] for i in dict.fromkeys(about[:ABOUT_CAP])}, "focus": sorted(urgent)}
     set_setting(conn, KEY, s)
     return s
 
@@ -119,11 +141,10 @@ def get(conn: sqlite3.Connection, today: date) -> dict | None:
 
 # ---- the light run -----------------------------------------------------------------------------
 
-def build_prompt(cfg: dict, b: dict, today: date, closed: list[dict], at: str) -> str:
-    from .planner import _esc, sections
+def build_prompt(cfg: dict, b: dict, today: date) -> str:
+    from .planner import sections
     fill = sections(b, today)
-    fill["now"] = f"{fill.pop('today')} · it is {at[11:16]}"
-    fill["closed"] = "\n".join(f"Task-{c['id']} {_esc(c['name'])[:80]} ({c['status']})" for c in closed) or "(nothing closed today)"
+    fill["now"] = fill.pop("today")
     tpl = PROMPT.read_text(encoding="utf-8")
     for k, v in fill.items():
         tpl = tpl.replace("{{" + k + "}}", v)
@@ -138,9 +159,12 @@ def run(conn: sqlite3.Connection, cfg: dict, today: date, *, runner=None, calend
     runner = runner or _runner.run
     at = at or reminders.local_now(cfg).isoformat(timespec="minutes")
     started = time.monotonic()
-    b = planner.bundle(conn, cfg, today, events=planner.week_events(cfg, today, calendar))
-    closed = rows(conn, "SELECT id, name, status FROM tasks WHERE status IN ('done', 'dropped') AND completed_at = ? ORDER BY id LIMIT 30", (today.isoformat(),))
-    prompt = build_prompt(cfg, b, today, closed, at)
+    try:
+        clock = datetime.fromisoformat(at)
+    except ValueError:
+        clock = None
+    b = planner.bundle(conn, cfg, today, events=planner.week_events(cfg, today, calendar), now=clock)
+    prompt = build_prompt(cfg, b, today)
     workdir = Path(RUNS_DIR) / today.isoformat()
     workdir.mkdir(parents=True, exist_ok=True)
     (workdir / "prompt.md").write_text(prompt, encoding="utf-8")
@@ -155,7 +179,7 @@ def run(conn: sqlite3.Connection, cfg: dict, today: date, *, runner=None, calend
         return {"ok": False, "error": err, "cost_usd": res.cost_usd}
     listed = {t["id"] for t in b["rows"]}
     ids = [i for i in (res.data.get("task_ids") or []) if type(i) is int and i in listed]
-    s = store(conn, text, ids, today, "summary", at=at)
+    s = store(conn, text, ids, today, "summary", at=at, snap=b["snap"])
     log_run(conn, "today-summary", ms, ok=True, summary=s["text"][:300], cost_usd=res.cost_usd)
     conn.commit()
     return {"ok": True, "text": s["text"], "cost_usd": res.cost_usd}

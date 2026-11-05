@@ -93,7 +93,8 @@ def test_a_planner_run_stores_the_summary_and_a_second_run_the_same_day_makes_no
     assert r1["ok"] and len(r1["created"]) == 1
     s = summary.get(conn, DAY)
     assert s["text"] == "PCA first." and s["source"] == "planner" and s["stale"] == []
-    assert sorted(get_settings(conn)["state.summary"]["tasks"]) == ["1", "4"]                # only rows the bundle listed
+    about = get_settings(conn)["state.summary"]["tasks"]
+    assert {"1", "4"} <= set(about) and "12345" not in about                                 # the rows it named that the bundle listed (and the urgent ones)
     r2 = planner.run(conn, cfg, DAY, runner=fake({"verdict": "Still PCA.", "why_now": [], "proposals": [create("Attend the UVA Link Lab visit", 11), create("Study for Quiz 7", None)], "dismiss": []}))
     assert len(r2["created"]) == 1 and r2["created"][0] != r1["created"][0]
     assert one(conn, "SELECT name FROM tasks WHERE id = ?", (r1["created"][0],))["name"] == "Go to the dentist"      # the morning's create is not overwritten
@@ -262,3 +263,106 @@ def test_the_apis_connection_survives_requests_running_at_once(cfg, tmp_path):
     [t.start() for t in ts]
     [t.join() for t in ts]
     assert not bad, f"{len(bad)} of 1200 reads failed, e.g. {bad[0]}"
+
+
+# --- the review of wave 9 (2026-11-04) -----------------------------------------------------------
+
+def test_a_change_made_while_the_summary_is_being_written_still_shows_as_stale(conn, cfg):
+    """The run takes seconds to minutes. What the model read is the bundle, so the summary is
+    remembered by the rows as they were in the bundle, not as they are when the text comes back."""
+    from factotum import planner, summary
+    from factotum.claude.runner import RunResult
+    upsert_task(conn, task(id=1, name="Submit PCA", due="2026-11-02", hard=1)); upsert_task(conn, task(id=2, name="Slides")); conn.commit()
+
+    def during(out, change):
+        def runner(cfg, kind, prompt, **kw):
+            batches.apply(conn, [change], "ui", DAY)                                         # the user, while Claude is thinking
+            return RunResult(True, out, json.dumps(out), 0.1, 1000)
+        return runner
+    r = summary.run(conn, cfg, DAY, runner=during({"summary": "Submit the PCA today.", "task_ids": [1]}, {"task_id": 1, "op": "set", "fields": {"due": "2026-11-09"}}), at="2026-11-02T10:00")
+    assert r["ok"] and any("Task-1" in x and "due moved" in x for x in summary.get(conn, DAY)["stale"])
+    r = planner.run(conn, cfg, DAY, runner=during({"verdict": "Submit the PCA.", "verdict_tasks": [1], "why_now": [{"task_id": 2, "why_now": "soon"}], "proposals": [], "dismiss": []}, {"task_id": 1, "op": "done"}))
+    st = summary.get(conn, DAY)["stale"]
+    assert r["ok"] and len(st) == 1 and "Task-1" in st[0] and "done" in st[0]                # and the planner's own why_now edit to Task-2 is not a reason
+
+
+def test_a_summary_is_about_the_urgent_rows_and_the_codes_in_its_text_even_when_the_model_lists_none(conn):
+    from factotum import summary
+    upsert_task(conn, task(id=1, name="Submit PCA", due="2026-11-02", hard=1)); upsert_task(conn, task(id=7, name="Read the GAIL paper")); conn.commit()
+    summary.store(conn, "Submit the PCA; Task-7 can wait.", [], DAY, "summary", at="2026-11-02T10:00"); conn.commit()
+    assert summary.get(conn, DAY)["stale"] == []
+    batches.apply(conn, [{"task_id": 1, "op": "done"}, {"task_id": 7, "op": "drop"}], "ui", DAY)
+    st = summary.get(conn, DAY)["stale"]
+    assert any("Task-1" in x and "done" in x for x in st) and any("Task-7" in x and "dropped" in x for x in st)
+
+
+def test_a_second_planner_run_does_not_stage_a_suggestion_that_is_already_waiting(conn, cfg):
+    from factotum import planner
+    from factotum.claude.runner import RunResult
+    _seed_planner(conn, cfg)
+    out = {"verdict": "V.", "why_now": [], "dismiss": [], "proposals": [
+        {"op": "create", "task_id": None, "fields": {"name": "Study for Quiz 7", "project": "COMPE 510"}, "label": "create: Study for Quiz 7", "evidence": [], "reason": "announced"},
+        {"op": "set", "task_id": 3, "fields": {"due": "2026-11-11"}, "label": "Task-3 → due Nov 11", "evidence": [], "reason": "hunch"}]}
+    again = dict(out, proposals=[dict(out["proposals"][0], fields={"name": "study for  quiz 7", "project": "COMPE 510"}, label="create: study for quiz 7"), out["proposals"][1]])
+    run = lambda o: planner.run(conn, cfg, DAY, runner=lambda cfg, kind, prompt, **kw: RunResult(True, o, json.dumps(o), 0.1, 1000))   # noqa: E731
+    r1, r2 = run(out), run(again)
+    assert len(r1["staged"]) == 2 and r2["staged"] == [] and len(r2["rejected"]) == 2 and "already" in r2["rejected"][0]
+    assert one(conn, "SELECT COUNT(*) AS n FROM evidence WHERE kind = 'proposal' AND judged_at IS NULL")["n"] == 2
+
+
+def test_a_recording_never_removes_a_due_date_by_leaving_it_empty(conn, cfg):
+    from factotum import sync_file
+    from test_phase3 import REC, _create
+    upsert_task(conn, task(id=10, name="Submit the report", due="2026-11-06T23:59", due_is_datetime=1, hard=1))
+    upsert_task(conn, task(id=11, name="Call Molina", due="2026-11-03", hard=1, source="Plaud", source_key=f"plaud:{REC['id']}:1")); conn.commit()
+    data = {"note": {"properties": {"area": "Personal", "project": "Personal", "type": "Reminder", "tags": []}, "body_md": "x", "followups": []},
+            "tasks": [{"op": "update", "id": 10, "due": None, "context": "Mentioned again"}, _create("Call Molina", due=None, source_key=f"plaud:{REC['id']}:1")],
+            "instructions": [], "reminders": [], "calendar": [], "unresolved": []}
+    sync_file.apply_result(conn, cfg, REC, data, TODAY, calendar=None)
+    t = one(conn, "SELECT due, hard, due_is_datetime, context FROM tasks WHERE id = 10")
+    assert (t["due"], t["hard"], t["due_is_datetime"]) == ("2026-11-06T23:59", 1, 1) and "Mentioned again" in (t["context"] or "")
+    t = one(conn, "SELECT due, hard FROM tasks WHERE id = 11")
+    assert (t["due"], t["hard"]) == ("2026-11-03", 1)                                        # the same recording synced twice keeps the date the row has
+    upsert_task(conn, task(id=12, name="Soft thing", due="2026-11-20", hard=0)); conn.commit()
+    sync_file.apply_result(conn, cfg, REC, dict(data, tasks=[{"op": "update", "id": 12, "hard": True}]), TODAY, calendar=None)
+    assert one(conn, "SELECT hard FROM tasks WHERE id = 12")["hard"] == 1                    # an update that names no due at all still sets what it names
+
+
+def test_due_null_with_hard_true_is_still_an_undated_soft_row(conn):
+    upsert_task(conn, task(id=1, due="2026-11-08", hard=1)); conn.commit()
+    batches.apply(conn, [{"task_id": 1, "op": "set", "fields": {"due": None, "hard": 1}}], "ui", TODAY)
+    t = one(conn, "SELECT due, hard FROM tasks WHERE id = 1")
+    assert (t["due"], t["hard"]) == (None, 0)
+
+
+def test_a_failing_rewrite_backs_off_an_hour_and_a_bad_interval_does_not_stop_the_tick(conn, cfg):
+    from factotum import summary
+    upsert_task(conn, task(id=1, name="Submit PCA", due="2026-11-02", hard=1)); conn.commit()
+    summary.store(conn, "Old.", [1], DAY, "planner", at="2026-11-02T06:31"); conn.commit()
+    batches.apply(conn, [{"task_id": 1, "op": "done"}], "ui", DAY)
+    calls = []
+    s = _sched(cfg, conn, summary=SimpleNamespace(get=summary.get, run=lambda c, e, today, calendar=None, at=None: (calls.append(at), {"ok": False, "error": "auth: Not logged in"})[1]))
+    s.tick(datetime(2026, 11, 2, 10, 0)); s.tick(datetime(2026, 11, 2, 10, 1)); s.tick(datetime(2026, 11, 2, 10, 30))
+    assert len(calls) == 1                                                                   # stale, failing, and not a run every 30 seconds
+    s.tick(datetime(2026, 11, 2, 11, 1))
+    assert len(calls) == 2
+    set_setting(conn, "claude.summary.auto_minutes", "soon"); set_setting(conn, "state.last_fail.today_summary", None); conn.commit()
+    s.tick(datetime(2026, 11, 2, 12, 5))                                                      # must not raise
+    assert len(calls) == 3
+
+
+def test_a_refresh_request_older_than_twenty_minutes_is_dropped_not_run(conn, cfg):
+    from factotum import summary
+    calls = []
+    pl = SimpleNamespace(run=lambda c, e, today, calendar=None: (calls.append("planner"), {"ok": True, "verdict": "V."})[1])
+    summary.request_refresh(conn, datetime(2026, 11, 2, 9, 0)); conn.commit()
+    _sched(cfg, conn, planner=pl).tick(datetime(2026, 11, 2, 10, 0))                           # the service was down when it was asked
+    assert calls == [] and not get_settings(conn).get("state.refresh.requested")
+
+
+def test_the_planner_is_told_the_time_and_what_was_closed_today(conn, cfg):
+    from factotum import planner
+    _seed_planner(conn, cfg)
+    batches.apply(conn, [{"task_id": 2, "op": "done"}], "ui", DAY)
+    prompt = planner.build_prompt(cfg, planner.bundle(conn, cfg, DAY, now=datetime(2026, 11, 2, 15, 4)), DAY)
+    assert "it is 15:04" in prompt and "Task-2 Prepare the slides Max asked for (done)" in prompt

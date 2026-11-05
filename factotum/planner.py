@@ -40,7 +40,8 @@ TASK_OPS = {"done", "drop", "set", "add_reminder", "pin_top", "longterm"}
 NON_PROVING = {"slack_mention"}       # anyone in a workspace can write "Task-42 is done": a hint to cite, never proof to act on
 
 
-def bundle(conn: sqlite3.Connection, cfg: dict, today: date, events: list[dict] | None = None) -> dict:
+def bundle(conn: sqlite3.Connection, cfg: dict, today: date, events: list[dict] | None = None, now: datetime | None = None) -> dict:
+    from . import reminders, summary
     from .mail_sweep import review_flags
     open_tasks = rows(conn, "SELECT * FROM tasks WHERE status = 'open'")
     for t in open_tasks:
@@ -61,8 +62,11 @@ def bundle(conn: sqlite3.Connection, cfg: dict, today: date, events: list[dict] 
     last = lifecycle.parse_date(st.get("state.last_review_at", "null").strip('"'))
     review_n = len(lifecycle.build_review_queue(open_tasks, today, cfg, last, flags_by_id=review_flags(conn), cap=10**9))
     pending = rows(conn, "SELECT label FROM evidence WHERE kind = 'proposal' AND judged_at IS NULL ORDER BY id DESC LIMIT 20")
+    closed = rows(conn, "SELECT id, name, status FROM tasks WHERE status IN ('done', 'dropped') AND completed_at = ? ORDER BY id LIMIT 30", (today.isoformat(),))
+    # `snap`: the open rows as this run reads them, so the summary it writes is remembered by what
+    # the model saw (summary.store); `clock`: a run at 15:00 should not write a morning's verdict.
     return {"rows": ordered[:ROW_CAP], "candidates": cands, "announcements": anns, "reminders": rem, "events": events or [], "waiting": waiting, "review_n": review_n,
-            "pending": pending}
+            "pending": pending, "closed": closed, "clock": (now or reminders.local_now(cfg)).strftime("%H:%M"), "snap": summary.snapshot(open_tasks, today)}
 
 
 def _esc(v) -> str:
@@ -85,7 +89,8 @@ def sections(b: dict, today: date) -> dict[str, str]:
     rem_lines = [f"reminder {r['fire_at'][11:16]} Task-{r['id']} {_esc(r['name'])[:70]} ({_esc(r.get('label'))[:60]})" for r in b["reminders"]]
     ev_lines = [f"event {e.get('start')}{'' if e.get('all_day') else '–' + str(e.get('end') or '')[11:16]} {_esc(e.get('summary'))[:80]}" + (" (accepted)" if e.get("self_status") == "accepted" else "") for e in b["events"]]
     wait_lines = [f"waiting Task-{t['id']} {_esc(t['name'])[:70]} on {_esc(t['waiting_on'])[:60]}" for t in b["waiting"]]
-    return {"today": today.strftime("%A %Y-%m-%d") + f" · Review holds {b['review_n']} items",
+    return {"today": today.strftime("%A %Y-%m-%d") + (f" · it is {b['clock']}" if b.get("clock") else "") + f" · Review holds {b['review_n']} items",
+            "closed": "\n".join(f"Task-{c['id']} {_esc(c['name'])[:80]} ({c['status']})" for c in b.get("closed") or []) or "(nothing closed today)",
             "rows": "\n".join(row_lines) or "(no open rows)", "candidates": "\n".join(cand_lines) or "(nothing collected)",
             "announcements": "\n".join(ann_lines) or "(none)", "reminders": "\n".join(rem_lines) or "no reminders today",
             "events": "\n".join(ev_lines) or "calendar: off or empty", "waiting": "\n".join(wait_lines) or "nothing waiting on anyone",
@@ -99,8 +104,28 @@ def build_prompt(cfg: dict, b: dict, today: date) -> str:
     return tpl
 
 
+def _norm(v) -> str:
+    return " ".join(str(v or "").split()).casefold()
+
+
+def _same_suggestion(a: dict, b: dict) -> bool:
+    if a.get("op") != b.get("op"):
+        return False
+    if a.get("op") == "create":
+        return _norm((a.get("fields") or {}).get("name")) == _norm((b.get("fields") or {}).get("name"))
+    return a.get("task_id") == b.get("task_id") and (a.get("fields") or {}) == (b.get("fields") or {})
+
+
 def apply(conn: sqlite3.Connection, cfg: dict, data: dict, b: dict, today: date) -> dict:
     allowed = {t["id"] for t in b["rows"]}
+    # Suggestions already waiting in Review. The prompt lists them, but the planner now runs more than
+    # once a day and a model can repeat itself: Python never stages the same card twice.
+    waiting: list[dict] = []
+    for r in rows(conn, "SELECT ref FROM evidence WHERE kind = 'proposal' AND judged_at IS NULL"):
+        try:
+            waiting.append(json.loads(r["ref"]))
+        except (TypeError, ValueError):
+            pass
     evidence = {e["id"]: e for e in rows(conn, "SELECT * FROM evidence WHERE judged_at IS NULL AND kind != 'proposal'")}
     changes: list[dict] = []
     applied: list[str] = []
@@ -133,12 +158,16 @@ def apply(conn: sqlite3.Connection, cfg: dict, data: dict, b: dict, today: date)
             if not cited or any(e.get("kind") in NON_PROVING for e in cited):
                 # An announcement, a hunch, or someone's Slack message: a suggestion card in Review, created
                 # by nobody but the user. A non-proving citation is judged staged so no second card appears.
-                conn.execute("INSERT INTO evidence (task_id, kind, ref, label, excerpt, at) VALUES (NULL, 'proposal', ?, ?, ?, ?)",
-                             (json.dumps({"op": "create", "fields": f}), label, reason, now_iso()))
+                sugg = {"op": "create", "fields": f}
+                dup = any(_same_suggestion(sugg, w) for w in waiting)
+                if not dup:
+                    conn.execute("INSERT INTO evidence (task_id, kind, ref, label, excerpt, at) VALUES (NULL, 'proposal', ?, ?, ?, ?)",
+                                 (json.dumps(sugg), label, reason, now_iso()))
+                    waiting.append(sugg)
                 for e in cited:
                     conn.execute("UPDATE evidence SET judged_at = ?, verdict = 'staged' WHERE id = ?", (now_iso(), e["id"]))
                     judged[e["id"]] = None
-                staged.append(label); continue
+                (rejected if dup else staged).append(f"{label}: already waiting in Review" if dup else label); continue
             if any(e.get("task_id") is not None for e in cited):
                 rejected.append(f"{label}: cites evidence that belongs to a task"); continue
             n_create += 1
@@ -186,9 +215,12 @@ def apply(conn: sqlite3.Connection, cfg: dict, data: dict, b: dict, today: date)
         if proven:
             changes.append(ch)
             applied.append(label)
+        elif any(_same_suggestion(ch, w) for w in waiting):
+            rejected.append(f"{label}: already waiting in Review")
         else:
             conn.execute("INSERT INTO evidence (task_id, kind, ref, label, excerpt, at) VALUES (?, 'proposal', ?, ?, ?, ?)",
                          (tid, json.dumps(ch), label, reason, now_iso()))
+            waiting.append(ch)
             staged.append(label)
     for d in (data.get("dismiss") or [])[:20]:
         if not (isinstance(d, dict) and str(d.get("evidence_id") or "").isdigit()):
@@ -242,12 +274,11 @@ def run(conn: sqlite3.Connection, cfg: dict, today: date, *, runner=None, calend
         return {"ok": True, "dry_run": True, "data": res.data, "prompt": prompt, "cost_usd": res.cost_usd, "verdict": res.data.get("verdict")}
     s = apply(conn, cfg, res.data, b, today)
     if s["verdict"]:
-        # The verdict is the Today tab's summary until something rewrites it (SPEC §8.4). A model that
-        # named no rows is taken to mean the ones nobody could leave out.
+        # The verdict is the Today tab's summary until something rewrites it (SPEC §8.4).
         from . import reminders, summary
-        urgent = summary.focus(b["rows"], today)
-        summary.store(conn, s["verdict"], s["verdict_tasks"] or [t["id"] for t in b["rows"] if t["id"] in urgent], today, "planner",
-                      at=reminders.local_now(cfg).isoformat(timespec="minutes"))
+        mine = [r["task_id"] for r in rows(conn, "SELECT DISTINCT task_id FROM changes WHERE batch_id = ?", (s["batch_id"],))] if s.get("batch_id") else []
+        summary.store(conn, s["verdict"], s["verdict_tasks"], today, "planner", at=reminders.local_now(cfg).isoformat(timespec="minutes"),
+                      snap=b["snap"], live=mine + s["created"])       # as the model read them, except what this run itself changed
     line = (f"{s['verdict'][:160]} · why_now {s['why_now']}, applied {len(s['applied'])}, for Review {len(s['staged'])}, rejected {len(s['rejected'])}"
             + (f"; batch {s['batch_id']}" if s.get("batch_id") else ""))
     log_run(conn, "planner-morning", ms, ok=True, summary=line[:1000], cost_usd=res.cost_usd)

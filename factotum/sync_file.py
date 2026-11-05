@@ -185,6 +185,12 @@ def apply_result(conn: sqlite3.Connection, cfg: dict, rec: dict, data: dict, tod
             continue
         op = t.get("op") or "create"
         f = _clean_task_fields(cfg, t)
+        # An empty due on an existing row means "the recording did not say", never "remove the date"
+        # (the prompt writes creates as `"due": "…" | null`, and a recording synced twice comes back
+        # through here): the row keeps the date it has, and the hardness that goes with that date.
+        # A new row is simply undated.
+        # (An update that names no due at all is untouched: "make Task-10 a hard deadline" still works.)
+        keep_date = lambda fields: {k: v for k, v in fields.items() if not ("due" in fields and not fields["due"] and k in ("due", "due_is_datetime", "hard"))}  # noqa: E731
         if op == "update":
             tid = t.get("id")
             row = _target(tid)
@@ -194,8 +200,8 @@ def apply_result(conn: sqlite3.Connection, cfg: dict, rec: dict, data: dict, tod
                 continue
             if row["status"] in ("faded", "lapsed"):
                 changes.append({"task_id": row["id"], "op": "reopen", "fields": {}})
-            if f:
-                changes.append({"task_id": row["id"], "op": "set", "fields": f})
+            if keep_date(f):
+                changes.append({"task_id": row["id"], "op": "set", "fields": keep_date(f)})
             updated.append(row["id"]); touched.append(row["id"]); by_index[i] = row["id"]
             continue
         n += 1
@@ -211,7 +217,7 @@ def apply_result(conn: sqlite3.Connection, cfg: dict, rec: dict, data: dict, tod
             tid = int(existing[0])
             if existing[1] in ("faded", "lapsed"):
                 changes.append({"task_id": tid, "op": "reopen", "fields": {}})
-            changes.append({"task_id": tid, "op": "set", "fields": f})
+            changes.append({"task_id": tid, "op": "set", "fields": keep_date(f)})
             updated.append(tid); touched.append(tid); by_index[i] = tid
             continue
         if not f.get("due"):

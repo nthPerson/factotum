@@ -19,7 +19,8 @@
   // Which sections are folded, per tab ("today:week", "timeline:later", "projects:<name>"); kept in
   // this browser so the layout survives a reload and the next session.
   let folds = {};
-  try { folds = JSON.parse(localStorage.getItem('factotum.folds') || '{}') || {}; } catch (_) { folds = {}; }
+  try { folds = JSON.parse(localStorage.getItem('factotum.folds') || '{}'); } catch (_) { folds = {}; }
+  if (!folds || typeof folds !== 'object' || Array.isArray(folds)) folds = {};
   const folded = (key, dflt) => Object.prototype.hasOwnProperty.call(folds, key) ? !!folds[key] : !!dflt;
   function setFold(key, shut) { folds[key] = !!shut; try { localStorage.setItem('factotum.folds', JSON.stringify(folds)); } catch (_) {} }
   let ui = { tab: 'today', focus: null, sel: new Set(), open: new Set(), reviewIdx: 0, laterOpen: false, datePick: false, trayOpen: false, trayOff: new Set(), reviewPaused: false, rvNote: { id: null, text: '' }, remOpen: null, dueOpen: null, rvReply: null,
@@ -72,12 +73,23 @@
   // ---------- loading ----------
   let pending = [];           // batches a skill staged (/api/proposals): Apply or Dismiss, above every tab
   async function load() {
+    const was = sumBusy();
     data = await api('/api/tasks?status=open');
     try { pending = (await api('/api/proposals')).proposals; } catch (_) { pending = []; }
     try { summary = await api('/api/summary'); } catch (_) { summary = null; }
     document.getElementById('today-label').textContent = '· ' + TODAY().toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
+    // A reload can arrive under the user's hands (a refresh ending): a half-typed command survives it.
+    const cmd = document.getElementById('cmd'), typed = cmd ? cmd.value : '', had = cmd && document.activeElement === cmd;
     render();
+    const again = document.getElementById('cmd');
+    if (again && typed) { again.value = typed; if (had) again.focus(); }
     watchSummary();
+    if (was && !sumBusy()) refreshEnded();      // this load, not the poll, saw the refresh finish
+  }
+  function refreshEnded() {
+    const last = ((summary || {}).refresh || {}).last || {};
+    logData = null; if (ui.tab !== 'review') review = null;      // a Review session in progress keeps its page
+    toast(last.ok ? 'Refreshed · ' + (last.line || '') : 'Refresh failed · ' + (last.line || ''));
   }
 
   // ---------- the Today summary (SPEC §8.4) ----------
@@ -93,7 +105,7 @@
     return `<section class="summary ${stale.length ? 'stale' : ''}" id="summary">
       <div class="shead"><span class="lbl">Summary</span>${when ? `<span class="when">${esc(when)}${s.source === 'planner' ? ' · planner' : ''}</span>` : ''}${stale.length ? `<span class="chip stalechip">${stale.length === 1 && /^written /.test(stale[0]) ? esc(stale[0]) : `${stale.length} change${stale.length === 1 ? '' : 's'} since`}</span>` : ''}<span class="spacer"></span>${btn}</div>
       ${s ? `<p class="stext">${esc(s.text)}</p>` : `<p class="hint">No summary yet. ${summary.can_refresh ? 'Refresh writes one.' : 'The morning planner writes one.'}</p>`}
-      ${stale.length && !busy ? `<ul class="since">${stale.slice(0, 4).map(x => `<li>${reason(x)}</li>`).join('')}${stale.length > 4 ? `<li>and ${stale.length - 4} more</li>` : ''}</ul><p class="hint">${summary.auto ? 'A new summary is written on its own within a few minutes.' : 'Automatic rewriting is off (Settings → Claude); Refresh writes a new one.'}</p>` : ''}
+      ${stale.length && !busy ? `<ul class="since">${stale.slice(0, 4).map(x => `<li>${reason(x)}</li>`).join('')}${stale.length > 4 ? `<li>and ${stale.length - 4} more</li>` : ''}</ul><p class="hint">${summary.auto ? 'A new summary is written automatically' + (summary.can_refresh ? '; Refresh does it now, with a sweep.' : '.') : 'Automatic rewriting is off (Settings → Claude)' + (summary.can_refresh ? '; Refresh writes a new one.' : '.')}</p>` : ''}
       ${busy ? `<p class="hint"><span class="spin"></span>${rf.state === 'requested' ? 'Starting…' : 'Sweeping mail, Canvas, the calendar and Slack, then the planner. About a minute.'}</p>` : ''}
       ${!busy && rf.last && !rf.last.ok ? `<p class="hint bad">The last refresh did not finish cleanly: ${esc(rf.last.line || '')}</p>` : ''}</section>`;
   }
@@ -118,9 +130,13 @@
     const changed = JSON.stringify(next) !== JSON.stringify(summary);
     summary = next;
     if (was && !sumBusy()) {     // a refresh just ended: the sweeps and the planner may have changed rows, Review and the Log
-      const last = (summary.refresh || {}).last || {};
-      review = null; logData = null; await load();
-      toast(last.ok ? 'Refreshed · ' + (last.line || '') : 'Refresh failed · ' + (last.line || ''));
+      refreshEnded();
+      try {
+        // The lists are redrawn; a tab with something being typed or decided (Settings, Chat, Review) only gets fresh data and the rail.
+        if (['today', 'timeline', 'projects', 'log'].includes(ui.tab)) await load();
+        else { data = await api('/api/tasks?status=open'); renderRail(); wireRail(); }
+      } catch (_) { swapSummary(); }
+      watchSummary();
       return;
     }
     if (changed) swapSummary();
@@ -273,7 +289,7 @@
     // only the rank is left (ringed red or amber by the date), and it still takes a click.
     rail.innerHTML = `<h2 id="rail-head" title="${ui.railOpen ? 'Fold the Top list' : 'Unfold the Top list'}"><span class="lbl">Top <span>${top.length} of ${data.top_cap}</span></span><button class="tog" aria-expanded="${ui.railOpen}" aria-label="${ui.railOpen ? 'Fold the Top list' : 'Unfold the Top list'}"></button></h2>
       <ol id="rail-list">${top.map((x, i) => { const d = fmtDue(x.due); const u = d ? (d.days < 0 ? 'crit' : d.days <= 1 ? 'warn' : '') : '';
-        return `<li draggable="true" tabindex="0" data-id="${x.id}" class="${u}" title="${esc(x.name)}${d ? ' · ' + d.label : ''} — click to go to it, double-click to open its details"><span class="rank">${i + 1}</span><span class="tb"><span class="t">${esc(x.name)}</span><span class="m"><span class="code">Task-${x.id}</span><span>${esc(x.project || '—')}</span><span class="due ${u}">${d ? d.label + (x.hard ? ' · hard' : '') : 'no date'}</span></span></span></li>`; }).join('')}</ol>
+        return `<li draggable="true" tabindex="0" role="button" data-id="${x.id}" class="${u}" title="${esc(x.name)}${d ? ' · ' + d.label : ''} — click to go to it, double-click to open its details"><span class="rank">${i + 1}</span><span class="tb"><span class="t">${esc(x.name)}</span><span class="m"><span class="code">Task-${x.id}</span><span>${esc(x.project || '—')}</span><span class="due ${u}">${d ? d.label + (x.hard ? ' · hard' : '') : 'no date'}</span></span></span></li>`; }).join('')}</ol>
       <div class="drop" id="rail-drop">Drag a row here, or press <b>t</b></div>`;
     document.getElementById('rail-head').onclick = () => { ui.railOpen = !ui.railOpen; try { localStorage.setItem('factotum.rail', ui.railOpen ? '1' : '0'); } catch (_) {} renderRail(); wireRail(); };
   }
@@ -294,7 +310,7 @@
     render();
     const el = document.querySelector(`#panel .row[data-id="${id}"]`);
     if (el) { el.scrollIntoView({ block: 'center', behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' }); el.classList.add('flash'); }
-    if (hit.tab === 'timeline' && from !== 'timeline') toast(`Task-${id} has no place on Today (nothing due this week) · shown in Timeline`);
+    if (hit.tab === 'timeline' && from !== 'timeline') toast(`Task-${id} is not on Today · shown in Timeline`);
   }
   function attachedIds() { return ui.sel.size ? [...ui.sel] : (ui.focus ? [ui.focus] : []); }
   function composer() {
@@ -661,7 +677,7 @@
       ${f('notify.morning_brief.enabled', 'Morning brief', 'Email at this time: Top, due today, reminders.', bool('notify.morning_brief.enabled') + ' ' + time('notify.morning_brief.time') + ' to ' + text('notify.morning_brief.to', '240px'))}
       <h3>Claude</h3>
       ${f('claude.planner.enabled', 'Morning planner', 'One Claude run before the brief: the verdict, why-now lines and proposals. Off = the plain brief.', bool('claude.planner.enabled'))}
-      ${f('claude.summary.auto', 'Today summary', 'Rewritten by one light Claude run when a task it is about changes, something becomes urgent, or the day turns. Off: the Today tab still says what changed, and Refresh rewrites it.', bool('claude.summary.auto', true) + ' &nbsp; at most every ' + `<input type="number" id="s-claude.summary.auto_minutes" data-key="claude.summary.auto_minutes" value="${e['claude.summary.auto_minutes'] == null ? 10 : e['claude.summary.auto_minutes']}" min="1" max="240">` + ' min')}
+      ${f('claude.summary.auto', 'Today summary', 'Rewritten by one light Claude run when a task it is about changes, something becomes urgent, or the day turns. Off: the Today tab still says what changed, and Refresh rewrites it.', bool('claude.summary.auto', true) + ' &nbsp; at most every ' + `<input type="number" id="s-claude.summary.auto_minutes" data-key="claude.summary.auto_minutes" value="${Number(e['claude.summary.auto_minutes']) || 10}" min="1" max="240">` + ' min')}
       ${f('claude.budgets_usd.chat_turn', 'Chat turn budget', 'Dollars a single chat turn may spend before Claude stops.', '$ ' + num('claude.budgets_usd.chat_turn', 0.05, 5) )}
       <h3>Connections</h3>
       ${f('server.oauth.enabled', 'claude.ai / Claude Desktop connector', `Factotum is the OAuth server behind <code>${esc(connectors ? connectors.url : '')}</code>: add that URL as a custom connector and approve it once on the consent page (docs/SETUP.md §16). What a connector may do with tasks is the next setting.`, bool('server.oauth.enabled'))}
@@ -823,7 +839,7 @@
         clearTimeout(railTap.timer);
         railTap = { id, timer: setTimeout(() => { railTap = { id: null, timer: null }; jumpTo(id, false); }, 260) };
       });
-      li.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); jumpTo(+li.dataset.id, true); } });
+      li.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); jumpTo(+li.dataset.id, e.key === 'Enter'); } });
       li.addEventListener('dragstart', e => e.dataTransfer.setData('text/plain', li.dataset.id));
       li.addEventListener('dragover', e => { e.preventDefault(); li.classList.add('over'); });
       li.addEventListener('dragleave', () => li.classList.remove('over'));
@@ -904,8 +920,9 @@
     const i = visible.indexOf(ui.focus);
     if (e.key === 'j') { ui.focus = visible[Math.min(visible.length - 1, i + 1)]; render(); }
     else if (e.key === 'k') { ui.focus = visible[Math.max(0, i - 1)]; render(); }
-    else if (e.key === 'e' && ui.focus) { ui.open.has(ui.focus) ? ui.open.delete(ui.focus) : ui.open.add(ui.focus); render(); }
-    else if (ui.focus && { d: 'done', x: 'drop', s: 'snooze', t: 'top', l: 'longterm' }[e.key]) { act(ui.focus, { d: 'done', x: 'drop', s: 'snooze', t: 'top', l: 'longterm' }[e.key]); }
+    // i < 0: the focused row is in a folded section or on another tab; a key must never act on a row that is not on screen
+    else if (e.key === 'e' && i >= 0) { ui.open.has(ui.focus) ? ui.open.delete(ui.focus) : ui.open.add(ui.focus); render(); }
+    else if (i >= 0 && { d: 'done', x: 'drop', s: 'snooze', t: 'top', l: 'longterm' }[e.key]) { act(ui.focus, { d: 'done', x: 'drop', s: 'snooze', t: 'top', l: 'longterm' }[e.key]); }
     else return;
     e.preventDefault();
   });

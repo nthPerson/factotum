@@ -42,6 +42,8 @@ announcements are context, so such a create stays a suggestion).
 {{reminders}}
 {{events}}
 {{waiting}}
+Closed today (when this is not the first run of the day, the verdict starts from what is left):
+{{closed}}
 
 # 6. Return
 One raw JSON object, nothing else: it starts with { and ends with }, no code fence, no prose.
