@@ -35,7 +35,8 @@ End with exactly one fenced JSON object (nothing after it):
 - `set` fields: `name`, `project`, `due` (ISO date or date-time, local), `hard` (true/false), `effort`
   ({efforts}), `context` (a note; keep what is there and add a dated line), `counterpart` (email),
   `waiting_on` (who, and from when), `snoozed_until` (ISO date). Only fields the user asked for or
-  the evidence proves.
+  the evidence proves. `null` clears a field: `"due": null` removes a due date (the task becomes
+  undated and is no longer a hard deadline).
 - `add_reminder` fields: `fire_at` (ISO local date-time), `label`, optional `repeat` (daily|weekdays|weekly|monthly).
 - `link_thread` fields: `conversation_id` — only a conversation you fetched in this turn. Propose one
   for every mail thread that belongs to a task; Factotum then watches it for replies.

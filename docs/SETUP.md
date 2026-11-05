@@ -290,6 +290,14 @@ The planner runs inside the morning-brief job: `planner --dry-run` prints what i
 (a real Claude run, about $0.30); `planner --send` applies and mails the brief now. Its prompt and
 result land under `data/runs/planner/<date>/`.
 
+The planner's verdict is also the summary at the top of the Today tab (SPEC §8.4). **Refresh** on
+that card runs every enabled sweep and then the planner, without mailing anything; it needs the
+service's own scheduler, so a second instance started with `--no-scheduler` shows no button. When
+the summary goes out of date (a task it is about changed, something became urgent) one light Claude
+run rewrites it: `claude.summary.auto` and `claude.summary.auto_minutes` (Settings → Claude → Today
+summary; model, budget and timeout under `claude.*.today_summary`, defaults sonnet / $0.30 / 180 s
+when the keys are absent). Its prompt and result land under `data/runs/summary/<date>/`.
+
 Cutover from plaud-sync (done 2026-11-02 for Robert): on lark-server
 `sudo systemctl disable --now planner@morning.timer planner@evening.timer plaud-digest.timer`.
 Then delete the Gmail filter on the SDSU account that forwarded mail to the trigger mailbox:

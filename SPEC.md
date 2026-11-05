@@ -311,7 +311,37 @@ and listed in the run row. `why_now` and the applied proposals ride in one batch
 `planner`). The brief stays Python-built (phase 2) and leads with the verdict, shows `why_now`
 beside the rows that have one, and lists what the planner did and what it left for Review. If the
 run fails, the plain brief goes out with the reason. `python -m factotum planner [--dry-run]
-[--send]` runs it by hand.
+[--send]` runs it by hand. The planner may run more than once a day (the Today tab's Refresh, §8.4),
+so the prompt lists the suggestions already waiting in Review ("do not propose these again") and a
+created row's `source_key` is the evidence it came from (`planner:e<id>`), never the date and a
+counter: a second run cannot overwrite the task the first one made.
+
+### 8.4 The Today summary (`factotum/summary.py`, added 2026-11-04)
+The planner's verdict is also the summary at the top of the Today tab, kept in the settings table
+(`state.summary`: the text, when it was written, by what, and the rows it is about). The model
+names those rows (`verdict_tasks`, ≤ 8, only rows the bundle listed; with none, the rows that are
+overdue-hard, due today or tomorrow, or pinned are assumed). **Python decides when it is out of
+date, never a model**, and only for reasons a reader would care about: a row it is about was closed,
+re-dated, put off, handed to someone or changed hardness; a row it could not know became urgent
+(overdue and hard, due today or tomorrow, pinned to Top); or the day changed (one reason, "written
+yesterday", not a line per row). An edit to any other row leaves it fresh; an undone change is no
+change. `GET /api/summary` returns the summary with its reasons, the refresh state, and whether
+this instance can refresh.
+
+Three things rewrite it. (1) The morning planner, as before. (2) **Automatically**, when it is stale
+and `claude.summary.auto` is on: one light run (`prompts/today-summary.md`, kind `today_summary`, no
+tools) over the same bundle plus what was closed today, returning `{summary, task_ids}`. It writes
+the summary and nothing else: no task, evidence or proposal changes, so a rewrite never surprises.
+It runs at once when the last summary is older than `claude.summary.auto_minutes` (10), otherwise
+when it is; yesterday's summary waits for the morning brief time, where the planner normally writes
+it first. (3) **Refresh** on the Today tab: every enabled sweep now (mail, Canvas, calendar, Slack;
+one that fails does not stop the rest, and each interval restarts from here), then the whole planner
+on what they found, or the light run when the planner is off; no brief is mailed. The request is a
+settings row (`state.refresh.requested`) that the scheduler thread picks up, woken at once by
+`POST /api/summary/refresh`; the API never sweeps itself, so there is still one sweeper per
+database, and an instance started with `--no-scheduler` answers 409. `state.refresh.last` is what
+the UI reports when it is over; a request or a run older than 20 minutes was lost to a restart and
+reads as idle.
 
 ### 8.3 `chat-turn` (Chat tab, "Search related emails", "Draft reply")
 Inputs: the prompt (`prompts/chat-turn.md` on a thread's first turn, a short continuation header
@@ -363,7 +393,11 @@ so it works on a phone); a double-tap opens its details; Esc clears the selectio
 floats at the bottom of the screen with any selection (it never shifts the list, so the second
 tap of a double-tap lands on the same row) and offers Done, Drop, Snooze, a due date to set or
 clear, Top and Long-term. Due dates can also be set or cleared from a row's
-details and from a Review card, staged beside the decision rather than replacing it. Timeline groups
+details and from a Review card, staged beside the decision rather than replacing it; "Remove due
+date" sits beside "Change due", `nodue 364` is the command, and a connector sends `due: null`.
+Removing a date also clears `hard` and the time flag (an undated row is not a hard deadline), and
+the row then follows the undated lifecycle (§5): it leaves Today and can fade unless pinned or
+long-term. Timeline groups
 open tasks by due date and ends with "Recently added", the newest 30 by creation date, so what a
 recording or a sweep just added is one scroll away. The Log tab
 lists recent batches with every field change (old → new, task named) and an Undo per batch, and
@@ -392,6 +426,22 @@ that button stages, never the field's own change event (a phone's wheel fires it
 every context gets a More / Less button on phones. Settings saves on change and exposes the sweep intervals (Slack's too), the planner toggle
 and the chat budget; Settings → Connections turns the claude.ai connector on, arms it for a new
 client, and lists every connector with Revoke.
+
+Wave 9 (2026-11-04). **Today** opens with the summary card (§8.4): the text, when it was written,
+a badge with the number of changes since and the reasons under it (each task code goes to its row),
+and Refresh, which shows progress while the scheduler works and then reloads the lists. **Sections
+fold**: every group on Today and Timeline has a heading that folds it, Projects remembers which
+projects were opened, and the state is kept per browser (`localStorage`, `factotum.folds`), so a
+phone and a desktop can differ. A folded section renders no rows, so `j`/`k` and the bulk bar only
+see what is on screen. **The Top rail** shows tiles (rank, the name on up to three lines, code,
+project, date) in a wider column that stays in view while the list scrolls; it folds on every width
+to one numbered tile per item, ringed red (overdue) or amber (due within a day), and the fold is
+remembered. A click on a tile, folded or not, goes to the task's row: on the current tab if it lists
+the task, else Today, else Timeline (which lists every open task; a toast says so); the section is
+unfolded and the row focused and flashed. Two clicks open its details as well; the first waits
+260 ms for the second, because the jump scrolls the page and a second tap would otherwise land on
+whatever moved under the finger. The Top chip on a row shows the same number as its tile (stored
+ranks can have gaps). Settings → Claude has the Today summary toggle and its minimum interval.
 
 ## 10. Reminders and push
 
@@ -476,7 +526,8 @@ The old Command Log relations are not imported; task history lives in `changes` 
 | Run | Budget | Expected/day |
 |---|---|---|
 | sync-file | $1.00 | 2–4 recordings → $1–3 |
-| planner-morning | $0.75 | $0.75 |
+| planner-morning | $0.75 | $0.75 (measured ≈ $0.10 a run; each Refresh on the Today tab is one more) |
+| today-summary (§8.4) | $0.30 | a few cents a rewrite, at most one per `claude.summary.auto_minutes` while tasks change |
 | chat-turn / search / draft | $0.60 | on demand |
 | sweeps, UI, reminders, brief | $0 | $0 |
 

@@ -35,6 +35,7 @@ cd /home/robert/factotum
 .venv/bin/python -m factotum chat-check       # the MCP server over a pipe + one haiku run through it (~$0.002)
 .venv/bin/python -m factotum slack-check | discord-check   # when those sources are configured
 .venv/bin/python -m factotum sweep slack      # one mention sweep now (also mail | canvas | calendar)
+# every sweep plus the planner at once: Refresh on the Today tab (POST /api/summary/refresh; the scheduler runs it, a `refresh` row in the Log says what each did)
 .venv/bin/python -m factotum connectors       # the claude.ai / Desktop connectors behind /mcp; --arm before approving a new one, --revoke ID
 .venv/bin/python -m factotum mirror --dry-run # rows the Notion mirror would push
 .venv/bin/python -m factotum tick             # one scheduler tick — ONLY with factotum.service stopped: two schedulers on one DB send the brief twice and fire reminders twice
@@ -77,8 +78,9 @@ Person-specific facts never go in a `.py` file; that is a bug, not a shortcut.
 
 ## Costs
 
-sync-file ≈ $0.15 per recording, planner ≈ $0.30 a morning, a chat turn $0.05–0.20, chat-check
-$0.002. `GET /api/stats` reports the last 7 days; the Log tab shows each run.
+sync-file ≈ $0.15 per recording, planner ≈ $0.10–0.30 a run (each morning, and each Refresh on the
+Today tab), the Today summary's automatic rewrite a few cents (kind `today-summary`; Settings →
+Claude turns it off or spaces it out), a chat turn $0.05–0.20, chat-check $0.002. `GET /api/stats` reports the last 7 days; the Log tab shows each run.
 
 ## What this skill may do
 

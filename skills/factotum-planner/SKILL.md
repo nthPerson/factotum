@@ -58,6 +58,7 @@ instead of creating its twin (a create with an open task's exact name is refused
 | done / finished / submitted | `{"op": "done"}` |
 | defer / push to `<date>` | `{"op": "set", "fields": {"due": "YYYY-MM-DD"}}` (keep `hard` as it is) |
 | later / not now, no date | `{"op": "set", "fields": {"snoozed_until": "YYYY-MM-DD"}}` (tomorrow); leave `due` alone |
+| remove the due date / it has no deadline | `{"op": "set", "fields": {"due": null}}` (Factotum clears `hard` with it; say that an undated task can fade unless pinned or long-term) |
 | drop / cancel | `{"op": "drop"}` |
 | waiting on `<who>` | `{"op": "set", "fields": {"waiting_on": "who"}}` |
 | top of the pile / long-term, never fades | `{"op": "pin_top"}` / `{"op": "longterm"}` |

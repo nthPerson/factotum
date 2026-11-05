@@ -38,7 +38,10 @@ connector (`factotum/oauth.py`: Factotum as the OAuth server behind `/mcp`, cons
 with the JWT verified, arming from Settings → Connections), `mirror --task`. Wave 8 (2026-11-04):
 Claude Client ID Metadata Documents; writing from a connector or skill (`create`, `reopen`,
 `watch_sent` as batch ops; `apply_changes` beside `stage_changes` when `server.mcp_writes` is
-`apply`; the mail sweep closes a watched task when the mail is sent). Retiring the old Notion
+`apply`; the mail sweep closes a watched task when the mail is sent). Wave 9 (2026-11-04): the Today
+summary (`factotum/summary.py`: the planner's verdict in `state.summary`, staleness decided by
+Python, a light rewrite run, Refresh = sweeps + planner through the scheduler), removing a due date
+(`due: null`, `nodue`), foldable sections, the Top rail's tiles and jump-to-task. Retiring the old Notion
 pages and plaud-sync is the user's checklist (SETUP §15). Update this paragraph when something lands.
 
 ## Where things live
@@ -76,6 +79,8 @@ pages and plaud-sync is the user's checklist (SETUP §15). Update this paragraph
 | verdicts on evidence (dismiss, accept, reviewed), planner suggestions on Review | SPEC §9 | `factotum/batches.py` (`judge_evidence`), `api.py` (`/api/review`, `/api/review/suggestions`, `SUGGESTION_KINDS`) |
 | what a connector or skill may write: validation, staging vs direct apply, create, the sent-mail watch | SPEC §15 "Writing from a connector" | `factotum/mcp_server.py` (`_validate_changes`, `stage_changes`, `apply_changes`), `batches.py` (`_create`, `watch_fields`), `mail_sweep.py` (`watched`), `mcp_server.known_recipients` |
 | the Slack mention sweep, "Mentioned in Slack", a mention as a suggestion card | SPEC §6 "Slack" | `factotum/slack_sweep.py` (`sweep`), `lifecycle.REVIEW_ORDER`, `mail_sweep.review_flags`, `planner.NON_PROVING` |
+| the Today summary: what it is about, when it is stale, the light rewrite, Refresh | SPEC §8.4 | `factotum/summary.py` (`store`, `stale`, `run`, `refresh_state`), `scheduler.py` (`_refresh`, `_auto_summary`), `api.py` (`/api/summary`), `prompts/today-summary.md`, `web/app.js` (`summaryHtml`, `pollSummary`) |
+| folded sections, the Top rail's tiles, jump to a task's row | SPEC §9 "Wave 9" | `web/app.js` (`folds`, `group`, `todayGroups`, `timelineGroups`, `renderRail`, `jumpTo`) |
 | the claude.ai connector: metadata, registration, consent gate, arming, tokens, `/mcp` auth | SPEC §15, SETUP §16 | `factotum/oauth.py` (`consent_identity`, `verify_access_jwt`, `armed`, `token`, `check_access`), `api.py` (`/oauth/*`, `/api/connectors`) |
 
 ## Commands
@@ -101,6 +106,7 @@ pages and plaud-sync is the user's checklist (SETUP §15). Update this paragraph
 .venv/bin/python -m factotum mcp                              # the stdio MCP server itself (the runner starts it; rarely by hand)
 .venv/bin/python -m factotum serve --port 8751 --no-scheduler   # a second instance for UI checks; never two schedulers on one DB
 .venv/bin/python -m factotum serve                 # http://127.0.0.1:8750
+# every sweep and the planner at once: Refresh on the Today tab (the scheduler runs it; a `refresh` row in the Log)
 sudo systemctl restart factotum                    # after code changes; see the restart rule below
 journalctl -u factotum -n 20
 ```
@@ -185,6 +191,24 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
   so once a box has been seen unticked the database holds `false` and `C.effective` prefers it to the
   file. `server.oauth.enabled: true` in the YAML did nothing until the toggle was ticked in Settings.
   Change such keys in Settings; the YAML is their default for a fresh database.
+- **The API's connection is opened with `connect(path, shared=True)`** (2026-11-04): sync routes run
+  on a thread pool over one connection, and Python's sqlite3 hands two threads running the same SQL
+  the same cached statement, so a read came back short or raised (a 500 on about one request in
+  twenty when two arrived together; worse, `get_settings` silently returning half the rows).
+  `shared=True` is `cached_statements=0`. Any new connection used from more than one thread needs it.
+- **The API never sweeps or runs the planner itself** (2026-11-04): the Today tab's Refresh stores
+  `state.refresh.requested` and wakes the scheduler (`app.state.scheduler.wake()`), which is the one
+  thread that sweeps. `serve --no-scheduler` has no `app.state.scheduler`; the route answers 409.
+- **The planner can run more than once a day** (2026-11-04): a create's `source_key` is
+  `planner:e<evidence id>`, never date + counter (a second run overwrote the first run's task through
+  `upsert_task`), and the prompt lists unjudged suggestions so they are not proposed again.
+- **"Stale" for the Today summary is Python's call** (`summary.stale`), on a fingerprint of the rows
+  the summary is about plus the urgent set; a new field that should invalidate a summary goes in
+  `summary.FP`. The automatic rewrite (`summary.run`) must never write anything but `state.summary`.
+- **Removing a due date clears `hard` and `due_is_datetime` in `batches._apply_one`** (2026-11-04),
+  and `""` means `None`. The connector's hourly cap counts those rows (`mcp_server._rows_written`).
+- **A folded section renders no rows** (2026-11-04): `jumpTo` must unfold (`setFold`) before
+  `render()`, and anything that looks rows up in the DOM only sees unfolded sections.
 - **`expire` only touches rows Review has shown** (`last_offered_at`, stamped by `GET /api/review`).
   A row that was never on a Review page stays open however old it is; that is by design.
 
