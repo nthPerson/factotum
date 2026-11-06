@@ -52,19 +52,24 @@ def _glob_any(pats, *cands) -> bool:
     return any(fnmatch.fnmatch((c or "").lower(), str(p).lower()) for p in (pats or []) for c in cands if c)
 
 
+def _person(x) -> tuple[str, str]:
+    """(address, display name) of a sender or recipient. Mailbird writes {email, displayName}; the
+    sweep read {address, name} until 2026-11-05 and so saw nobody on any real message (no waiting
+    flip, no close on a sent mail, no watch ever fired). Both shapes and a bare string are taken."""
+    if isinstance(x, str):
+        return x.strip().lower(), x.strip()
+    if not isinstance(x, dict):
+        return "", ""
+    addr = str(x.get("email") or x.get("address") or "").strip().lower()
+    return addr, str(x.get("displayName") or x.get("name") or addr).strip()
+
+
 def _addr(m: dict | None) -> tuple[str, str]:
-    f = (m or {}).get("from") or {}
-    if isinstance(f, str):
-        return f.lower(), f
-    return str(f.get("address") or "").lower(), str(f.get("name") or f.get("address") or "")
+    return _person((m or {}).get("from"))
 
 
-def _recipients(m: dict) -> set[str]:
-    out = set()
-    for k in ("to", "cc", "bcc"):
-        for r in m.get(k) or []:
-            out.add((r.get("address") if isinstance(r, dict) else str(r)).lower())
-    return out
+def _recipients(m: dict, fields=("to", "cc", "bcc")) -> set[str]:
+    return {a for k in fields for a in (_person(r)[0] for r in m.get(k) or []) if a}
 
 
 def _evidence(conn, task_id, kind, ref, account, label, excerpt, at) -> bool:
@@ -138,7 +143,7 @@ def sweep(conn: sqlite3.Connection, cfg: dict, client, now_local: datetime) -> s
         except Exception as e:
             notes.append(f"message for {cid[:8]}: {type(e).__name__}")
             return
-        to = {(r.get("address") if isinstance(r, dict) else str(r)).lower() for r in last.get("to") or []}
+        to = _recipients(last, ("to",))
         whom = ("to you" if to <= own else f"to you and {len(to - own)} other{'s' if len(to - own) != 1 else ''}") if to & own else "you are not in To (cc, bcc or a list)"
         body = re.sub(r"\s+", " ", str(m.get("body") or m.get("bodyPreview") or "")).strip()
         conn.execute("INSERT INTO evidence (task_id, kind, ref, account, label, excerpt, at) VALUES (NULL, 'mail_new', ?, ?, ?, ?, ?)",

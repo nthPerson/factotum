@@ -141,7 +141,7 @@ class FakeMailbird:
 
     def add(self, folder, cid, subject, when, msgs, attachments=()):
         self.convs[folder].append({"conversationId": cid, "folderId": str(folder), "subject": subject, "receivedAtUtc": when, "lastMessageId": str(msgs[-1]["id"]),
-                                   "lastSender": msgs[-1]["from"].get("name") or msgs[-1]["from"]["address"], "messageCount": str(len(msgs)), "isRead": "False", "messages": []})
+                                   "lastSender": msgs[-1]["from"].get("displayName") or msgs[-1]["from"]["email"], "messageCount": str(len(msgs)), "isRead": "False", "messages": []})
         for m in msgs:
             self.messages[m["id"]] = dict(m, subject=subject, body=m.get("body", "body of " + subject), bodyPreview=(m.get("body") or "")[:40], attachmentCount=len(attachments),
                                           attachments=[{"name": a} for a in attachments])
@@ -167,7 +167,9 @@ class FakeMailbird:
 
 
 def _msg(mid, from_addr, to, when, body="", name=None):
-    return {"id": mid, "from": {"address": from_addr, "name": name or from_addr}, "to": [{"address": a} for a in to], "cc": [], "bcc": [], "receivedAtUtc": when, "body": body}
+    # Mailbird's own shape (checked against the live server 2026-11-05): {email, displayName}. The sweep read
+    # {address, name} until then, saw no sender on any real message, and never flipped, closed or watched anything.
+    return {"id": mid, "from": {"email": from_addr, "displayName": name or from_addr}, "to": [{"email": a, "displayName": a} for a in to], "cc": [], "bcc": [], "receivedAtUtc": when, "body": body}
 
 
 def test_mail_sweep_flips_waiting_closes_replies_watches_threads_and_collects_candidates(conn, cfg):

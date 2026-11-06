@@ -234,3 +234,12 @@ def test_the_mail_behind_a_card_can_be_shown_in_mailbird_and_nothing_else_can(cf
     assert client.post(f"/api/review/suggestions/{card}/open", json={}).status_code == 200 and asked == [("select_conversation", {"conversationId": "conv-ask"})]
     assert client.post("/api/review/suggestions/77/open", json={}).status_code == 404 and client.post("/api/review/suggestions/31/open", json={}).status_code == 404
     assert len(asked) == 1
+
+
+def test_the_sweep_reads_senders_and_recipients_in_mailbirds_shape_and_the_older_one():
+    from factotum import mail_sweep
+    real = {"from": {"email": "Prof@SDSU.edu", "displayName": "Dr. Rao"}, "to": [{"email": "A@x.org", "displayName": "A"}], "cc": [{"email": "b@x.org"}], "bcc": []}
+    old = {"from": {"address": "prof@sdsu.edu", "name": "Dr. Rao"}, "to": [{"address": "a@x.org"}, "c@x.org"], "cc": [], "bcc": [{}]}
+    assert mail_sweep._addr(real) == ("prof@sdsu.edu", "Dr. Rao") == mail_sweep._addr(old)
+    assert mail_sweep._recipients(real) == {"a@x.org", "b@x.org"} and mail_sweep._recipients(old) == {"a@x.org", "c@x.org"}
+    assert mail_sweep._addr({"from": "x@y.org"}) == ("x@y.org", "x@y.org") and mail_sweep._addr({}) == ("", "") and mail_sweep._addr(None) == ("", "")
