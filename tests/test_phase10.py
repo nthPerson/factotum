@@ -252,3 +252,48 @@ def test_a_mail_body_is_kept_as_words_not_as_tracking_links_and_padding():
     out = mail_sweep.clean_body(raw)
     assert out == "Hi Robert, please review the draft by Friday. logo See https://short.example.com/x and https://long.example.com/… thanks"
     assert mail_sweep.clean_body(None) == "" and len(mail_sweep.clean_body("word " * 2000)) <= mail_sweep.BODY_CAP
+
+
+def test_a_chat_thread_can_be_deleted_with_its_messages(cfg, tmp_path):
+    from fastapi.testclient import TestClient
+    from factotum import chat
+    from factotum.api import create_app
+    app = create_app(cfg, db_path=str(tmp_path / "api.db"))
+    c = app.state.conn
+    a, b = chat.new_thread(c, "Keep me"), chat.new_thread(c, "Search related emails")
+    c.execute("INSERT INTO chat_messages (thread_id, role, text, created_at) VALUES (?, 'user', 'hello', '2026-11-02T10:00:00+00:00')", (b,)); c.commit()
+    client = TestClient(app)
+    assert client.delete(f"/api/chat/threads/{b}", headers={"Content-Type": "application/json"}).json() == {"deleted": b}
+    assert [t["id"] for t in client.get("/api/chat/threads").json()["threads"]] == [a]
+    assert one(c, "SELECT COUNT(*) AS n FROM chat_messages WHERE thread_id = ?", (b,))["n"] == 0
+    assert client.delete(f"/api/chat/threads/{b}", headers={"Content-Type": "application/json"}).status_code == 404
+    assert client.delete(f"/api/chat/threads/{a}").status_code == 415                         # like every state-changing call: JSON content type or nothing
+
+
+def test_the_log_takes_a_larger_window_and_says_whether_there_is_more(cfg, tmp_path):
+    from fastapi.testclient import TestClient
+    from factotum import batches
+    from factotum.api import create_app
+    from factotum.db import log_run
+    app = create_app(cfg, db_path=str(tmp_path / "api.db"))
+    c = app.state.conn
+    upsert_task(c, task(id=1, name="x")); c.commit()
+    for i in range(5):
+        batches.apply(c, [{"task_id": 1, "op": "set", "fields": {"context": f"note {i}"}}], "ui", DAY)
+        log_run(c, "mail_sweep", 100, ok=True, summary=f"run {i}")
+    c.commit()
+    client = TestClient(app)
+    r = client.get("/api/log", params={"limit": 3}).json()
+    assert len(r["batches"]) == 3 and len(r["runs"]) == 3 and r["more"] == {"batches": True, "runs": True}
+    r = client.get("/api/log", params={"limit": 10}).json()
+    assert len(r["batches"]) == 5 and r["more"] == {"batches": False, "runs": False}
+
+
+def test_hostile_mail_cannot_stop_or_stall_the_body_cleaner():
+    import time
+    from factotum import mail_sweep
+    assert mail_sweep.clean_body("see https:///" + "a" * 100 + " now").startswith("see https:///")       # no host to keep: cut, never an exception
+    t0 = time.monotonic()
+    for bad in ("[" * 200_000, "[x](" * 50_000, "![" + "a" * 200_000, "https://" + "/" * 200_000, "(" * 100_000 + ")" * 100_000):
+        assert len(mail_sweep.clean_body(bad)) <= mail_sweep.BODY_CAP
+    assert time.monotonic() - t0 < 2.0

@@ -431,7 +431,10 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
             for b in bs:
                 b["changes"] = by.get(b["id"], [])
         runs = rows(conn, "SELECT id, kind, started_at, duration_ms, cost_usd, ok, summary, error FROM runs ORDER BY id DESC LIMIT ?", (limit,))
-        return {"batches": bs, "runs": runs}
+        # `more`: whether each list was cut at the limit. The Log's timeline merges the two by time and
+        # must stop at the older list's last entry, or its tail would show only one kind.
+        more = {"batches": conn.execute("SELECT COUNT(*) FROM batches").fetchone()[0] > len(bs), "runs": conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0] > len(runs)}
+        return {"batches": bs, "runs": runs, "more": more}
 
     # ---- Chat (SPEC.md §8.3) -------------------------------------------------------------------
     from . import chat
@@ -446,6 +449,17 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         if not th:
             raise HTTPException(404)
         return {"thread": th[0], "messages": chat.messages(conn, thread_id)}
+
+    @app.delete("/api/chat/threads/{thread_id}")
+    def chat_thread_delete(thread_id: int):
+        """Remove a thread and its messages (chat history only: nothing a turn applied is undone, and
+        the run rows with their cost stay in the Log)."""
+        if not rows(conn, "SELECT 1 FROM chat_threads WHERE id = ?", (thread_id,)):
+            raise HTTPException(404, "no such thread")
+        conn.execute("DELETE FROM chat_messages WHERE thread_id = ?", (thread_id,))
+        conn.execute("DELETE FROM chat_threads WHERE id = ?", (thread_id,))
+        conn.commit()
+        return {"deleted": thread_id}
 
     @app.post("/api/chat/turn")
     def chat_turn(body: TurnBody):

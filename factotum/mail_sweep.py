@@ -40,17 +40,25 @@ SKIP_SENDERS = ["*noreply*", "*no-reply*", "*no_reply*", "*donotreply*", "*do-no
 
 
 _INVISIBLE = re.compile("[\u200b-\u200f\u2060\ufeff\u00ad\u034f\u061c\u180e]")
-_MD_LINK = re.compile(r"!?\[([^\]]*)\]\((?:[^()\s]|\([^()\s]*\))*\)")
-_URL = re.compile(r"https?://[^\s<>\"')\]]+")
+_MD_LINK = re.compile(r"!?\[([^\]\n]{0,300})\]\([^()\s]{0,2000}\)")      # bounded: mail is written by strangers, and this runs on all of it
+_URL = re.compile(r"https?://[^\s<>\"')\]]{1,4000}")
+_HOST = re.compile(r"https?://[^/\s]{1,255}")
+READ_CAP = BODY_CAP * 20            # how much of a body is cleaned at all
 
 
 def clean_body(text) -> str:
     """A message body as the triage run should read it: Mailbird hands over Markdown, and in bulk
     mail most of it is tracking links and invisible padding (a real 1,500-character excerpt held
     four words). Links keep their text, a long bare URL keeps its host, padding goes."""
-    t = _INVISIBLE.sub("", str(text or ""))
+    def short(m) -> str:
+        u = m.group(0)
+        if len(u) <= 60:
+            return u
+        h = _HOST.match(u)
+        return (h.group(0) + "/…") if h else u[:60] + "…"
+    t = _INVISIBLE.sub("", str(text or "")[:READ_CAP])
     t = _MD_LINK.sub(lambda m: m.group(1), t)
-    t = _URL.sub(lambda m: m.group(0) if len(m.group(0)) <= 60 else re.match(r"https?://[^/]+/?", m.group(0)).group(0).rstrip("/") + "/…", t)
+    t = _URL.sub(short, t)
     return re.sub(r"\s+", " ", t).strip()[:BODY_CAP]
 
 
@@ -160,7 +168,11 @@ def sweep(conn: sqlite3.Connection, cfg: dict, client, now_local: datetime) -> s
             return
         to = _recipients(last, ("to",))
         whom = ("to you" if to <= own else f"to you and {len(to - own)} other{'s' if len(to - own) != 1 else ''}") if to & own else "you are not in To (cc, bcc or a list)"
-        body = clean_body(m.get("body") or m.get("bodyPreview"))
+        try:
+            body = clean_body(m.get("body") or m.get("bodyPreview"))
+        except Exception as e:                               # one unreadable message is a note, never a failed sweep
+            notes.append(f"body of {cid[:8]}: {type(e).__name__}")
+            return
         conn.execute("INSERT INTO evidence (task_id, kind, ref, account, label, excerpt, at) VALUES (NULL, 'mail_new', ?, ?, ?, ?, ?)",
                      (cid, account, str(c.get("subject") or "")[:200], f"from {disp} <{addr}> · {whom}{' · unread' if _unread(c) else ''}\n{body}", when or now_iso()))
         new_mail += 1
