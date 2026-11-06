@@ -34,6 +34,13 @@ CONFIRM_RE = re.compile(r"\b(confirm(ed|ation)?|registered|registration|receipt|
 ICS_RE = re.compile(r"\b(invitation|invite|updated invitation|accepted:|declined:|tentative:)\b|\.ics\b", re.I)
 EXCERPT = 500
 SENT_OVERLAP_MIN = 10
+BODY_CAP = 1500                     # how much of a new mail the triage run reads (mail_triage.py)
+# Senders whose mail is never a candidate for a task, when the config names none (generic noise).
+SKIP_SENDERS = ["*noreply*", "*no-reply*", "*no_reply*", "*donotreply*", "*do-not-reply*", "*newsletter*", "*mailer-daemon*", "*notifications@*", "*notification@*", "*marketing@*", "*news@*", "*digest@*"]
+
+
+def _unread(c: dict) -> bool:
+    return str(c.get("isRead")).strip().lower() in ("false", "0")
 
 
 def _utc_str(local: datetime, cfg: dict) -> str:
@@ -100,9 +107,43 @@ def sweep(conn: sqlite3.Connection, cfg: dict, client, now_local: datetime) -> s
     fired: set[int] = set()
     links = rows(conn, "SELECT l.*, t.status FROM links l JOIN tasks t ON t.id = l.task_id WHERE l.kind = 'mail_thread' AND t.status = 'open'")
     changes: list[dict] = []
-    flipped = closed = threads = candidates = 0
+    flipped = closed = threads = candidates = new_mail = 0
     notes: list[str] = []
     fetched: dict[str, dict] = {}
+    # Tasks suggested from mail (SPEC §8.5): new Inbox mail that no rule below claims is kept as
+    # `mail_new` evidence for the triage run. Never the owner's own mail (the brief arrives in this
+    # inbox), never a thread a task already follows, never a sender the config calls noise.
+    suggest = bool(C.get(cfg, "sources.mail.suggest.enabled", False))
+    skip = C.get(cfg, "sources.mail.suggest.skip_senders", None) or SKIP_SENDERS
+    only_unread = bool(C.get(cfg, "sources.mail.suggest.only_unread", False))
+    per_sweep = int(C.get(cfg, "sources.mail.suggest.max_per_sweep", 20))
+    from .brief import smtp_settings
+    own = ({str(a["address"]).lower() for a in rows(conn, "SELECT address FROM accounts")} | {str(e).lower() for e in C.get(cfg, "owner.emails", []) or []}
+           | {str(smtp_settings().get("user") or "").lower()}) - {""}
+    tracked = {l["ref"] for l in links}
+
+    def candidate(c: dict, msgs: list[dict], account: str, backlog: bool = False) -> None:
+        nonlocal new_mail
+        cid, when, last = c["conversationId"], str(c.get("receivedAtUtc") or ""), msgs[-1]
+        addr, disp = _addr(last)
+        disp = " ".join(disp.split())
+        if not addr or addr in own or cid in tracked or _glob_any(skip, addr, f"{disp} <{addr}>"):
+            return
+        if (only_unread or backlog) and not _unread(c):
+            return
+        if new_mail >= per_sweep or conn.execute("SELECT 1 FROM evidence WHERE kind = 'mail_new' AND ref = ? AND at >= ?", (cid, when)).fetchone():
+            return                                           # this message is already a candidate; a later one in the thread is a new one
+        try:
+            m = client.call("get_message", {"messageId": int(c.get("lastMessageId") or last.get("id"))})
+        except Exception as e:
+            notes.append(f"message for {cid[:8]}: {type(e).__name__}")
+            return
+        to = {(r.get("address") if isinstance(r, dict) else str(r)).lower() for r in last.get("to") or []}
+        whom = ("to you" if to <= own else f"to you and {len(to - own)} other{'s' if len(to - own) != 1 else ''}") if to & own else "you are not in To (cc, bcc or a list)"
+        body = re.sub(r"\s+", " ", str(m.get("body") or m.get("bodyPreview") or "")).strip()
+        conn.execute("INSERT INTO evidence (task_id, kind, ref, account, label, excerpt, at) VALUES (NULL, 'mail_new', ?, ?, ?, ?, ?)",
+                     (cid, account, str(c.get("subject") or "")[:200], f"from {disp} <{addr}> · {whom}{' · unread' if _unread(c) else ''}\n{body[:BODY_CAP]}", when or now_iso()))
+        new_mail += 1
 
     def conversation(cid: str) -> dict | None:
         if cid not in fetched:
@@ -134,7 +175,8 @@ def sweep(conn: sqlite3.Connection, cfg: dict, client, now_local: datetime) -> s
                     wm = (datetime.fromisoformat(wm[:19]) - timedelta(minutes=SENT_OVERLAP_MIN)).isoformat()
                 except ValueError:
                     pass
-            convs = [c for c in client.call("list_conversations", {"folderId": fid, "limit": limit}) if str(c.get("receivedAtUtc") or "") > wm]
+            listed = client.call("list_conversations", {"folderId": fid, "limit": limit})
+            convs = [c for c in listed if str(c.get("receivedAtUtc") or "") > wm]
             for c in convs:
                 cid, when, subject = c["conversationId"], str(c.get("receivedAtUtc") or ""), str(c.get("subject") or "")
                 newest[folder] = max(newest[folder], when)
@@ -194,6 +236,8 @@ def sweep(conn: sqlite3.Connection, cfg: dict, client, now_local: datetime) -> s
                     continue
                 kind = "ics" if ICS_RE.search(subject) else "confirmation" if CONFIRM_RE.search(subject) else None
                 if not kind:
+                    if suggest:
+                        candidate(c, msgs, address)
                     continue
                 try:
                     m = client.call("get_message", {"messageId": int(c.get("lastMessageId") or last.get("id"))})
@@ -205,6 +249,17 @@ def sweep(conn: sqlite3.Connection, cfg: dict, client, now_local: datetime) -> s
                 body = re.sub(r"\s+", " ", str(m.get("body") or m.get("bodyPreview") or "")).strip()
                 if _evidence(conn, None, kind, cid, address, subject, f"from {header}: {body}", when):
                     candidates += 1
+            if folder == "inbox" and suggest and not st.get(f"state.mail_suggest.backfilled.{address}"):
+                # Once per mailbox, when suggestions are first on: mail from the last days that is still
+                # unread and older than the sweep's mark (what arrives from now on comes through above).
+                since = _utc_str(now_local - timedelta(days=int(C.get(cfg, "sources.mail.suggest.backfill_days", 3))), cfg)
+                for c in listed:
+                    if since < str(c.get("receivedAtUtc") or "") <= wm and _unread(c):
+                        msgs = (conversation(c["conversationId"]) or {}).get("messages") or []
+                        addr, disp = _addr(msgs[-1]) if msgs else ("", "")
+                        if msgs and _glob_any(allow, addr, f"{disp} <{addr}>") and not _glob_any(deny, addr, f"{disp} <{addr}>"):
+                            candidate(c, msgs, address, backlog=True)
+                set_setting(conn, f"state.mail_suggest.backfilled.{address}", True)
         for f in ("inbox", "sent"):
             if newest[f] != wms[f]:
                 set_setting(conn, f"{key}.{f}", newest[f])
@@ -221,9 +276,10 @@ def sweep(conn: sqlite3.Connection, cfg: dict, client, now_local: datetime) -> s
     if changes:
         batches.apply(conn, changes, "mail", now_local.date(), closed_by="mail-evidence")
     conn.commit()
-    if not (flipped or closed or threads or candidates):
+    if not (flipped or closed or threads or candidates or new_mail):
         return None                                           # notes alone (an account Mailbird lacks) are not activity; mail-check shows them
-    return f"flipped {flipped}, closed {closed}, threads {threads}, candidates {candidates}" + (f" · {'; '.join(notes[:4])}" if notes else "")
+    return (f"flipped {flipped}, closed {closed}, threads {threads}, candidates {candidates}" + (f" · {new_mail} for triage" if new_mail else "")
+            + (f" · {'; '.join(notes[:4])}" if notes else ""))
 
 
 def review_flags(conn: sqlite3.Connection) -> dict[int, dict]:

@@ -174,6 +174,7 @@ def test_mail_sweep_flips_waiting_closes_replies_watches_threads_and_collects_ca
     from factotum import mail_sweep
     from factotum.db import add_link, seed_accounts
     seed_accounts(conn, cfg["sources"]["mail"]["seed_accounts"]); conn.commit()
+    cfg["sources"]["mail"]["suggest"]["enabled"] = False      # the older rules on their own; tests/test_phase10.py covers mail kept for triage
     upsert_task(conn, task(id=1, name="Sign up for a 30-minute evaluation block", waiting_on="Erica Snider (esnider@sdsu.edu) — slot request emailed Tue Oct 13", project="ZIP Launchpad"))
     upsert_task(conn, task(id=2, name="Reply to Max about the stipend form", counterpart="max@sdsu.edu", project="SCIBER-CT", created_at="2026-10-28T00:00:00+00:00"))
     upsert_task(conn, task(id=3, name="Prepare the slides Max asked for", counterpart="max@sdsu.edu", project="SCIBER-CT", created_at="2026-10-28T00:00:00+00:00"))

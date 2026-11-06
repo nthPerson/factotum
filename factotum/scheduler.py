@@ -8,6 +8,8 @@ the review time or turning the brief off takes effect at the next tick.
     expire          once a day at lifecycle.expire_time (03:30): fade / lapse what Review has shown
     calendar_sweep  every sources.calendar.sweep_minutes when the calendar is on
     slack_sweep     every sources.slack.sweep_minutes when Slack is on: @-mentions of the user into evidence
+    mail_triage     when the mail sweep left new mail to read (mail_triage.pending) and sources.mail.suggest.enabled:
+                    one light run that turns it into Review suggestions, no more often than sources.mail.suggest.minutes
     notion_mirror   every sinks.notion_tasks_mirror.sweep_minutes when the mirror is on: rows edited since the last pass
     refresh         when the Today tab asked (`state.refresh.requested`): every enabled sweep now, then the planner
     today_summary   when the Today summary is stale (summary.get) and claude.summary.auto is on: one light run,
@@ -32,11 +34,12 @@ RETRY_AFTER = timedelta(hours=1)
 
 
 class Scheduler:
-    def __init__(self, cfg: dict, conn: sqlite3.Connection, push=notify.publish, mailer=None, calendar=None, canvas=None, mail=None, planner=None, mirror=None, slack=None, summary=None):
+    def __init__(self, cfg: dict, conn: sqlite3.Connection, push=notify.publish, mailer=None, calendar=None, canvas=None, mail=None, planner=None, mirror=None, slack=None, summary=None, triage=None):
         self.cfg, self.conn, self.push, self.mailer, self.calendar, self.canvas, self.mail, self.planner = cfg, conn, push, mailer, calendar, canvas, mail, planner
         self.mirror = mirror
         self.slack = slack
         self.summary = summary
+        self.triage = triage
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._thread: threading.Thread | None = None
@@ -61,6 +64,8 @@ class Scheduler:
             self._every("canvas_sweep", int(C.get(ecfg, "sources.canvas.sweep_minutes", 60)), now, st, did, lambda: self.canvas.sweep_job(self.conn, ecfg, now))
         if C.get(ecfg, "sources.mail.enabled") and self.mail:
             self._every("mail_sweep", int(C.get(ecfg, "sources.mail.sweep_minutes", 20)), now, st, did, lambda: self.mail.sweep_job(self.conn, ecfg, now))
+        if self._triage_on(ecfg):
+            self._mail_triage(ecfg, now, st, did)
         if C.get(ecfg, "sources.slack.enabled") and self.slack:
             self._every("slack_sweep", int(C.get(ecfg, "sources.slack.sweep_minutes", 20)), now, st, did, lambda: self.slack.sweep_job(self.conn, ecfg, now))
         if C.get(ecfg, "sinks.notion_tasks_mirror.enabled") and self.mirror:
@@ -206,6 +211,15 @@ class Scheduler:
                 except Exception as e:
                     self.conn.rollback()
                     parts.append(f"{name} failed ({type(e).__name__}: {str(e)[:80]})")
+            if self._triage_on(ecfg) and self.triage.pending(self.conn, 1, now.date()):
+                try:                                         # the mail the sweep just found, read before the planner writes its verdict
+                    tri = self.triage.run(self.conn, ecfg, now.date(), at=stamp)
+                    set_setting(self.conn, "state.last_run.mail_triage", stamp)
+                    self.conn.commit()
+                    parts.append(f"mail triage: {tri.get('line')}" if tri.get("ok") else f"mail triage failed ({tri.get('error')})")
+                except Exception as e:
+                    self.conn.rollback()
+                    parts.append(f"mail triage failed ({type(e).__name__}: {str(e)[:80]})")
             res = None
             try:
                 if self.planner is not None and C.get(ecfg, "claude.planner.enabled", True):
@@ -229,6 +243,33 @@ class Scheduler:
             log_run(self.conn, "refresh", int((time.monotonic() - started) * 1000), ok=ok, summary=line if ok else None, error=None if ok else line)
             self.conn.commit()
         did.append(f"refresh: {line}")
+
+    def _triage_on(self, ecfg: dict) -> bool:
+        return bool(self.triage is not None and C.get(ecfg, "sources.mail.enabled") and C.get(ecfg, "sources.mail.suggest.enabled"))
+
+    def _mail_triage(self, ecfg: dict, now: datetime, st: dict, did: list[str]) -> None:
+        """Read the new mail the sweep kept (SPEC §8.5): only when there is some, and no more often
+        than sources.mail.suggest.minutes, so an empty inbox costs nothing and a busy one one run
+        per interval. A failed run backs off an hour like every job; the mail waits."""
+        try:
+            floor = max(1, int(C.get(ecfg, "sources.mail.suggest.minutes", 30)))
+        except (TypeError, ValueError):
+            floor = 30
+        last = st.get("state.last_run.mail_triage")
+        try:
+            if last and now - datetime.fromisoformat(str(last)[:16]) < timedelta(minutes=floor):
+                return
+        except ValueError:
+            pass
+        if not self.triage.pending(self.conn, 1, now.date()):
+            return
+
+        def job() -> None:
+            res = self.triage.run(self.conn, ecfg, now.date(), at=now.strftime("%Y-%m-%dT%H:%M"))
+            if not res.get("ok"):
+                raise RuntimeError(res.get("error") or "no result")
+            did.append(f"mail_triage: {res.get('line')}")      # the run logged itself (kind mail-triage, with its cost)
+        self._run("mail_triage", now, st, did, job, mark=now.strftime("%Y-%m-%dT%H:%M"))
 
     def _auto_summary(self, ecfg: dict, now: datetime, st: dict, did: list[str]) -> None:
         """Rewrite the Today summary when Python says it is stale (summary.stale): at once when the

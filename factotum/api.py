@@ -277,7 +277,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
             i["evidence"] = by_task.get(i["task"]["id"], [])      # judged in the same batch as the decision; a proposal's change can be accepted
         # Planner creates with no task (an announcement, a hunch) and Slack mentions naming no task:
         # suggestion cards with Create / Dismiss.
-        suggestions = [{"id": e["id"], "kind": e["kind"], "label": e["label"], "reason": e["excerpt"], "at": e["at"], "fields": _suggestion_fields(ecfg, e)}
+        suggestions = [{"id": e["id"], "kind": e["kind"], "label": e["label"], "reason": e["excerpt"], "at": e["at"], "fields": _suggestion_fields(ecfg, e), "mail": _suggestion_mail(e)}
                        for e in pending if e["task_id"] is None and e["kind"] in SUGGESTION_KINDS]
         cap = int(C.get(ecfg, "lifecycle.review_cap", 15))
         page = full[:cap]
@@ -290,6 +290,16 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
                 i["task"]["last_offered_at"] = today.isoformat()
         return {"today": today.isoformat(), "last_review_at": st.get("state.last_review_at"),
                 "cap": cap, "total": len(full), "labels": lifecycle.REVIEW_LABELS, "items": page, "suggestions": suggestions}
+
+    def _suggestion_mail(e: dict) -> dict | None:
+        """For a card the mail triage made (SPEC §8.5): the thread it came from, as Mailbird reported it."""
+        if e["kind"] != "proposal":
+            return None
+        try:
+            m = (json.loads(e["ref"]) if e.get("ref") else {}).get("mail")
+        except (ValueError, AttributeError):
+            return None
+        return m if isinstance(m, dict) and m.get("ref") else None
 
     def _suggestion_fields(ecfg: dict, e: dict) -> dict:
         """What Create would make: the planner's fields for an uncited create (evidence.ref holds
@@ -321,7 +331,8 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
             raise HTTPException(404, "no such suggestion")
         e = e[0]
         is_slack = e["kind"] == "slack_mention"
-        key = f"{'slack-mention' if is_slack else 'planner-suggestion'}:{evidence_id}"
+        mail = _suggestion_mail(e)
+        key = f"{'slack-mention' if is_slack else 'mail-suggestion' if mail else 'planner-suggestion'}:{evidence_id}"
         ex = rows(conn, "SELECT id FROM tasks WHERE source_key = ?", (key,))
         if ex:
             return {"task_id": ex[0]["id"]}
@@ -332,14 +343,35 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         want = _suggestion_fields(ecfg, e)
         f = _clean_task_fields(ecfg, want)
         now = now_iso()
-        tid = upsert_task(conn, dict(f, status="open", source="Slack" if is_slack else "Planner", source_key=key, source_link=want.get("source_link"),
-                                     account=e.get("account") if is_slack else None, context=f.get("context") or (e["excerpt"] or None),
+        tid = upsert_task(conn, dict(f, status="open", source="Slack" if is_slack else "Mail" if mail else "Planner", source_key=key, source_link=want.get("source_link"),
+                                     account=e.get("account") if is_slack else mail.get("account") if mail else None, context=f.get("context") or (e["excerpt"] or None),
                                      mentions=1, last_mention_at=date.today().isoformat(), created_at=now, edited_at=now))
         if is_slack and e.get("ref"):
             add_link(conn, tid, "slack_message", e["ref"], label=str(e.get("label") or "")[:120], account=e.get("account"))
+        if mail:     # the user said yes to this mail: from here on the sweep follows its thread like any linked one
+            add_link(conn, tid, "mail_thread", str(mail["ref"]), label=str(mail.get("subject") or "")[:120], account=mail.get("account"))
         conn.execute("UPDATE evidence SET judged_at = ?, verdict = 'applied' WHERE id = ?", (now, evidence_id))
         conn.commit()
         return {"task_id": tid}
+
+    @app.post("/api/review/suggestions/{evidence_id}/open")
+    def open_suggestion(evidence_id: int):
+        """Show the mail behind a suggestion in Mailbird's window (it selects the conversation; nothing
+        is read back, written or sent). Only a conversation a waiting card names can be asked for."""
+        from . import mailbird
+        e = rows(conn, "SELECT * FROM evidence WHERE id = ? AND kind = 'proposal' AND task_id IS NULL", (evidence_id,))
+        mail = _suggestion_mail(e[0]) if e else None
+        if not mail:
+            raise HTTPException(404, "no mail behind this suggestion")
+        try:
+            client = mailbird.Client(eff_cfg())
+            try:
+                client.call_write("select_conversation", {"conversationId": str(mail["ref"])})
+            finally:
+                client.close()
+        except mailbird.MailbirdError as ex:
+            raise HTTPException(502, str(ex))
+        return {"ok": True}
 
     @app.post("/api/review/finish")
     def finish_review():

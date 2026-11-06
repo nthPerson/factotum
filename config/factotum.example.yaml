@@ -164,6 +164,14 @@ sources:
     url: https://127.0.0.1:52000/mcp
     tls_verify: false             # Mailbird uses a self-signed certificate on loopback
     sweep_minutes: 20
+    suggest:                      # tasks suggested from mail (SPEC §8.5): new Inbox mail about no task is read by one light Claude
+      enabled: true               # run and what the owner has to do becomes a suggestion card in Review. Settings → Inputs.
+      minutes: 30                 # that run happens only when there is new mail, and no more often than this
+      backfill_days: 3            # the first pass over a mailbox also takes mail of the last days that is still unread
+      only_unread: false          # true = mail already read is never a candidate
+      max_per_sweep: 20
+      skip_senders: ["*noreply*", "*no-reply*", "*no_reply*", "*donotreply*", "*do-not-reply*", "*newsletter*", "*mailer-daemon*",
+                     "*notifications@*", "*notification@*", "*marketing@*", "*news@*", "*digest@*"]   # never candidates (allow / deny above still apply)
     # accounts are managed in Settings → Accounts (table `accounts`); these seed it on first run
     seed_accounts:
       - { address: rashe7414@sdsu.edu,      display: SDSU,     roles: [monitor] }
@@ -256,12 +264,12 @@ notify:
 
 claude:
   binary: claude                # absolute path (`which claude`) for the same reason; `factotum claude-check` says which
-  models: { sync_file: sonnet, today_summary: sonnet, planner_morning: sonnet, chat_turn: sonnet, check: haiku }
-  budgets_usd: { sync_file: 1.00, today_summary: 0.30, planner_morning: 0.75, chat_turn: 0.60, check: 0.05 }
+  models: { sync_file: sonnet, today_summary: sonnet, mail_triage: sonnet, planner_morning: sonnet, chat_turn: sonnet, check: haiku }
+  budgets_usd: { sync_file: 1.00, today_summary: 0.30, mail_triage: 0.40, planner_morning: 0.75, chat_turn: 0.60, check: 0.05 }
   planner: { enabled: true }   # the morning brief's verdict and proposals; off = the plain brief
   summary: { auto: true, auto_minutes: 10 }   # the Today tab's summary: rewritten by one light run when it goes stale (a row it is about changed,
                                 # or something became urgent), at most this often; off = a badge and the Refresh button only. Settings → Claude.
-  timeouts_s: { sync_file: 600, today_summary: 180, planner_morning: 480, chat_turn: 240 }
+  timeouts_s: { sync_file: 600, today_summary: 180, mail_triage: 240, planner_morning: 480, chat_turn: 240 }
 
 server:
   host: 127.0.0.1
