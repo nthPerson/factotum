@@ -243,3 +243,12 @@ def test_the_sweep_reads_senders_and_recipients_in_mailbirds_shape_and_the_older
     assert mail_sweep._addr(real) == ("prof@sdsu.edu", "Dr. Rao") == mail_sweep._addr(old)
     assert mail_sweep._recipients(real) == {"a@x.org", "b@x.org"} and mail_sweep._recipients(old) == {"a@x.org", "c@x.org"}
     assert mail_sweep._addr({"from": "x@y.org"}) == ("x@y.org", "x@y.org") and mail_sweep._addr({}) == ("", "") and mail_sweep._addr(None) == ("", "")
+
+
+def test_a_mail_body_is_kept_as_words_not_as_tracking_links_and_padding():
+    from factotum import mail_sweep
+    raw = ("Hi Robert,‌ ‌ \xad͏ ‌   please   [review the draft](https://track.example.com/c/" + "a" * 400 + ") by Friday.\n\n"
+           "![logo](https://cdn.example.com/" + "b" * 300 + ".png) See https://short.example.com/x and https://long.example.com/path/" + "c" * 200 + "?utm=1 thanks")
+    out = mail_sweep.clean_body(raw)
+    assert out == "Hi Robert, please review the draft by Friday. logo See https://short.example.com/x and https://long.example.com/… thanks"
+    assert mail_sweep.clean_body(None) == "" and len(mail_sweep.clean_body("word " * 2000)) <= mail_sweep.BODY_CAP
