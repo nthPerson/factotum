@@ -40,7 +40,8 @@ SKIP_SENDERS = ["*noreply*", "*no-reply*", "*no_reply*", "*donotreply*", "*do-no
 
 
 _INVISIBLE = re.compile("[\u200b\u200e\u200f\u2060\ufeff\u00ad\u034f\u061c\u180e\u202a-\u202e\u2066-\u2069]")
-_JOINER_PAD = re.compile("(?:(?<=\\s)|^)[\u200c\u200d]+|[\u200c\u200d]+(?=\\s|$)")     # ZWNJ / ZWJ as padding; inside a word or an emoji they are spelling
+_JOINERS = "\u200c\u200d"            # ZWNJ / ZWJ: spelling inside a word or an emoji, padding at a word's edge
+_JOINER_RUN = re.compile("[\u200c\u200d]{3,}")
 _MD_LINK = re.compile(r"!?\[([^\]\n]{0,300})\]\([^()\s]{0,2000}\)")      # bounded: mail is written by strangers, and this runs on all of it
 _URL = re.compile(r"https?://[^\s<>\"')\]]{1,4000}")
 _HOST = re.compile(r"https?://[^/\s]{1,255}")
@@ -58,11 +59,14 @@ def clean_body(text) -> str:
         h = _HOST.match(u)
         return (h.group(0) + "/…") if h else u[:60] + "…"
     t = _INVISIBLE.sub("", str(text or "")[:READ_CAP])
-    for _ in range(3):                                       # bulk mail pads with "ZWNJ space ZWNJ space …"
-        t = _JOINER_PAD.sub("", t)
+    # Bulk mail pads with "ZWNJ space ZWNJ space …". No lookaround here: a pattern that asked "is this run
+    # followed by a space" took 30 s on a 29,000-joiner run inside one word. A run of three or more is
+    # never spelling; the rest is stripped from each word's edges by plain string work, linear in the text.
+    t = _JOINER_RUN.sub("", t)
     t = _MD_LINK.sub(lambda m: m.group(1), _MD_LINK.sub(lambda m: m.group(1), t))      # twice: a linked image is a link around an image
     t = _URL.sub(short, t)
-    return re.sub(r"\s+", " ", t).strip()[:BODY_CAP]
+    t = re.sub(r"\s+", " ", t)
+    return " ".join(w for w in (x.strip(_JOINERS) for x in t.split(" ")) if w)[:BODY_CAP]
 
 
 def _unread(c: dict) -> bool:

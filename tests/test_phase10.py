@@ -294,7 +294,9 @@ def test_hostile_mail_cannot_stop_or_stall_the_body_cleaner():
     from factotum import mail_sweep
     assert mail_sweep.clean_body("see https:///" + "a" * 100 + " now").startswith("see https:///")       # no host to keep: cut, never an exception
     t0 = time.monotonic()
-    for bad in ("[" * 200_000, "[x](" * 50_000, "![" + "a" * 200_000, "https://" + "/" * 200_000, "(" * 100_000 + ")" * 100_000):
+    for bad in ("[" * 200_000, "[x](" * 50_000, "![" + "a" * 200_000, "https://" + "/" * 200_000, "(" * 100_000 + ")" * 100_000,
+                "\u200c" * 30_000 + "x", "a\u200d" * 15_000, ("\u200c\u200d" * 50 + "x ") * 300,
+                "a" + "\u200c" * 29_000 + "x", ("a" + "\u200d" * 2_000 + "b ") * 14):       # a joiner run inside a word took 30 s with a lookahead pattern
         assert len(mail_sweep.clean_body(bad)) <= mail_sweep.BODY_CAP
     assert time.monotonic() - t0 < 2.0
 
