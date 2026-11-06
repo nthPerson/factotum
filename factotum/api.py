@@ -350,6 +350,8 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
             add_link(conn, tid, "slack_message", e["ref"], label=str(e.get("label") or "")[:120], account=e.get("account"))
         if mail:     # the user said yes to this mail: from here on the sweep follows its thread like any linked one
             add_link(conn, tid, "mail_thread", str(mail["ref"]), label=str(mail.get("subject") or "")[:120], account=mail.get("account"))
+            # seen up to the message the card was made from, or the next sweep would call that same message "Thread updated"
+            conn.execute("UPDATE links SET last_seen_at = ? WHERE task_id = ? AND kind = 'mail_thread' AND ref = ? AND last_seen_at IS NULL", (mail.get("at"), tid, str(mail["ref"])))
         conn.execute("UPDATE evidence SET judged_at = ?, verdict = 'applied' WHERE id = ?", (now, evidence_id))
         conn.commit()
         return {"task_id": tid}
@@ -456,6 +458,8 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         the run rows with their cost stay in the Log)."""
         if not rows(conn, "SELECT 1 FROM chat_threads WHERE id = ?", (thread_id,)):
             raise HTTPException(404, "no such thread")
+        if thread_id in app.state.chat_busy:                 # the turn would end by writing into a thread that is gone
+            raise HTTPException(409, "a turn is still running in this thread; delete it when it has answered")
         conn.execute("DELETE FROM chat_messages WHERE thread_id = ?", (thread_id,))
         conn.execute("DELETE FROM chat_threads WHERE id = ?", (thread_id,))
         conn.commit()
@@ -473,12 +477,20 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         q: queue.Queue = queue.Queue()
         runner = app.state.chat_runner
 
+        app.state.chat_busy.add(thread_id)
+
         def work():
             try:
                 res = chat.turn(conn, eff_cfg(), thread_id, body.text, body.attached, today=date.today(), canned=body.canned, runner=runner, on_event=q.put)
                 q.put({"type": "done", "result": res} if res.get("ok") else {"type": "error", "error": res.get("error") or "run failed", "result": res})
             except Exception as e:   # noqa: BLE001 — the stream must end with a reason, never hang
+                try:
+                    conn.rollback()                          # a failed write must not leave this connection holding the write lock
+                except Exception:   # noqa: BLE001
+                    pass
                 q.put({"type": "error", "error": f"{type(e).__name__}: {e}"})
+            finally:
+                app.state.chat_busy.discard(thread_id)
             q.put(None)
 
         threading.Thread(target=work, daemon=True).start()
@@ -817,6 +829,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
 
     app.mount("/static", NoCacheStatic(directory=str(WEB)), name="static")
     app.state.conn = conn
+    app.state.chat_busy = set()                  # threads with a turn in flight (they cannot be deleted meanwhile)
     app.state.cfg = cfg
     app.state.chat_runner = chat_runner          # tests inject a fake; None means the real headless run
     return app

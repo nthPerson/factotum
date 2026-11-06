@@ -61,6 +61,7 @@ main.rail-min { grid-template-columns: 58px minmax(0, 1fr); }
 .btn.small { padding: 4px 8px; font-size: 12px; }
 @media (hover: none), (max-width: 700px) {
   .btn, .btn.small { min-height: 36px; padding: 6px 12px; font-size: 13px; }
+  .card .rvask textarea { font-size: 16px; }
   .cmd input, .cmd textarea, .settings input, .settings select, .remform input, .remform select, .card .later-menu input[type=date] { min-height: 40px; font-size: 16px; }   /* 16px: iOS does not zoom the page */
   .row .details { padding-left: 12px; }
   .details .actions { gap: 8px; }
@@ -331,6 +332,7 @@ body.tray-open main { padding-bottom: 60vh; }
   .tl .t { grid-area: t; } .tl .k { grid-area: k; } .tl .x { grid-area: x; } .tl .car { grid-area: car; } .tl .m { grid-area: m; white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; }
   .tl.open .m { display: block; }
   .tl > .btn { grid-column: 1 / -1; justify-self: start; }
+  .tl .nobtn { display: none; }
   .tl .more { grid-area: more; }
 }
 .logb { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-bottom: 8px; } .logb.undone { opacity: .6; }

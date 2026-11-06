@@ -207,6 +207,20 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
   failed (the live `evidence` table simply had none of those kinds). `mail_sweep._person` takes both;
   `tests/test_phase4.py::_msg` builds the real one. Check a new integration's fake against one live
   response (keys only) before trusting a green suite.
+- **A sent mail closes a task only as a reply in the thread the task follows** (2026-11-05):
+  `mail_sweep.REPLY_RE` (reply / respond / answer / get back) AND `(task, conversation)` in the links
+  that existed before the pass. Everything else to a counterpart is `sent_to_counterpart` evidence
+  with the text, for the planner. Do not widen the verb list or link threads by address alone: that
+  is what would have closed three tasks on one unrelated mail. A `watch_sent` is the explicit version.
+- **A waiting task flips only on a NEW message from the address** (2026-11-05): `_waiting_match` gets
+  the messages after the watermark that the owner did not write. A display-name match is whole words,
+  and only a hint (no link, no `matched`).
+- **The mail sweep commits before every Mailbird call** (`mb()` inside `sweep`): never call
+  `client.call` there directly, or the write lock is held across the network again.
+- **When the candidate cap leaves mail behind, the Inbox watermark stays** (2026-11-05): `candidate`
+  returns False only for that; a new early `return` in it must return True, or the watermark freezes.
+- **Mailbird: an attachment's name is `fileName`, a conversation row's `lastMessageId` is not always
+  its last message** (checked live 2026-11-05). Fetch a message by its own `id`.
 - **A mail suggestion is a card, never a task** (2026-11-05): `mail_triage.apply` only inserts
   `proposal` evidence and judges `mail_new` rows. The model supplies no address (`counterpart` is
   Mailbird's sender) and can name only evidence from the batch it was shown. The planner must keep

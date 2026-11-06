@@ -297,3 +297,146 @@ def test_hostile_mail_cannot_stop_or_stall_the_body_cleaner():
     for bad in ("[" * 200_000, "[x](" * 50_000, "![" + "a" * 200_000, "https://" + "/" * 200_000, "(" * 100_000 + ")" * 100_000):
         assert len(mail_sweep.clean_body(bad)) <= mail_sweep.BODY_CAP
     assert time.monotonic() - t0 < 2.0
+
+
+# --- the review of wave 10 (2026-11-05): what the sweep does now that it can see who wrote ----------
+
+def _sweep(conn, cfg, mb, when):
+    from factotum import mail_sweep
+    real = mb.call
+
+    def call(tool, args):
+        assert not conn.in_transaction, f"{tool} was called with a write transaction open"      # the UI's Apply would wait behind it
+        return real(tool, args)
+    mb.call = call
+    try:
+        return mail_sweep.sweep(conn, cfg, mb, when)
+    finally:
+        mb.call = real
+
+
+def test_a_sent_mail_closes_only_a_reply_task_in_its_own_thread_and_is_a_candidate_for_the_rest(conn, cfg):
+    mb = _mail(conn, cfg)
+    old = "2026-10-28T00:00:00+00:00"
+    upsert_task(conn, task(id=1, name="Reply to Max about the stipend form", counterpart="max@sdsu.edu", created_at=old))
+    upsert_task(conn, task(id=2, name="Email Max the residuals CSV", counterpart="max@sdsu.edu", created_at=old))
+    upsert_task(conn, task(id=3, name="Send Max the slides for Friday", counterpart="max@sdsu.edu", created_at=old))
+    upsert_task(conn, task(id=4, name="Reply to Max about the room", counterpart="max@sdsu.edu", created_at=old))
+    add_link(conn, 1, "mail_thread", "conv-stipend", label="Stipend form", account=ME)
+    add_link(conn, 3, "mail_thread", "conv-stipend", label="Stipend form", account=ME); conn.commit()
+    mb.add(7, "conv-stipend", "Re: Stipend form", "2026-11-01T17:00:00", [_msg(300, "max@sdsu.edu", [ME], "2026-10-30T09:00:00", "Can you fill this in?"),
+                                                                        _msg(301, ME, ["max@sdsu.edu"], "2026-11-01T17:00:00", "Filled in and attached.")])
+    mb.add(7, "conv-coffee", "Coffee Thursday?", "2026-11-01T16:00:00", [_msg(302, ME, ["max@sdsu.edu"], "2026-11-01T16:00:00", "Coffee Thursday? I'll send the slides next week.")])
+    line = _sweep(conn, cfg, mb, datetime(2026, 11, 1, 19, 0))
+    status = {r["id"]: r["status"] for r in rows(conn, "SELECT id, status FROM tasks")}
+    assert status == {1: "done", 2: "open", 3: "open", 4: "open"} and "closed 1" in line        # the reply, in the thread the task follows; nothing else
+    ev = rows(conn, "SELECT task_id, ref, excerpt FROM evidence WHERE kind = 'sent_to_counterpart' ORDER BY task_id, ref")
+    assert {(e["task_id"], e["ref"]) for e in ev} >= {(2, "conv-coffee"), (3, "conv-stipend"), (4, "conv-coffee")}
+    assert any("I'll send the slides next week" in e["excerpt"] for e in ev)                    # the planner judges these, so it is given what was written
+
+
+def test_a_waiting_task_flips_only_for_a_new_message_from_that_address_and_a_name_is_a_whole_word_hint(conn, cfg):
+    mb = _mail(conn, cfg)
+    upsert_task(conn, task(id=1, name="Sign up for a block", waiting_on="Erica Snider (esnider@sdsu.edu)"))
+    upsert_task(conn, task(id=2, name="Get the numbers", waiting_on="Dan"))
+    upsert_task(conn, task(id=3, name="Get the dataset", waiting_on="Lindsey Duvanich")); conn.commit()
+    set_setting(conn, f"state.mail_sweep.last_at.{ME}.inbox", "2026-11-01T12:00:00"); conn.commit()
+    mb.add(2, "conv-old-erica", "Re: block", "2026-11-01T18:00:00", [_msg(400, "esnider@sdsu.edu", [ME], "2026-09-10T09:00:00", "In September", "Erica Snider"),
+                                                                    _msg(401, "bob@sdsu.edu", [ME], "2026-11-01T18:00:00", "Replying to all on an old thread", "Bob")])
+    mb.add(2, "conv-abundance", "RSVP by Friday for the mixer", "2026-11-01T17:00:00", [_msg(402, "editor@abundance.org", [ME], "2026-11-01T17:00:00", "Please RSVP by Friday.", "Abundance Weekly")])
+    mb.add(2, "conv-lindsey", "dataset", "2026-11-01T16:00:00", [_msg(403, "someone@example.com", [ME], "2026-11-01T16:00:00", "here it is", "Lindsey Duvanich")])
+    _sweep(conn, cfg, mb, datetime(2026, 11, 1, 19, 0))
+    assert one(conn, "SELECT waiting_on FROM tasks WHERE id = 1")["waiting_on"] is not None      # Erica wrote nothing new
+    kinds = {(e["kind"], e["task_id"], e["ref"]) for e in rows(conn, "SELECT kind, task_id, ref FROM evidence")}
+    assert ("maybe_reply_from_waiting", 3, "conv-lindsey") in kinds and not any(k[1] == 2 for k in kinds)         # "Dan" is not inside "Abundance"
+    assert ("mail_new", None, "conv-abundance") in kinds and ("mail_new", None, "conv-lindsey") in kinds          # a name is a hint: the other rules still see the mail
+    assert rows(conn, "SELECT 1 AS x FROM links WHERE task_id = 3") == []                        # and no thread is tied to a task on a name alone
+
+
+def test_mail_past_the_cap_waits_for_the_next_sweep_and_an_unreadable_body_is_still_a_candidate(conn, cfg):
+    mb = _mail(conn, cfg)
+    cfg["sources"]["mail"]["suggest"]["max_per_sweep"] = 2
+    for i in range(4):
+        mb.add(2, f"conv-{i}", f"Question {i}", f"2026-11-01T1{8 - i}:00:00", [_msg(500 + i, f"p{i}@sdsu.edu", [ME], f"2026-11-01T1{8 - i}:00:00", f"Could you do thing {i}?")])
+    del mb.messages[503]                                                                     # Mailbird cannot hand over this body
+    assert "2 for triage" in _sweep(conn, cfg, mb, datetime(2026, 11, 1, 19, 0))
+    assert "2 for triage" in _sweep(conn, cfg, mb, datetime(2026, 11, 1, 19, 20))
+    new = {e["ref"]: e["excerpt"] for e in _new(conn)}
+    assert sorted(new) == ["conv-0", "conv-1", "conv-2", "conv-3"] and "could not be read" in new["conv-3"] and "p3@sdsu.edu" in new["conv-3"]
+    assert _sweep(conn, cfg, mb, datetime(2026, 11, 1, 19, 40)) is None and len(_new(conn)) == 4
+
+
+def test_a_mailbox_swept_for_the_first_time_gives_only_its_unread_mail(conn, cfg):
+    mb = _mail(conn, cfg)
+    mb.add(2, "conv-read", "Lunch?", "2026-11-01T12:00:00", [_msg(600, "friend@example.com", [ME], "2026-11-01T12:00:00", "Tomorrow?")])
+    mb.convs[2][0]["isRead"] = True
+    mb.add(2, "conv-unread", "Can you review my draft?", "2026-11-01T11:00:00", [_msg(601, "peer@sdsu.edu", [ME], "2026-11-01T11:00:00", "By Wednesday.")])
+    _sweep(conn, cfg, mb, datetime(2026, 11, 1, 19, 0))
+    assert [e["ref"] for e in _new(conn)] == ["conv-unread"]
+
+
+def test_the_candidate_is_the_conversations_newest_message_and_an_invitation_is_found_by_file_name(conn, cfg):
+    mb = _mail(conn, cfg)
+    mb.add(2, "conv-two", "Question", "2026-11-01T18:00:00", [_msg(700, "peer@sdsu.edu", [ME], "2026-11-01T17:00:00", "First message"), _msg(701, "peer@sdsu.edu", [ME], "2026-11-01T18:00:00", "Second, newest message")])
+    mb.convs[2][0]["lastMessageId"] = "700"                                                    # the row can point at another message than the last one
+    mb.add(12, "conv-ics", "Invitation: Dentist", "2026-11-01T14:00:00", [_msg(702, "dentist@example.com", ["robertashe2.0@gmail.com"], "2026-11-01T14:00:00", "See attached")])
+    mb.messages[702]["attachments"] = [{"fileName": "invite.ics", "mimeType": "text/calendar"}]            # Mailbird's key (checked live 2026-11-05)
+    _sweep(conn, cfg, mb, datetime(2026, 11, 1, 19, 0))
+    assert "Second, newest message" in _new(conn)[0]["excerpt"]
+    assert one(conn, "SELECT COUNT(*) AS n FROM evidence WHERE kind = 'ics'")["n"] == 1
+
+
+def test_a_body_keeps_joiners_inside_words_and_a_linked_image_leaves_its_text():
+    from factotum import mail_sweep
+    assert mail_sweep.clean_body("می‌خواهم 👨‍💻 pad‌ ‌ ‌ end ‮evil") == "می‌خواهم 👨‍💻 pad end evil"
+    assert mail_sweep.clean_body("[![logo](https://cdn.example.com/a.png)](https://example.com/home) Hello") == "logo Hello"
+
+
+def test_triage_leaves_what_it_could_not_place_and_a_reply_of_the_wrong_shape_judges_nothing(conn, cfg):
+    from factotum import mail_triage
+    from factotum.claude.runner import RunResult
+    for i in range(10):
+        _candidate(conn, 40 + i, f"conv-{i}", f"Ask {i}", f"P{i} <p{i}@sdsu.edu>", f"Please do thing {i}")
+    conn.commit()
+    ten = {"suggest": [{"evidence_id": 40 + i, "name": f"Do thing {i} for P{i}", "reason": "asked"} for i in range(10)], "dismiss": []}
+    res = mail_triage.run(conn, cfg, DAY, runner=lambda *a, **k: RunResult(True, ten, json.dumps(ten), 0.1, 1000), at="2026-11-02T10:00")
+    assert len(res["suggested"]) == 8 and res["set_aside"] == 0 and res["left"] == 2             # the ninth and tenth are asked about again, not thrown away
+    assert [c["id"] for c in mail_triage.pending(conn, today=DAY)] == [48, 49]
+    wrong = {"suggestions": [{"evidence_id": 48, "name": "x"}]}
+    bad = mail_triage.run(conn, cfg, DAY, runner=lambda *a, **k: RunResult(True, wrong, json.dumps(wrong), 0.1, 1000), at="2026-11-02T10:40")
+    assert not bad["ok"] and [c["id"] for c in mail_triage.pending(conn, today=DAY)] == [48, 49]
+    worse = mail_triage.run(conn, cfg, DAY, runner=lambda *a, **k: RunResult(False, None, "no", 0.1, 1000, error="no JSON"), at="2026-11-02T11:40")
+    assert not worse["ok"] and "set aside" in worse["error"] and mail_triage.pending(conn, today=DAY) == []     # twice failed on the same mail: it stops costing money
+    assert {e["verdict"] for e in rows(conn, "SELECT verdict FROM evidence WHERE id IN (48, 49)")} == {"dismissed"}
+    kw = {}
+    _candidate(conn, 60, "conv-x", "Ask", "P <p@sdsu.edu>", "Please"); conn.commit()
+    mail_triage.run(conn, cfg, DAY, runner=lambda cfg, kind, prompt, **k: (kw.update(k), RunResult(True, {"suggest": [], "dismiss": []}, "{}", 0.1, 1000))[1], at="2026-11-02T12:40")
+    assert kw["tools"] == "" and kw["allowed_tools"] == [] and str(kw["workdir"]).endswith("1240")     # no tools at all for a run that reads strangers' text; a directory per run
+
+
+def test_create_from_a_mail_card_does_not_flag_its_own_thread_as_updated(cfg, tmp_path):
+    from fastapi.testclient import TestClient
+    from factotum import mail_triage
+    from factotum.api import create_app
+    from factotum.claude.runner import RunResult
+    app = create_app(cfg, db_path=str(tmp_path / "api.db"))
+    c = app.state.conn
+    _seed_triage(c)
+    mail_triage.run(c, cfg, DAY, runner=lambda *a, **k: RunResult(True, GOOD, json.dumps(GOOD), 0.07, 2500), at="2026-11-02T10:00")
+    client = TestClient(app)
+    sg = client.get("/api/review").json()["suggestions"][0]
+    tid = client.post(f"/api/review/suggestions/{sg['id']}/create", json={}).json()["task_id"]
+    assert one(c, "SELECT last_seen_at FROM links WHERE task_id = ?", (tid,))["last_seen_at"] == "2026-11-02T09:00:00"
+
+
+def test_a_thread_with_a_turn_in_flight_cannot_be_deleted(cfg, tmp_path):
+    from fastapi.testclient import TestClient
+    from factotum import chat
+    from factotum.api import create_app
+    app = create_app(cfg, db_path=str(tmp_path / "api.db"))
+    tid = chat.new_thread(app.state.conn, "Busy")
+    app.state.chat_busy.add(tid)
+    client = TestClient(app)
+    assert client.delete(f"/api/chat/threads/{tid}", headers={"Content-Type": "application/json"}).status_code == 409
+    app.state.chat_busy.discard(tid)
+    assert client.delete(f"/api/chat/threads/{tid}", headers={"Content-Type": "application/json"}).status_code == 200

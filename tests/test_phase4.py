@@ -185,6 +185,7 @@ def test_mail_sweep_flips_waiting_closes_replies_watches_threads_and_collects_ca
     upsert_task(conn, task(id=6, name="Get the dataset from Lindsey", waiting_on="Lindsey Duvanich", project="Car Sounds"))
     upsert_task(conn, task(id=7, name="Reply to Reza about the simulator", counterpart="reza@sdsu.edu", project="Caltrans", created_at="2026-10-28T00:00:00+00:00"))
     add_link(conn, 4, "mail_thread", "conv-old", label="Re: July residuals", account="rashe7414@sdsu.edu")
+    add_link(conn, 2, "mail_thread", "conv-sent-max", label="Re: stipend form", account="rashe7414@sdsu.edu")      # since 2026-11-05 a reply closes its task only in the thread the task follows
     conn.execute("UPDATE links SET last_seen_at = '2026-10-20T00:00:00' WHERE ref = 'conv-old'"); conn.commit()
     mb = FakeMailbird()
     mb.add(2, "conv-erica", "Re: evaluation block", "2026-11-01T18:00:00", [_msg(101, "esnider@sdsu.edu", ["rashe7414@sdsu.edu"], "2026-11-01T18:00:00", "Thursday 2pm works", "Erica Snider")])
@@ -220,7 +221,7 @@ def test_mail_sweep_flips_waiting_closes_replies_watches_threads_and_collects_ca
     # the next sweep sees nothing new: watermarks moved, no twins
     assert mail_sweep.sweep(conn, cfg, mb, datetime(2026, 11, 1, 19, 20)) is None
     assert one(conn, "SELECT COUNT(*) AS n FROM evidence")["n"] == 7
-    assert all(t != "get_message" or a["messageId"] in (104, 105) for t, a in mb.calls)                     # bodies fetched for candidates only
+    assert all(t != "get_message" or a["messageId"] in (102, 104, 105) for t, a in mb.calls)                # bodies fetched for candidates only (102: the sent mail the planner judges)
 
 
 def test_scheduler_runs_the_mail_sweep_on_its_interval(conn, cfg):

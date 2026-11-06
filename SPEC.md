@@ -187,10 +187,17 @@ by hand. No large payload ever passes through a tool result, so the 40 KB MCP sp
 accounts (add, edit, remove, enable). Allow/deny globs in config. Sweep every `sweep_minutes`
 (`factotum/mail_sweep.py`, Python only, read-only client `factotum/mailbird.py` that refuses any
 tool outside its read list). Per monitored account it walks Inbox and Sent above a per-account
-time watermark and writes rows to `evidence`: a reply from the ADDRESS a task waits on clears
-`waiting_on` (a display-name match is only flagged: names are forgeable); a message the account
-itself sent to a task's `counterpart` after the task was created closes a "reply to …" task
-(closed_by `mail-evidence`, link kept) and is a candidate for any other; a task under a watch
+time watermark and writes rows to `evidence`: a NEW message (arrived since the last pass, not the
+owner's own) from the ADDRESS a task waits on clears `waiting_on`; a display name carrying every
+word of the name is only a hint on the task's Review card (names are forgeable and first names
+common: no flip, no link, and the mail still goes to the other rules). A message the account itself
+sent to a task's `counterpart` after the task was created closes the task by itself in ONE case:
+the task is a reply ("Reply to …", "Respond …", "Answer …", "Get back to …") and the message is in
+the thread the task already follows (closed_by `mail-evidence`). Every other mail to that address
+is `sent_to_counterpart` evidence carrying what was written (400 characters), for the planner to
+judge: until 2026-11-05 the rule was "any mail to the address closes any send / email / write /
+reply task", which one "Coffee Thursday?" to a person three tasks are owed to would have turned
+into three closed tasks (it never happened only because the sweep saw no senders); a task under a watch
 (`close_on_sent_since` and `close_on_sent_to`, set by the `watch_sent` op: "close this when I have
 sent the mail") closes when a message to the watched address is sent after the watch began,
 whatever it is called, and the watch ends with it (evidence `sent_watched`, judged in the same
@@ -213,8 +220,17 @@ because strangers write this text). Never kept: the owner's own mail (every addr
 `owner.emails` and the SMTP user, so the brief is not a candidate), a thread an open task already
 follows, a sender matching `sources.mail.suggest.skip_senders`, and whatever `allow` / `deny`
 excludes. A later message in the same conversation is a new candidate. The first pass over a
-mailbox also takes mail of the last `backfill_days` (3) that is still unread; after that, every
-new arrival, read or not (`only_unread: true` narrows it). At most `max_per_sweep` (20) per pass.
+mailbox takes only mail that is still unread (of the last `lookback_days` for a mailbox never swept,
+of the last `backfill_days` (3) for one swept before suggestions were on); after that, every new
+arrival, read or not (`only_unread: true` narrows it). At most `max_per_sweep` (20) per pass: when
+the cap leaves mail behind, the Inbox watermark does not move, so the rest is met on the next pass
+(what was already kept is skipped by its `(conversation, time)`). A body Mailbird cannot hand over
+is still a candidate, judged by subject and sender. The message is always the conversation's last
+one, fetched by its own id (a row's `lastMessageId` can point elsewhere), and an invitation's
+attachment is found by `fileName` (Mailbird's key; `name` was never there). Every Mailbird call
+first commits what the sweep has written, so the write lock is never held across the network; the
+price is that evidence can be committed and the sweep die before its batch is applied, in which
+case the planner finds that evidence unjudged and proposes the change.
 
 **Canvas.** `/api/v1/planner/items` with submission state; course map, effort by type and skip
 patterns in config. Auto-close on submitted/graded/excused/complete (`factotum/canvas.py`, every
@@ -377,13 +393,19 @@ what Create would make, the model's context and reason, who wrote and when, Show
 Mailbird) and never a task, a change or a link. Its fields go through the same cleaner as every
 create; its `counterpart` is the sender address Mailbird reported, set only when the model says a
 reply finishes the task, never an address the model wrote; a name that an open task or a waiting
-card already has is set aside; at most 8 per run. Every mail in the batch is judged by the end of
-the run (`staged` or `dismissed`, outside a batch: these are raw mail, not task state, and a
-day's worth would bury the Log), so nothing is asked about twice; a failed run judges nothing and
-the batch waits; a candidate nobody triaged within a week is set aside unread. **Create** makes an
+card already has is set aside; at most 8 per run, and a good suggestion past that stays unjudged
+for the next run. Every other mail in the batch is judged by the end of the run (`staged` or
+`dismissed`, outside a batch: these are raw mail, not task state, and a day's worth would bury the
+Log), so nothing is asked about twice. A reply that is not `{suggest: [...], dismiss: [...]}` is a
+failed run, whatever JSON it holds; a failed run judges nothing and the batch waits, but a batch
+that fails twice in a row is set aside unread (it would otherwise cost a run an hour for a week and
+hold newer mail behind it; the mail is still in the mailbox). The run is started with no tools at
+all (`tools=""`), since everything it reads was written by strangers. A candidate nobody triaged
+within a week is set aside unread. **Create** makes an
 open task with source `Mail`, the mail's account, and a `mail_thread` link to the conversation, so
-from then on the sweep follows that thread, and a "reply to …" task closes itself when the reply is
-sent (§6). The planner never sees `mail_new`.
+from then on the sweep follows that thread (seen up to the message the card was made from), and a
+"Reply to …" task closes itself when the owner answers in it (§6); for any other name the planner
+reads what was sent. The planner never sees `mail_new`.
 
 The scheduler runs it only when candidates exist and no more often than
 `sources.mail.suggest.minutes` (30); a Refresh (§8.4) runs it between the sweeps and the planner.
@@ -504,7 +526,8 @@ on another tab, and a thread can start with nothing attached (the focused row is
 there). The row hints and the bulk bar are not shown in Chat, Esc closes the task box instead of
 clearing the attachments, an empty thread offers three starter prompts (they fill the box, never
 send), the header has Delete thread (`DELETE /api/chat/threads/{id}`: the thread and its messages;
-nothing it applied is undone and its runs stay in the Log), and the box stays at the bottom of the
+nothing it applied is undone and its runs stay in the Log; refused with 409 while a turn is running
+in it), Enter while a turn is running keeps the prompt in the box instead of dropping it, and the box stays at the bottom of the
 window while a long thread scrolls. **Review** shows a mail suggestion (§8.5) as its own card and
 re-reads the queue after Create, so the new row's card comes next. **Log** has four views,
 remembered per browser: *Timeline* merges change batches and runs by time, newest first, under a

@@ -264,7 +264,7 @@
     renderRail();
     const p = document.getElementById('panel');
     const fns = { today: renderToday, timeline: renderTimeline, projects: renderProjects, review: renderReview, chat: renderChat, log: renderLog, settings: renderSettings };
-    const act = document.activeElement, held = act && ['cmd', 'rv-ask', 'chat-pick'].includes(act.id) ? { id: act.id, a: act.selectionStart, b: act.selectionEnd } : null;
+    const act = document.activeElement, held = act && ['cmd', 'rv-ask', 'chat-pick', 'rv-note'].includes(act.id) ? { id: act.id, a: act.selectionStart, b: act.selectionEnd } : null;
     p.innerHTML = pendingHtml() + fns[ui.tab]();
     if (held) { const el = document.getElementById(held.id); if (el) { el.focus({ preventScroll: true }); try { el.setSelectionRange(held.a, held.b); } catch (_) {} } }
     p.querySelectorAll('textarea.grow').forEach(grow);
@@ -326,7 +326,7 @@
     const q = draft.pick.trim().toLowerCase(); if (!q) return [];
     const num = /^(task[-\s]?)?\d+$/.test(q) ? q.replace(/\D/g, '') : null, words = q.split(/\s+/);
     return openOnes().filter(x => !ui.sel.has(x.id) && (num ? String(x.id).startsWith(num) : words.every(w => (x.name + ' ' + (x.project || '')).toLowerCase().includes(w))))
-      .sort((a, b) => num ? a.id - b.id : (b.score || 0) - (a.score || 0)).slice(0, 8);
+      .sort((a, b) => num ? (String(b.id) === num) - (String(a.id) === num) || a.id - b.id : (b.score || 0) - (a.score || 0)).slice(0, 8);     // the exact number first
   }
   function chatAttach() {
     const ids = attachedIds();
@@ -517,7 +517,7 @@
     const d = f.due ? fmtDue(String(f.due)) : null;
     const day = iso => new Date(iso.length > 10 && !/[zZ+]/.test(iso.slice(10)) ? iso + 'Z' : iso).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
     // What Create would make, so the decision is about the task and not only its title.
-    const would = [f.project ? `<span class="chip proj">${esc(f.project)}</span>` : '', d ? `<span class="chip due ${f.hard ? 'hard' : ''}">${d.label}${f.hard ? ' · hard' : ''}</span>` : (mail ? '<span class="chip">no date</span>' : ''), f.effort ? `<span class="chip eff">${esc(f.effort)}</span>` : ''].join('');
+    const would = [f.counterpart ? `<span class="chip" title="The task's counterpart. A task named “Reply to …” closes itself when you answer in this thread; for anything else the planner reads what you sent.">↩ ${esc(f.counterpart)}</span>` : '', f.project ? `<span class="chip proj">${esc(f.project)}</span>` : '', d ? `<span class="chip due ${f.hard ? 'hard' : ''}">${d.label}${f.hard ? ' · hard' : ''}</span>` : (mail ? '<span class="chip">no date</span>' : ''), f.effort ? `<span class="chip eff">${esc(f.effort)}</span>` : ''].join('');
     return `<div class="review">
       <div class="progress"><span>${n} suggestion${n === 1 ? '' : 's'} waiting</span><div class="track"></div></div>
       <div class="card" data-sugg="${sg.id}">
@@ -604,7 +604,7 @@
         <div class="thead"><b>Threads</b><button class="btn small primary" id="chat-new">+ New</button><button class="btn small close" id="chat-threads-close" aria-label="Close">×</button></div>
         ${chat.threads.length ? chat.threads.map(t => `<button class="thread ${t.id === chat.current ? 'cur' : ''}" data-thread="${t.id}"><span class="t">${esc(t.title || 'untitled')}</span><span class="d">${when(t)}</span></button>`).join('') : '<div class="hint">No threads yet.</div>'}
       </nav>`;
-    const head = `<div class="chat-head"><button class="btn small" id="chat-threads-toggle" aria-label="Threads">☰ Threads</button><span class="cur">${cur ? esc(cur.title || 'untitled') : 'New thread'}</span>${cur ? `<span class="spacer"></span><button class="btn small" id="chat-delete" title="Delete this thread and its messages. Nothing it applied is undone.">Delete thread</button>` : ''}</div>`;
+    const head = `<div class="chat-head"><button class="btn small" id="chat-threads-toggle" aria-label="Threads">☰ Threads</button><span class="cur">${cur ? esc(cur.title || 'untitled') : 'New thread'}</span>${cur ? `<span class="spacer"></span><button class="btn small" id="chat-delete" ${chat.busy ? 'disabled' : ''} title="Delete this thread and its messages. Nothing it applied is undone.">Delete thread</button>` : ''}</div>`;
     const STARTERS = ['What should I work on next, and why?', 'What is overdue, and what could I drop?', 'Is there anything in my mail from this week that I have not dealt with?'];
     const body = chat.messages.length || chat.live ? chat.messages.map(messageHtml).join('') + liveHtml()
       : `<div class="note">Ask about your tasks, your mail or your calendar. A prompt can carry tasks (＋ Attach a task below, or select rows on another tab) or none at all. Everything Claude proposes is staged into the tray; nothing changes until you Apply. Drafts it writes land in Mailbird and are never sent.</div>
@@ -759,12 +759,12 @@
         const b = i.b, key = 'b' + b.id, open = logOpen.has(key);
         out += `<div class="tl change ${b.undone_at ? 'undone' : ''} ${open ? 'open' : ''}" data-tl="${key}"><span class="t">${time(i.t)}</span><span class="chip k">${esc(SOURCE_NAMES[b.source] || b.source)}</span>
           <span class="m"><span class="code">#${b.id}</span> ${esc(batchLine(b))}</span><span class="x">${b.undone_at ? 'undone' : `${b.changes.length} change${b.changes.length === 1 ? '' : 's'}`}</span>
-          ${b.undone_at || !b.changes.length ? '' : `<button class="btn small" data-undo="${b.id}">Undo</button>`}<span class="car" aria-hidden="true"></span>
+          ${b.undone_at || !b.changes.length ? '<span class="nobtn"></span>' : `<button class="btn small" data-undo="${b.id}">Undo</button>`}<span class="car" aria-hidden="true"></span>
           ${open ? `<div class="more">${batchDigest(b)}<div class="hint">Every field, old → new, is in the Changes view (#${b.id}).</div></div>` : ''}</div>`;
       } else {
         const r = i.r, key = 'r' + r.id, open = logOpen.has(key), text = r.error || r.summary || (r.ok ? 'ok' : 'failed');
         out += `<div class="tl run ${r.ok ? '' : 'bad'} ${Number(r.cost_usd) ? 'claude' : ''} ${open ? 'open' : ''}" data-tl="${key}"><span class="t">${time(i.t)}</span><span class="chip k">${esc(RUN_NAMES[r.kind] || r.kind)}</span>
-          <span class="m">${esc(text)}</span><span class="x">${Number(r.cost_usd) ? '$' + Number(r.cost_usd).toFixed(2) + ' · ' : ''}${r.duration_ms >= 1000 ? Math.round(r.duration_ms / 1000) + ' s' : ''}</span><span class="car" aria-hidden="true"></span></div>`;
+          <span class="m">${esc(text)}</span><span class="x">${Number(r.cost_usd) ? '$' + Number(r.cost_usd).toFixed(2) + ' · ' : ''}${r.duration_ms >= 1000 ? Math.round(r.duration_ms / 1000) + ' s' : ''}</span><span class="nobtn"></span><span class="car" aria-hidden="true"></span></div>`;
       }
     }
     return out + '</div>';
@@ -802,7 +802,7 @@
       ${f('sources.plaud.enabled', 'Plaud recordings', 'IMAP trigger + plaud CLI (phase 3).', bool('sources.plaud.enabled'))}
       ${f('sources.canvas.enabled', 'Canvas', 'New items become hard-deadline tasks, submitted ones close.', bool('sources.canvas.enabled') + ' &nbsp; every ' + num('sources.canvas.sweep_minutes', 5, 1440) + ' min')}
       ${f('sources.mail.enabled', 'Email via Mailbird', 'Replies flip Waiting, sent mail closes reply tasks, invitations and confirmations feed the planner.', bool('sources.mail.enabled') + ' &nbsp; every ' + num('sources.mail.sweep_minutes', 5, 1440) + ' min')}
-      ${f('sources.mail.suggest.enabled', 'Tasks from mail', 'New mail that is about none of your tasks is read by one light Claude run, and what it leaves you to do becomes a suggestion card in Review. Nothing becomes a task without your Create. The run happens only when there is new mail.', bool('sources.mail.suggest.enabled', true) + ' &nbsp; at most every ' + `<input type="number" id="s-sources.mail.suggest.minutes" data-key="sources.mail.suggest.minutes" value="${Number(e['sources.mail.suggest.minutes']) || 30}" min="5" max="1440">` + ' min')}
+      ${f('sources.mail.suggest.enabled', 'Tasks from mail', 'New mail that is about none of your tasks is read by one light Claude run, and what it leaves you to do becomes a suggestion card in Review. Nothing becomes a task without your Create. The run happens only when there is new mail.', bool('sources.mail.suggest.enabled', false) + ' &nbsp; at most every ' + `<input type="number" id="s-sources.mail.suggest.minutes" data-key="sources.mail.suggest.minutes" value="${Number(e['sources.mail.suggest.minutes']) || 30}" min="5" max="1440">` + ' min')}
       ${f('sources.calendar.enabled', 'Google Calendar', 'Needs config/google-credentials.json (docs/SETUP.md §6).', bool('sources.calendar.enabled') + ' &nbsp; every ' + num('sources.calendar.sweep_minutes', 5, 1440) + ' min &nbsp; calendar id ' + text('sources.calendar.calendar_id', '160px'))}
       ${f('sources.slack.enabled', 'Slack', 'Chat can search and read the workspaces named in the config file (docs/SETUP.md §12); tokens in .env. The sweep turns @-mentions of you into Review items.', bool('sources.slack.enabled') + ' &nbsp; every ' + num('sources.slack.sweep_minutes', 5, 1440) + ' min')}
       ${f('sources.discord.enabled', 'Discord', 'Chat can list channels and read recent messages in the servers named in the config file (docs/SETUP.md §13).', bool('sources.discord.enabled'))}
@@ -949,7 +949,7 @@
     // A text box that grows: Enter sends (Shift+Enter is a new line); on a touch keyboard Enter is a new line and the button sends.
     const typing = (el, key, send) => {
       el.oninput = () => { draft[key] = el.value; grow(el); };
-      el.addEventListener('keydown', e => { if (e.key === 'Escape') return; if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !TOUCH()) { e.preventDefault(); send(); } e.stopPropagation(); });
+      el.addEventListener('keydown', e => { if (e.key === 'Escape') return; if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229 && !TOUCH()) { e.preventDefault(); send(); } e.stopPropagation(); });      // 229: Safari's Enter that commits an IME candidate
     };
     const ask = document.getElementById('rv-ask'), askGo = document.getElementById('rv-ask-go');
     const askSend = () => { const v = draft.ask.trim(); if (!v || chat.busy) return; draft.ask = ''; const card = ask.closest('.card'); sendChat(v, null, [+card.dataset.id], { review: +card.dataset.id }); };
@@ -958,7 +958,8 @@
     const po = document.getElementById('chat-pick-open'); if (po) po.onclick = () => { ui.pickOpen = !ui.pickOpen; draft.pick = ''; render(); const el = document.getElementById('chat-pick'); if (el) el.focus(); };
     const pk = document.getElementById('chat-pick');
     if (pk) {
-      pk.oninput = () => { draft.pick = pk.value; render(); };
+      pk.oninput = e => { draft.pick = pk.value; if (!e.isComposing) render(); };      // a re-render mid-composition would break an IME
+      pk.addEventListener('compositionend', () => { draft.pick = pk.value; render(); });
       pk.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); const m = pickMatches()[0]; if (m) { ui.sel.add(m.id); draft.pick = ''; render(); } } else if (e.key === 'Escape') { ui.pickOpen = false; render(); const c = document.getElementById('cmd'); if (c) c.focus(); } e.stopPropagation(); });
     }
     panel.querySelectorAll('[data-pick]').forEach(b => b.onclick = () => { ui.sel.add(+b.dataset.pick); draft.pick = ''; render(); const el = document.getElementById('chat-pick'); if (el) el.focus(); });
@@ -978,7 +979,11 @@
     panel.querySelectorAll('[data-tl]').forEach(r => r.addEventListener('click', e => { if (e.target.closest('button, a')) return; const k = r.dataset.tl; logOpen.has(k) ? logOpen.delete(k) : logOpen.add(k); render(); }));
     panel.querySelectorAll('[data-goto-chat]').forEach(a => a.onclick = e => { e.preventDefault(); chat.current = +a.dataset.gotoChat; chat.threads = null; ui.tab = 'chat'; location.hash = 'chat'; render(); });
     const cmd = document.getElementById('cmd'), cmdGo = document.getElementById('cmd-go');
-    const cmdSend = () => { const v = draft.cmd.trim(); if (!v) return; draft.cmd = ''; if (cmd) { cmd.value = ''; grow(cmd); } sendPrompt(v); };
+    const cmdSend = () => {
+      const v = draft.cmd.trim(); if (!v) return;
+      if (chat.busy && ui.tab === 'chat') { toast('Claude is still answering · your prompt is kept in the box'); return; }      // never clear what cannot be sent
+      draft.cmd = ''; if (cmd) { cmd.value = ''; grow(cmd); } sendPrompt(v);
+    };
     if (cmdGo) cmdGo.onclick = cmdSend;
     if (cmd) typing(cmd, 'cmd', cmdSend);
     document.getElementById('tray-apply').onclick = () => applyAll();
@@ -1055,6 +1060,8 @@
     if (res.is_command) {
       res.changes.forEach(c => stage(c.task_id, c.op, c.fields, c.op === 'set' ? Object.entries(c.fields).map(([k, v]) => `${k} ${v || 'cleared'}`).join(', ') : c.op));
       toast(`Staged ${res.changes.length} change${res.changes.length === 1 ? '' : 's'}`);
+    } else if (chat.busy) {      // not a command, and a turn is running: give the text back instead of dropping it
+      draft.cmd = text; toast('A chat turn is still running · your prompt is kept in the box'); render();
     } else {
       sendChat(text, null, attachedIds());
     }

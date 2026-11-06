@@ -26,7 +26,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from . import config as C
-from .db import log_run, now_iso, rows
+from .db import get_settings, log_run, now_iso, rows, set_setting
 
 KIND = "mail_new"
 PROMPT = C.ROOT / "prompts" / "mail-triage.md"
@@ -91,11 +91,12 @@ def apply(conn: sqlite3.Connection, cfg: dict, data: dict, cands: list[dict]) ->
             pass
     suggested: list[str] = []
     staged: set[int] = set()
-    for s in (data.get("suggest") if isinstance(data.get("suggest"), list) else [])[: BATCH * 2]:
+    over: set[int] = set()            # good suggestions past the cap: left unjudged, the next run takes them
+    for s in data["suggest"][: BATCH * 2]:
         if not isinstance(s, dict) or type(s.get("evidence_id")) is not int:
             continue
         e = by.get(s["evidence_id"])
-        if not e or e["id"] in staged or len(suggested) >= MAX_SUGGEST:
+        if not e or e["id"] in staged:
             continue
         f = {k: v for k, v in _clean_task_fields(cfg, {k: s.get(k) for k in ("name", "project", "due", "hard", "effort", "context") if k in s}).items() if v is not None}
         if not f.get("name"):
@@ -107,11 +108,14 @@ def apply(conn: sqlite3.Connection, cfg: dict, data: dict, cands: list[dict]) ->
                 "mail": {"ref": e["ref"], "account": e.get("account"), "subject": e.get("label"), "sender": f"{who} <{addr}>" if addr else who, "at": e.get("at")}}
         if _norm(f["name"]) in taken or any(_same_suggestion(card, w) for w in waiting):
             continue                                         # already a task or already a card: set aside below
+        if len(suggested) >= MAX_SUGGEST:
+            over.add(e["id"])
+            continue
         conn.execute("INSERT INTO evidence (task_id, kind, ref, account, label, excerpt, at) VALUES (NULL, 'proposal', ?, ?, ?, ?, ?)",
                      (json.dumps(card), e.get("account"), f"create: {f['name']}", str(s.get("reason") or "")[:300], now_iso()))
         conn.execute("UPDATE evidence SET judged_at = ?, verdict = 'staged' WHERE id = ?", (now_iso(), e["id"]))
         staged.add(e["id"]); suggested.append(f["name"]); waiting.append(card)
-    aside = [i for i in by if i not in staged]
+    aside = [i for i in by if i not in staged and i not in over]
     for i in aside:
         conn.execute("UPDATE evidence SET judged_at = ?, verdict = 'dismissed' WHERE id = ? AND judged_at IS NULL", (now_iso(), i))
     conn.commit()
@@ -130,18 +134,41 @@ def run(conn: sqlite3.Connection, cfg: dict, today: date, *, runner=None, at: st
         return {"ok": True, "suggested": [], "set_aside": 0, "left": 0, "cost_usd": 0.0, "line": "no new mail"}
     started = time.monotonic()
     prompt = build_prompt(cfg, conn, cands, today, at[11:16])
-    workdir = Path(RUNS_DIR) / today.isoformat()
+    workdir = Path(RUNS_DIR) / today.isoformat() / at[11:16].replace(":", "")      # one directory per run: several a day
     workdir.mkdir(parents=True, exist_ok=True)
     (workdir / "prompt.md").write_text(prompt, encoding="utf-8")
-    res = runner(cfg, "mail_triage", prompt, allowed_tools=[], workdir=workdir)
+    # tools="": every word of this prompt's §4 was written by strangers, so the run gets no tool at all
+    res = runner(cfg, "mail_triage", prompt, allowed_tools=[], tools="", workdir=workdir)
     (workdir / "result.txt").write_text(res.result_text or "", encoding="utf-8")
     ms = int((time.monotonic() - started) * 1000)
+    err = None
+    out = None
     if not res.ok or not isinstance(res.data, dict):
-        err = (res.error or "no JSON")[:1000]
-        log_run(conn, "mail-triage", ms, ok=False, summary="mail triage", error=err, cost_usd=res.cost_usd)
+        err = res.error or "no JSON"
+    elif not isinstance(res.data.get("suggest"), list) or not isinstance(res.data.get("dismiss"), list):
+        err = "the reply is not {suggest: [...], dismiss: [...]}"       # some other JSON: judging the batch by it would set real mail aside
+    else:
+        try:
+            out = apply(conn, cfg, res.data, cands)
+        except Exception as e:                               # the run is paid for: log it even when applying it fails
+            conn.rollback()
+            err = f"applying the reply failed: {type(e).__name__}: {e}"
+    if err:
+        # The same batch failing twice is a batch that will keep failing (a mail the model refuses, a
+        # reply that is never JSON): it is set aside unread, so it stops costing a run an hour and
+        # stops holding newer mail behind it. The mail is still in the mailbox.
+        first, mark = cands[0]["id"], get_settings(conn).get("state.mail_triage.failed")
+        if isinstance(mark, dict) and mark.get("first") == first:
+            for c in cands:
+                conn.execute("UPDATE evidence SET judged_at = ?, verdict = 'dismissed' WHERE id = ? AND judged_at IS NULL", (now_iso(), c["id"]))
+            set_setting(conn, "state.mail_triage.failed", None)
+            err += f" · failed twice on the same {len(cands)} mail: set aside unread"
+        else:
+            set_setting(conn, "state.mail_triage.failed", {"first": first})
+        log_run(conn, "mail-triage", ms, ok=False, summary="mail triage", error=err[:1000], cost_usd=res.cost_usd)
         conn.commit()
-        return {"ok": False, "error": err, "cost_usd": res.cost_usd}
-    out = apply(conn, cfg, res.data, cands)
+        return {"ok": False, "error": err[:1000], "cost_usd": res.cost_usd}
+    set_setting(conn, "state.mail_triage.failed", None)
     left = len(pending(conn, 10**6, today))
     n = len(out["suggested"])
     line = (f"{len(cands)} mail: {n} suggested" + (" (" + "; ".join(s[:50] for s in out["suggested"][:3]) + ")" if n else "")
