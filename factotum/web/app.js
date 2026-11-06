@@ -14,6 +14,12 @@
   let chat = { threads: null, current: null, messages: [], live: null, busy: false, from: null };   // from: {review: id} when a turn was asked from a Review card
   let lastTap = { id: null, at: 0 };   // for the hand-rolled double-click on rows
   let railTap = { id: null, timer: null };   // a Top tile waits a moment for a second tap before it acts
+  // What is being typed, kept outside the DOM: every render() rebuilds the panel (a chat turn's status
+  // line re-renders it every second), and a long prompt must survive that with its caret.
+  const draft = { cmd: '', ask: '', askFor: null, pick: '' };
+  const TOUCH = () => window.matchMedia('(hover: none)').matches;
+  let logView = 'all', logQuiet = false, logLimit = 60, logOpen = new Set();
+  try { const v = localStorage.getItem('factotum.logview'); if (['timeline', 'changes', 'runs', 'all'].includes(v)) logView = v; logQuiet = localStorage.getItem('factotum.logquiet') === '1'; } catch (_) {}
   let summary = null;       // /api/summary payload: the Today summary, what changed since, the refresh state
   let sumTimer = null;
   // Which sections are folded, per tab ("today:week", "timeline:later", "projects:<name>"); kept in
@@ -78,11 +84,7 @@
     try { pending = (await api('/api/proposals')).proposals; } catch (_) { pending = []; }
     try { summary = await api('/api/summary'); } catch (_) { summary = null; }
     document.getElementById('today-label').textContent = '· ' + TODAY().toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
-    // A reload can arrive under the user's hands (a refresh ending): a half-typed command survives it.
-    const cmd = document.getElementById('cmd'), typed = cmd ? cmd.value : '', had = cmd && document.activeElement === cmd;
-    render();
-    const again = document.getElementById('cmd');
-    if (again && typed) { again.value = typed; if (had) again.focus(); }
+    render();        // what is being typed survives it (the drafts)
     watchSummary();
     if (was && !sumBusy()) refreshEnded();      // this load, not the poll, saw the refresh finish
   }
@@ -262,7 +264,10 @@
     renderRail();
     const p = document.getElementById('panel');
     const fns = { today: renderToday, timeline: renderTimeline, projects: renderProjects, review: renderReview, chat: renderChat, log: renderLog, settings: renderSettings };
+    const act = document.activeElement, held = act && ['cmd', 'rv-ask', 'chat-pick'].includes(act.id) ? { id: act.id, a: act.selectionStart, b: act.selectionEnd } : null;
     p.innerHTML = pendingHtml() + fns[ui.tab]();
+    if (held) { const el = document.getElementById(held.id); if (el) { el.focus({ preventScroll: true }); try { el.setSelectionRange(held.a, held.b); } catch (_) {} } }
+    p.querySelectorAll('textarea.grow').forEach(grow);
     document.querySelectorAll('#tabs button').forEach(b => { b.setAttribute('aria-selected', b.dataset.tab === ui.tab); if (b.dataset.tab === ui.tab && PHONE() && b.scrollIntoView) b.scrollIntoView({ block: 'nearest', inline: 'center' }); });
     document.getElementById('n-today').textContent = openOnes().filter(x => x.due && fmtDue(x.due).days <= 1).length || '';
     document.getElementById('n-review').textContent = review && (review.total || (review.suggestions || []).length) ? review.total + (review.suggestions || []).filter(x => !x.created).length : '';
@@ -312,11 +317,34 @@
     if (el) { el.scrollIntoView({ block: 'center', behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' }); el.classList.add('flash'); }
     if (hit.tab === 'timeline' && from !== 'timeline') toast(`Task-${id} is not on Today · shown in Timeline`);
   }
-  function attachedIds() { return ui.sel.size ? [...ui.sel] : (ui.focus ? [ui.focus] : []); }
-  function composer() {
+  // What a prompt carries: the selected rows; on the list tabs, the focused row when nothing is
+  // selected. In Chat only what is attached there, so a thread can start with nothing at all.
+  function attachedIds() { return ui.sel.size ? [...ui.sel] : (ui.tab !== 'chat' && ui.focus ? [ui.focus] : []); }
+  function grow(el) { el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight + 2, 260) + 'px'; }
+  // Open tasks matching what is typed in Chat's "attach a task" box: a number, or every word of the name.
+  function pickMatches() {
+    const q = draft.pick.trim().toLowerCase(); if (!q) return [];
+    const num = /^(task[-\s]?)?\d+$/.test(q) ? q.replace(/\D/g, '') : null, words = q.split(/\s+/);
+    return openOnes().filter(x => !ui.sel.has(x.id) && (num ? String(x.id).startsWith(num) : words.every(w => (x.name + ' ' + (x.project || '')).toLowerCase().includes(w))))
+      .sort((a, b) => num ? a.id - b.id : (b.score || 0) - (a.score || 0)).slice(0, 8);
+  }
+  function chatAttach() {
     const ids = attachedIds();
+    const chips = ids.map(id => { const t = byId(id); return `<span class="chip att" title="${esc(t ? t.name : '')}">Task-${id}${t ? ` <span class="nm">${esc(t.name)}</span>` : ''}<button data-detach="${id}" aria-label="Remove Task-${id} from this prompt">×</button></span>`; }).join('');
+    const hits = ui.pickOpen ? pickMatches() : [];
+    return `<div class="attach">${ids.length ? chips : '<span>No tasks attached</span>'}
+        <button class="btn small" id="chat-pick-open" aria-expanded="${!!ui.pickOpen}">+ Attach a task</button>${ids.length > 1 ? '<button class="btn small" id="chat-detach-all">Remove all</button>' : ''}</div>
+      ${ui.pickOpen ? `<div class="pick"><input id="chat-pick" value="${esc(draft.pick)}" placeholder="A task number, or words from its name" aria-label="Find a task to attach" autocomplete="off">
+        <div class="hits">${hits.map(x => { const d = fmtDue(x.due); return `<button data-pick="${x.id}"><span class="code">Task-${x.id}</span> <span class="nm">${esc(x.name)}</span><span class="chip proj">${esc(x.project || '—')}</span>${d ? `<span class="chip">${d.label}</span>` : ''}</button>`; }).join('') || (draft.pick.trim() ? '<div class="hint">No open task matches.</div>' : '')}</div></div>` : ''}`;
+  }
+  function composer() {
+    const ids = attachedIds(), inChat = ui.tab === 'chat';
+    const ph = inChat ? (TOUCH() ? 'Ask about your tasks, mail or calendar' : 'Ask about your tasks, mail or calendar · Enter sends, Shift+Enter starts a new line')
+      : PHONE() ? 'done 389 · push 364 fri · or ask Claude' : 'Command: done 389 392 · push 364 fri · nodue 364 · top 23 · longterm 38 · or ask Claude in plain words';
+    const box = `<div class="cmd"><textarea id="cmd" class="grow" rows="1" placeholder="${ph}" aria-label="Prompt or command">${esc(draft.cmd)}</textarea><button class="btn primary" id="cmd-go" ${inChat && chat.busy ? 'disabled' : ''}>Send</button></div>`;
+    if (inChat) return `<div class="composer">${chatAttach()}${box}</div>`;       // no row hints and no bulk bar here: there are no rows
     return `<div class="composer"><div class="attach">${ids.length ? 'Attached: ' + ids.map(id => `<span class="chip">Task-${id}</span>`).join('') : 'Nothing attached · tap a row to attach it'}</div>
-      <div class="cmd"><input id="cmd" placeholder="${PHONE() ? 'done 389 · push 364 fri · or ask Claude' : 'Command: done 389 392 · push 364 fri · nodue 364 · top 23 · longterm 38 · or ask Claude in plain words'}" aria-label="Prompt or command"><button class="btn primary" id="cmd-go">Send</button></div>
+      ${box}
       <p class="hint keys">Tap a row to select it (the bulk bar appears) · <kbd>j</kbd><kbd>k</kbd> move · <kbd>d</kbd> done · <kbd>x</kbd> drop · <kbd>s</kbd> snooze · <kbd>t</kbd> top · <kbd>l</kbd> long-term · <kbd>e</kbd> details · double-click a row for details · <kbd>Esc</kbd> deselect</p>
       <p class="hint touch">Tap a row to select it · double-tap or ▸ for details</p></div>
       <div class="bulk" id="bulk"><b id="bulk-n"></b> selected
@@ -484,19 +512,27 @@
   // A planner create with no task behind it: one card, Create or Dismiss (the dismissal is a batch
   // change like any other, so the Log tab undoes it).
   function suggestionCard(sg, n) {
-    const slack = sg.kind === 'slack_mention';
-    const link = slack && sg.fields && sg.fields.source_link;
+    const slack = sg.kind === 'slack_mention', mail = sg.mail, f = sg.fields || {};
+    const link = slack && f.source_link;
+    const d = f.due ? fmtDue(String(f.due)) : null;
+    const day = iso => new Date(iso.length > 10 && !/[zZ+]/.test(iso.slice(10)) ? iso + 'Z' : iso).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
+    // What Create would make, so the decision is about the task and not only its title.
+    const would = [f.project ? `<span class="chip proj">${esc(f.project)}</span>` : '', d ? `<span class="chip due ${f.hard ? 'hard' : ''}">${d.label}${f.hard ? ' · hard' : ''}</span>` : (mail ? '<span class="chip">no date</span>' : ''), f.effort ? `<span class="chip eff">${esc(f.effort)}</span>` : ''].join('');
     return `<div class="review">
-      <div class="progress"><span>${n} suggestion${n === 1 ? '' : 's'} from the planner and Slack</span><div class="track"></div></div>
+      <div class="progress"><span>${n} suggestion${n === 1 ? '' : 's'} waiting</span><div class="track"></div></div>
       <div class="card" data-sugg="${sg.id}">
-        <div class="why new">${slack ? 'Mentioned in Slack' : 'Planner suggests'}</div>
-        <h2>${esc(slack ? (sg.fields && sg.fields.name) || sg.label : sg.label.replace(/^create:\s*/i, ''))}</h2>
+        <div class="why new">${slack ? 'Mentioned in Slack' : mail ? 'From your mail' : 'Planner suggests'}</div>
+        <h2>${esc(slack || mail ? f.name || sg.label : sg.label.replace(/^create:\s*/i, ''))}</h2>
+        ${would ? `<div class="sub">${would}</div>` : ''}
+        ${mail && f.context ? `<p>${esc(f.context)}</p>` : ''}
         ${sg.reason ? `<p class="ctx">${esc(sg.reason)}</p>` : ''}
-        <p class="hint">${sg.at ? (slack ? 'Posted ' : 'Suggested ') + new Date(sg.at).toLocaleDateString([], { month: 'short', day: 'numeric' }) : ''}${slack && sg.fields && sg.fields.project ? ` · files under ${esc(sg.fields.project)}` : ''}</p>
+        ${mail ? `<p class="hint from">✉ ${esc(mail.sender || '')} · “${esc(mail.subject || '')}”${mail.at ? ' · ' + day(String(mail.at)) : ''}${mail.account ? ` · to ${esc(mail.account)}` : ''}</p>` : ''}
+        <p class="hint">${sg.at && !mail ? (slack ? 'Posted ' : 'Suggested ') + new Date(sg.at).toLocaleDateString([], { month: 'short', day: 'numeric' }) : ''}${slack && f.project ? ` · files under ${esc(f.project)}` : ''}</p>
         ${link ? `<div class="links"><a href="${esc(link)}" target="_blank" rel="noopener">Open in Slack</a></div>` : ''}
         <div class="big"><button class="done" data-sugg-create="${sg.id}">Create task</button><button class="drop" data-sugg-dismiss="${sg.id}">Dismiss</button></div>
+        ${mail ? `<div class="extra"><button class="btn small" data-sugg-open="${sg.id}">✉ Show the message in Mailbird</button></div>` : ''}
       </div>
-      <div class="note">Create makes an open task (source ${slack ? 'Slack, the message linked' : 'Planner'}) that shows as New in Review; Dismiss stages a change you can undo from the Log tab.</div></div>`;
+      <div class="note">${mail ? 'Create makes an open task (source Mail) linked to this thread, so a reply or a message you send is noticed from then on. ' : `Create makes an open task (source ${slack ? 'Slack, the message linked' : 'Planner'}) that shows as New in Review; `}Dismiss stages a change you can undo from the Log tab.</div></div>`;
   }
   function stageJudge(evidenceId, taskId, verdict, label) { stageExtra('e:' + evidenceId, taskId, 'judge_evidence', { evidence_id: evidenceId, verdict }, label); }
   // ---------- Chat (SPEC §8.3) ----------
@@ -518,7 +554,7 @@
     }
   }
   async function loadChatThreads() { const r = await api('/api/chat/threads'); chat.threads = r.threads; if (chat.current === null && chat.threads.length) chat.current = chat.threads[0].id; if (chat.current !== null) await loadChatThread(chat.current); else render(); }
-  async function loadChatThread(id) { try { const r = await api(`/api/chat/threads/${id}`); chat.current = id; chat.messages = r.messages; } catch (_) { chat.current = null; chat.messages = []; } render(); }
+  async function loadChatThread(id) { try { const r = await api(`/api/chat/threads/${id}`); chat.current = id; chat.messages = r.messages; chat.scroll = true; } catch (_) { chat.current = null; chat.messages = []; } render(); }
   const propKey = (p, mid, i) => ['done', 'drop', 'pin_top', 'longterm'].includes(p.op) ? p.task_id : p.op === 'add_reminder' ? p.task_id + ':r' : `${p.task_id}:c${mid}-${i}`;
   function stageProposal(p, mid, i) {
     if (p.op === 'create' || p.op === 'link_thread') return false;
@@ -568,21 +604,24 @@
         <div class="thead"><b>Threads</b><button class="btn small primary" id="chat-new">+ New</button><button class="btn small close" id="chat-threads-close" aria-label="Close">×</button></div>
         ${chat.threads.length ? chat.threads.map(t => `<button class="thread ${t.id === chat.current ? 'cur' : ''}" data-thread="${t.id}"><span class="t">${esc(t.title || 'untitled')}</span><span class="d">${when(t)}</span></button>`).join('') : '<div class="hint">No threads yet.</div>'}
       </nav>`;
-    const head = `<div class="chat-head"><button class="btn small" id="chat-threads-toggle" aria-label="Threads">☰ Threads</button><span class="cur">${cur ? esc(cur.title || 'untitled') : 'New thread'}</span></div>`;
+    const head = `<div class="chat-head"><button class="btn small" id="chat-threads-toggle" aria-label="Threads">☰ Threads</button><span class="cur">${cur ? esc(cur.title || 'untitled') : 'New thread'}</span>${cur ? `<span class="spacer"></span><button class="btn small" id="chat-delete" title="Delete this thread and its messages. Nothing it applied is undone.">Delete thread</button>` : ''}</div>`;
+    const STARTERS = ['What should I work on next, and why?', 'What is overdue, and what could I drop?', 'Is there anything in my mail from this week that I have not dealt with?'];
     const body = chat.messages.length || chat.live ? chat.messages.map(messageHtml).join('') + liveHtml()
-      : '<div class="note">Ask about your tasks, your mail or your calendar. Attach tasks by selecting rows on another tab first. Everything Claude proposes is staged into the tray; nothing changes until you Apply. Drafts it writes land in Mailbird and are never sent.</div>';
+      : `<div class="note">Ask about your tasks, your mail or your calendar. A prompt can carry tasks (＋ Attach a task below, or select rows on another tab) or none at all. Everything Claude proposes is staged into the tray; nothing changes until you Apply. Drafts it writes land in Mailbird and are never sent.</div>
+         <div class="starters">${STARTERS.map((t, i) => `<button class="btn small" data-starter="${i}">${esc(t)}</button>`).join('')}</div>`;
     return `<div class="chat">${list}<div class="chat-main">${head}<div class="msgs" id="msgs">${body}</div>${composer()}</div><div class="backdrop ${ui.chatDrawer ? 'on' : ''}" id="chat-backdrop"></div></div>`;
   }
   function reviewAsk(id) {
     const live = chat.busy && chat.from && chat.from.review === id ? `<div class="hint"><span class="spin"></span> ${esc((chat.live || {}).status || 'Working…')}</div>` : '';
     const reply = ui.rvReply && ui.rvReply.id === id ? `<div class="rvreply">${md(ui.rvReply.text)}${ui.rvReply.note ? `<div class="hint">${esc(ui.rvReply.note)}</div>` : ''}<div class="hint"><a href="#chat" data-goto-chat="${ui.rvReply.thread}">Open in Chat</a></div></div>` : '';
-    return `<div class="cmd rvask"><input id="rv-ask" placeholder="Ask Claude about this task — e.g. “add that the first pass is done”; its proposals stage with this decision" aria-label="Ask Claude"><button class="btn small" id="rv-ask-go" ${chat.busy ? 'disabled' : ''}>Ask</button></div>${live}${reply}`;
+    if (draft.askFor !== id) { draft.ask = ''; draft.askFor = id; }      // a new card starts with an empty box
+    return `<div class="cmd rvask"><textarea id="rv-ask" class="grow" rows="1" placeholder="Ask Claude about this task — e.g. “add that the first pass is done”; its proposals stage with this decision" aria-label="Ask Claude">${esc(draft.ask)}</textarea><button class="btn small" id="rv-ask-go" ${chat.busy ? 'disabled' : ''}>Ask</button></div>${TOUCH() ? '' : '<div class="hint keysonly">Enter sends · Shift+Enter starts a new line</div>'}${live}${reply}`;
   }
   // One turn: POST, then read the server-sent events until done. From a Review card (`from.review`)
   // the tab stays put and the proposals about that task are staged straight into the tray.
   async function sendChat(text, canned, attached, from) {
     if (chat.busy) { toast('A chat turn is already running'); return; }
-    chat.busy = true; chat.live = { status: 'Starting…', texts: [] }; chat.from = from || null;
+    chat.busy = true; chat.live = { status: 'Starting…', texts: [] }; chat.from = from || null; chat.scroll = !from;
     if (!from) { ui.tab = 'chat'; location.hash = 'chat'; if (!chat.threads) { try { const r = await api('/api/chat/threads'); chat.threads = r.threads; } catch (_) { chat.threads = []; } } }
     const threadId = from ? null : chat.current;    // a Review question starts its own thread
     if (!from) chat.messages = [...chat.messages, { role: 'user', text: text || (canned === 'search_mail' ? 'Search related emails' : 'Draft a reply'), attached }];
@@ -619,27 +658,126 @@
       render(); return;
     }
     try { const r = await api('/api/chat/threads'); chat.threads = r.threads; } catch (_) {}
-    if (chat.current !== null) { try { const r = await api(`/api/chat/threads/${chat.current}`); chat.messages = r.messages; } catch (_) {} }
+    if (chat.current !== null) { try { const r = await api(`/api/chat/threads/${chat.current}`); chat.messages = r.messages; chat.scroll = true; } catch (_) {} }
     if (result) { toast(`Answered · $${Number(result.cost_usd || 0).toFixed(2)}` + (result.drafts && result.drafts.length ? ' · draft saved in Mailbird' : '')); if ((result.proposals || []).some(p => p.applied)) load(); }
     else toast('Chat failed: ' + error);
     render();
   }
   let logData = null;
-  async function loadLog() { logData = await api('/api/log'); render(); }
+  async function loadLog() { logData = await api('/api/log?limit=' + logLimit); render(); }
+  // The Log has four views of the same two lists (SPEC §9): Timeline merges changes and runs by time,
+  // newest first; Changes and Runs show one list; All stacks both. The choice is remembered.
+  const RUN_NAMES = { 'notion_mirror': 'mirror', 'sync-file': 'recording', 'chat-turn': 'chat', 'planner-morning': 'planner', 'today-summary': 'summary', 'today_summary': 'summary',
+    'mail-triage': 'mail triage', 'mail_triage': 'mail triage', 'mail_sweep': 'mail sweep', 'canvas_sweep': 'canvas sweep', 'slack_sweep': 'slack sweep', 'calendar_sweep': 'calendar sweep',
+    'morning_brief': 'brief', 'review_push': 'review nudge', 'reminder': 'reminder', 'refresh': 'refresh', 'expire': 'expire' };
+  const ROUTINE = new Set(['notion_mirror', 'mail_sweep', 'canvas_sweep', 'slack_sweep', 'calendar_sweep', 'reminder', 'review_push', 'expire']);
+  const SOURCE_NAMES = { ui: 'you', review: 'review', plaud: 'recording', planner: 'planner', canvas: 'canvas', mail: 'mail', connector: 'Claude', skill: 'Claude Code', chat: 'chat', automation: 'automation' };
+  const logWhen = iso => iso ? new Date(iso).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '';
+  const logVal = v => v === null || v === undefined ? '—' : typeof v === 'object' ? esc(JSON.stringify(v)) : esc(String(v));
+  const routine = r => r.ok && !Number(r.cost_usd) && ROUTINE.has(r.kind);
+  const shownRuns = () => logData.runs.filter(r => !(logQuiet && routine(r)));
+  function changeLines(b) {
+    return b.changes.map(c => c.field === 'evidence' ? `<div class="logc">${c.task_id ? `<span class="code">Task-${c.task_id}</span> <span class="name">${esc(c.task_name || '')}</span>` : '<span class="code">suggestion</span>'} <span class="f">evidence #${c.new && c.new.evidence_id}</span> ${esc((c.new || {}).verdict || '')}</div>`
+      : c.field === 'created' ? `<div class="logc"><span class="code">Task-${c.task_id}</span> <span class="name">${esc(c.task_name || '')}</span> <span class="f">created</span></div>`
+      : `<div class="logc"><span class="code">Task-${c.task_id}</span> <span class="name">${esc(c.task_name || '')}</span> <span class="f">${esc(c.field)}</span> ${logVal(c.old)} → ${logVal(c.new)}</div>`).join('');
+  }
+  // One line for a batch: per task, the change that matters most (a status over a date over a note).
+  function batchLine(b) {
+    const NOISE = new Set(['completed_at', 'closed_by', 'due_is_datetime', 'last_reviewed_at', 'close_on_sent_to']);
+    const RANK = { status: 5, created: 5, due: 4, snoozed_until: 3, reminder: 3, close_on_sent_since: 3 };
+    const per = new Map();
+    for (const c of b.changes) {
+      if (NOISE.has(c.field)) continue;
+      const v = c.new;
+      const label = c.field === 'status' ? (v === 'open' ? 'reopened' : String(v)) : c.field === 'created' ? 'created' : c.field === 'due' ? (v ? 'due ' + String(v).slice(0, 10) : 'due date removed')
+        : c.field === 'snoozed_until' ? (v ? 'later, back ' + String(v).slice(0, 10) : 'back from later') : c.field === 'reminder' ? 'reminder set' : c.field === 'top_rank' ? (v ? 'Top' : 'unpinned')
+        : c.field === 'evidence' ? ((v || {}).verdict === 'dismissed' ? 'dismissed' : 'seen') : c.field === 'close_on_sent_since' ? (v ? 'closes on send' : 'watch ended') : c.field.replace(/_/g, ' ');
+      const key = c.task_id || 'e' + ((v || {}).evidence_id || '');
+      const r = RANK[c.field] || 1, cur = per.get(key);
+      if (!cur || r > cur.r) per.set(key, { r, label, id: c.task_id });
+    }
+    const items = [...per.values()];
+    if (!items.length) return 'no changes';
+    if (items.length > 2 && items.every(i => i.label === items[0].label)) return `${items.length} tasks · ${items[0].label}`;
+    return items.slice(0, 3).map(i => (i.id ? `Task-${i.id} ` : 'suggestion ') + i.label).join(' · ') + (items.length > 3 ? ` · +${items.length - 3} more` : '');
+  }
+  // An opened batch in the Timeline: one line per task saying what happened to it, in words. The
+  // bookkeeping that rides along (completed_at, closed_by, last_reviewed_at) is left to the Changes view.
+  function batchDigest(b) {
+    const QUIET = new Set(['completed_at', 'closed_by', 'due_is_datetime', 'last_reviewed_at', 'close_on_sent_to']);
+    const short = v => { const t = String(v); return t.length > 16 && /^\d{4}-\d\d-\d\dT/.test(t) ? t.slice(0, 16).replace('T', ' ') : t; };
+    const cut = (t, n) => { t = String(t).replace(/\s+/g, ' ').trim(); return t.length > n ? t.slice(0, n - 1) + '…' : t; };
+    const say = c => {
+      const o = c.old, v = c.new;
+      if (c.field === 'status') return v === 'open' ? 'reopened' : String(v);
+      if (c.field === 'created') return 'created';
+      if (c.field === 'due') return v ? (o ? `due ${short(o)} → ${short(v)}` : `due ${short(v)}`) : 'due date removed';
+      if (c.field === 'snoozed_until') return v ? `later, back ${short(v)}` : 'back from later';
+      if (c.field === 'reminder') return 'reminder ' + (v && v.fire_at ? short(v.fire_at) : 'set') + (v && v.repeat ? ' · ' + v.repeat : '');
+      if (c.field === 'top_rank') return v ? (o ? `Top ${o} → ${v}` : 'pinned to Top') : 'unpinned';
+      if (c.field === 'longterm') return v ? 'long-term' : 'not long-term';
+      if (c.field === 'hard') return v ? 'hard deadline' : 'soft date';
+      if (c.field === 'waiting_on') return v ? 'waiting on ' + cut(v, 50) : 'no longer waiting';
+      if (c.field === 'close_on_sent_since') return v ? 'closes when the mail is sent' : 'sent-mail watch ended';
+      if (c.field === 'evidence') return 'evidence #' + ((v || {}).evidence_id || '?') + ' ' + ((v || {}).verdict || '');
+      if (c.field === 'context' || c.field === 'why_now') { const added = o && v && String(v).startsWith(String(o)) ? String(v).slice(String(o).length) : v;
+        return (c.field === 'context' ? (o ? 'note added: ' : 'context: ') : 'why now: ') + '“' + cut(added == null ? '' : added, 180) + '”'; }
+      return c.field.replace(/_/g, ' ') + ' ' + (v === null || v === undefined ? 'cleared' : '→ ' + cut(typeof v === 'object' ? JSON.stringify(v) : v, 60));
+    };
+    const per = new Map();
+    for (const c of b.changes) { const k = c.task_id || 'e'; if (!per.has(k)) per.set(k, { id: c.task_id, name: c.task_name, said: [], quiet: 0 }); const g = per.get(k); QUIET.has(c.field) ? g.quiet++ : g.said.push(say(c)); }
+    return [...per.values()].map(g => `<div class="logc dg">${g.id ? `<span class="code">Task-${g.id}</span> <span class="name">${esc(g.name || '')}</span>` : '<span class="code">suggestion</span>'}
+      <span class="what">${g.said.length ? g.said.map(esc).join(' · ') : 'reviewed, kept as it is'}</span></div>`).join('') || '<div class="hint">No field changed.</div>';
+  }
+  function changesHtml() {
+    return logData.batches.map(b => `<div class="logb ${b.undone_at ? 'undone' : ''}">
+        <div class="loghead"><b>#${b.id}</b> <span class="chip">${esc(b.source)}</span> <span>${logWhen(b.applied_at || b.created_at)}</span> <span>${b.changes.length} change${b.changes.length === 1 ? '' : 's'}</span>
+          ${b.undone_at ? `<span class="chip">undone ${logWhen(b.undone_at)}</span>` : b.changes.length ? `<span class="spacer"></span><button class="btn small" data-undo="${b.id}">Undo</button>` : ''}</div>
+        ${changeLines(b)}</div>`).join('') || '<div class="empty">No batches yet.</div>';
+  }
+  function runsHtml() {
+    const runs = shownRuns();
+    return runs.length ? `<div class="scroll"><table class="runs"><tr><th>Run</th><th>Started</th><th>Took</th><th>Cost</th><th>Result</th></tr>${runs.map(r => `<tr class="${r.ok ? '' : 'bad'}"><td>${esc(r.kind)}</td><td>${logWhen(r.started_at)}</td><td>${r.duration_ms ? Math.round(r.duration_ms / 1000) + ' s' : ''}</td><td>${r.cost_usd != null ? '$' + Number(r.cost_usd).toFixed(2) : ''}</td><td>${esc(r.error || r.summary || (r.ok ? 'ok' : ''))}</td></tr>`).join('')}</table></div>`
+      : `<div class="note">${logData.runs.length ? 'Only routine runs in this window; untick “Hide routine runs” to see them.' : 'Nothing has run yet. Reminders, sweeps, the brief and the Claude runs with their cost land here when they do something.'}</div>`;
+  }
+  // Changes and runs as one list, newest first, under a heading per day. A row is one line; a click
+  // opens it (a batch's field changes, a run's whole result). Where one list was cut at the limit
+  // the timeline stops at that list's oldest entry, so its tail never shows one kind only.
+  function timelineHtml() {
+    const at = x => Date.parse(x.applied_at || x.created_at || x.started_at) || 0;
+    const cut = Math.max(logData.more && logData.more.batches && logData.batches.length ? Math.min(...logData.batches.map(at)) : 0, logData.more && logData.more.runs && logData.runs.length ? Math.min(...logData.runs.map(at)) : 0);
+    const items = [...logData.batches.map(b => ({ t: at(b), b })), ...shownRuns().map(r => ({ t: at(r), r }))].filter(i => i.t >= cut).sort((x, y) => y.t - x.t);
+    if (!items.length) return '<div class="empty">Nothing has happened yet.</div>';
+    const dayKey = t => new Date(t).toDateString(), today = new Date().toDateString(), yest = new Date(Date.now() - 86400000).toDateString();
+    const dayLabel = t => { const k = dayKey(t), d = new Date(t).toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' }); return k === today ? 'Today · ' + d : k === yest ? 'Yesterday · ' + d : d; };
+    const time = t => new Date(t).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    let out = '', day = null;
+    for (const i of items) {
+      if (dayKey(i.t) !== day) { day = dayKey(i.t); const same = items.filter(x => dayKey(x.t) === day), cost = same.reduce((a, x) => a + (x.r ? Number(x.r.cost_usd) || 0 : 0), 0);
+        out += `${out ? '</div>' : ''}<h4 class="tlday">${dayLabel(i.t)}<span class="n">${same.filter(x => x.b).length} change batch${same.filter(x => x.b).length === 1 ? '' : 'es'} · ${same.filter(x => x.r).length} run${same.filter(x => x.r).length === 1 ? '' : 's'}${cost ? ' · $' + cost.toFixed(2) : ''}</span></h4><div class="tlist">`; }
+      if (i.b) {
+        const b = i.b, key = 'b' + b.id, open = logOpen.has(key);
+        out += `<div class="tl change ${b.undone_at ? 'undone' : ''} ${open ? 'open' : ''}" data-tl="${key}"><span class="t">${time(i.t)}</span><span class="chip k">${esc(SOURCE_NAMES[b.source] || b.source)}</span>
+          <span class="m"><span class="code">#${b.id}</span> ${esc(batchLine(b))}</span><span class="x">${b.undone_at ? 'undone' : `${b.changes.length} change${b.changes.length === 1 ? '' : 's'}`}</span>
+          ${b.undone_at || !b.changes.length ? '' : `<button class="btn small" data-undo="${b.id}">Undo</button>`}<span class="car" aria-hidden="true"></span>
+          ${open ? `<div class="more">${batchDigest(b)}<div class="hint">Every field, old → new, is in the Changes view (#${b.id}).</div></div>` : ''}</div>`;
+      } else {
+        const r = i.r, key = 'r' + r.id, open = logOpen.has(key), text = r.error || r.summary || (r.ok ? 'ok' : 'failed');
+        out += `<div class="tl run ${r.ok ? '' : 'bad'} ${Number(r.cost_usd) ? 'claude' : ''} ${open ? 'open' : ''}" data-tl="${key}"><span class="t">${time(i.t)}</span><span class="chip k">${esc(RUN_NAMES[r.kind] || r.kind)}</span>
+          <span class="m">${esc(text)}</span><span class="x">${Number(r.cost_usd) ? '$' + Number(r.cost_usd).toFixed(2) + ' · ' : ''}${r.duration_ms >= 1000 ? Math.round(r.duration_ms / 1000) + ' s' : ''}</span><span class="car" aria-hidden="true"></span></div>`;
+      }
+    }
+    return out + '</div>';
+  }
   function renderLog() {
     if (!logData) { loadLog(); return '<div class="empty">Loading log…</div>'; }
-    const when = iso => iso ? new Date(iso).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '';
-    const val = v => v === null || v === undefined ? '—' : typeof v === 'object' ? esc(JSON.stringify(v)) : esc(String(v));
-    const batches = logData.batches.map(b => `<div class="logb ${b.undone_at ? 'undone' : ''}">
-        <div class="loghead"><b>#${b.id}</b> <span class="chip">${esc(b.source)}</span> <span>${when(b.applied_at || b.created_at)}</span> <span>${b.changes.length} change${b.changes.length === 1 ? '' : 's'}</span>
-          ${b.undone_at ? `<span class="chip">undone ${when(b.undone_at)}</span>` : b.changes.length ? `<span class="spacer"></span><button class="btn small" data-undo="${b.id}">Undo</button>` : ''}</div>
-        ${b.changes.map(c => c.field === 'evidence' ? `<div class="logc">${c.task_id ? `<span class="code">Task-${c.task_id}</span> <span class="name">${esc(c.task_name || '')}</span>` : '<span class="code">suggestion</span>'} <span class="f">evidence #${c.new && c.new.evidence_id}</span> ${esc((c.new || {}).verdict || '')}</div>`
-          : c.field === 'created' ? `<div class="logc"><span class="code">Task-${c.task_id}</span> <span class="name">${esc(c.task_name || '')}</span> <span class="f">created</span></div>`
-          : `<div class="logc"><span class="code">Task-${c.task_id}</span> <span class="name">${esc(c.task_name || '')}</span> <span class="f">${esc(c.field)}</span> ${val(c.old)} → ${val(c.new)}</div>`).join('')}
-      </div>`).join('') || '<div class="empty">No batches yet.</div>';
-    const runs = logData.runs.length ? `<div class="scroll"><table class="runs"><tr><th>Run</th><th>Started</th><th>Took</th><th>Cost</th><th>Result</th></tr>${logData.runs.map(r => `<tr class="${r.ok ? '' : 'bad'}"><td>${esc(r.kind)}</td><td>${when(r.started_at)}</td><td>${r.duration_ms ? Math.round(r.duration_ms / 1000) + ' s' : ''}</td><td>${r.cost_usd != null ? '$' + Number(r.cost_usd).toFixed(2) : ''}</td><td>${esc(r.error || r.summary || (r.ok ? 'ok' : ''))}</td></tr>`).join('')}</table></div>`
-      : '<div class="note">Nothing has run yet. Reminders, the review push, the expire pass and the morning brief land here when they do something (cost $0.00); Claude runs with their cost start in phase 3.</div>';
-    return `<div class="log"><h3>Changes</h3>${batches}<h3>Runs · automations and Claude</h3>${runs}</div>`;
+    const views = [['timeline', 'Timeline', ''], ['changes', 'Changes', logData.batches.length], ['runs', 'Runs', shownRuns().length], ['all', 'All', '']];
+    const bar = `<div class="logbar"><div class="seg" role="tablist" aria-label="Log view">${views.map(([k, l, n]) => `<button role="tab" data-logview="${k}" aria-selected="${logView === k}">${l}${n !== '' ? `<span class="n">${n}</span>` : ''}</button>`).join('')}</div>
+      ${logView === 'changes' ? '' : `<label class="quiet" title="The Notion mirror, the sweeps, reminders and the review nudge when they cost nothing and did not fail"><input type="checkbox" id="log-quiet" ${logQuiet ? 'checked' : ''}> Hide routine runs</label>`}</div>`;
+    const more = logData.more && (logData.more.batches || logData.more.runs) && logLimit < 200 ? `<p class="logmore"><button class="btn small" id="log-more">Show older</button></p>` : '';
+    const body = logView === 'timeline' ? timelineHtml() : logView === 'changes' ? changesHtml() : logView === 'runs' ? runsHtml()
+      : `<h3>Changes</h3>${changesHtml()}<h3>Runs · automations and Claude</h3>${runsHtml()}`;
+    return `<div class="log ${logView}">${bar}${body}${more}</div>`;
   }
   async function loadSettings() { [settings, connectors] = await Promise.all([api('/api/settings'), api('/api/connectors').catch(() => null)]); render(); }
   function renderSettings() {
@@ -664,6 +802,7 @@
       ${f('sources.plaud.enabled', 'Plaud recordings', 'IMAP trigger + plaud CLI (phase 3).', bool('sources.plaud.enabled'))}
       ${f('sources.canvas.enabled', 'Canvas', 'New items become hard-deadline tasks, submitted ones close.', bool('sources.canvas.enabled') + ' &nbsp; every ' + num('sources.canvas.sweep_minutes', 5, 1440) + ' min')}
       ${f('sources.mail.enabled', 'Email via Mailbird', 'Replies flip Waiting, sent mail closes reply tasks, invitations and confirmations feed the planner.', bool('sources.mail.enabled') + ' &nbsp; every ' + num('sources.mail.sweep_minutes', 5, 1440) + ' min')}
+      ${f('sources.mail.suggest.enabled', 'Tasks from mail', 'New mail that is about none of your tasks is read by one light Claude run, and what it leaves you to do becomes a suggestion card in Review. Nothing becomes a task without your Create. The run happens only when there is new mail.', bool('sources.mail.suggest.enabled', true) + ' &nbsp; at most every ' + `<input type="number" id="s-sources.mail.suggest.minutes" data-key="sources.mail.suggest.minutes" value="${Number(e['sources.mail.suggest.minutes']) || 30}" min="5" max="1440">` + ' min')}
       ${f('sources.calendar.enabled', 'Google Calendar', 'Needs config/google-credentials.json (docs/SETUP.md §6).', bool('sources.calendar.enabled') + ' &nbsp; every ' + num('sources.calendar.sweep_minutes', 5, 1440) + ' min &nbsp; calendar id ' + text('sources.calendar.calendar_id', '160px'))}
       ${f('sources.slack.enabled', 'Slack', 'Chat can search and read the workspaces named in the config file (docs/SETUP.md §12); tokens in .env. The sweep turns @-mentions of you into Review items.', bool('sources.slack.enabled') + ' &nbsp; every ' + num('sources.slack.sweep_minutes', 5, 1440) + ' min')}
       ${f('sources.discord.enabled', 'Discord', 'Chat can list channels and read recent messages in the servers named in the config file (docs/SETUP.md §13).', bool('sources.discord.enabled'))}
@@ -690,6 +829,7 @@
   function renderTray() {
     const n = staged.size;
     document.getElementById('tray').classList.toggle('on', n > 0);
+    document.body.classList.toggle('tray-on', n > 0);
     document.getElementById('tray-count').textContent = `${n} change${n === 1 ? '' : 's'}`;
     document.getElementById('tray-list').textContent = [...staged.values()].map(s => (s.task_id ? `Task-${s.task_id} ` : '') + s.label).join(' · ');
     const open = ui.trayOpen && n > 0;
@@ -746,7 +886,7 @@
       bulk.classList.toggle('on', ui.sel.size > 0); const n = document.getElementById('bulk-n'); if (n) n.textContent = ui.sel.size;
       const tray = document.getElementById('tray'); bulk.style.bottom = tray.classList.contains('on') ? (tray.offsetHeight + 8) + 'px' : '';
     }
-    document.body.classList.toggle('bulk-on', ui.sel.size > 0);
+    document.body.classList.toggle('bulk-on', ui.sel.size > 0 && !!bulk);      // Chat has no bulk bar: what is selected there is what a prompt carries
     panel.querySelectorAll('[data-proj]').forEach(b => b.addEventListener('click', () => { const k = 'projects:' + b.dataset.proj; setFold(k, !folded(k, true)); render(); }));
     panel.querySelectorAll('[data-fold]').forEach(b => b.addEventListener('click', () => { setFold(b.dataset.fold, !folded(b.dataset.fold)); render(); }));
     wireSummary();
@@ -775,7 +915,7 @@
     panel.querySelectorAll('[data-sugg-dismiss]').forEach(b => b.onclick = () => { stageJudge(+b.dataset.suggDismiss, null, 'dismissed', 'suggestion dismissed'); });
     panel.querySelectorAll('[data-sugg-create]').forEach(b => b.onclick = async () => {
       const id = +b.dataset.suggCreate;
-      try { const r = await api(`/api/review/suggestions/${id}/create`, { method: 'POST' }); const sg = (review.suggestions || []).find(x => x.id === id); if (sg) sg.created = r.task_id; toast(`Created Task-${r.task_id} · it shows as New in Review`); await load(); }
+      try { const r = await api(`/api/review/suggestions/${id}/create`, { method: 'POST' }); const sg = (review.suggestions || []).find(x => x.id === id); if (sg) sg.created = r.task_id; toast(`Created Task-${r.task_id} · it shows as New in Review`); await load(); await loadReview(); }      // the queue is re-read, so the new row's card is next
       catch (e) { toast('Create failed: ' + e.message); }
     });
     // The date is used only on the button: a date input's own change event fires while the phone's
@@ -805,14 +945,42 @@
     const cn = document.getElementById('chat-new'); if (cn) cn.onclick = () => { chat.current = null; chat.messages = []; ui.chatDrawer = false; render(); };
     const tt = document.getElementById('chat-threads-toggle'); if (tt) tt.onclick = () => { ui.chatDrawer = !ui.chatDrawer; render(); };
     ['chat-threads-close', 'chat-backdrop'].forEach(id => { const el = document.getElementById(id); if (el) el.onclick = () => { ui.chatDrawer = false; render(); }; });
-    const msgs = document.getElementById('msgs'); if (msgs) msgs.scrollTop = msgs.scrollHeight;
+    if (ui.tab === 'chat' && chat.scroll) { chat.scroll = false; window.scrollTo({ top: document.documentElement.scrollHeight }); }
+    // A text box that grows: Enter sends (Shift+Enter is a new line); on a touch keyboard Enter is a new line and the button sends.
+    const typing = (el, key, send) => {
+      el.oninput = () => { draft[key] = el.value; grow(el); };
+      el.addEventListener('keydown', e => { if (e.key === 'Escape') return; if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !TOUCH()) { e.preventDefault(); send(); } e.stopPropagation(); });
+    };
     const ask = document.getElementById('rv-ask'), askGo = document.getElementById('rv-ask-go');
-    const askSend = () => { const v = ask.value.trim(); if (!v) return; ask.value = ''; const card = ask.closest('.card'); sendChat(v, null, [+card.dataset.id], { review: +card.dataset.id }); };
+    const askSend = () => { const v = draft.ask.trim(); if (!v || chat.busy) return; draft.ask = ''; const card = ask.closest('.card'); sendChat(v, null, [+card.dataset.id], { review: +card.dataset.id }); };
     if (askGo) askGo.onclick = askSend;
-    if (ask) ask.addEventListener('keydown', e => { if (e.key === 'Enter') askSend(); if (e.key !== 'Escape') e.stopPropagation(); });
+    if (ask) typing(ask, 'ask', askSend);
+    const po = document.getElementById('chat-pick-open'); if (po) po.onclick = () => { ui.pickOpen = !ui.pickOpen; draft.pick = ''; render(); const el = document.getElementById('chat-pick'); if (el) el.focus(); };
+    const pk = document.getElementById('chat-pick');
+    if (pk) {
+      pk.oninput = () => { draft.pick = pk.value; render(); };
+      pk.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); const m = pickMatches()[0]; if (m) { ui.sel.add(m.id); draft.pick = ''; render(); } } else if (e.key === 'Escape') { ui.pickOpen = false; render(); const c = document.getElementById('cmd'); if (c) c.focus(); } e.stopPropagation(); });
+    }
+    panel.querySelectorAll('[data-pick]').forEach(b => b.onclick = () => { ui.sel.add(+b.dataset.pick); draft.pick = ''; render(); const el = document.getElementById('chat-pick'); if (el) el.focus(); });
+    panel.querySelectorAll('[data-detach]').forEach(b => b.onclick = () => { ui.sel.delete(+b.dataset.detach); render(); });
+    const da = document.getElementById('chat-detach-all'); if (da) da.onclick = () => { ui.sel.clear(); render(); };
+    panel.querySelectorAll('[data-starter]').forEach(b => b.onclick = () => { draft.cmd = b.textContent; render(); const el = document.getElementById('cmd'); if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); } });
+    const cd = document.getElementById('chat-delete'); if (cd) cd.onclick = async () => {
+      if (!confirm('Delete this thread and its messages? What it applied to your tasks stays as it is.')) return;
+      try { await api(`/api/chat/threads/${chat.current}`, { method: 'DELETE' }); chat.current = null; chat.messages = []; chat.threads = null; toast('Thread deleted'); render(); } catch (e) { toast('Delete failed: ' + e.message); }
+    };
+    panel.querySelectorAll('[data-sugg-open]').forEach(b => b.onclick = async () => {
+      try { await api(`/api/review/suggestions/${b.dataset.suggOpen}/open`, { method: 'POST' }); toast('Shown in Mailbird'); } catch (e) { toast('Mailbird could not show it (' + e.message + '); it may have been moved'); }
+    });
+    panel.querySelectorAll('[data-logview]').forEach(b => b.onclick = () => { logView = b.dataset.logview; try { localStorage.setItem('factotum.logview', logView); } catch (_) {} render(); });
+    const lq = document.getElementById('log-quiet'); if (lq) lq.onchange = () => { logQuiet = lq.checked; try { localStorage.setItem('factotum.logquiet', logQuiet ? '1' : '0'); } catch (_) {} render(); };
+    const lm = document.getElementById('log-more'); if (lm) lm.onclick = () => { logLimit = Math.min(200, logLimit + 70); loadLog(); };
+    panel.querySelectorAll('[data-tl]').forEach(r => r.addEventListener('click', e => { if (e.target.closest('button, a')) return; const k = r.dataset.tl; logOpen.has(k) ? logOpen.delete(k) : logOpen.add(k); render(); }));
     panel.querySelectorAll('[data-goto-chat]').forEach(a => a.onclick = e => { e.preventDefault(); chat.current = +a.dataset.gotoChat; chat.threads = null; ui.tab = 'chat'; location.hash = 'chat'; render(); });
-    const cmdGo = document.getElementById('cmd-go'); if (cmdGo) cmdGo.onclick = () => { const i = document.getElementById('cmd'); const v = i.value.trim(); i.value = ''; sendPrompt(v); };
-    const cmd = document.getElementById('cmd'); if (cmd) cmd.addEventListener('keydown', e => { if (e.key === 'Escape') return; if (e.key === 'Enter') { const v = cmd.value.trim(); cmd.value = ''; sendPrompt(v); } e.stopPropagation(); });
+    const cmd = document.getElementById('cmd'), cmdGo = document.getElementById('cmd-go');
+    const cmdSend = () => { const v = draft.cmd.trim(); if (!v) return; draft.cmd = ''; if (cmd) { cmd.value = ''; grow(cmd); } sendPrompt(v); };
+    if (cmdGo) cmdGo.onclick = cmdSend;
+    if (cmd) typing(cmd, 'cmd', cmdSend);
     document.getElementById('tray-apply').onclick = () => applyAll();
     document.getElementById('tray-discard').onclick = () => discardStaged();
     document.getElementById('tray-toggle').onclick = () => { ui.trayOpen = !ui.trayOpen; renderTray(); };
@@ -913,7 +1081,12 @@
 
   document.getElementById('tabs').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; ui.tab = b.dataset.tab; ui.laterOpen = false; location.hash = ui.tab; render(); });
   document.addEventListener('keydown', e => {
-    if (e.key === 'Escape') { lastTap = { id: null, at: 0 }; if (ui.sel.size) { ui.sel.clear(); render(); } if (e.target.matches('input, select, textarea')) e.target.blur(); return; }   // Esc: deselect everything
+    if (e.key === 'Escape') {   // Esc: deselect everything; in Chat the selection is what a prompt carries, so it only closes the task picker
+      lastTap = { id: null, at: 0 };
+      if (ui.tab === 'chat') { if (ui.pickOpen) { ui.pickOpen = false; render(); } }
+      else if (ui.sel.size) { ui.sel.clear(); render(); }
+      if (e.target.matches('input, select, textarea')) e.target.blur(); return;
+    }
     if (e.target.matches('input, select, textarea')) return;
     if (ui.tab === 'review') { const map = { d: 'done', k: 'keep', s: 'later', x: 'drop', t: 'top', l: 'longterm' }; if (map[e.key]) { e.preventDefault(); reviewAct(map[e.key]); } return; }
     const visible = [...document.querySelectorAll('#panel .row')].map(r => +r.dataset.id); if (!visible.length) return;
