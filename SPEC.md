@@ -200,6 +200,21 @@ message can reach Mailbird after a newer Inbox one was swept; a linked thread
 (`links.kind = mail_thread`) that moved is flagged; `.ics` invitations and confirmation-shaped
 subjects are candidates with a 500-character excerpt. Review shows the flags as "Thread updated";
 the planner judges the candidates. Bodies are fetched for candidates only and treated as data.
+Senders and recipients are read in Mailbird's own shape, `{email, displayName}` (the sweep read
+`{address, name}` until 2026-11-05 and so saw nobody on any real message: none of the rules above
+that depend on who wrote or received a mail had ever fired; the test double now has the real shape).
+
+**Tasks suggested from mail (2026-11-05, §8.5).** With `sources.mail.suggest.enabled`, Inbox mail
+that none of the rules above claims is kept as `mail_new` evidence for the triage run: the newest
+message of a conversation, with a sender line (`from Name <addr> · to you | to you and N others |
+you are not in To · unread`) and up to 1,500 characters of the body as words (link text kept, a long
+bare URL cut to its host, invisible padding removed; the patterns are bounded and the read capped,
+because strangers write this text). Never kept: the owner's own mail (every address in `accounts`,
+`owner.emails` and the SMTP user, so the brief is not a candidate), a thread an open task already
+follows, a sender matching `sources.mail.suggest.skip_senders`, and whatever `allow` / `deny`
+excludes. A later message in the same conversation is a new candidate. The first pass over a
+mailbox also takes mail of the last `backfill_days` (3) that is still unread; after that, every
+new arrival, read or not (`only_unread: true` narrows it). At most `max_per_sweep` (20) per pass.
 
 **Canvas.** `/api/v1/planner/items` with submission state; course map, effort by type and skip
 patterns in config. Auto-close on submitted/graded/excused/complete (`factotum/canvas.py`, every
@@ -349,6 +364,33 @@ the UI reports when it is over; a request or a run older than 20 minutes was los
 reads as idle and the scheduler drops it instead of running it late. A failed automatic rewrite is
 retried after an hour, like every job.
 
+### 8.5 `mail-triage`: tasks suggested from mail (`factotum/mail_triage.py`, added 2026-11-05)
+One light run, no tools, over a batch of at most 15 `mail_new` candidates (§6), with the taxonomy,
+the open rows (to see what is already tracked) and the suggestions already waiting. It returns
+`{suggest: [{evidence_id, name, project, due, hard, effort, context, reply_expected, reason}],
+dismiss: [...]}`. The bar, in the prompt: something a reasonable person would put on a to-do list
+(a request to the owner, something to do by a date, a meeting with a time); when in doubt, set
+aside, because a card that should not exist costs more than a mail the owner will read anyway.
+
+Python decides what that becomes. A suggestion is a `proposal` card in Review ("From your mail":
+what Create would make, the model's context and reason, who wrote and when, Show the message in
+Mailbird) and never a task, a change or a link. Its fields go through the same cleaner as every
+create; its `counterpart` is the sender address Mailbird reported, set only when the model says a
+reply finishes the task, never an address the model wrote; a name that an open task or a waiting
+card already has is set aside; at most 8 per run. Every mail in the batch is judged by the end of
+the run (`staged` or `dismissed`, outside a batch: these are raw mail, not task state, and a
+day's worth would bury the Log), so nothing is asked about twice; a failed run judges nothing and
+the batch waits; a candidate nobody triaged within a week is set aside unread. **Create** makes an
+open task with source `Mail`, the mail's account, and a `mail_thread` link to the conversation, so
+from then on the sweep follows that thread, and a "reply to …" task closes itself when the reply is
+sent (§6). The planner never sees `mail_new`.
+
+The scheduler runs it only when candidates exist and no more often than
+`sources.mail.suggest.minutes` (30); a Refresh (§8.4) runs it between the sweeps and the planner.
+A run is a `mail-triage` row with its cost and a line such as "15 mail: 1 suggested (…), 14 set
+aside"; prompt and result under `data/runs/triage/<date>/`. Measured on real mail 2026-11-05: 15
+messages, $0.14, 7 s.
+
 ### 8.3 `chat-turn` (Chat tab, "Search related emails", "Draft reply")
 Inputs: the prompt (`prompts/chat-turn.md` on a thread's first turn, a short continuation header
 after), the attached tasks as JSON, the thread continued through `--resume` (the session id is kept on
@@ -451,6 +493,32 @@ unfolded and the row focused and flashed. Two clicks open its details as well; t
 whatever moved under the finger. The Top chip on a row shows the same number as its tile (stored
 ranks can have gaps). Settings → Claude has the Today summary toggle and its minimum interval.
 
+Wave 10 (2026-11-05). **Prompt boxes** (every composer and the Review card's Ask box) are text
+areas that grow with what is typed, up to about ten lines. Enter sends and Shift+Enter starts a new
+line; on a touch keyboard Enter is a new line and the button sends. What is typed lives outside the
+DOM (`draft` in app.js) and is put back with its caret after every render, because a running chat
+turn re-renders the panel every second. **Chat**: what a prompt carries is the selection, shown as
+chips with the task's name and a × each, plus Remove all; "+ Attach a task" opens a box that finds
+open tasks by number or by words of the name (Enter takes the first), so nothing has to be selected
+on another tab, and a thread can start with nothing attached (the focused row is no longer attached
+there). The row hints and the bulk bar are not shown in Chat, Esc closes the task box instead of
+clearing the attachments, an empty thread offers three starter prompts (they fill the box, never
+send), the header has Delete thread (`DELETE /api/chat/threads/{id}`: the thread and its messages;
+nothing it applied is undone and its runs stay in the Log), and the box stays at the bottom of the
+window while a long thread scrolls. **Review** shows a mail suggestion (§8.5) as its own card and
+re-reads the queue after Create, so the new row's card comes next. **Log** has four views,
+remembered per browser: *Timeline* merges change batches and runs by time, newest first, under a
+heading per day with that day's counts and cost; each is one line (time, who or what, a one-line
+summary, cost and duration) with a stripe saying which it is (a change, a Claude run, an automation,
+a failure), and a click opens it: a batch as one line per task in words ("done", "due Nov 5 →
+Nov 9", "note added: …"; bookkeeping fields are left to Changes), a run as its whole result.
+*Changes* and *Runs* are the two lists as before, *All* stacks them. "Hide routine runs" drops the
+mirror, the sweeps, reminders and the review nudge when they cost nothing and did not fail; "Show
+older" widens the window (`/api/log?limit=`, which also reports whether each list was cut, and the
+timeline stops at the older list's last entry so its tail never shows one kind only). A card layout
+for the timeline was tried and dropped: one batch's field changes filled the screen. Settings →
+Inputs has "Tasks from mail" with its minimum interval.
+
 ## 10. Reminders and push
 
 - The public ntfy.sh server caps delay at 3 days and 250 messages/day, so **the service owns the
@@ -536,6 +604,7 @@ The old Command Log relations are not imported; task history lives in `changes` 
 | sync-file | $1.00 | 2–4 recordings → $1–3 |
 | planner-morning | $0.75 | $0.75 (measured ≈ $0.10 a run; each Refresh on the Today tab is one more) |
 | today-summary (§8.4) | $0.30 | ≈ $0.18 a rewrite measured on sonnet (2026-11-04), at most one per `claude.summary.auto_minutes` and only while the summary is stale; a busy day of edits is $1–3. `claude.models.today_summary: haiku` or a longer interval cuts it |
+| mail-triage (§8.5) | $0.40 | ≈ $0.14 per batch of 15 messages (measured 2026-11-05); runs only when there is new mail, at most every `sources.mail.suggest.minutes` |
 | chat-turn / search / draft | $0.60 | on demand |
 | sweeps, UI, reminders, brief | $0 | $0 |
 

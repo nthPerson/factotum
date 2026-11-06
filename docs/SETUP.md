@@ -298,6 +298,16 @@ run rewrites it: `claude.summary.auto` and `claude.summary.auto_minutes` (Settin
 summary; model, budget and timeout under `claude.*.today_summary`, defaults sonnet / $0.30 / 180 s
 when the keys are absent). Its prompt and result land under `data/runs/summary/<date>/`.
 
+**Tasks from mail** (SPEC §8.5) is on with `sources.mail.suggest.enabled` (Settings → Inputs →
+Tasks from mail, with its minimum interval). The sweep keeps new mail that is about none of your
+tasks; one light Claude run reads it and what you have to do appears in Review as a "From your
+mail" card with Create / Dismiss. Nothing becomes a task on its own. Tune what is never considered
+with `sources.mail.suggest.skip_senders` (globs on the sender) beside the sweep's own `allow` /
+`deny`; `only_unread: true` ignores mail you have already read; `backfill_days` is how far the
+first pass looks back for unread mail. Each run is a `mail-triage` row in the Log saying how many
+were suggested and set aside; prompt and result land under `data/runs/triage/<date>/`. To see what
+it would do without waiting: Refresh on the Today tab.
+
 Cutover from plaud-sync (done 2026-11-02 for Robert): on lark-server
 `sudo systemctl disable --now planner@morning.timer planner@evening.timer plaud-digest.timer`.
 Then delete the Gmail filter on the SDSU account that forwarded mail to the trigger mailbox:

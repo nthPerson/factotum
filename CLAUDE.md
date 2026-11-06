@@ -41,7 +41,10 @@ Claude Client ID Metadata Documents; writing from a connector or skill (`create`
 `apply`; the mail sweep closes a watched task when the mail is sent). Wave 9 (2026-11-04): the Today
 summary (`factotum/summary.py`: the planner's verdict in `state.summary`, staleness decided by
 Python, a light rewrite run, Refresh = sweeps + planner through the scheduler), removing a due date
-(`due: null`, `nodue`), foldable sections, the Top rail's tiles and jump-to-task. Retiring the old Notion
+(`due: null`, `nodue`), foldable sections, the Top rail's tiles and jump-to-task. Wave 10
+(2026-11-05): tasks suggested from mail (`mail_sweep.py` keeps `mail_new` evidence, `factotum/mail_triage.py`
+and `prompts/mail-triage.md` turn it into Review cards), growing prompt boxes, Chat attachments and
+Delete thread, the Log's Timeline / Changes / Runs / All views. Retiring the old Notion
 pages and plaud-sync is the user's checklist (SETUP §15). Update this paragraph when something lands.
 
 ## Where things live
@@ -79,6 +82,8 @@ pages and plaud-sync is the user's checklist (SETUP §15). Update this paragraph
 | verdicts on evidence (dismiss, accept, reviewed), planner suggestions on Review | SPEC §9 | `factotum/batches.py` (`judge_evidence`), `api.py` (`/api/review`, `/api/review/suggestions`, `SUGGESTION_KINDS`) |
 | what a connector or skill may write: validation, staging vs direct apply, create, the sent-mail watch | SPEC §15 "Writing from a connector" | `factotum/mcp_server.py` (`_validate_changes`, `stage_changes`, `apply_changes`), `batches.py` (`_create`, `watch_fields`), `mail_sweep.py` (`watched`), `mcp_server.known_recipients` |
 | the Slack mention sweep, "Mentioned in Slack", a mention as a suggestion card | SPEC §6 "Slack" | `factotum/slack_sweep.py` (`sweep`), `lifecycle.REVIEW_ORDER`, `mail_sweep.review_flags`, `planner.NON_PROVING` |
+| tasks suggested from mail: what the sweep keeps, the triage run, the card, Create | SPEC §6 "Tasks suggested from mail", §8.5 | `factotum/mail_sweep.py` (`candidate`, `clean_body`, `_person`), `factotum/mail_triage.py` (`pending`, `apply`, `run`), `prompts/mail-triage.md`, `scheduler.py` (`_mail_triage`), `api.py` (`_suggestion_mail`, `create_suggestion`, `open_suggestion`), `web/app.js` (`suggestionCard`) |
+| prompt boxes, Chat attachments and the task picker, the Log's views | SPEC §9 "Wave 10" | `web/app.js` (`draft`, `typing`, `grow`, `chatAttach`, `pickMatches`, `renderLog`, `timelineHtml`, `batchLine`, `batchDigest`) |
 | the Today summary: what it is about, when it is stale, the light rewrite, Refresh | SPEC §8.4 | `factotum/summary.py` (`store`, `stale`, `run`, `refresh_state`), `scheduler.py` (`_refresh`, `_auto_summary`), `api.py` (`/api/summary`), `prompts/today-summary.md`, `web/app.js` (`summaryHtml`, `pollSummary`) |
 | folded sections, the Top rail's tiles, jump to a task's row | SPEC §9 "Wave 9" | `web/app.js` (`folds`, `group`, `todayGroups`, `timelineGroups`, `renderRail`, `jumpTo`) |
 | the claude.ai connector: metadata, registration, consent gate, arming, tokens, `/mcp` auth | SPEC §15, SETUP §16 | `factotum/oauth.py` (`consent_identity`, `verify_access_jwt`, `armed`, `token`, `check_access`), `api.py` (`/oauth/*`, `/api/connectors`) |
@@ -196,6 +201,24 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
   the same cached statement, so a read came back short or raised (a 500 on about one request in
   twenty when two arrived together; worse, `get_settings` silently returning half the rows).
   `shared=True` is `cached_statements=0`. Any new connection used from more than one thread needs it.
+- **Mailbird writes people as `{email, displayName}`** (2026-11-05), never `{address, name}`. The
+  mail sweep read the second shape for a week and saw no sender on any real message: no waiting
+  flip, no close on a sent mail, no sent-mail watch and no deny rule had ever fired, and nothing
+  failed (the live `evidence` table simply had none of those kinds). `mail_sweep._person` takes both;
+  `tests/test_phase4.py::_msg` builds the real one. Check a new integration's fake against one live
+  response (keys only) before trusting a green suite.
+- **A mail suggestion is a card, never a task** (2026-11-05): `mail_triage.apply` only inserts
+  `proposal` evidence and judges `mail_new` rows. The model supplies no address (`counterpart` is
+  Mailbird's sender) and can name only evidence from the batch it was shown. The planner must keep
+  excluding `mail_new` (two readers would judge the same mail twice).
+- **Text written by strangers goes through bounded patterns** (2026-11-05): `mail_sweep.clean_body`
+  caps what it reads and bounds every quantifier; an exception there is a note, never a failed sweep.
+- **What is typed lives in `draft`, not in the DOM** (2026-11-05): `render()` rebuilds the panel
+  (every second while a chat turn runs) and restores focus and caret for `#cmd`, `#rv-ask` and
+  `#chat-pick`. A new text box needs an entry in `draft`, `typing()` wiring and its id in that list,
+  or it loses its text mid-sentence.
+- **In Chat the selection is the attachment list** (2026-11-05): `attachedIds()` has no focus
+  fallback there and Esc does not clear it; the bulk bar is not rendered on that tab.
 - **The API never sweeps or runs the planner itself** (2026-11-04): the Today tab's Refresh stores
   `state.refresh.requested` and wakes the scheduler (`app.state.scheduler.wake()`), which is the one
   thread that sweeps. `serve --no-scheduler` has no `app.state.scheduler`; the route answers 409.
