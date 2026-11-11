@@ -373,7 +373,7 @@ body.tray-open main { padding-bottom: 60vh; }
 }
 .logb { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-bottom: 8px; } .logb.undone { opacity: .6; }
 .loghead { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
-.logc { font-size: 13px; padding: 2px 0; display: flex; gap: 6px; flex-wrap: wrap; } .logc .name { color: var(--muted); max-width: 32ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .logc .f { font-family: var(--mono); }
+.logc { font-size: 13px; padding: 2px 0; display: flex; gap: 6px; flex-wrap: wrap; overflow-wrap: anywhere; } .logc .name { color: var(--muted); max-width: 32ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .logc .f { font-family: var(--mono); }
 .log .scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 .runs { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 520px; } .runs th, .runs td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); } .runs tr.bad td { color: var(--crit); }
 .bulk .remform { display: inline-flex; width: auto; }
