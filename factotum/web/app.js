@@ -338,7 +338,7 @@
   async function load() {
     const was = sumBusy();
     data = await api('/api/tasks?status=open');
-    find.cache.clear(); if (find.done) find.done.clear();      // a search answered before this load may be out of date
+    find.cache.clear(); if (find.done) find.done.clear(); find.found = null;      // a search answered before this load may be out of date
     detailGen++; detailCache.forEach(d => { d.stale = true; });      // an opened task keeps what it shows until its new answer arrives
     try { pending = (await api('/api/proposals')).proposals; } catch (_) { pending = []; }
     try { summary = await api('/api/summary'); } catch (_) { summary = null; }
@@ -2446,7 +2446,8 @@
   function searchTasks(q) {
     q = q.trim();
     if (!find.cache.has(q)) {
-      const p = api('/api/search?q=' + encodeURIComponent(q)).catch(() => ({ results: [], more: false }));
+      const p = api('/api/search?q=' + encodeURIComponent(q));
+      p.catch(() => { if (find.cache.get(q) === p) find.cache.delete(q); });      // a failed answer is never kept: the same words ask again
       find.cache.set(q, p);
     }
     return find.cache.get(q);
@@ -2456,7 +2457,8 @@
     q = q.trim(); clearTimeout(find.timer);
     if (!q) { if (asFound) find.found = null; return; }
     find.timer = setTimeout(async () => {
-      const res = await searchTasks(q);
+      let res;
+      try { res = await searchTasks(q); } catch (e) { res = { results: [], more: false, error: (e && e.message) || 'no answer' }; }
       find.done = find.done || new Map(); find.done.set(q, res);
       if (asFound) { if (q !== draft.findQ.trim()) return; find.found = { q, res }; }
       render();
@@ -2474,14 +2476,14 @@
     const f = find.found, q = draft.findQ.trim();
     let rows = '';
     if (q && f && f.q === q) {
-      rows = f.res.results.map(r => {
+      rows = f.res.error ? `<div class="hint">Search failed: ${esc(f.res.error)}</div>` : f.res.results.map(r => {
         const closed = r.status !== 'open', st = staged.get(r.id);
         const reopen = !closed ? '' : st && st.op === 'reopen' ? '<span class="chip staged">reopen staged</span>' : `<button class="btn small" data-find-reopen="${r.id}">Reopen</button>`;
         return `<div class="hit${closed ? ' closed' : ''}"><span class="code">Task-${r.id}</span><span class="nm">${esc(r.name)}</span><span class="chips">${statusChip(r)}</span>
           <span class="acts"><button class="btn small" data-find-open="${r.id}">Open</button>${reopen}</span>
           ${closed && r.outcome ? `<div class="outcome">Outcome: ${esc(r.outcome)}</div>` : ''}</div>`;
       }).join('') || '<div class="hint">No task matches.</div>';
-      if (f.res.more) rows += '<div class="hint">More match; add a word.</div>';
+      if (f.res.more && !f.res.error) rows += '<div class="hint">More match; add a word.</div>';
     }
     return `<div class="find"><input id="find-q" placeholder="A task number, or words from its name, open or closed" autocomplete="off" aria-label="Find any task" value="${esc(draft.findQ)}">${rows ? `<div class="hits">${rows}</div>` : ''}</div>`;
   }
@@ -2533,9 +2535,9 @@
     pickOpts[slot] = opts;
     const q = (draft.picks[slot] || '').trim();
     if (q && opts.closed && !(find.done && find.done.has(q))) wantSearch(q, false);
-    const hits = pickHits(slot);
+    const hits = pickHits(slot), dr = opts.closed && find.done && find.done.get(q), closedErr = dr && dr.error;
     return `<div class="picker"><input id="pick-${slot}" value="${esc(draft.picks[slot] || '')}" placeholder="${esc(opts.placeholder)}" aria-label="${esc(opts.placeholder)}" autocomplete="off">
-      <div class="hits">${hits.map(x => `<button data-picker="${slot}" data-hit="${x.id}"><span class="code">Task-${x.id}</span> <span class="nm">${esc(x.name)}</span>${statusChip(x)}</button>`).join('') || (q ? `<div class="hint">No ${opts.closed ? '' : 'open '}task matches.</div>` : '')}</div></div>`;
+      <div class="hits">${hits.map(x => `<button data-picker="${slot}" data-hit="${x.id}"><span class="code">Task-${x.id}</span> <span class="nm">${esc(x.name)}</span>${statusChip(x)}</button>`).join('') || (q ? `<div class="hint">${closedErr ? 'Search failed: ' + esc(closedErr) : 'No ' + (opts.closed ? '' : 'open ') + 'task matches.'}</div>` : '')}</div></div>`;
   }
 
   // ---------- by hand (stage 6): New task ----------
