@@ -12,7 +12,9 @@ an optional records sink. Claude stays in the loop for judgment only; every writ
 
 It is also meant to be **handed to someone else**: everything person-specific lives in
 `config/factotum.yaml` and `.env`, every input and every sink can be switched off, and the
-Settings tab names the config file so a new user knows where the rest lives.
+Settings tab names the config file so a new user knows where the rest lives. A fresh install has
+no `config/factotum.yaml`: it runs on the neutral starter (`config/factotum.starter.yaml`, nothing
+switched on) and says so (§9 "Configuration").
 
 ## 1. Why (measured 2026-11-01 on plaud-sync)
 
@@ -47,6 +49,8 @@ Four causes, none of them the user's discipline:
   never send, delete, move or archive mail.
 - **Configurable, not forked.** A new user edits two files and the Settings tab; they never
   edit code to change projects, weights, databases, accounts or which integrations are on.
+  `config/factotum.example.yaml` is the reference (every key, placeholders only) they copy to
+  `config/factotum.yaml`; `config/factotum.starter.yaml` is the fallback until they do.
 - **Bounded cost.** Per-run budgets in §13; the rolling total is visible in Settings.
 
 ## 3. Architecture
@@ -485,6 +489,23 @@ one Undo. Review as a card stack. Settings: lifecycle values, inputs and outputs
 accounts table, ntfy topic, brief time and recipient, with a note naming the config file.
 Keyboard: `j k d x s t l e`, Esc deselects; Review `d k s x`.
 
+**Configuration** (stage 3 of the linked-tasks design, 2026-11-10, design §15). A value comes from
+the first of: a Settings override (the `settings` table, `SETTINGS_KEYS` only), the user's file,
+the code's default (`config.DEFAULTS`, one entry per Settings key, read through `C.value`). The
+user's file is `config/factotum.yaml` (or what `FACTOTUM_CONFIG` names); without it Factotum runs
+on `config/factotum.starter.yaml` (no name, no addresses, the machine's time zone, three projects of
+equal weight, every input, output, notification and paid Claude run off, connector writes staged),
+prints one line to stderr and shows a banner on every tab ("Starter settings in use.") with how to
+make it your own; the example is never loaded unless named. Settings shows each control's effective
+value, its default filled in, and a change saves that one key (earlier overrides stay until removed
+from the table). **Absent means off** for anything that costs money or sends mail: the morning
+brief, the planner, the automatic summary, the Notion notes sink and the mail suggestions run only
+when their key is explicitly on. Mail accounts are seeded from the user's file once per database
+(`state.accounts_seeded`), never from the starter, so a table emptied on purpose stays empty.
+`python -m factotum effective [KEY…] [--as-before]` prints each key's value and origin (`settings`,
+`file`, `machine`, `default`, `unset`) without writing or printing a secret; `--as-before` uses the
+pre-stage-3 defaults, so a diff of the two is the deploy check (SETUP §18).
+
 **Stage 1 of the linked-tasks design (2026-11-10): the app shell** (design
 `docs/superpowers/specs/2026-11-10-linked-tasks-design.md` §13). The page is an installable app: a
 manifest (`manifest.webmanifest`, requested with `crossorigin="use-credentials"` so Cloudflare Access
@@ -669,6 +690,9 @@ The old Command Log relations are not imported; task history lives in `changes` 
 | mail-triage (§8.5) | $0.40 | ≈ $0.14 per batch of 15 messages (measured 2026-11-05); runs only when there is new mail, at most every `sources.mail.suggest.minutes` |
 | chat-turn / search / draft | $0.60 | on demand |
 | sweeps, UI, reminders, brief | $0 | $0 |
+
+Every paid run Factotum starts on its own is off unless its switch is explicitly on (absent means
+off, §9 "Configuration"); a chat turn runs only when the user sends one.
 
 Target under $4/day all in, versus ≈$9/day measured in September. Settings shows the rolling
 7-day total from `runs`. Headless allowlists exclude every destructive Mailbird tool; Python

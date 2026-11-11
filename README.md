@@ -37,24 +37,27 @@ old Notion pages and plaud-sync is a checklist in docs/SETUP.md §15.
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-cp .env.example .env                       # fill in NOTION_TOKEN at least
-cp config/factotum.example.yaml config/factotum.yaml   # edit projects, accounts, times
-.venv/bin/python -m factotum init-db
-.venv/bin/python -m factotum import-notion --dry-run   # bucket report, writes nothing
-.venv/bin/python -m factotum import-notion --apply
-.venv/bin/python -m factotum import-notion --new-only --apply   # hourly, until the old system stops writing
-.venv/bin/python -m factotum serve                     # http://127.0.0.1:8750
-.venv/bin/pytest                                       # 159 tests, no network
+.venv/bin/python -m factotum serve                     # http://127.0.0.1:8750, on the starter settings: nothing switched on
+cp config/factotum.example.yaml config/factotum.yaml   # make it yours: projects, addresses, the integrations you use
+cp .env.example .env                                   # only the secrets of the integrations you switch on (docs/SETUP.md)
+.venv/bin/python -m factotum effective                 # what each switch is and where it comes from
+.venv/bin/pytest                                       # offline
 ```
+
+Moving from a Notion tasks database is `import-notion --dry-run` (a report, writes nothing), then
+`import-notion --apply` (docs/SETUP.md §5).
 
 ## Adapting it to your own workflow
 
-Everything person-specific is in two files: `config/factotum.yaml` (projects and weights,
-which inputs and outputs are on, reminder times, Notion database ids and property names,
-Canvas course map, email allow/deny) and `.env` (every secret). The Settings tab overrides the
-lifecycle and notification values and manages email accounts; it names the config file so you
-know where the rest lives. Each input and each sink can be turned off; with Notion off, Factotum
-is a standalone SQLite task list with a web UI.
+Until `config/factotum.yaml` exists, Factotum runs on `config/factotum.starter.yaml`: no name, no
+addresses, three generic projects, and every input, output, notification and paid Claude run off;
+the app says so with a banner. `config/factotum.example.yaml` is the reference: every key,
+explained, with placeholders to replace. Everything person-specific is in two files:
+`config/factotum.yaml` (projects and weights, which inputs and outputs are on, reminder times,
+Notion database ids and property names, Canvas course map, email allow/deny) and `.env` (every
+secret). The Settings tab overrides the lifecycle and notification values and manages email
+accounts; it names the config file so you know where the rest lives. Each input and each sink can
+be turned off; with Notion off, Factotum is a standalone SQLite task list with a web UI.
 
 ## Layout
 
@@ -73,7 +76,7 @@ factotum/            the service
   importers/         notion_tasks.py (one-time migration)
   sinks/             notion_mirror.py (one-way task mirror)
   web/               index.html, app.css, app.js
-config/              factotum.example.yaml
+config/              factotum.starter.yaml (the fallback), factotum.example.yaml (the reference)
 deploy/              factotum.service (systemd, WSL2)
 docs/                SETUP.md
 tests/               pytest, offline

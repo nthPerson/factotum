@@ -12,9 +12,9 @@ Guidance for Claude Code working in this repository. Read `SPEC.md` for the desi
    task state. Claude runs return JSON proposals; the UI, the command grammar, Review, Chat and
    the automations all turn them into a batch. Every batch is undoable.
 3. **Person-specific facts live in config, never in code.** A Notion id, a course code, an
-   email address or a project weight in a `.py` file is a bug; it belongs in
-   `config/factotum.example.yaml` (structure) or `.env` (secrets). The tool is meant to be
-   handed to other people.
+   email address or a project weight in a `.py` file is a bug; it belongs in the user's
+   `config/factotum.yaml` (`config/factotum.example.yaml` documents the structure with
+   placeholders) or `.env` (secrets). The tool is meant to be handed to other people.
 
 ## Phase status
 
@@ -47,7 +47,13 @@ and `prompts/mail-triage.md` turn it into Review cards), growing prompt boxes, C
 Delete thread, the Log's Timeline / Changes / Runs / All views. Stage 1 of the linked-tasks design (2026-11-10,
 `docs/superpowers/specs/2026-11-10-linked-tasks-design.md`): the installable app, task and tab
 addresses with Back, the phone task page, the short selection bar, Sign in again, fresh on return,
-self-update by build stamp; the command leftover fault and the brief retry fault. Retiring the old Notion
+self-update by build stamp; the command leftover fault and the brief retry fault. Stage 3 (2026-11-10): a
+neutral start: without `config/factotum.yaml` the app runs on `config/factotum.starter.yaml` and says so (one
+stderr line, a banner on every tab); absent means off for every paid or mailing switch, with one table of
+code defaults (`config.DEFAULTS`, read through `C.value`); `factotum effective` prints each switch's value and
+origin; accounts are seeded once (`state.accounts_seeded`); Settings shows effective values and saves only the
+control that changed; the example is a reference with placeholders, and the suite loads
+`tests/fixtures/factotum.fixture.yaml` instead. Retiring the old Notion
 pages and plaud-sync is the user's checklist (SETUP §15). Update this paragraph when something lands.
 
 ## Where things live
@@ -92,6 +98,7 @@ pages and plaud-sync is the user's checklist (SETUP §15). Update this paragraph
 | the claude.ai connector: metadata, registration, consent gate, arming, tokens, `/mcp` auth | SPEC §15, SETUP §16 | `factotum/oauth.py` (`consent_identity`, `verify_access_jwt`, `armed`, `token`, `check_access`), `api.py` (`/oauth/*`, `/api/connectors`) |
 | the installable app: manifest, icons, the page head | design §13, SPEC §9 | `factotum/web/manifest.webmanifest`, `index.html`, `tools/make_icons.py` |
 | addresses, Back, the phone task page, the short bar, signed out, return and update | SPEC §9 | `web/app.js` (`parseAddress`, `setAddress`, `go`, `applyAddress`, `openTask`, `closeTask`, `taskPageHtml`, `signedOut`, `typingNow`, `onReturn`), `api.py` (`PAGE_TABS`, `STAMPED`, `build_stamp`, `BuildStamp`, `_index_html`) |
+| the starter, code defaults, absent means off, `effective` | SPEC §9 "Configuration", SETUP §18 | `factotum/config.py` (`STARTER_CONFIG`, `DEFAULTS`, `PAID_SWITCHES`, `value`, `explain`), `config/factotum.starter.yaml`, `__main__.py` (`_effective`), `web/app.js` (`starterHtml`, `settingsDirty`), `tests/test_stage3.py` (`_code_defaults`) |
 
 ## Commands
 
@@ -116,6 +123,7 @@ pages and plaud-sync is the user's checklist (SETUP §15). Update this paragraph
 .venv/bin/python -m factotum mcp                              # the stdio MCP server itself (the runner starts it; rarely by hand)
 .venv/bin/python -m factotum serve --port 8751 --no-scheduler   # a second instance for UI checks; never two schedulers on one DB
 .venv/bin/python -m factotum serve                 # http://127.0.0.1:8750
+.venv/bin/python -m factotum effective [KEY…] [--as-before]   # each switch's value and origin, read-only; diff the two before a deploy (SETUP §18)
 # every sweep and the planner at once: Refresh on the Today tab (the scheduler runs it; a `refresh` row in the Log)
 sudo systemctl restart factotum                    # after code changes; see the restart rule below
 journalctl -u factotum -n 20
@@ -125,7 +133,14 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
 ## Conventions that break silently
 
 - **Settings-tab keys are a whitelist** (`config.SETTINGS_KEYS`). A new toggle needs the key
-  there, a control in `web/app.js` `renderSettings`, and a default in the example YAML.
+  there, its code default in `config.DEFAULTS`, a control in `web/app.js` `renderSettings`, and a
+  default in the example YAML.
+- **Absent means off for anything that costs money or sends mail** (2026-11-10): a paid Claude run, a
+  mail, a write to an outside service happens only when its switch is explicitly on. The default lives
+  in `config.DEFAULTS` as False and the code reads it with `C.value(cfg, key)`, never
+  `C.get(cfg, key, True)`; a new Settings key needs its `DEFAULTS` entry too (with `SETTINGS_KEYS`, the
+  control and the example). New runs (ripples, filing) follow this from the start.
+  `tests/test_stage3.py::_code_defaults` fails when a literal default in the code disagrees with the table.
 - **Settable task fields are a whitelist** (`batches.SETTABLE`). `score`, `priority`, `status`
   and `mentions` are derived or owned by automations; a change that names them is rejected
   with a reason, not applied.
@@ -200,7 +215,9 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
 - **A Settings-tab override hides a YAML edit** (2026-11-02): every `SETTINGS_KEYS` control auto-saves,
   so once a box has been seen unticked the database holds `false` and `C.effective` prefers it to the
   file. `server.oauth.enabled: true` in the YAML did nothing until the toggle was ticked in Settings.
-  Change such keys in Settings; the YAML is their default for a fresh database.
+  Change such keys in Settings; the YAML is their default for a fresh database. Since 2026-11-10 only
+  the control that changed is saved (`settingsDirty`); the overrides saved before that stay until removed
+  from the `settings` table, and `factotum effective` shows them with the origin `settings`.
 - **The API's connection is opened with `connect(path, shared=True)`** (2026-11-04): sync routes run
   on a thread pool over one connection, and Python's sqlite3 hands two threads running the same SQL
   the same cached statement, so a read came back short or raised (a 500 on about one request in
@@ -271,6 +288,21 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
   installs on the panel works there too, and nothing may assume the panel holds a list.
 - **The test suite never reads `.env`** (2026-11-10, `tests/conftest.py::_no_real_env`): a new secret is
   named in `.env.example`, and a test that needs one sets it with `monkeypatch.setenv`.
+- **`.env.example`'s `NAME=` lines are the list `_no_real_env` clears** (2026-11-10): `FACTOTUM_CONFIG` and
+  `FACTOTUM_DB` stay there as `NAME=` lines for that reason, even though both have defaults.
+- **The tests read `tests/fixtures/factotum.fixture.yaml`, never the example** (2026-11-10): the example
+  holds placeholders (`you@example.com`, `YOUR_DATABASE_ID`); a test that asserts on projects or
+  accounts uses `conftest.FIXTURE`.
+- **No `config/factotum.yaml` means the starter** (2026-11-10): `config.load` falls back to
+  `config/factotum.starter.yaml`, marks the dict `_starter`, prints one stderr line per process, and the
+  page shows "Starter settings in use." on every tab. A `FACTOTUM_CONFIG` naming a missing file falls
+  through to `config/factotum.yaml`, then the starter, never to the example.
+- **`owner.timezone` empty or not a zone means the machine's zone** (2026-11-10): `config.load` fills it
+  from `TZ`, `/etc/timezone`, the `/etc/localtime` link, else `UTC` (a misspelt name prints one stderr
+  line); `factotum effective` shows that origin as `machine`.
+- **Accounts are seeded once** (2026-11-10): `db.seed_accounts` records `state.accounts_seeded`, so a
+  table emptied on purpose stays empty; a table that already has rows is marked without inserting, an
+  empty seed list does not use the seeding up, and the starter is never seeded from.
 
 ## Gotchas carried over from plaud-sync (dates are when they were learned)
 
