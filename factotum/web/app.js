@@ -19,7 +19,8 @@
   let railTap = { id: null, timer: null };   // a Top tile waits a moment for a second tap before it acts
   // What is being typed, kept outside the DOM: every render() rebuilds the panel (a chat turn's status
   // line re-renders it every second), and a long prompt must survive that with its caret.
-  const draft = { cmd: '', ask: '', askFor: null, pick: '', outcome: '', askToday: '', askTask: '', askTaskFor: null };
+  const draft = { cmd: '', ask: '', askFor: null, pick: '', outcome: '', askToday: '', askTask: '', askTaskFor: null,
+                  newLine: '', newKey: newKey() };      // the New task line, and the key its next add carries (stage 6)
   let asking = null;        // {id, name} of the task whose outcome the toast asks (ripples (stage 5): the outcome question)
   try { draft.cmd = sessionStorage.getItem('factotum.cmd') || ''; sessionStorage.removeItem('factotum.cmd'); } catch (_) {}   // kept by reloadKeepingDraft
   const TOUCH = () => window.matchMedia('(hover: none)').matches;
@@ -40,7 +41,8 @@
              railOpen: !window.matchMedia('(max-width: 860px)').matches, chatDrawer: false,
              page: null, pageScroll: 0, pageMore: false, pageLater: false,      // the task page: its id, the list's scroll, a phone's More and Later open
              bulkMore: false,      // the phone's short bar shows its second line (back to false when nothing is selected)
-             askTask: null };      // the opened task whose conversation shows (stage 6; one at a time)
+             askTask: null,        // the opened task whose conversation shows (stage 6; one at a time)
+             newOpen: false };     // the New task line is open (stage 6; a desktop's list tabs)
   try { ui.tab = parseAddress().tab; } catch (_) {}
   try { const r = localStorage.getItem('factotum.rail'); if (r === '0' || r === '1') ui.railOpen = r === '1'; } catch (_) {}
   try { const s = JSON.parse(localStorage.getItem('factotum.staged') || '[]'); staged = new Map(s); } catch (_) {}
@@ -352,9 +354,9 @@
   // Focus in an empty draft-backed box does not count: its text lives in `draft` and render() puts the
   // focus and caret back, so a reload of the lists loses nothing (a box left focused and empty would
   // otherwise keep the lists stale on every return). render() uses the same list, through isDraftBox.
-  const DRAFT_BOXES = ['cmd', 'rv-ask', 'chat-pick', 'rv-note', 'today-ask', 'task-ask'];
+  const DRAFT_BOXES = ['cmd', 'rv-ask', 'chat-pick', 'rv-note', 'today-ask', 'task-ask', 'new-line'];
   function typingNow() {
-    if ([draft.cmd, draft.ask, draft.pick, draft.outcome, draft.askToday, draft.askTask, ui.rvNote.text].some(s => (s || '').trim())) return true;
+    if ([draft.cmd, draft.ask, draft.pick, draft.outcome, draft.askToday, draft.askTask, draft.newLine, ui.rvNote.text].some(s => (s || '').trim())) return true;
     if (ui.remOpen !== null || ui.dueOpen !== null || chat.busy) return true;
     const a = document.activeElement;
     return !!(a && a.matches('input, textarea, select') && a.closest('#panel') && !isDraftBox(a.id));
@@ -1353,8 +1355,8 @@
     const box = `<div class="cmd"><textarea id="cmd" class="grow" rows="1" placeholder="${ph}" aria-label="Prompt or command">${esc(draft.cmd)}</textarea><button class="btn primary" id="cmd-go" ${inChat && chat.busy ? 'disabled' : ''}>Send</button></div>`;
     if (inChat) return `<div class="composer">${chatAttach()}${box}</div>`;       // no row hints and no bulk bar here: there are no rows
     const phone = PHONE();      // a tap opens the task page there; the tick box selects
-    return `<div class="composer"><div class="attach">${ids.length ? 'Attached: ' + ids.map(id => `<span class="chip">Task-${id}</span>`).join('') : phone ? 'Nothing attached · tick a row to attach it' : 'Nothing attached · tap a row to attach it'}</div>
-      ${box}
+    return `${handBarHtml()}${ui.newOpen && !phone ? newLineHtml() : ''}<div class="composer"><div class="attach">${ids.length ? 'Attached: ' + ids.map(id => `<span class="chip">Task-${id}</span>`).join('') : phone ? 'Nothing attached · tick a row to attach it' : 'Nothing attached · tap a row to attach it'}</div>
+      ${box}<div data-add-prev="cmd">${addPreviewHtml('cmd')}</div>
       <p class="hint keys">Tap a row to select it (the bulk bar appears) · <kbd>j</kbd><kbd>k</kbd> move · <kbd>d</kbd> done · <kbd>x</kbd> drop · <kbd>s</kbd> snooze · <kbd>t</kbd> top · <kbd>l</kbd> long-term · <kbd>e</kbd> details · double-click a row for details · <kbd>Esc</kbd> deselect</p>
       <p class="hint touch">${phone ? 'Tap a row to open it · tick the box to select it' : 'Tap a row to select it · double-tap or ▸ for details'}</p></div>
       ${phone ? shortBar() : `<div class="bulk" id="bulk"><b id="bulk-n"></b> selected
@@ -1509,9 +1511,10 @@
     pb.style.bottom = tray.classList.contains('on') ? tray.offsetHeight + 'px' : '';
   }
   const dueDays = x => x.due ? fmtDue(x.due).days : null;
-  // Shown wherever a list of open tasks would be, when there are none. Only says how tasks arrive today.
+  // Shown wherever a list of open tasks would be, when there are none: how to add a first task (stage 6).
   function noTasksHtml() {
-    return '<div class="empty"><b>No open tasks.</b> Tasks arrive from the inputs you switch on in Settings (Plaud recordings, Canvas), from suggestions you accept in Review (mail, Slack), and from Chat, where Claude can propose a task for you to create. Coming from a Notion tasks database? Run <code>python -m factotum import-notion --dry-run</code>, then <code>--apply</code> (docs/SETUP.md §5).</div>';
+    const how = PHONE() ? 'Tap <b>+</b> at the bottom' : 'Press <kbd>n</kbd> or <b>New task</b>';
+    return `<div class="empty"><b>No open tasks yet.</b> ${how} and type one line, for example <code>Email the lab the dataset fri ~S</code>, then Enter. Or write a sentence in the box above and Claude files it for you. Tasks also arrive from the inputs you switch on in Settings and from suggestions in Review. Coming from a Notion tasks database? See docs/SETUP.md §5.</div>`;
   }
   function todayGroups(lv) {
     const ready = (lv || effectiveLinkView()) === 'ready';
@@ -2087,7 +2090,7 @@
         if (p.op === 'link_thread' || p.applied) return `<div class="pprop"><span></span>${words}<span class="chip staged">${p.op === 'create' && p.task_id ? 'created ' + tref(p.task_id) : 'linked'}</span></div>`;
         if (staged.has(placeKey(p, m.id, i))) return `<div class="pprop"><span></span>${words}<span class="chip staged">staged</span></div>`;
         if (!PLACE_OPS.has(p.op)) return `<div class="pprop"><span></span>${words}<span></span></div>`;
-        return `<label class="pprop"><input type="checkbox" data-pprop="${esc(k)}" ${pl.off.has(k) ? '' : 'checked'} aria-label="Stage this">${words}${p.op === 'create' ? `<button class="btn small" data-place-create="${esc(k)}">Create</button>` : '<span></span>'}</label>`;
+        return `<label class="pprop"><input type="checkbox" data-pprop="${esc(k)}" ${pl.off.has(k) ? '' : 'checked'} aria-label="Stage this">${words}${p.op === 'create' ? `<span class="pbtns"><button class="btn small" data-place-create="${esc(k)}">Create</button>${PHONE() ? '' : `<button class="btn small" data-edit-first="${esc(k)}">Edit first</button>`}</span>` : '<span></span>'}</label>`;
       };
       const short = PHONE() && !pl.more && props.length > 2;
       const rows = (short ? props.slice(0, 2) : props).map((p, i) => row(p, i)).join('')
@@ -2150,6 +2153,7 @@
       el.querySelectorAll('[data-place-more]').forEach(b => b.onclick = e => { e.preventDefault(); pl.more = true; swapPlace(pl); });
       el.querySelectorAll('[data-place-stage]').forEach(b => b.onclick = () => stagePlace(pl, +b.dataset.placeStage.split('|')[1], !!pl.opts.decision));
       el.querySelectorAll('[data-place-create]').forEach(b => b.onclick = e => { e.preventDefault(); const [, mid, i] = b.dataset.placeCreate.split('|'); placeCreate(+mid, +i); });
+      el.querySelectorAll('[data-edit-first]').forEach(b => b.onclick = e => { e.preventDefault(); const [, mid, i] = b.dataset.editFirst.split('|'); editFirst(+mid, +i); });
       el.querySelectorAll('[data-pdraft]').forEach(b => b.onclick = async () => {
         const [, mid, i] = b.dataset.pdraft.split('|'); const m = pl.messages.find(x => x.id === +mid); const d = m && (m.drafts || [])[+i]; if (!d) return;
         try { await api('/api/chat/drafts/open', { method: 'POST', body: JSON.stringify({ draft: d }) }); toast('Shown in Mailbird'); }
@@ -2429,6 +2433,143 @@
     document.getElementById('tray-discard-sel').onclick = () => discardStaged(sel());
   }
 
+  // ---------- by hand (stage 6): New task ----------
+  // One line (design §12.7, frame 6): `n` or New task opens it on a desktop's list tabs; a preview says how the line
+  // will be filed and what each word means; Enter makes the task at once (POST /api/add, one batch: Undo drops it).
+  // The line is sent as typed (nothing stripped); the Today command box takes `add …` / `new …` / `+ …` too, and
+  // only there is the verb stripped (`verb: true`). A key rides with every add: two Enters with nothing typed
+  // between them carry the same key, so the server makes one task; an edited line gets a new key.
+  const ADD_RE = /^\s*(?:(?:add|new)\s+|\+\s*)/i;
+  function newKey() {
+    const b = new Uint8Array(12); crypto.getRandomValues(b);
+    return Array.from(b, x => (x % 36).toString(36)).join('');
+  }
+  const LIST_TABS = ['today', 'timeline', 'projects'];
+  function handBarHtml() {
+    if (PHONE()) return '';      // a phone has the round button (Task 12)
+    return `<div class="handbar"><button class="btn small" id="new-open" aria-expanded="${ui.newOpen}">+ New task <kbd>n</kbd></button></div>`;
+  }
+  function newLineHtml() {
+    return `<div class="newline"><label class="lbl" for="new-line">New task</label>
+      <input id="new-line" autocomplete="off" placeholder="Email the lab the dataset fri #project ~S after 120" value="${esc(draft.newLine)}">
+      <div data-add-prev="new">${addPreviewHtml('new')}</div>
+      <div class="nlact"><button class="btn primary" id="new-add">Add</button><button class="btn" id="new-add-open">Add and open</button><span class="hint">The task exists the moment you press Enter. Undo removes it.</span></div></div>`;
+  }
+  // The last preview each box was answered with: {text, res}; drawn only while its box still holds an add line.
+  const addPrev = { new: null, cmd: null }, addPrevT = {};
+  const addText = slot => slot === 'cmd' ? draft.cmd : draft.newLine;
+  function addPreviewHtml(slot) {
+    const cur = addText(slot) || '', p = addPrev[slot];
+    if (!cur.trim() || (slot === 'cmd' && !ADD_RE.test(cur)) || !p || !p.res || !p.res.is_add) return '';
+    const r = p.res, parts = r.parts || [], refused = r.refused || [];
+    const chip = x => x.kind === 'waits_on' || x.kind === 'part_of' ? `<span class="lb ${x.kind === 'waits_on' ? 'wait' : 'ok'}">${linkTasks(x.label)}</span>`
+      : `<span class="chip${x.kind === 'project' ? ' proj' : x.kind === 'due' || x.kind === 'effort' ? ' mono' : ''}">${esc(x.label)}</span>`;
+    return `<div class="addprev"><div class="lbl">Will be added as</div>
+      <div class="aprow"><div class="apname"><span class="newtag">new</span> <span class="nm">${esc(r.name)}</span></div><div class="apchips">${parts.map(chip).join('')}</div></div>
+      ${parts.length ? `<div class="legend">${parts.map(x => `<span><span class="code">${esc(x.words)}</span> ${esc(x.legend)}</span>`).join('')}</div>` : ''}
+      ${refused.length ? `<div class="refused">${refused.map(x => `<div>${x.words ? `<span class="code">${esc(x.words)}</span> ` : ''}${esc(x.why)}</div>`).join('')}</div>` : ''}</div>`;
+  }
+  // Only the preview's container is redrawn: the box being typed in is left alone.
+  function swapAddPrev(slot) {
+    const el = document.querySelector(`#panel [data-add-prev="${slot}"]`); if (!el) return;
+    el.innerHTML = addPreviewHtml(slot); wireDetail(el);
+  }
+  // 250 ms after the last keystroke; an answer for text that has changed since is dropped.
+  function previewAdd(slot, text) {
+    clearTimeout(addPrevT[slot]);
+    if (!text.trim() || (slot === 'cmd' && !ADD_RE.test(text))) { swapAddPrev(slot); return; }
+    addPrevT[slot] = setTimeout(async () => {
+      let res;
+      try { res = await api('/api/add/preview?text=' + encodeURIComponent(text) + (slot === 'cmd' ? '&verb=1' : '')); } catch (_) { return; }
+      if (text !== addText(slot)) return;
+      addPrev[slot] = { text, res }; swapAddPrev(slot);
+    }, 250);
+  }
+  // Makes the task now. input: {text, verb?} (a line) or {fields}; opts: {open, clear, said}. Returns its id, or null
+  // when it was not made (the caller's text stays) or another add is still in flight (the call is ignored).
+  let adding = false;
+  async function addTask(input, opts = {}) {
+    if (adding) return null;
+    adding = true;
+    try {
+      let res;
+      try { res = await api('/api/add', { method: 'POST', body: JSON.stringify(Object.assign({}, input, { key: draft.newKey })) }); }
+      catch (e) {
+        if (!(e && e.message === 'signed out')) toast('Not added: ' + (e.detail || (e.network ? 'the server did not answer' : e.message)));
+        return null;
+      }
+      const id = res.task_id;
+      if (opts.clear) opts.clear();
+      draft.newKey = newKey();
+      lastBatch = res.batch_id;
+      try { await load(); } catch (_) {}      // the task is made either way; the lists catch up on the next load
+      if (opts.open) openTask(id); else if (!PHONE()) jumpTo(id, false);
+      toast((opts.said ? opts.said(id) : `Added Task-${id}`) + (res.already ? ' (already added)' : '')
+        + ((res.refused || []).length ? ' · ' + res.refused.map(r => (r.words ? r.words + ': ' : '') + r.why).join(' · ') : '')
+        + ((res.skipped || []).length ? ' · ' + res.skipped[0].why : ''), true, { buttons: [{ text: 'Open', run: () => goTask(id) }] });
+      return id;
+    } finally { adding = false; }
+  }
+  function focusNewLine() {
+    const el = document.getElementById('new-line'); if (!el) return;
+    el.focus({ preventScroll: true }); el.setSelectionRange(el.value.length, el.value.length);
+  }
+  // `n`, the New task button, Edit first: the line opens on this list tab (Today from any other tab or a task page).
+  function openNewLine() {
+    ui.newOpen = true;
+    if (ui.page !== null || !LIST_TABS.includes(ui.tab)) go(LIST_TABS.includes(ui.tab) ? ui.tab : 'today'); else render();
+    focusNewLine();
+  }
+  function addFromLine(open) {
+    const sent = draft.newLine;
+    if (!sent.trim()) { focusNewLine(); return; }
+    // A line typed further while the add was in flight is kept (it got a new key, so Enter makes it too).
+    addTask({ text: sent }, { open, clear: () => { if (draft.newLine === sent) draft.newLine = ''; } }).then(id => { if (id != null && !open) focusNewLine(); });
+  }
+  // A proposed new task as an add line: name, date (with ! when hard), #project, ~effort, under N, after N.
+  const compact = s => String(s || '').replace(/[^A-Za-z0-9]/g, '');      // the server compares projects the same way
+  function addLineOf(f) {
+    const ln = [String(f.name || '').trim()], links = f.links || [];
+    if (f.due) ln.push(String(f.due).slice(0, 10) + (f.hard ? '!' : ''));
+    if (f.project && compact(f.project)) ln.push('#' + compact(f.project));
+    if (f.effort) ln.push('~' + f.effort);
+    const n = kind => { const l = links.find(l => l && l.kind === kind && Number.isInteger(l.other)); return l ? l.other : null; };
+    if (n('part_of') != null) ln.push('under ' + n('part_of'));
+    if (n('waits_on') != null) ln.push('after ' + n('waits_on'));
+    return ln.filter(Boolean).join(' ');
+  }
+  // Edit first on a proposed new task: its line goes into the New task line, to be changed and added with Enter.
+  function editFirst(mid, i) {
+    const p = proposalsOf(mid)[i]; if (!p || p.op !== 'create') return;
+    const f = p.fields || {};
+    draft.newLine = addLineOf(f); draft.newKey = newKey();
+    openNewLine();
+    previewAdd('new', draft.newLine);
+    if ((f.links || []).some(l => l && typeof l.other === 'string')) toast('A link to another new task is left out');
+  }
+  function wireNew(panel) {
+    const open = document.getElementById('new-open');
+    if (open) open.onclick = () => { if (ui.newOpen) { ui.newOpen = false; render(); } else openNewLine(); };
+    const nl = document.getElementById('new-line');
+    if (nl) {
+      nl.oninput = () => { draft.newLine = nl.value; previewAdd('new', nl.value); };
+      nl.addEventListener('keydown', e => {
+        if (e.key === 'Escape') { e.preventDefault(); ui.newOpen = false; render(); }      // the text stays in draft
+        else if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); addFromLine(false); }
+        e.stopPropagation();      // no key typed here acts on the list
+      });
+    }
+    const add = document.getElementById('new-add'); if (add) add.onclick = () => addFromLine(false);
+    const addOpen = document.getElementById('new-add-open'); if (addOpen) addOpen.onclick = () => addFromLine(true);
+  }
+  // A changed line is a new add: a new key (the New task line, the Today box holding an add line, the phone
+  // sheet's name, a step's line). The Today box's preview follows what is typed there.
+  document.addEventListener('input', e => {
+    const id = (e.target && e.target.id) || '';
+    if (id === 'new-line' || id === 'new-name' || /^step-line-\d+$/.test(id) || (id === 'cmd' && ADD_RE.test(e.target.value))) draft.newKey = newKey();
+    if (id === 'cmd' && ui.tab !== 'chat') previewAdd('cmd', e.target.value);
+  });
+
   // ---------- wiring ----------
   // A text box that grows: Enter sends (Shift+Enter is a new line); on a touch keyboard Enter is a new line and the button sends.
   function typing(el, key, send) {
@@ -2589,6 +2730,7 @@
     ['chat-threads-close', 'chat-backdrop'].forEach(id => { const el = document.getElementById(id); if (el) el.onclick = () => { ui.chatDrawer = false; render(); }; });
     if (ui.tab === 'chat' && chat.scroll) { chat.scroll = false; window.scrollTo({ top: document.documentElement.scrollHeight }); }
     wirePlaces(panel);
+    wireNew(panel);
     placeReviewBar();
     const po = document.getElementById('chat-pick-open'); if (po) po.onclick = () => { ui.pickOpen = !ui.pickOpen; draft.pick = ''; render(); const el = document.getElementById('chat-pick'); if (el) el.focus(); };
     const pk = document.getElementById('chat-pick');
@@ -2727,6 +2869,14 @@
   }
   async function sendPrompt(text) {
     if (!text) return;
+    // An add line makes the task at once (stage 6), never a tray command. The Chat tab's box keeps its behaviour.
+    // The Send handler has emptied the box: what is there now was typed since, so the clear leaves it, and a line
+    // not added goes back ahead of it.
+    if (ui.tab !== 'chat' && ADD_RE.test(text)) {
+      const id = await addTask({ text, verb: true }, { clear: () => {} });
+      if (id == null) { draft.cmd = draft.cmd.trim() ? text + '\n' + draft.cmd : text; render(); }
+      return;
+    }
     let res;
     try { res = await api('/api/commands', { method: 'POST', body: JSON.stringify({ text }) }); }
     catch (e) {
@@ -2813,6 +2963,8 @@
     }
     if (e.target.matches('input, select, textarea')) return;
     if (ui.page !== null) return;      // the task page covers the tab: no key acts on what is under it
+    // Before the returns below: Review has its own keys, and an empty list has no rows (and says "Press n").
+    if (e.key === 'n' && !e.ctrlKey && !e.metaKey && !e.altKey && !PHONE()) { e.preventDefault(); openNewLine(); return; }
     if (ui.tab === 'review') { const map = { d: 'done', k: 'keep', s: 'later', x: 'drop', t: 'top', l: 'longterm' }; if (map[e.key]) { e.preventDefault(); reviewAct(map[e.key]); } return; }
     const visible = [...document.querySelectorAll('#panel .row')].map(r => +r.dataset.id); if (!visible.length) return;
     const i = visible.indexOf(ui.focus);

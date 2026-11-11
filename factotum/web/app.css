@@ -702,6 +702,34 @@ label.pprop { cursor: pointer; }
   body.kb-open .tray, body.kb-open .review .card .big, body.kb-open .pagebar, body.kb-open .fab { display: none; }
 }
 
+/* New task by hand (stage 6, frame 6): the bar above the box, the one line, its "Will be added as" preview */
+.pprop .pbtns { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; align-self: center; }
+.handbar { display: flex; gap: 8px; margin-bottom: 10px; }
+.handbar kbd, .empty kbd { font-family: var(--mono); font-size: 11px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; margin-left: 4px; background: var(--bg); color: var(--muted); }
+.newline { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px; margin-bottom: 14px; display: flex; flex-direction: column; gap: 10px; }
+.newline .lbl, .addprev .lbl { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; }
+.newline input { width: 100%; font: inherit; font-size: 15px; padding: 10px 12px; min-height: 44px; border: 1px solid var(--accent); border-radius: var(--radius); background: var(--surface); color: var(--fg); }
+.newline [data-add-prev]:empty { display: none; }
+.addprev { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+.composer [data-add-prev] .addprev { margin-top: 8px; }
+.addprev .aprow { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; }
+.addprev .apname { min-width: 0; overflow-wrap: anywhere; }
+.addprev .apname .nm { font-weight: 500; }
+.addprev .newtag { font-family: var(--mono); font-size: 11px; background: var(--accent-soft); color: var(--accent); border-radius: 4px; padding: 1px 6px; }
+.addprev .apchips { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; align-items: center; }
+.addprev .chip { color: var(--fg); background: var(--surface-2); }
+.addprev .chip.mono { font-family: var(--mono); }
+.addprev .lb { cursor: default; }
+.addprev .lb .tref { font-family: var(--mono); color: inherit; text-decoration: none; }
+.addprev .lb .tref:hover { text-decoration: underline; }
+.addprev .legend { display: flex; gap: 4px 14px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+.addprev .legend .code { font-size: 12px; color: var(--fg); }
+.addprev .refused { font-size: 12px; color: var(--crit); display: flex; flex-direction: column; gap: 2px; overflow-wrap: anywhere; }
+.addprev .refused .code { font-size: 12px; color: var(--crit); }
+.newline .nlact { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.newline .nlact .btn { min-height: 40px; padding: 8px 16px; }
+.newline .nlact .hint { margin: 0; }
+
 /* A batch a skill staged (phase 6): above every tab until Apply or Dismiss */
 .pending { background: var(--top-soft); border: 1px solid var(--top); border-radius: 10px; padding: 10px 12px; margin-bottom: 14px; }
 .starter { background: var(--warn-soft); border: 1px solid var(--warn); border-radius: 10px; padding: 10px 12px; margin-bottom: 14px; display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: center; }
