@@ -121,3 +121,69 @@ def test_the_preview_checks_the_tasks_it_names(cfg, tmp_path):
     assert pv("Read #nosuch")["refused"][0]["why"] == "no project matches #nosuch" + K
     assert pv("")["refused"] == [{"words": "", "why": "a task needs a name"}]
     assert one(conn, "SELECT COUNT(*) AS n FROM batches")["n"] == n_batches        # a preview writes nothing
+
+
+# --- Task 3: a new task exists on Enter
+
+def test_a_task_made_by_hand_exists_at_once_and_its_undo_drops_it(cfg, tmp_path):
+    client, conn = _client(cfg, tmp_path)
+    mk(conn, 12, name="Ask the chair")
+    r = client.post("/api/add", json={"text": "Email the lab #personal ~S after 12", "key": "k1abcdef"}).json()
+    t = one(conn, "SELECT * FROM tasks WHERE id = ?", (r["task_id"],))
+    assert not r["already"] and r["refused"] == [] and r["skipped"] == []
+    assert (t["name"], t["project"], t["effort"], t["source"], t["status"]) == ("Email the lab", "Personal", "S", "Manual", "open")
+    assert (r["task_id"], 12, "waits_on") in active_rels(conn)
+    assert one(conn, "SELECT source FROM batches WHERE id = ?", (r["batch_id"],))["source"] == "ui"
+    client.post(f"/api/batches/{r['batch_id']}/undo", json={})
+    t = one(conn, "SELECT status, closed_by FROM tasks WHERE id = ?", (r["task_id"],))
+    assert (t["status"], t["closed_by"]) == ("dropped", "undo") and (r["task_id"], 12, "waits_on") not in active_rels(conn)
+
+
+def test_two_quick_enters_make_one_task(cfg, tmp_path):
+    from factotum import by_hand
+    client, conn = _client(cfg, tmp_path)
+    a = client.post("/api/add", json={"text": "Water the plants", "key": "samekey1"}).json()
+    b = client.post("/api/add", json={"text": "Water the plants", "key": "samekey1"}).json()
+    assert b["already"] and b["task_id"] == a["task_id"] and b["batch_id"] is None
+    shared = connect(tmp_path / "t.db", shared=True)
+    got = []
+    ts = [threading.Thread(target=lambda: got.append(by_hand.add(shared, cfg, text="Feed the cat", key="samekey2", today=TODAY))) for _ in range(2)]
+    [t.start() for t in ts]; [t.join() for t in ts]
+    assert len({g["task_id"] for g in got}) == 1 and sorted(g["already"] for g in got) == [False, True]
+    assert one(conn, "SELECT COUNT(*) AS n FROM tasks WHERE name IN ('Water the plants', 'Feed the cat')")["n"] == 2
+
+
+def test_refused_words_stay_in_the_name_and_are_reported(cfg, tmp_path):
+    client, conn = _client(cfg, tmp_path)
+    r = client.post("/api/add", json={"text": "Read after 99", "key": "k2abcdef"}).json()
+    assert one(conn, "SELECT name FROM tasks WHERE id = ?", (r["task_id"],))["name"] == "Read after 99"
+    assert r["refused"] == [{"words": "after 99", "why": "no Task-99" + K}] and not active_rels(conn)
+
+
+def test_add_with_fields_for_the_phone_sheet_add_a_step_and_duplicate(cfg, tmp_path):
+    client, conn = _client(cfg, tmp_path)
+    mk(conn, 30); mk(conn, 12)
+    r = client.post("/api/add", json={"key": "k3abcdef", "fields": {"name": "Copy", "due": "2026-11-20", "hard": True, "project": "Personal", "effort": "M",
+                                                                   "context": "ctx", "counterpart": "a@b.c", "under": 30, "after": 12}}).json()
+    t = one(conn, "SELECT * FROM tasks WHERE id = ?", (r["task_id"],))
+    assert (t["due"], t["hard"], t["project"], t["effort"], t["context"], t["counterpart"]) == ("2026-11-20", 1, "Personal", "M", "ctx", "a@b.c")
+    assert {(r["task_id"], 30, "part_of"), (r["task_id"], 12, "waits_on")} <= active_rels(conn)
+    r = client.post("/api/add", json={"key": "k4abcdef", "fields": {"name": "X", "project": "Nope", "effort": "XXL", "due": "soon", "score": 9, "after": "12"}}).json()
+    assert [x["why"] for x in r["refused"]] == ["'soon' is not a date", "'Nope' is not a project", "'XXL' is not an effort (XS, S, M, L)",
+                                                "'12' is not a task number", "score cannot be set on a new task"]
+    assert one(conn, "SELECT project, effort, due FROM tasks WHERE id = ?", (r["task_id"],)) == {"project": None, "effort": None, "due": None}
+    assert client.post("/api/add", json={"fields": {"name": " "}}).status_code == 400
+    assert client.post("/api/add", json={"text": "x", "key": "bad key!"}).status_code == 400
+    assert client.post("/api/add", json={}).status_code == 400
+
+
+def test_the_add_command_line(cfg, tmp_path, monkeypatch, capsys):
+    from factotum import __main__ as cli
+    monkeypatch.setenv("FACTOTUM_CONFIG", str(FIXTURE)); monkeypatch.setenv("FACTOTUM_DB", str(tmp_path / "c.db"))
+    cli.main(["add", "Read the paper #personal", "--dry-run"])
+    assert json.loads(capsys.readouterr().out)["name"] == "Read the paper"
+    c = connect(tmp_path / "c.db")
+    assert one(c, "SELECT COUNT(*) AS n FROM tasks")["n"] == 0
+    cli.main(["add", "Read the paper #nosuch"])
+    out = capsys.readouterr().out
+    assert out.startswith("Task-") and "#nosuch: no project matches #nosuch" in out

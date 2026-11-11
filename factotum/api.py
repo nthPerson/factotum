@@ -3,6 +3,7 @@
   GET  /api/tasks?status=open|all        tasks with computed score/priority/tier/fade/last-call
   GET  /api/tasks/{id}?before=&limit=    one task, any status: links, reminders, its task links, where it came from, a page of History (stamps neighbours_seen_at)
   POST /api/commands  {text}             parse the grammar → changes (nothing applied)
+  POST /api/add {text|fields, key}        make a task now (one ui batch; the same key twice is one task)
   GET  /api/add/preview?text=            how an add line will be filed, the tasks it names checked (writes nothing)
   POST /api/batches/apply {source, changes}   the one write path
   POST /api/batches/{id}/undo
@@ -68,6 +69,12 @@ def _index_html() -> str:
 class ApplyBody(BaseModel):
     source: str = "ui"
     changes: list[dict[str, Any]]
+
+
+class AddBody(BaseModel):
+    text: str | None = None
+    fields: dict | None = None
+    key: str | None = None
 
 
 class CommandBody(BaseModel):
@@ -349,6 +356,17 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
     @app.get("/api/add/preview")
     def add_preview(text: str = ""):
         return by_hand.preview(conn, eff_cfg(), text, date.today())
+
+    @app.post("/api/add")
+    def add_task(body: AddBody):
+        try:
+            res = by_hand.add(conn, eff_cfg(), text=body.text, fields=body.fields, key=body.key, today=date.today())
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        sch = getattr(app.state, "scheduler", None)
+        if not res["already"] and sch is not None:
+            sch.wake()
+        return res
 
     @app.post("/api/batches/apply")
     def apply_batch(body: ApplyBody):
