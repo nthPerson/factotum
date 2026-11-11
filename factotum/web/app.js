@@ -548,7 +548,13 @@
     el.classList.add('on');
     clearTimeout(toast.t); toast.t = setTimeout(() => el.classList.remove('on'), 8000);
     const u = document.getElementById('undo');
-    if (u) u.onclick = async () => { const res = await undoBatch(lastBatch); lastBatch = null; await load(); toast(undoSaid(res)); };
+    if (u) u.onclick = async () => {
+      const id = lastBatch; u.disabled = true;
+      let res;
+      try { res = await undoBatch(id); } catch (e) { toast('Undo failed: ' + e.message, true); return; }     // the batch stays undoable: Undo again
+      if (lastBatch === id) lastBatch = null;
+      await load(); toast(undoSaid(res));
+    };
   }
   // The sign-in has expired (see `expired`): a full-screen "Sign in again" over the whole app, whose
   // button reloads at the same address. The tray is in localStorage, so it survives the reload. The rest
@@ -798,9 +804,10 @@
       <div class="tw">${cell(g.rows[0])}${cell(g.rows[1])}<div class="twb"><button class="btn small primary" data-twin-merge="${g.goes}:${g.keep}:${g.eid}">Merge into ${g.keep}</button><button class="btn small" data-twin-not="${g.eid}:${g.goes}:${g.keep}">Not the same</button></div></div></section>`;
   }
   const TICK = '<svg role="img" aria-label="Done" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5 9-10"></path></svg>';
+  const CROSS = '<svg role="img" aria-label="Dropped" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7l10 10"></path><path d="M17 7L7 17"></path></svg>';
   function closedStepHtml(t) {
     const dropped = t.status === 'dropped', when = dayMon(t.completed_at);
-    return `<a class="lstep closed" href="/t/${t.id}" data-lb="${t.id}">${TICK}<span class="body"><span><span class="code">Task-${t.id}</span> <span class="name">${esc(t.name)}</span></span>${t.outcome ? `<span class="outcome">Outcome: <span>${esc(t.outcome)}</span></span>` : ''}</span><span class="chip ${dropped ? 'dropped' : 'donechip'}">${dropped ? 'dropped' : 'done'}${when ? ' ' + esc(when) : ''}</span></a>`;
+    return `<a class="lstep closed${dropped ? ' dropped' : ''}" href="/t/${t.id}" data-lb="${t.id}">${dropped ? CROSS : TICK}<span class="body"><span><span class="code">Task-${t.id}</span> <span class="name">${esc(t.name)}</span></span>${t.outcome ? `<span class="outcome">Outcome: <span>${esc(t.outcome)}</span></span>` : ''}</span><span class="chip ${dropped ? 'dropped' : 'donechip'}">${dropped ? 'dropped' : 'done'}${when ? ' ' + esc(when) : ''}</span></a>`;
   }
   // Steps and waiting tasks are drawn indented: a copy carries `under`, never the row openOnes() returned.
   const under = x => Object.assign({}, x, { under: true });
@@ -1311,8 +1318,8 @@
   function noTasksHtml() {
     return '<div class="empty"><b>No open tasks.</b> Tasks arrive from the inputs you switch on in Settings (Plaud recordings, Canvas), from suggestions you accept in Review (mail, Slack), and from Chat, where Claude can propose a task for you to create. Coming from a Notion tasks database? Run <code>python -m factotum import-notion --dry-run</code>, then <code>--apply</code> (docs/SETUP.md §5).</div>';
   }
-  function todayGroups() {
-    const ready = effectiveLinkView() === 'ready';
+  function todayGroups(lv) {
+    const ready = (lv || effectiveLinkView()) === 'ready';
     const o = openOnes().filter(x => !(x.snoozed_until && x.snoozed_until > data.today) && (!ready || readyRow(x)));   // Later = hidden until its date
     const by = f => o.filter(f);
     const today = by(x => dueDays(x) === 0), tomorrow = by(x => dueDays(x) === 1);
@@ -1326,9 +1333,15 @@
   function renderToday() {
     const { groups } = todayGroups();      // snoozed rows are not in these groups but are open: Timeline lists them
     const lists = effectiveLinkView() === 'linked' ? linkedHtml() : groups.map(group).join('') +
-      (!openOnes().length ? noTasksHtml() : groups.some(g => g.rows.length) ? '' : '<div class="empty">Nothing is due today or this week. Every open task is on Timeline.</div>');
+      (!openOnes().length ? noTasksHtml() : groups.some(g => g.rows.length) ? '' : todayEmptyHtml());
     return summaryHtml() + composer() + linkBarHtml() + lists + legendHtml() +
       `<div class="note">Soft dates that slipped, new items, and fading backlog are not here. They wait in <b>Review</b> so this screen stays short.</div>`;
+  }
+  // Today with no rows. Under Ready now the waiting tasks it hides may be due this week: say so, not "nothing is due".
+  function todayEmptyHtml() {
+    const hidden = effectiveLinkView() !== 'ready' ? 0 : new Set(todayGroups('all').groups.flatMap(g => g.rows.map(x => x.id))).size;
+    if (!hidden) return '<div class="empty">Nothing is due today or this week. Every open task is on Timeline.</div>';
+    return `<div class="empty">Nothing here is ready now: ${hidden === 1 ? 'the one task' : `all ${hidden} tasks`} due today or this week ${hidden === 1 ? 'waits' : 'wait'} on another task. <b>All</b> shows ${hidden === 1 ? 'it' : 'them'}.</div>`;
   }
   const RECENT_CAP = 30;
   function timelineGroups() {
@@ -1649,7 +1662,7 @@
     if (!v || v.dir === 'in') return null;
     return linkPredicate(v.kind, v.other, c.new == null);
   }
-  const noteAfter = c => c.note ? ` <span class="f">— ${esc(c.note)}</span>` : '';
+  const noteAfter = c => c.note ? ` <span class="cnote">— ${esc(c.note)}</span>` : '';
   function changeLines(b) {
     return b.changes.filter(c => c.field !== 'link' || logLinkWords(c)).map(c => c.field === 'link' ? `<div class="logc"><span class="code">Task-${c.task_id}</span> <span class="name">${esc(c.task_name || '')}</span> <span class="f">${esc(logLinkWords(c))}</span>${noteAfter(c)}</div>`
       : c.field === 'evidence' ? `<div class="logc">${c.task_id ? `<span class="code">Task-${c.task_id}</span> <span class="name">${esc(c.task_name || '')}</span>` : '<span class="code">suggestion</span>'} <span class="f">evidence #${c.new && c.new.evidence_id}</span> ${esc((c.new || {}).verdict || '')}</div>`
@@ -1937,7 +1950,12 @@
     const rn = document.getElementById('rv-note'); if (rn) rn.oninput = () => { ui.rvNote = { id: +rn.closest('.card').dataset.id, text: rn.value }; };
     const rm = document.getElementById('review-more'); if (rm) rm.onclick = () => loadReview();
     wireReminders(panel); wireDue(panel);
-    panel.querySelectorAll('[data-undo]').forEach(b => b.onclick = async () => { const res = await undoBatch(+b.dataset.undo); await load(); logData = null; toast(undoSaid(res)); render(); });
+    panel.querySelectorAll('[data-undo]').forEach(b => b.onclick = async () => {
+      b.disabled = true;
+      let res;
+      try { res = await undoBatch(+b.dataset.undo); } catch (e) { b.disabled = false; toast('Undo failed: ' + e.message); return; }
+      await load(); logData = null; toast(undoSaid(res)); render();
+    });
     panel.querySelectorAll('[data-chat-canned]').forEach(b => b.onclick = () => sendChat('', b.dataset.chatCanned, [+b.dataset.id]));
     wireDetail(panel);
     panel.querySelectorAll('[data-chat-stage]').forEach(b => b.onclick = () => {

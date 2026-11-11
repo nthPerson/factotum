@@ -239,6 +239,8 @@ span.lb { cursor: default; }      /* stepsChip: the same look, not a link */
 .lstep.closed .outcome span { color: var(--fg); }
 .lstep.closed .chip { font-family: var(--mono); }
 .lstep.closed .chip.donechip { background: var(--ok-soft); color: var(--ok); }
+.lstep.closed.dropped svg { color: var(--muted); }
+.lstep.closed .chip.dropped { background: var(--surface); color: var(--muted); box-shadow: inset 0 0 0 1px var(--line); font-style: italic; }      /* closed without being done: quiet, outlined, never the plain grey chip */
 .lstep.closed:hover .name { color: var(--fg); }
 .lgroup.twin { border-style: dashed; border-color: var(--warn); }
 .lgroup.twin .lhead { background: var(--warn-soft); }
@@ -407,7 +409,7 @@ body.tray-open main { padding-bottom: 60vh; }
 .card .why.ok { color: var(--ok); } .card .why.chg { color: var(--top); }
 .card .why a { color: inherit; }
 .card h2 { margin: 0 0 6px; font-size: 20px; text-wrap: balance; font-weight: 600; }
-.card .sub { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+.card .sub { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
 .card p { margin: 0 0 8px; color: var(--muted); max-width: 62ch; }
 .card .links a { color: var(--accent); text-decoration: none; margin-right: 12px; font-size: 13px; }
 .card .big { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-top: 18px; }
@@ -522,7 +524,7 @@ body.tray-open main { padding-bottom: 60vh; }
 }
 .logb { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-bottom: 8px; } .logb.undone { opacity: .6; }
 .loghead { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
-.logc { font-size: 13px; padding: 2px 0; display: flex; gap: 6px; flex-wrap: wrap; overflow-wrap: anywhere; } .logc .name { color: var(--muted); max-width: 32ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .logc .f { font-family: var(--mono); }
+.logc { font-size: 13px; padding: 2px 0; display: flex; gap: 6px; flex-wrap: wrap; overflow-wrap: anywhere; } .logc .name { color: var(--muted); max-width: 32ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .logc .f { font-family: var(--mono); } .logc .cnote { color: var(--muted); font-style: italic; }      /* a change's free-text note: words, not a field name */
 .log .scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 .runs { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 520px; } .runs th, .runs td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); } .runs tr.bad td { color: var(--crit); }
 .bulk .remform { display: inline-flex; width: auto; }
