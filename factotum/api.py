@@ -829,7 +829,8 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
 
         def work():
             try:
-                res = chat.turn(conn, eff_cfg(), thread_id, body.text, body.attached, today=date.today(), canned=body.canned, runner=runner, on_event=q.put)
+                res = chat.turn(conn, eff_cfg(), thread_id, body.text, body.attached, today=date.today(), canned=body.canned, runner=runner, on_event=q.put,
+                                 asked=(body.origin, body.task_id))      # the prompt says where it was asked (a card and a task share a thread)
                 q.put({"type": "done", "result": res} if res.get("ok") else {"type": "error", "error": res.get("error") or "run failed", "result": res})
             except Exception as e:   # noqa: BLE001 — the stream must end with a reason, never hang
                 try:
