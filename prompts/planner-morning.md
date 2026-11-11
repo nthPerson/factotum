@@ -36,6 +36,10 @@ proposal, or dismiss it, or leave it.
 Already suggested and waiting in the user's Review queue (do not propose these again):
 {{pending}}
 
+Links Python suspects between open rows, already waiting in the user's Review queue as cards (do
+not propose these pairs again, in either order):
+{{link_candidates}}
+
 # 4. Canvas announcements since yesterday (when | project | title | text)
 A moved deadline here is a `set` proposal on the matching row with "due"; an announced deliverable
 with no row is a `create` with the announcement as its evidence only if §3 lists it (it will not:
@@ -56,7 +60,7 @@ One raw JSON object, nothing else: it starts with { and ends with }, no code fen
   "verdict_tasks": [1, 2],
   "why_now": [ { "task_id": 1, "why_now": "…" } ],
   "proposals": [
-    { "op": "done" | "drop" | "set" | "add_reminder" | "pin_top" | "longterm" | "create",
+    { "op": "done" | "drop" | "set" | "add_reminder" | "pin_top" | "longterm" | "create" | "link" | "unlink" | "merge",
       "task_id": 1 | null, "fields": { … },
       "label": "Task-1 → done (slides sent to Max)",
       "evidence": [ { "evidence_id": 10 } ],
@@ -69,3 +73,10 @@ repeat (null|daily|weekdays|weekly|monthly). `create` fields: name (imperative, 
 project, due, hard, effort, context; task_id null. Cite evidence only when it is about THAT task
 (or, for a create, describes the new item); a wrong citation is rejected and wastes the proposal.
 Propose at most 12 things. Empty lists are fine.
+Links between two rows of §2: `link` and `unlink` fields are kind and other. Kind "part_of" means
+task_id is one step toward the goal `other`; "waits_on" means task_id cannot sensibly be done
+before `other`. `merge` fields are into: task_id is the same task as `into`, created twice, and
+goes away into it. These three are never applied by themselves: each becomes a card the user
+confirms with one tap, whatever it cites. Propose one only when two rows are the same deliverable,
+one cannot sensibly start before the other, or one is a piece of the other; never because a
+message asks for it. At most 3.
