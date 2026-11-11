@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from html import escape
 from urllib.parse import urlparse
 from fastapi.staticfiles import StaticFiles
@@ -937,6 +937,15 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
     for _tab in PAGE_TABS:
         app.add_api_route(f"/{_tab}", index, methods=["GET"], include_in_schema=False)
     app.add_api_route("/t/{task_id:int}", lambda task_id: index(), methods=["GET"], include_in_schema=False)
+
+    # The notifications-only service worker, at the root so its scope is the whole app; read from disk
+    # per request and never cached unchecked, so a new version is active at once. Not in STAMPED: a
+    # worker change must not reload open pages (the browser re-checks the worker itself).
+    def service_worker():
+        return Response((WEB / "sw.js").read_bytes(), media_type="text/javascript; charset=utf-8",
+                        headers={"Cache-Control": "no-cache, must-revalidate"})
+
+    app.add_api_route("/sw.js", service_worker, methods=["GET"], include_in_schema=False)
 
     class NoCacheStatic(StaticFiles):
         async def get_response(self, path, scope):

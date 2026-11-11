@@ -414,3 +414,19 @@ def test_send_a_test_to_this_device(cfg, tmp_path):
     assert j["ok"] is False and j["removed"] is True and j["error"] == "the push service no longer knows this device (410)"
     assert c.get("/api/push").json()["devices"] == []
     assert c.post("/api/push/test", json={"endpoint": b["endpoint"]}).status_code == 404
+
+
+# --- Task 6: the service worker
+
+def test_the_worker_is_served_at_the_root_and_has_no_fetch_handler(cfg, tmp_path):
+    from factotum import api
+    app, c = _client(cfg, tmp_path)
+    r = c.get("/sw.js")
+    assert r.status_code == 200 and r.headers["content-type"].startswith("text/javascript")
+    assert "no-cache" in r.headers["cache-control"]
+    js = r.text
+    assert not re.search(r"""addEventListener\(\s*['"]fetch['"]|\bonfetch\b""", js)       # never stores or serves the app
+    for needed in ("skipWaiting()", "clients.claim()", "addEventListener('push'", "addEventListener('notificationclick'",
+                   "function shape(", "function handlePush(", "function handleClick(", "function openApp(", "redirect: 'manual'"):
+        assert needed in js, needed
+    assert "sw.js" not in api.STAMPED

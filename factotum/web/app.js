@@ -135,6 +135,22 @@
     render();
   }
 
+  // ---------- notifications (stage 2) ----------
+  // The service worker (/sw.js) only shows notifications and follows a tap on one; it never serves the app.
+  let workerError = null;      // why registering the worker failed, when it did (a string)
+  function registerWorker() {
+    if (!('serviceWorker' in navigator)) return Promise.resolve(null);
+    return navigator.serviceWorker.register('/sw.js', { scope: '/', updateViaCache: 'none' })
+      .catch(e => { workerError = String((e && e.message) || e); return null; });
+  }
+  // A tap on a notification while the app is open: the worker posts the address and this window follows
+  // it as Back and Forward do (a phone opens the task page, a desktop the task's row, /review the tab).
+  function followPath(path) {
+    if (!/^\/(t\/\d+|[a-z]+)?$/.test(path)) return;
+    setAddress(path); applyAddress({ type: 'worker' });
+  }
+  if ('serviceWorker' in navigator) navigator.serviceWorker.addEventListener('message', e => { if (e.data && e.data.type === 'open' && typeof e.data.path === 'string') followPath(e.data.path); });
+
   // ---------- loading ----------
   let pending = [];           // batches a skill staged (/api/proposals): Apply or Dismiss, above every tab
   async function load() {
@@ -1363,5 +1379,5 @@
   });
   window.addEventListener('resize', () => { const bar = document.querySelector('header.bar'); if (bar) document.documentElement.style.setProperty('--bar-h', bar.offsetHeight + 'px'); });
   document.addEventListener('visibilitychange', onReturn);
-  load().then(() => { applyAddress(); return loadSettings(); }).catch(e => { document.getElementById('panel').innerHTML = `<div class="empty">Could not load /api/tasks: ${esc(e.message)}</div>`; });
+  load().then(() => { applyAddress(); registerWorker(); return loadSettings(); }).catch(e => { document.getElementById('panel').innerHTML = `<div class="empty">Could not load /api/tasks: ${esc(e.message)}</div>`; });
 })();
