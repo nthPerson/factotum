@@ -235,3 +235,113 @@ def test_send_test_reaches_only_that_device(conn, cfg):
     n = json.loads(W.decrypt(got[0][1].content, ua, a))["notification"]
     assert n["title"] == "Factotum" and n["body"] == "Notifications work on this device." and n["navigate"] == "https://f.example/settings"
     assert AP.send_test(conn, cfg, "https://push.example/nobody", transport=t) is None
+
+
+# --- Task 4: a choice of provider
+
+from datetime import date, datetime  # noqa: E402
+from factotum import batches, notify, reminders, config as C  # noqa: E402
+from factotum.db import upsert_task  # noqa: E402
+from conftest import TODAY, task  # noqa: E402
+
+
+class Rec:
+    """Stands in for notify.publish and for app_push.send_all at once."""
+    def __init__(self, fail=None):
+        self.ntfy, self.app, self.fail = [], [], fail or set()
+    def push(self, cfg, title, body, **kw):
+        if "ntfy" in self.fail: raise OSError("ntfy down")
+        self.ntfy.append(dict(kw, title=title, body=body)); return "m1"
+    def device_push(self, conn, cfg, notice):
+        if "app" in self.fail: raise AP.NothingSent("503 from push.example: nope")
+        self.app.append(notice); return {"devices": 1, "sent": 1, "removed": 0, "failed": 0, "errors": []}
+
+
+def _due(conn, task_id=1, status="open"):
+    upsert_task(conn, task(id=task_id, name="Call Reza", due="2026-11-05")); conn.commit()
+    batches.apply(conn, [{"task_id": task_id, "op": "add_reminder", "fields": {"fire_at": "2026-11-03T09:00", "label": "before the meeting"}}], "ui", TODAY)
+    if status != "open":                                         # closed after the reminder was set
+        conn.execute("UPDATE tasks SET status = ? WHERE id = ?", (status, task_id)); conn.commit()
+
+
+def test_provider_is_a_settings_key_that_defaults_to_ntfy(cfg):
+    assert "notify.provider" in C.SETTINGS_KEYS and C.DEFAULTS["notify.provider"] == "ntfy"
+    assert notify.providers(cfg) == {"ntfy"}                     # the owner's file has no provider key: ntfy, as before
+    for v, want in (("app", {"app"}), ("both", {"ntfy", "app"}), ("pigeon", {"ntfy"})):
+        C.set_(cfg, "notify.provider", v); assert notify.providers(cfg) == want
+    assert C.get(C.load(C.EXAMPLE_CONFIG), "notify.provider") == "ntfy"
+
+
+def test_ready_names_only_providers_that_can_deliver(conn, cfg):
+    C.set_(cfg, "notify.ntfy.topic", ""); assert notify.ready(conn, cfg) == []
+    C.set_(cfg, "notify.ntfy.topic", "t"); assert notify.ready(conn, cfg) == ["ntfy"]
+    C.set_(cfg, "notify.provider", "both"); assert notify.ready(conn, cfg) == ["ntfy"]
+    _device(conn); assert notify.ready(conn, cfg) == ["ntfy", "app"]
+    C.set_(cfg, "notify.provider", "app"); assert notify.ready(conn, cfg) == ["app"]
+    assert notify.ready(conn, C.load(C.STARTER_CONFIG)) == []
+
+
+def test_a_reminder_goes_to_the_app_with_the_task_address(conn, cfg):
+    _due(conn); C.set_(cfg, "notify.provider", "app"); rec = Rec()
+    fired = reminders.fire(conn, cfg, datetime(2026, 11, 3, 9, 0, 30), rec.push, device_push=rec.device_push)
+    assert rec.ntfy == [] and len(rec.app) == 1 and fired[0]["errors"] == []
+    n = rec.app[0]
+    assert n["title"] == "Call Reza" and n["body"] == "before the meeting · due Nov 5" and n["path"] == "/t/1" and n["tag"] == "task-1"
+    assert [a["title"] for a in n["actions"]] == ["Done", "Snooze 1 h"] and n["urgency"] == "high" and n["ttl"] == 86400
+
+
+def test_ntfy_and_the_app_carry_the_same_token_links(conn, cfg):
+    _due(conn); C.set_(cfg, "notify.provider", "both"); rec = Rec()
+    reminders.fire(conn, cfg, datetime(2026, 11, 3, 9, 0, 30), rec.push, device_push=rec.device_push)
+    tok = conn.execute("SELECT token FROM reminders WHERE status = 'sent'").fetchone()[0]
+    assert [a["url"].split("/r/")[1] for a in rec.ntfy[0]["actions"]][:2] == [f"{tok}?a=snooze", f"{tok}?a=done"]
+    assert [a["path"] for a in rec.app[0]["actions"]] == [f"/r/{tok}?a=done", f"/r/{tok}?a=snooze"]
+
+
+def test_a_reminder_for_a_closed_task_has_no_buttons(conn, cfg):
+    _due(conn, status="dropped"); C.set_(cfg, "notify.provider", "app"); rec = Rec()
+    reminders.fire(conn, cfg, datetime(2026, 11, 3, 9, 0, 30), rec.push, device_push=rec.device_push)
+    assert rec.app[0]["actions"] == [] and "task is dropped" in rec.app[0]["body"] and rec.app[0]["path"] == "/t/1"
+
+
+def test_one_provider_failing_does_not_hold_the_other(conn, cfg):
+    _due(conn); C.set_(cfg, "notify.provider", "both"); rec = Rec(fail={"app"})
+    fired = reminders.fire(conn, cfg, datetime(2026, 11, 3, 9, 0, 30), rec.push, device_push=rec.device_push)
+    assert len(rec.ntfy) == 1 and fired[0]["errors"] == ["app: 503 from push.example: nope"]
+    assert conn.execute("SELECT status FROM reminders").fetchone()[0] == "sent"
+    _due(conn, task_id=2); rec2 = Rec(fail={"app", "ntfy"})
+    with pytest.raises(OSError):
+        reminders.fire(conn, cfg, datetime(2026, 11, 3, 9, 1), rec2.push, device_push=rec2.device_push)
+    conn.rollback()
+    assert conn.execute("SELECT status FROM reminders WHERE task_id = 2").fetchone()[0] == "pending"
+
+
+def test_with_the_key_file_gone_a_reminder_waits_and_the_log_says_why(conn, cfg):
+    from factotum.scheduler import Scheduler
+    _due(conn); _device(conn)                                    # a device, but no key file
+    C.set_(cfg, "notify.provider", "app")
+    Scheduler(cfg, conn, push=Rec().push).tick(datetime(2026, 11, 3, 9, 0, 30))   # the real app_push.send_all
+    assert conn.execute("SELECT status FROM reminders").fetchone()[0] == "pending"
+    run = conn.execute("SELECT ok, error FROM runs WHERE kind = 'reminder'").fetchone()
+    assert run[0] == 0 and "push-keys.json" in run[1] and "missing" in run[1]
+
+
+def test_the_scheduler_waits_when_no_provider_can_deliver_and_sends_to_the_app_when_one_can(conn, cfg):
+    from factotum.scheduler import Scheduler
+    _due(conn); C.set_(cfg, "notify.provider", "app"); rec = Rec()
+    s = Scheduler(cfg, conn, push=rec.push, device_push=rec.device_push)
+    s.tick(datetime(2026, 11, 3, 9, 0, 30))
+    assert rec.app == [] and conn.execute("SELECT status FROM reminders").fetchone()[0] == "pending"   # no device yet
+    _device(conn); s.tick(datetime(2026, 11, 3, 9, 1))
+    assert len(rec.app) == 1 and conn.execute("SELECT status FROM reminders").fetchone()[0] == "sent"
+
+
+def test_the_review_nudge_opens_review_in_the_app(conn, cfg):
+    from factotum.scheduler import Scheduler
+    upsert_task(conn, task(id=1, due=None, created_at="2026-10-30T00:00:00+00:00", last_mention_at="2026-10-30")); conn.commit()
+    C.set_(cfg, "notify.provider", "both"); rec = Rec()
+    out = Scheduler(cfg, conn, push=rec.push, device_push=rec.device_push)._review_push(cfg, date(2026, 11, 1), {})
+    assert out == "1 items" and len(rec.ntfy) == 1 and rec.ntfy[0]["click"].endswith("/review")
+    n = rec.app[0]
+    assert n["path"] == "/review" and n["tag"] == "review" and n["actions"] == [] and n["urgency"] == "normal" and n["ttl"] == 14400
+    assert n["title"] == rec.ntfy[0]["title"] and n["body"] == rec.ntfy[0]["body"]

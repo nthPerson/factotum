@@ -212,6 +212,7 @@ sinks:
     status_map: { open: Next, done: Done, dropped: Dropped, faded: Dropped, lapsed: Dropped }   # Factotum status → the Notion Status option
 
 notify:
+  provider: ntfy                # Settings → Notifications. Where reminders and the evening review nudge go: ntfy (its app and the topic below), app (Factotum's own notifications, on every device where they were turned on in Settings) or both
   ntfy:                         # push notifications through ntfy (§4); NTFY_TOKEN in .env
     enabled: false              # Settings → Outputs. On = reminders and the review push are sent to the topic below; anyone who knows the topic can read them
     server: https://ntfy.sh

@@ -1,5 +1,7 @@
-"""Reminders (SPEC.md §10): firing due rows through ntfy, scheduling the next occurrence of a
-repeating one, and the three actions that come back through `/r/<token>`.
+"""Reminders (SPEC.md §10): firing due rows to the chosen providers (notify.provider: ntfy, the
+app's own notifications, or both), scheduling the next occurrence of a repeating one, and the
+three actions that come back through `/r/<token>`. One token serves both providers: their
+buttons are the same links.
 
 `fire_at` is naive local wall time in `owner.timezone`; `now_local` passed in here is the same.
 Tokens are random, stored on the reminder row, single use for Done and Snooze (the row's status
@@ -14,7 +16,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from . import batches, config as C
+from . import batches, config as C, notify
 from .dates import parse_date
 from .db import now_iso, rows
 
@@ -74,10 +76,24 @@ def _body(r: dict) -> str:
     return " · ".join(parts)
 
 
-def fire(conn: sqlite3.Connection, cfg: dict, now_local: datetime, push) -> list[dict]:
-    """Publish every due reminder, mark it sent, queue the next occurrence of a repeating one.
-    `push` is notify.publish or a stand-in with the same signature. Returns what was sent."""
+def notice(r: dict, token: str) -> dict:
+    """The app's notice for one due reminder (app_push's shape): a tap opens the task; Done and Snooze
+    are the same token links ntfy carries, and a task that is no longer open gets no buttons."""
+    task_id = r["task_id"]
+    actions = [{"action": "done", "title": "Done", "path": f"/r/{token}?a=done"},
+               {"action": "snooze", "title": "Snooze 1 h", "path": f"/r/{token}?a=snooze"}] if r["task_status"] == "open" else []
+    return {"title": r["task_name"], "body": _body(r), "path": f"/t/{task_id}", "tag": f"task-{task_id}",
+            "actions": actions, "urgency": "high", "ttl": 86400, "data": {"task_id": task_id}}
+
+
+def fire(conn: sqlite3.Connection, cfg: dict, now_local: datetime, push, device_push=None) -> list[dict]:
+    """Send every due reminder to the chosen providers, mark it sent, queue the next occurrence of a
+    repeating one. `push` is notify.publish or a stand-in with the same signature; `device_push` is
+    app_push.send_all or one like it. A reminder is marked sent when at least one provider delivered;
+    when none did and one raised, that error propagates and the row stays pending; when none was
+    reached (ntfy off, no device) it stays pending and is not returned. Returns what was sent."""
     base = str(C.get(cfg, "server.public_url", "http://127.0.0.1:8750")).rstrip("/")
+    chosen = notify.providers(cfg)
     sent = []
     for r in due(conn, now_local):
         token = secrets.token_urlsafe(24)
@@ -88,13 +104,22 @@ def fire(conn: sqlite3.Connection, cfg: dict, now_local: datetime, push) -> list
         # tapped, so Snooze / Done are only reachable by going back to ntfy. Without it the tap shows
         # the message with its three buttons; "Open" is one of them.
         click = f"{base}/t/{r['task_id']}" if C.get(cfg, "notify.ntfy.tap_opens_app", False) else None
-        msg_id = push(cfg, r["task_name"], _body(r), click=click, actions=actions, tags=["alarm_clock"])
+        sends = []
+        if "ntfy" in chosen:
+            sends.append(("ntfy", lambda: push(cfg, r["task_name"], _body(r), click=click, actions=actions, tags=["alarm_clock"])))
+        if "app" in chosen and device_push is not None:
+            sends.append(("app", lambda: device_push(conn, cfg, notice(r, token))))
+        delivered, results, errors = notify.send_each(sends)
+        if not delivered:
+            continue                     # nothing reached anyone: leave it pending for when a provider can
+        msg_id = results.get("ntfy")
         conn.execute("UPDATE reminders SET status = 'sent', sent_at = ?, token = ?, ntfy_seq = ? WHERE id = ?", (now_iso(), token, msg_id, r["id"]))
         if r.get("repeat"):
             conn.execute("INSERT INTO reminders (task_id, fire_at, label, repeat, status, created_by, created_at) VALUES (?, ?, ?, ?, 'pending', ?, ?)",
                          (r["task_id"], next_occurrence(r["fire_at"], r["repeat"]), r.get("label"), r["repeat"], r.get("created_by") or "repeat", now_iso()))
         conn.commit()   # per reminder: a failure on the next push must not roll this one back into pending (it was delivered)
-        sent.append({"reminder_id": r["id"], "task_id": r["task_id"], "msg_id": msg_id, "task_name": r["task_name"]})
+        sent.append({"reminder_id": r["id"], "task_id": r["task_id"], "msg_id": msg_id, "task_name": r["task_name"],
+                     "errors": errors, "app": results.get("app")})
     return sent
 
 

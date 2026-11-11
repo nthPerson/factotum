@@ -2,7 +2,7 @@
 library: each tick re-reads the effective config (Settings-tab overrides included), so changing
 the review time or turning the brief off takes effect at the next tick.
 
-    reminders       every tick: fire due rows (reminders.fire) when ntfy is configured
+    reminders       every tick: fire due rows (reminders.fire) when a chosen provider can deliver (notify.ready)
     review_push     once a day at notify.review_time; quiet when reviewed today or the queue is empty
     morning_brief   once a day at notify.morning_brief.time when switched on (off when the key is absent) (brief.send)
     expire          once a day at lifecycle.expire_time (03:30): fade / lapse what Review has shown
@@ -27,19 +27,20 @@ import time
 import traceback
 from datetime import date, datetime, timedelta
 
-from . import batches, config as C, lifecycle, notify, reminders
+from . import app_push, batches, config as C, lifecycle, notify, reminders
 from .db import get_settings, log_run, rows, set_setting
 
 RETRY_AFTER = timedelta(hours=1)
 
 
 class Scheduler:
-    def __init__(self, cfg: dict, conn: sqlite3.Connection, push=notify.publish, mailer=None, calendar=None, canvas=None, mail=None, planner=None, mirror=None, slack=None, summary=None, triage=None):
+    def __init__(self, cfg: dict, conn: sqlite3.Connection, push=notify.publish, mailer=None, calendar=None, canvas=None, mail=None, planner=None, mirror=None, slack=None, summary=None, triage=None, device_push=None):
         self.cfg, self.conn, self.push, self.mailer, self.calendar, self.canvas, self.mail, self.planner = cfg, conn, push, mailer, calendar, canvas, mail, planner
         self.mirror = mirror
         self.slack = slack
         self.summary = summary
         self.triage = triage
+        self.device_push = device_push or app_push.send_all
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._thread: threading.Thread | None = None
@@ -81,12 +82,12 @@ class Scheduler:
         return did
 
     def _reminders(self, ecfg: dict, now: datetime, did: list[str]) -> None:
-        if not notify.enabled(ecfg):
+        if not notify.ready(self.conn, ecfg):
             return
         started = time.monotonic()
         try:
-            fired = reminders.fire(self.conn, ecfg, now, self.push)
-        except Exception as e:   # ntfy down: leave the rows pending, say so once an hour
+            fired = reminders.fire(self.conn, ecfg, now, self.push, device_push=self.device_push)
+        except Exception as e:   # every chosen provider failed: leave the rows pending, say so once an hour
             self.conn.rollback()
             if not self._rem_error_at or now - self._rem_error_at > RETRY_AFTER:
                 self._rem_error_at = now
@@ -95,6 +96,9 @@ class Scheduler:
             return
         if fired:
             summary = ", ".join(f"Task-{f['task_id']} {f['task_name']}"[:60] for f in fired)
+            errors = [e for f in fired for e in f.get("errors", [])]
+            if errors:
+                summary += " · " + "; ".join(errors)
             log_run(self.conn, "reminder", int((time.monotonic() - started) * 1000), ok=True, summary=summary)
             self.conn.commit()   # the Log tab reads through another connection; a row left in this transaction is invisible
             did.append(f"reminders: {summary}")
@@ -158,9 +162,17 @@ class Scheduler:
         n = len(queue)
         base = str(C.get(ecfg, "server.public_url", "")).rstrip("/")
         first = "; ".join(i["task"]["name"][:40] for i in queue[:3])
-        self.push(ecfg, f"Review: {n} item{'' if n == 1 else 's'}", f"{n} item{'' if n == 1 else 's'} waiting: {first}" + (" …" if n > 3 else ""),
-                  click=f"{base}/review", tags=["clipboard"])
-        return f"{n} items"
+        title = f"Review: {n} item{'' if n == 1 else 's'}"
+        body = f"{n} item{'' if n == 1 else 's'} waiting: {first}" + (" …" if n > 3 else "")
+        chosen = notify.providers(ecfg)
+        sends = []
+        if "ntfy" in chosen:
+            sends.append(("ntfy", lambda: self.push(ecfg, title, body, click=f"{base}/review", tags=["clipboard"])))
+        if "app" in chosen:
+            sends.append(("app", lambda: self.device_push(self.conn, ecfg, {"title": title, "body": body, "path": "/review", "tag": "review",
+                                                                           "actions": [], "urgency": "normal", "ttl": 14400})))
+        _, _, errors = notify.send_each(sends)    # none delivered and one raised: it raises, and the job retries in an hour
+        return f"{n} items" + (" · " + "; ".join(errors) if errors else "")
 
     def _brief(self, ecfg: dict, today: date) -> str | None:
         """The planner is a paid run and a failed send retries hourly, so its result is kept for the day."""
