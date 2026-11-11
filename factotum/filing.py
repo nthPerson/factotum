@@ -195,6 +195,9 @@ def run_queue(conn, cfg: dict, now: datetime, runner=None) -> str | None:
     for tid in queued(conn, now.date())[:PER_TICK]:
         set_setting(conn, QUEUE_KEY, [e for e in _queue(conn) if e["task_id"] != tid])
         conn.commit()                                   # dequeued before the run: a failure is not retried
+        if not wants(conn, tid):                        # closed, filed by hand or linked meanwhile: no paid run
+            lines.append(f"Task-{tid}: skipped (no longer only a name)")
+            continue
         try:
             res = run(conn, cfg, tid, runner=runner, today=now.date())
         except Exception as e:

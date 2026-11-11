@@ -105,7 +105,8 @@ class Scheduler:
             did.append(f"reminders: {summary}")
 
     def _suggestions(self, ecfg: dict, now: datetime, st: dict, did: list[str]) -> None:
-        """stage 7: the link detectors after the sweeps (free); filing runs join in Task 9."""
+        """stage 7: the link detectors after the sweeps (free, every SWEEP_MINUTES), then the filing queue
+        (paid, only when claude.filing.enabled is on and a task is waiting)."""
         self._every("link_suggestions", suggestions.SWEEP_MINUTES, now, st, did, lambda: suggestions.sweep_job(self.conn, ecfg, now))
         if C.value(ecfg, "claude.filing.enabled") and filing.queued(self.conn, now.date()):
             def job() -> None:

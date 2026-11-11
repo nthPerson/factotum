@@ -120,6 +120,20 @@ def test_filing_runs_from_the_scheduler_only_when_switched_on_and_never_twice(co
     assert filing.run_queue(conn, on, now) is None and len(calls) == 1 and get_settings(conn)[filing.QUEUE_KEY] == []   # a stale entry is dropped unrun
 
 
+def test_a_queued_task_closed_or_filed_meanwhile_is_dequeued_without_a_run(conn, cfg, tmp_path, monkeypatch):
+    monkeypatch.setattr(filing, "RUNS_DIR", tmp_path / "runs")
+    calls = []
+    run = _runner({"project": None, "effort": "S", "link": None, "twin": None}, calls)
+    made = [batches.apply(conn, [{"op": "create", "fields": {"name": n}}], "ui", TODAY)["created"][0] for n in ("Water the plants", "Call the bank", "Fix the bike")]
+    now = datetime.now().replace(second=0, microsecond=0)
+    assert filing.queued(conn, now.date()) == made                                              # a create queues it
+    batches.apply(conn, [{"op": "done", "task_id": made[0]},
+                         {"op": "set", "task_id": made[1], "fields": {"project": "DiCE Lab", "effort": "S"}}], "ui", TODAY)
+    line = filing.run_queue(conn, cfg, now, runner=run)
+    assert len(calls) == 1 and str(made[2]) in calls[0][1] and filing.queued(conn, now.date()) == []
+    assert f"Task-{made[0]}: skipped" in line and f"Task-{made[1]}: skipped" in line
+
+
 def test_the_list_carries_filing_chips_until_the_field_is_set_and_a_create_wakes_the_scheduler(cfg, tmp_path):
     from types import SimpleNamespace
     from fastapi.testclient import TestClient
