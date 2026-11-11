@@ -139,7 +139,21 @@ changes(id, batch_id, task_id, field, old, new,
           -- a link is two changes rows (field `link`, one per end); `evidence.kind` gains `link_suggestion`
           -- (a suggested pair, `ref` {a, b, kind, why, signal}; judged through the batch that makes the link or merge)
 chat_threads / chat_messages / runs / accounts / settings
+push_subscriptions(                               -- stage 2: one row per device with the app's notifications on
+      id,
+      endpoint UNIQUE,                            -- the push service's address for this device
+      p256dh,                                     -- the device's public key, base64url as the browser gives it
+      auth,                                       -- the device's 16-byte secret, base64url
+      label,                                      -- "iPhone", "Chrome on Windows"
+      origin,                                     -- the app's origin on that device; a notification's links are built on it
+      created_at,
+      last_success_at,                            -- the last push the service accepted
+      last_failure_at,                            -- the last push it did not
+      last_error)                                 -- why, as Settings shows it
 ```
+
+The server's push key pair is not a table: it is the file `push-keys.json` beside the database (the
+directory of the file the connection has open), mode 0600, never in git (§10, §13).
 
 Task ids continue the Notion numbering (next id after import: 395), so `Task-<n>` stays the
 code the user types and says.
@@ -640,6 +654,32 @@ timeline stops at the older list's last entry so its tail never shows one kind o
 for the timeline was tried and dropped: one batch's field changes filled the screen. Settings →
 Inputs has "Tasks from mail" with its minimum interval.
 
+**Settings → Notifications** (stage 2 of the linked-tasks design, 2026-11-10, design §14). "Send
+reminders to" (`notify.provider`: ntfy, The app, Both; §10) is the first control, then "This device"
+and "Devices with notifications on", then the ntfy switch and topic (moved here from Outputs). The
+"Review at" pill in the header shows when the nudge can reach somewhere (ntfy on with a topic, or the
+app with a device, as the provider allows). "This device" is in one of these states:
+- *Checking this device…* while `GET /api/push` and the browser's subscription are read.
+- *Cannot*: "This browser cannot show notifications from Factotum." (no service worker, Push API or
+  Notification), with the browsers that can.
+- *Install first*: on an iPhone or iPad outside the installed app, "On an iPhone, notifications work
+  only in the installed app." and how to add it to the Home Screen.
+- *Factotum cannot send*: the key file is unreadable (or the page could not ask), with the reason.
+- *Not allowed*: the browser's permission is denied; how to allow it in the site settings (the word
+  "blocked" is not used).
+- *Off*: "Turn on notifications on this device". The tap asks the permission first, registers the
+  worker if needed, subscribes with the server's public key (a subscription made with an older key
+  is dropped first) and posts it with the device's label and `location.origin`.
+- *Turning on…* while that runs.
+- *On*: "Notifications are on for this device." with Send a test and Turn off; when the provider is
+  ntfy alone, a hint that reminders go to ntfy only at the moment.
+- *Refused*: "The push service refused:" and why (the browser's subscribe failed, Factotum did not
+  take the subscription, or this device's last push failed), with Try again (and Turn off when
+  there is a subscription).
+
+The devices table lists each row (label, "(this device)", added, last sent, the last failure when it
+is newer than the last success) with Remove on every other device.
+
 **Links in the API (stage 4a; the page follows in stage 4b).** `GET /api/tasks` carries a compact `rel`
 per task (links, `waits_on_open`, `frees_open`, `goal_id`, steps open / total, `needed_by`, `changed`,
 `suggestions`; omitted when empty) and a `neighbours` map naming every other task they mention. `GET
@@ -687,6 +727,77 @@ follows in stage 4b.
 - The morning brief lists reminders firing today, so email and push agree. The planner runs at most
   once per brief day: its result (or its failure) is kept in `state.brief.planner` before the mail
   is sent, and a retried send reuses it (2026-11-10).
+
+**Notifications from the app** (stage 2 of the linked-tasks design, 2026-11-10, design §14).
+`factotum/webpush.py` is the protocol (RFC 8291 `aes128gcm` encryption, RFC 8292 VAPID with an ES256
+JWT, one HTTP send) on the installed `cryptography` and `httpx`; `factotum/app_push.py` owns the key
+pair, the devices, the payload and sending; `factotum/web/sw.js` is the worker.
+
+- **Providers.** `notify.provider` is `ntfy`, `app` or `both` (a Settings key, "Send reminders to").
+  Absent or unknown means ntfy (`config.DEFAULTS`), so an existing configuration keeps ntfy; the
+  starter has no provider key and ntfy off, so it sends nothing. Reminders and the evening review
+  nudge go to each chosen provider; sync-file's failure alert stays on ntfy.
+- **The key pair** is `push-keys.json` beside the database (`app_push.KEY_FILE`): `{"private",
+  "public", "created_at"}`, base64url, written atomically with mode 0600. Only `GET /api/push` and
+  `POST /api/push/subscribe` make one, when it is missing; making one deletes every row of
+  `push_subscriptions` (each subscription was bound to the old public key). The sender never makes
+  one: missing or unreadable at send time is `app_push.KeyFileError`, nothing is sent, the reminder
+  stays pending and the Log says why. An unreadable file is never overwritten.
+- **The payload** is the declarative Web Push format (`{"web_push": 8030, "notification": {…}}`,
+  `app_push.payload`): title, body, `navigate` (the task's `/t/<id>`, `/review` for the nudge,
+  `/settings` for a test), `tag` with `renotify`, the buttons, and `data.task_id`. Safari (iOS 18.4+,
+  macOS 15.5+) shows it without running the worker; Chrome, Edge and Firefox hand the same JSON to
+  the worker, whose `shape()` shows it the same way. It has no `mutable` member: with it Safari would
+  run the worker and wait on it. Its links are absolute on each device's own origin
+  (`push_subscriptions.origin`), so the dev instance's notifications open the dev instance. It is at
+  most `webpush.MAX_PLAINTEXT` (3993) bytes, one 4096-byte record: over that, the body is cut (ending
+  in "…"), then the title, then the buttons are dropped; `navigate`, the tag and `data` are never cut
+  (every notice Factotum makes keeps them short; one too large anyway is refused by `encrypt` and
+  recorded as that device's failure).
+- **Tag, Topic, TTL, urgency.** The tag is `task-<id>` (the nudge `review`, a test `test`) and is
+  also the push service's `Topic` header, so a newer reminder for the same task replaces an older
+  one on the device and at the service. A reminder lives 86400 s (the token's life) at urgency
+  `high`; the nudge 14400 s at `normal`; a test 600 s at `high`. The VAPID `sub` is
+  `server.public_url` when it is `https://…`, else the device's origin when that is, else none.
+- **Buttons.** A reminder for an open task carries Done, then Snooze 1 h (browsers show at most two;
+  the tap is Open). Both are the same `/r/<token>?a=…` links ntfy carries (`reminders.notice`, one
+  token for both providers), which stay behind the sign-in. The worker fetches the link with the
+  cookie and, on an answer that is not ok (an expired sign-in is a redirect, an expired token an
+  error page) or no answer, opens the task instead; on success the notification becomes "Marked
+  done" or "Snoozed for 1 hour". Where Safari shows declarative buttons they navigate to the link.
+  A reminder whose task is no longer open has no buttons; its body says the task's status and the
+  tap opens the task page.
+- **The worker** (`/sw.js`) handles `push` and `notificationclick` only; it has no fetch handler,
+  so it never stores or serves the app. It is served by its own route with `Cache-Control: no-cache,
+  must-revalidate`, registered with scope `/` and `updateViaCache: 'none'`, takes over at once
+  (`skipWaiting`, `clients.claim`) and is not in `api.STAMPED` (a worker change reloads no page).
+  Every push shows a notification: a payload it cannot read, or a refused one, shows "Factotum". A
+  tap opens the app at the notification's address: an open window is sent `{type: 'open', path}` and
+  follows it like Back (`followPath` → `applyAddress`), else a new window opens.
+- **Delivery.** `app_push.send_all` makes every network call before its first write, then writes
+  the device rows and commits them itself (a removal must survive the caller's rollback). A 404 or
+  410 removes the device; any other failure or no answer is kept on its row (`last_failure_at`,
+  `last_error`: `HTTP <status> from <host>`, `could not reach <host>: <error name>`; a push service's
+  own answer is never repeated, in a route, on a row or in the Log). It raises `NothingSent` when there was a device and none took the push. One
+  provider failing never holds the other (`notify.send_each`): a reminder is marked sent when at
+  least one chosen provider delivered (ntfy returned a message id; the app reached a device); when
+  none did and one raised, the reminder stays pending and the error is logged once an hour, as an
+  ntfy failure always was. The scheduler fires reminders only when `notify.ready` names a chosen
+  provider that can deliver (ntfy on with a topic; the app with a device), so nothing is marked sent
+  into the void. A test from Settings (`POST /api/push/test`) is sent in the request, to that one
+  device.
+- **Only known push services.** A subscription's endpoint must be `https` on a known push service:
+  `fcm.googleapis.com`, `updates.push.services.mozilla.com`, `web.push.apple.com` or any
+  `*.push.apple.com`, any `*.notify.windows.com`, the names in `notify.app.push_hosts` (config file
+  only, not a Settings key; exact names), and any name under `.invalid` (it never resolves; the UI
+  checks use `push.invalid`). An IP literal, `localhost` (with a trailing dot or as a suffix),
+  credentials in the address, or a host a resolver might read as a number is refused whatever the
+  config says. `app_push.endpoint_problem` decides, at subscribe (a 400 that names the host and the
+  key) and again before every send, so a row stored earlier or by hand is recorded as a failure and
+  never posted to. The server must never be a way to make requests to an address a caller chose.
+- **Routes.** `GET /api/push` (the public key, made on first ask, or why there is none; the
+  provider; the devices without their keys), `POST /api/push/subscribe`, `/unsubscribe` (by
+  endpoint or id), `/test`. A refusal is a 400, 404 or 409, never a 401 or 403.
 
 ## 11. Deployment
 
@@ -751,6 +862,13 @@ Target under $4/day all in, versus ≈$9/day measured in September. Settings sho
 7-day total from `runs`. Headless allowlists exclude every destructive Mailbird tool; Python
 validates every proposal before writing (`batches.SETTABLE`); automatic closes always cite a
 link; every batch is undoable; sinks are write-only.
+
+Notifications from the app (§10) cost nothing: the browsers' push services are free and no Claude
+run is involved. The private key never leaves the server (no `/api` answer carries more than the
+public half, and `/api/settings` carries neither); a new key pair empties the devices, which then
+turn notifications on again. The payload is encrypted end to end for each device, so the push
+service carries a task's name and its token links without being able to read them; ntfy's topic
+readers can read both, which is why ntfy's topic must not be guessable (SETUP §4).
 
 ## 14. Build order
 

@@ -324,6 +324,27 @@ def test_a_reminder_body_says_waits_on_and_frees(conn, cfg):
     assert reminders._body(many) == "Go · due Nov 5 · waits on Task-2, Task-3, Task-4 +2 · frees Task-7 when done"
 
 
+def test_ntfy_and_the_app_get_the_same_reminder_body_with_its_links(conn, cfg):
+    """Stage 2 sends a reminder to ntfy and the app; stage 4a's words are in the body both receive."""
+    from datetime import datetime
+    from factotum import reminders
+    mk(conn, 1); mk(conn, 2); mk(conn, 3)
+    link(conn, 1, 2, "waits_on")
+    for tid in (1, 2):
+        conn.execute("INSERT INTO reminders (task_id, fire_at, label, status, created_by, created_at) VALUES (?, '2026-11-01T08:00', 'Go', 'pending', 'ui', ?)", (tid, now_iso()))
+    conn.commit()
+    sent_ntfy, sent_app = {}, {}
+    def push(cfg, title, body, **kw):
+        sent_ntfy[title] = body; return "m1"
+    def device_push(conn, cfg, notice):
+        sent_app[notice["data"]["task_id"]] = notice["body"]; return {"devices": 1, "sent": 1, "removed": 0, "failed": 0, "errors": []}
+    C.set_(cfg, "notify.provider", "both")
+    fired = reminders.fire(conn, cfg, datetime(2026, 11, 1, 9, 0), push, device_push=device_push)
+    assert sorted(f["task_id"] for f in fired) == [1, 2]
+    assert sent_app == {1: "Go · waits on Task-2", 2: "Go · frees Task-1 when done"}
+    assert sent_ntfy == {"Task 1": sent_app[1], "Task 2": sent_app[2]}
+
+
 def test_the_summary_goes_stale_when_a_task_it_names_is_freed(conn):
     from factotum import summary
     mk(conn, 1); mk(conn, 2)

@@ -303,6 +303,18 @@ body.tray-open main { padding-bottom: 60vh; }
 .settings tr.muted td { color: var(--muted); }
 .settings td { padding: 4px 6px 4px 0; vertical-align: middle; }
 .settings td input[type=text] { width: 100%; }
+/* Settings → Notifications (stage 2): this device's buttons wrap at full thumb size; the devices table scrolls in its own box */
+#push-device .push-ctl { font-size: 13px; overflow-wrap: anywhere; }
+#push-device .acts { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0 0; }
+#push-device .acts:first-child { margin-top: 0; }
+#push-device .hint { margin: 6px 0 0; }
+@media (hover: none), (max-width: 700px) { #push-device .acts .btn { min-height: 44px; padding: 8px 14px; font-size: 15px; } }
+.settings .push-devices { padding: 10px 0; border-bottom: 1px solid var(--line); }
+.settings .push-devices .lbl { font-weight: 500; margin-bottom: 6px; }
+.settings .push-devices .hint { margin: 0; }
+.settings .tablewrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.settings table.devices td { white-space: nowrap; padding-right: 12px; }
+.settings table.devices td:nth-child(4) { white-space: normal; min-width: 160px; }
 .note { font-size: 12px; color: var(--muted); border-left: 3px solid var(--line); padding-left: 10px; margin: 14px 0; }
 .note code { font-family: var(--mono); font-size: 12px; }
 

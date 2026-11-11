@@ -61,7 +61,13 @@
   const api = (path, opts) => fetch(path, Object.assign({ headers: { 'Content-Type': 'application/json' }, redirect: 'manual' }, opts)).catch(netFail).then(r => {
     noteBuild(r);
     if (expired(r)) { signedOut(); throw new Error('signed out'); }
-    if (!r.ok) throw new Error(r.status); return r.json();
+    if (!r.ok) return r.json().catch(() => null).then(j => {
+      // The message stays the status (what every toast shows); a refusal's own words ride along as `detail`.
+      const e = new Error(r.status); e.status = r.status;
+      if (j && typeof j.detail === 'string') e.detail = j.detail;
+      throw e;
+    });
+    return r.json();
   });
 
   function view(t) {
@@ -135,6 +141,178 @@
     render();
   }
 
+  // ---------- notifications (stage 2) ----------
+  // The service worker (/sw.js) only shows notifications and follows a tap on one; it never serves the app.
+  let workerError = null;      // why registering the worker failed, when it did (a string)
+  function registerWorker() {
+    if (!('serviceWorker' in navigator)) return Promise.resolve(null);
+    return navigator.serviceWorker.register('/sw.js', { scope: '/', updateViaCache: 'none' })
+      .catch(e => { workerError = String((e && e.message) || e); return null; });
+  }
+  // A tap on a notification while the app is open: the worker posts the address and this window follows
+  // it as Back and Forward do (a phone opens the task page, a desktop the task's row, /review the tab).
+  function followPath(path) {
+    if (!/^\/(t\/\d+|[a-z]+)?$/.test(path)) return;
+    setAddress(path); applyAddress({ type: 'worker' });
+  }
+  if ('serviceWorker' in navigator) navigator.serviceWorker.addEventListener('message', e => { if (e.data && e.data.type === 'open' && typeof e.data.path === 'string') followPath(e.data.path); });
+
+  // Settings → Notifications: this device's subscription and the devices Factotum sends to.
+  let pushInfo = null;      // the GET /api/push answer: the public key (or why there is none), the provider, the devices
+  let pushDev = { sub: null, busy: false, reason: '' };   // this browser's PushSubscription, a call in flight, a refusal from the last attempt
+  let pushLoading = null;   // the loadPush() in flight, so a render during it does not start another
+  const isIOS = () => /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const installed = () => window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+  // An iPhone shows notifications only from the app added to the Home Screen.
+  function pushSupport() {
+    if (isIOS() && !installed()) return 'install';
+    if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) return 'unsupported';
+    return 'ok';
+  }
+  // The name the devices table shows for this browser ("Chrome on Windows").
+  function deviceLabel() {
+    const ua = navigator.userAgent;
+    if (/iPhone|iPod/.test(ua)) return 'iPhone';
+    if (/iPad/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)) return 'iPad';
+    const browser = /Edg\//.test(ua) ? 'Edge' : /Firefox\//.test(ua) ? 'Firefox' : /Chrome\//.test(ua) ? 'Chrome' : /Safari\//.test(ua) ? 'Safari' : '';
+    const os = /Android/.test(ua) ? 'Android' : /Windows/.test(ua) ? 'Windows' : /CrOS/.test(ua) ? 'ChromeOS' : /Mac OS X|Macintosh/.test(ua) ? 'Mac' : /Linux/.test(ua) ? 'Linux' : '';
+    return browser && os ? `${browser} on ${os}` : 'This browser';
+  }
+  function b64uBytes(s) {
+    const t = String(s || '').replace(/-/g, '+').replace(/_/g, '/');
+    return Uint8Array.from(atob(t + '==='.slice((t.length + 3) % 4)), c => c.charCodeAt(0));
+  }
+  // A subscription made with another server key (the key file was made again) can never be sent to.
+  function sameKey(sub, publicKey) {
+    const k = sub && sub.options && sub.options.applicationServerKey;
+    if (!k || !publicKey) return false;
+    const a = new Uint8Array(k), b = b64uBytes(publicKey);
+    return a.length === b.length && a.every((x, i) => x === b[i]);
+  }
+  // Never rejects: start-up chains it after the lists, and a failure there must not replace the panel.
+  function loadPush() {
+    if (pushLoading) return pushLoading;
+    pushLoading = (async () => {
+      try { pushInfo = await api('/api/push'); }
+      catch (e) {
+        if (e && e.message === 'signed out') return;
+        pushInfo = { public_key: null, error: `the page could not ask it (${(e && e.message) || e})`, provider: null, devices: [] };
+      }
+      try {
+        // Only with a registration: serviceWorker.ready would otherwise wait forever.
+        if (pushSupport() === 'ok' && await navigator.serviceWorker.getRegistration('/'))
+          pushDev.sub = await (await navigator.serviceWorker.ready).pushManager.getSubscription();
+      } catch (_) { pushDev.sub = null; }
+    })().finally(() => {
+      pushLoading = null;
+      renderRemind();
+      // Signed out leaves pushInfo null; rendering Settings then would only ask again, and again.
+      if (pushInfo !== null && ui.tab === 'settings' && ui.page === null) render();
+    });
+    return pushLoading;
+  }
+  const thisRow = () => (pushInfo && pushDev.sub && (pushInfo.devices || []).find(d => d.endpoint === pushDev.sub.endpoint)) || null;
+  const failedLast = d => !!(d && d.last_failure_at && (!d.last_success_at || d.last_failure_at > d.last_success_at));
+  function pushView() {
+    const row = thisRow(), v = (state, reason) => ({ state, reason: reason || '', row });
+    if (pushDev.busy) return v('working');
+    const sup = pushSupport(); if (sup !== 'ok') return v(sup);
+    if (!pushInfo) return v('loading');
+    if (pushInfo.error) return v('server', pushInfo.error);
+    if (Notification.permission === 'denied') return v('denied');
+    if (pushDev.reason) return v('refused', pushDev.reason);
+    if (failedLast(row)) return v('refused', row.last_error);
+    if (!pushDev.sub || !sameKey(pushDev.sub, pushInfo.public_key) || !row) return v('off');
+    return v('on');
+  }
+  // The review nudge has somewhere to go: ntfy can send, or the app has a device to send to.
+  function reviewPushOn() {
+    const e = settings && settings.effective; if (!e) return false;
+    const p = ['app', 'both'].includes(e['notify.provider']) ? e['notify.provider'] : 'ntfy';
+    const ntfy = p !== 'app' && e['notify.ntfy.enabled'] && e['notify.ntfy.topic'];
+    const app = p !== 'ntfy' && pushInfo && (pushInfo.devices || []).length > 0;
+    return !!(ntfy || app);
+  }
+  function renderRemind() {
+    const eff = settings && settings.effective;
+    document.getElementById('remind').innerHTML = eff && eff['notify.review_time'] && reviewPushOn()
+      ? `<span>Review at</span><span class="pill">${esc(eff['notify.review_time'])}</span>` : '';
+  }
+  function pushDeviceHtml() {
+    const { state, reason } = pushView();
+    const on = (label, dis) => `<button class="btn primary" id="push-on" ${dis ? 'disabled' : ''}>${label}</button>`;
+    const p = settings && settings.effective ? settings.effective['notify.provider'] : 'ntfy';
+    const control = {
+      loading: 'Checking this device…',
+      unsupported: '<b>This browser cannot show notifications from Factotum.</b> Use Chrome, Edge or Firefox on a computer or an Android phone, or the installed app on an iPhone.',
+      install: '<b>On an iPhone, notifications work only in the installed app.</b> In Safari tap Share, then Add to Home Screen, and open Factotum from the Home Screen.',
+      denied: '<b>This device does not allow notifications from Factotum.</b> Allow them in the browser\'s site settings (on an iPhone: Settings › Notifications › Factotum), then come back here.',
+      server: `<b>Factotum cannot send notifications right now:</b> ${esc(reason)}`,
+      off: `<div class="acts">${on('Turn on notifications on this device')}</div><p class="hint">Reminders and the evening review nudge will appear here and open the task they are about.</p>`,
+      working: `<div class="acts">${on('Turning on…', true)}</div>`,
+      on: `<b>Notifications are on for this device.</b><div class="acts"><button class="btn" id="push-test">Send a test</button><button class="btn" id="push-off">Turn off</button></div>`
+        + (['app', 'both'].includes(p) ? '' : '<p class="hint">Reminders go to ntfy only at the moment. Choose The app or Both in "Send reminders to" to get them here.</p>'),
+      refused: `<b>The push service refused:</b> ${esc(reason)}<div class="acts">${on('Try again')}${pushDev.sub ? '<button class="btn" id="push-off">Turn off</button>' : ''}</div>`,
+    }[state];
+    return `<div class="field" id="push-device" data-state="${state}"><label>This device</label><div class="push-ctl">${control}</div></div>`;
+  }
+  const fmtStamp = iso => { if (!iso) return '—'; const d = new Date(iso); return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) + ' ' + d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }); };
+  function pushDevicesHtml() {
+    const list = (pushInfo && pushInfo.devices) || [];
+    if (!list.length) return '<p class="hint">No device has notifications on yet.</p>';
+    const mine = pushDev.sub ? pushDev.sub.endpoint : null;
+    return `<div class="tablewrap"><table class="devices"><tr><td class="code">device</td><td class="code">added</td><td class="code">last sent</td><td class="code">last failure</td><td></td></tr>${list.map(d => `<tr>
+      <td>${esc(d.label)}${d.endpoint === mine ? ' (this device)' : ''}</td><td>${esc((d.created_at || '').slice(0, 10))}</td><td>${esc(fmtStamp(d.last_success_at))}</td>
+      <td>${failedLast(d) ? esc(d.last_error || '') : '—'}</td><td>${d.endpoint === mine ? '' : `<button class="btn small" data-push-remove="${d.id}">Remove</button>`}</td></tr>`).join('')}</table></div>`;
+  }
+  // The permission is asked first, before any await: iOS asks only from inside the tap.
+  async function pushOn() {
+    const asked = Notification.permission === 'granted' ? Promise.resolve('granted') : Notification.requestPermission();
+    pushDev.busy = true; pushDev.reason = ''; render();
+    try {
+      const perm = await asked;
+      if (perm === 'denied') return;      // the render below shows the denied state
+      if (perm !== 'granted') { toast('Notifications were not allowed'); return; }
+      if (!(await navigator.serviceWorker.getRegistration('/')) && !(await registerWorker())) { pushDev.reason = workerError || 'the notification helper did not start'; return; }
+      const reg = await navigator.serviceWorker.ready;
+      let sub = await reg.pushManager.getSubscription();
+      if (sub && !sameKey(sub, pushInfo.public_key)) { try { await sub.unsubscribe(); } catch (_) {} }
+      try { sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64uBytes(pushInfo.public_key) }); }
+      catch (e) { pushDev.reason = (e && (e.message || e.name)) || String(e); return; }
+      pushDev.sub = sub;
+      try { pushInfo = await api('/api/push/subscribe', { method: 'POST', body: JSON.stringify(Object.assign(sub.toJSON(), { label: deviceLabel(), origin: location.origin })) }); }
+      catch (e) { if (e.message !== 'signed out') pushDev.reason = 'Factotum did not take the subscription: ' + (e.detail || e.message); return; }
+      toast('Notifications are on for this device');
+    } catch (e) {
+      pushDev.reason = (e && (e.message || e.name)) || String(e);
+    } finally {
+      pushDev.busy = false; render();
+    }
+  }
+  async function pushTest() {
+    if (!pushDev.sub) return;
+    try {
+      const out = await api('/api/push/test', { method: 'POST', body: JSON.stringify({ endpoint: pushDev.sub.endpoint }) });
+      if (out.ok) toast('Test sent · it should appear in a few seconds');
+      else if (out.removed) pushDev.reason = 'it no longer knows this device. Turn notifications on again.';
+      else pushDev.reason = out.error || 'no reason given';
+    } catch (e) { if (e.message !== 'signed out') toast('Test not sent: ' + e.message); }
+    await loadPush();
+  }
+  async function pushOff() {
+    const sub = pushDev.sub; if (!sub) return;
+    try { pushInfo = await api('/api/push/unsubscribe', { method: 'POST', body: JSON.stringify({ endpoint: sub.endpoint }) }); }
+    catch (e) { if (e.message !== 'signed out') toast('Not turned off: ' + e.message); return; }
+    try { await sub.unsubscribe(); } catch (_) {}
+    pushDev.sub = null; pushDev.reason = '';
+    toast('Notifications are off for this device'); render();
+  }
+  async function pushRemove(id) {
+    try { pushInfo = await api('/api/push/unsubscribe', { method: 'POST', body: JSON.stringify({ id }) }); }
+    catch (e) { if (e.message !== 'signed out') toast('Not removed: ' + e.message); return; }
+    toast('Device removed'); render();
+  }
+
   // ---------- loading ----------
   let pending = [];           // batches a skill staged (/api/proposals): Apply or Dismiss, above every tab
   async function load() {
@@ -178,7 +356,7 @@
     if (ui.tab === 'log') logData = null;
     // A failed reload keeps what is on screen: a sign-out shows its own screen and no network is not a
     // fault. Anything else (a server error, a bug in a redraw) is logged rather than lost.
-    load().catch(e => { if (!(e && (e.message === 'signed out' || e.network))) console.error('Reloading on return failed:', e); });
+    load().then(loadPush).catch(e => { if (!(e && (e.message === 'signed out' || e.network))) console.error('Reloading on return failed:', e); });
   }
   document.getElementById('update').onclick = () => reloadKeepingDraft();      // the tray is in localStorage: it survives
 
@@ -381,9 +559,7 @@
     document.querySelectorAll('#tabs button').forEach(b => { b.setAttribute('aria-selected', b.dataset.tab === ui.tab); if (b.dataset.tab === ui.tab && PHONE() && b.scrollIntoView) b.scrollIntoView({ block: 'nearest', inline: 'center' }); });
     document.getElementById('n-today').textContent = openOnes().filter(x => x.due && fmtDue(x.due).days <= 1).length || '';
     document.getElementById('n-review').textContent = review && (review.total || (review.suggestions || []).length) ? review.total + (review.suggestions || []).filter(x => !x.created).length : '';
-    const eff = settings && settings.effective;
-    document.getElementById('remind').innerHTML = eff && eff['notify.review_time'] && eff['notify.ntfy.enabled'] && eff['notify.ntfy.topic']
-      ? `<span>Review at</span><span class="pill">${esc(settings.effective['notify.review_time'])}</span>` : '';
+    renderRemind();
     renderTray();
     wire();
   }
@@ -972,6 +1148,7 @@
   async function loadSettings() { [settings, connectors] = await Promise.all([api('/api/settings'), api('/api/connectors').catch(() => null)]); render(); }
   function renderSettings() {
     if (!settings) { loadSettings(); return '<div class="empty">Loading settings…</div>'; }
+    if (pushInfo === null) loadPush();
     const e = settings.effective;
     const f = (key, label, sub, control) => `<div class="field"><label for="s-${key}">${label}<span class="sub">${sub}</span></label><div>${control}</div></div>`;
     const num = (key, min, max) => `<input type="number" id="s-${key}" data-key="${key}" value="${e[key] == null ? '' : e[key]}" min="${min}" max="${max}" ${Number.isInteger(min) ? '' : 'step="0.05"'}>`;
@@ -982,12 +1159,17 @@
     return `<div class="settings">
       ${settings.starter ? `<div class="note starter-note"><b>These are the starter settings</b> (<code>config/factotum.starter.yaml</code>): no name, no addresses, every input and output off, no brief, no planner, no automatic summary, no notifications. To make Factotum your own, copy <code>config/factotum.example.yaml</code> to <code>config/factotum.yaml</code>, fill in your projects, your addresses and the integrations you use (docs/SETUP.md), and restart Factotum. A switch changed here is stored in the database and wins over the file.</div>` : `<div class="note">Overrides are stored in the database. Defaults and everything structural (projects, weights, sources, property names) live in <code>${esc(settings.config_file)}</code>; edit that file to adapt Factotum to another workflow.</div>`}
       <h3>Review and lifecycle</h3>
-      ${f('notify.review_time', 'Review reminder', 'Daily push via ntfy (phase 2). Quiet if you already reviewed today.', time('notify.review_time'))}
+      ${f('notify.review_time', 'Review reminder', 'The evening review nudge, sent where reminders go. Quiet if you already reviewed today.', time('notify.review_time'))}
       ${f('lifecycle.fade_days', 'Backlog fade', 'Undated items fade after this many quiet days. A new mention resets the clock.', num('lifecycle.fade_days', 7, 120) + ' days')}
       ${f('lifecycle.fade_warn_days', 'Fade warning', 'Shown in Review this many days before fading.', num('lifecycle.fade_warn_days', 1, 14) + ' days')}
       ${f('lifecycle.last_call_days', 'Last call', 'Hard deadlines this far past due go to Review once, then lapse.', num('lifecycle.last_call_days', 1, 30) + ' days')}
       ${f('lifecycle.top_cap', 'Top cap', 'Soft limit on the Top rail.', num('lifecycle.top_cap', 3, 15))}
       ${f('lifecycle.review_cap', 'Review cap', 'Max items per Review session.', num('lifecycle.review_cap', 5, 50))}
+      <h3>Notifications</h3>
+      ${f('notify.provider', 'Send reminders to', 'Reminders and the evening review nudge go here. ntfy needs its app and a topic; The app needs notifications turned on below, on each device.', `<select id="s-notify.provider" data-key="notify.provider">${[['ntfy', 'ntfy'], ['app', 'The app'], ['both', 'Both']].map(([v, l]) => `<option value="${v}" ${e['notify.provider'] === v ? 'selected' : ''}>${l}</option>`).join('')}</select>`)}
+      ${pushDeviceHtml()}
+      <div class="push-devices"><div class="lbl">Devices with notifications on</div>${pushDevicesHtml()}</div>
+      ${f('notify.ntfy.enabled', 'ntfy push', 'Reminders and the review nudge through the ntfy app, when "Send reminders to" includes ntfy.', bool('notify.ntfy.enabled') + ' &nbsp; topic ' + text('notify.ntfy.topic', '220px'))}
       <h3>Inputs</h3>
       ${f('sources.plaud.enabled', 'Plaud recordings', 'IMAP trigger + plaud CLI (phase 3).', bool('sources.plaud.enabled'))}
       ${f('sources.canvas.enabled', 'Canvas', 'New items become hard-deadline tasks, submitted ones close.', bool('sources.canvas.enabled') + ' &nbsp; every ' + num('sources.canvas.sweep_minutes', 5, 1440) + ' min')}
@@ -1002,7 +1184,6 @@
       <h3>Outputs</h3>
       ${f('sinks.notion_notes.enabled', 'Notion notes', 'One page per recording in the Plaud notes database.', bool('sinks.notion_notes.enabled'))}
       ${f('sinks.notion_tasks_mirror.enabled', 'Notion tasks mirror', 'One-way copy of every task row; never read back. Property names in the config file.', bool('sinks.notion_tasks_mirror.enabled') + ' &nbsp; every ' + num('sinks.notion_tasks_mirror.sweep_minutes', 2, 1440) + ' min')}
-      ${f('notify.ntfy.enabled', 'ntfy push', 'Reminders and the review push.', bool('notify.ntfy.enabled') + ' &nbsp; topic ' + text('notify.ntfy.topic', '220px'))}
       ${f('notify.morning_brief.enabled', 'Morning brief', 'Email at this time: Top, due today, reminders.', bool('notify.morning_brief.enabled') + ' ' + time('notify.morning_brief.time') + ' to ' + text('notify.morning_brief.to', '240px'))}
       <h3>Claude</h3>
       ${f('claude.planner.enabled', 'Morning planner', 'One Claude run before the brief: the verdict, why-now lines and proposals. Off = the plain brief.', bool('claude.planner.enabled'))}
@@ -1208,6 +1389,10 @@
         settingsDirty.set('#accounts', true); later();
       }));
       panel.querySelectorAll('[data-accdel]').forEach(b => b.onclick = () => { settings.accounts.splice(+b.dataset.accdel, 1); settingsDirty.set('#accounts', true); render(); later(); });
+      const pOn = document.getElementById('push-on'); if (pOn) pOn.onclick = pushOn;      // pushOn asks the permission before its first await
+      const pOff = document.getElementById('push-off'); if (pOff) pOff.onclick = pushOff;
+      const pTest = document.getElementById('push-test'); if (pTest) pTest.onclick = pushTest;
+      panel.querySelectorAll('[data-push-remove]').forEach(b => b.onclick = () => pushRemove(+b.dataset.pushRemove));
     }
     const accAdd = document.getElementById('acc-add'); if (accAdd) accAdd.onclick = () => { settings.accounts.push({ address: '', display: '', roles: ['monitor'], enabled: true }); render(); };
     wireRail();
@@ -1363,5 +1548,5 @@
   });
   window.addEventListener('resize', () => { const bar = document.querySelector('header.bar'); if (bar) document.documentElement.style.setProperty('--bar-h', bar.offsetHeight + 'px'); });
   document.addEventListener('visibilitychange', onReturn);
-  load().then(() => { applyAddress(); return loadSettings(); }).catch(e => { document.getElementById('panel').innerHTML = `<div class="empty">Could not load /api/tasks: ${esc(e.message)}</div>`; });
+  load().then(() => { applyAddress(); registerWorker(); return loadSettings(); }).then(loadPush).catch(e => { document.getElementById('panel').innerHTML = `<div class="empty">Could not load /api/tasks: ${esc(e.message)}</div>`; });
 })();

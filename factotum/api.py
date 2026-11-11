@@ -8,6 +8,7 @@
   GET  /api/review?exclude=1,2           one page of the review queue + total, each card's pending evidence, planner suggestions
   POST /api/review/suggestions/{id}/create   the task a suggestion describes: a planner create or a Slack mention (evidence judged applied)
   GET  /api/settings · PUT /api/settings  Settings-tab overrides (whitelisted keys), accounts
+  GET  /api/push · POST /api/push/subscribe|unsubscribe|test   this device's notifications: the public key, the devices, a test (stage 2)
   GET  /api/stats
   GET  /api/log                          recent batches with their changes, and the Claude runs with cost
   GET  /api/chat/threads · GET /api/chat/threads/{id}      chat history (phase 5, SPEC.md §8.3)
@@ -31,14 +32,14 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from html import escape
 from urllib.parse import urlparse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
-from . import batches, commands, config as C, lifecycle, oauth, relations, reminders, summary
+from . import app_push, batches, commands, config as C, lifecycle, oauth, relations, reminders, summary
 from .db import connect, get_settings, get_task, init_db, now_iso, rows, seed_accounts, set_setting
 from .dates import parse_date
 
@@ -75,6 +76,22 @@ class CommandBody(BaseModel):
 class SettingsBody(BaseModel):
     values: dict[str, Any] = {}
     accounts: list[dict[str, Any]] | None = None
+
+
+class SubscribeBody(BaseModel):
+    endpoint: str
+    keys: dict[str, str]
+    label: str = ""
+    origin: str
+
+
+class UnsubscribeBody(BaseModel):
+    endpoint: str | None = None
+    id: int | None = None
+
+
+class PushTestBody(BaseModel):
+    endpoint: str
 
 
 class TurnBody(BaseModel):
@@ -526,6 +543,58 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
             "sinks": {k: {"enabled": C.value(ecfg, f"sinks.{k}.enabled")} for k in ("notion_notes", "notion_tasks_mirror")},
         }
 
+    def push_state() -> dict:
+        public, error = None, None
+        try:
+            public = app_push.keys(conn, create=True).public
+        except app_push.KeyFileError as e:
+            error = str(e)
+        hidden = ("p256dh", "auth")
+        return {
+            "public_key": public,
+            "error": error,
+            "provider": C.value(eff_cfg(), "notify.provider"),
+            "devices": [{k: v for k, v in d.items() if k not in hidden} for d in app_push.devices(conn)],
+        }
+
+    @app.get("/api/push")
+    def push_get():
+        return push_state()
+
+    @app.post("/api/push/subscribe")
+    def push_subscribe(body: SubscribeBody):
+        try:
+            app_push.keys(conn, create=True)
+        except app_push.KeyFileError as e:
+            return JSONResponse({"detail": str(e)}, status_code=409)
+        p256dh, auth = body.keys.get("p256dh"), body.keys.get("auth")
+        try:
+            if p256dh is None:
+                raise ValueError("the device key is not a P-256 public key")
+            if auth is None:
+                raise ValueError("the device secret must be 16 bytes")
+            app_push.subscribe(conn, body.endpoint, p256dh, auth, body.label, body.origin, cfg=eff_cfg())
+        except ValueError as e:
+            conn.rollback()
+            return JSONResponse({"detail": str(e)}, status_code=400)
+        conn.commit()
+        return push_state()
+
+    @app.post("/api/push/unsubscribe")
+    def push_unsubscribe(body: UnsubscribeBody):
+        if body.endpoint is None and body.id is None:
+            return JSONResponse({"detail": "name a device"}, status_code=400)
+        app_push.unsubscribe(conn, endpoint=body.endpoint, device_id=body.id)
+        conn.commit()
+        return push_state()
+
+    @app.post("/api/push/test")
+    def push_test(body: PushTestBody):
+        out = app_push.send_test(conn, eff_cfg(), body.endpoint, transport=app.state.push_transport)
+        if out is None:
+            return JSONResponse({"detail": "This device is not subscribed"}, status_code=404)
+        return out
+
     @app.put("/api/settings")
     def put_settings(body: SettingsBody):
         for k, v in body.values.items():
@@ -958,6 +1027,15 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         app.add_api_route(f"/{_tab}", index, methods=["GET"], include_in_schema=False)
     app.add_api_route("/t/{task_id:int}", lambda task_id: index(), methods=["GET"], include_in_schema=False)
 
+    # The notifications-only service worker, at the root so its scope is the whole app; read from disk
+    # per request and never cached unchecked, so a new version is active at once. Not in STAMPED: a
+    # worker change must not reload open pages (the browser re-checks the worker itself).
+    def service_worker():
+        return Response((WEB / "sw.js").read_bytes(), media_type="text/javascript; charset=utf-8",
+                        headers={"Cache-Control": "no-cache, must-revalidate"})
+
+    app.add_api_route("/sw.js", service_worker, methods=["GET"], include_in_schema=False)
+
     class NoCacheStatic(StaticFiles):
         async def get_response(self, path, scope):
             r = await super().get_response(path, scope)
@@ -968,6 +1046,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
 
     app.mount("/static", NoCacheStatic(directory=str(WEB)), name="static")
     app.state.conn = conn
+    app.state.push_transport = None              # tests set an httpx.MockTransport for the push services
     app.state.chat_busy = set()                  # threads with a turn in flight (they cannot be deleted meanwhile)
     app.state.cfg = cfg
     app.state.chat_runner = chat_runner          # tests inject a fake; None means the real headless run
