@@ -51,7 +51,10 @@
   const BUILD = (document.querySelector('meta[name="factotum-build"]') || {}).content || '';
   let newBuild = false;
   function noteBuild(r) { const b = r.headers.get('X-Factotum-Build') || ''; if (BUILD && b && b !== BUILD) newBuild = true; }
-  const api = (path, opts) => fetch(path, Object.assign({ headers: { 'Content-Type': 'application/json' }, redirect: 'manual' }, opts)).then(r => {
+  // A fetch that rejects (no network, a refused connection) is marked `network` so a caller can tell it
+  // from a fault in the page; its message is unchanged.
+  const netFail = e => { if (e && typeof e === 'object') e.network = true; throw e; };
+  const api = (path, opts) => fetch(path, Object.assign({ headers: { 'Content-Type': 'application/json' }, redirect: 'manual' }, opts)).catch(netFail).then(r => {
     noteBuild(r);
     if (expired(r)) { signedOut(); throw new Error('signed out'); }
     if (!r.ok) throw new Error(r.status); return r.json();
@@ -103,9 +106,12 @@
     const name = p.slice(1);
     return { tab: TABS.includes(name) ? name : 'today', task: null, legacy: false };
   }
+  // A task entry carries { page: true }: it was put there by the app, so a list address already lies
+  // beneath it. A reload or self-update on a phone task page sees the mark and adds nothing under it.
   function setAddress(path, replace) {
     if (location.pathname + location.hash === path) return;
-    if (replace) history.replaceState(null, '', path); else history.pushState(null, '', path);
+    const state = /^\/t\//.test(path) ? { page: true } : null;
+    if (replace) history.replaceState(state, '', path); else history.pushState(state, '', path);
   }
   function go(tab) { ui.tab = tab; ui.laterOpen = false; setAddress(addressOf(tab)); render(); }
   // Once after the first load (no event), and on every popstate (with it). On a desktop a task address
@@ -115,7 +121,7 @@
   function applyAddress(ev) {
     const a = parseAddress();
     if (a.task !== null && PHONE()) {
-      if (!ev) { setAddress('/', true); setAddress('/t/' + a.task); }
+      if (!ev && !(history.state && history.state.page)) { setAddress('/', true); setAddress('/t/' + a.task); }
       openTask(a.task, false); return;
     }
     if (a.task !== null) { jumpTo(a.task, true, true); setAddress(addressOf(ui.tab), true); return; }
@@ -144,11 +150,15 @@
   }
   // Something is being typed: a draft or a Review note, an open reminder or due-date form (their values
   // live only in the DOM), a chat turn running, or focus in a box of the panel (Settings, among others).
+  // Focus in an empty draft-backed box does not count: its text lives in `draft` and render() puts the
+  // focus and caret back, so a reload of the lists loses nothing (a box left focused and empty would
+  // otherwise keep the lists stale on every return). render() uses the same list.
+  const DRAFT_BOXES = ['cmd', 'rv-ask', 'chat-pick', 'rv-note'];
   function typingNow() {
     if ([draft.cmd, draft.ask, draft.pick, ui.rvNote.text].some(s => (s || '').trim())) return true;
     if (ui.remOpen !== null || ui.dueOpen !== null || chat.busy) return true;
     const a = document.activeElement;
-    return !!(a && a.matches('input, textarea, select') && a.closest('#panel'));
+    return !!(a && a.matches('input, textarea, select') && a.closest('#panel') && !DRAFT_BOXES.includes(a.id));
   }
   // The app came back to the front. A newer build on the server reloads the page, or only says
   // "Update ready" while something is typed or staged; otherwise the lists are reloaded, unless
@@ -162,7 +172,9 @@
     }
     if (typingNow()) { if (ui.tab === 'today') { clearTimeout(sumTimer); pollSummary(); } return; }
     if (ui.tab === 'log') logData = null;
-    load().catch(() => {});      // a failed reload keeps what is on screen; a sign-out shows its own screen
+    // A failed reload keeps what is on screen: a sign-out shows its own screen and no network is not a
+    // fault. Anything else (a server error, a bug in a redraw) is logged rather than lost.
+    load().catch(e => { if (!(e && (e.message === 'signed out' || e.network))) console.error('Reloading on return failed:', e); });
   }
   document.getElementById('update').onclick = () => location.reload();      // the tray is in localStorage: it survives
 
@@ -348,7 +360,7 @@
     renderRail();
     const p = document.getElementById('panel');
     const fns = { today: renderToday, timeline: renderTimeline, projects: renderProjects, review: renderReview, chat: renderChat, log: renderLog, settings: renderSettings };
-    const act = document.activeElement, held = act && ['cmd', 'rv-ask', 'chat-pick', 'rv-note'].includes(act.id) ? { id: act.id, a: act.selectionStart, b: act.selectionEnd } : null;
+    const act = document.activeElement, held = act && DRAFT_BOXES.includes(act.id) ? { id: act.id, a: act.selectionStart, b: act.selectionEnd } : null;
     if (ui.page !== null && !byId(ui.page) && !(ui.pageTask && ui.pageTask.id === ui.page)) fetchPageTask(ui.page);
     p.innerHTML = ui.page !== null ? taskPageHtml() : pendingHtml() + fns[ui.tab]();
     if (held) { const el = document.getElementById(held.id); if (el) { el.focus({ preventScroll: true }); try { el.setSelectionRange(held.a, held.b); } catch (_) {} } }
@@ -556,7 +568,7 @@
     window.scrollTo(0, 0);
   }
   function closeTask() { ui.page = null; render(); window.scrollTo(0, ui.pageScroll); }
-  const dueDays = x =>x.due ? fmtDue(x.due).days : null;
+  const dueDays = x => x.due ? fmtDue(x.due).days : null;
   function todayGroups() {
     const o = openOnes().filter(x => !(x.snoozed_until && x.snoozed_until > data.today));   // Later = hidden until its date
     const by = f => o.filter(f);
