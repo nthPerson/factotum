@@ -1,0 +1,196 @@
+"""Stage 4a, the agent's surface (design §11): what the MCP tools show of links, and what they record."""
+import json
+
+from factotum import batches, mcp_server as M, relations
+from factotum.db import connect, now_iso
+from stage4_helpers import TODAY, link, mk
+
+
+def _rpc(ctx, id_, method, params=None):
+    msg = {"jsonrpc": "2.0", "id": id_, "method": method}
+    if params is not None:
+        msg["params"] = params
+    return M.dispatch(ctx, msg)
+
+
+def _text(resp) -> str:
+    return "".join(c["text"] for c in resp["result"]["content"] if c["type"] == "text")
+
+
+def _call(ctx, name: str, **args) -> dict:
+    resp = _rpc(ctx, 1, "tools/call", {"name": name, "arguments": args})
+    assert not resp["result"]["isError"], _text(resp)
+    return json.loads(_text(resp))
+
+
+def _ctx(cfg, tmp_path, **kw):
+    """A read-only connection of the tool's own on the test's database (the fixture's stays writable)."""
+    return M.Context(connect(tmp_path / "t.db"), cfg, today=TODAY, **kw)
+
+
+# --- Task 14: reading
+
+def test_tasks_query_drops_rows_to_fit_and_reports_the_cut(conn, cfg, tmp_path):
+    for i in range(1, 61):
+        mk(conn, i, name=("Very long task name " * 10)[:199], why_now="w" * 400)
+    ctx = M.Context(connect(tmp_path / "t.db"), cfg, today=TODAY)
+    text = _text(_rpc(ctx, 1, "tools/call", {"name": "tasks_query", "arguments": {"limit": 60}}))
+    res = json.loads(text)                                         # never cut mid-JSON
+    assert len(text) <= M.RESULT_CAP and res["cut"] > 0 and len(res["tasks"]) + res["cut"] == 60
+    small = _call(ctx, "tasks_query", limit=5)
+    assert small["cut"] == 0 and len(small["tasks"]) == 5 and small["total"] == 60       # `cut` is always there
+
+
+def test_tasks_query_rel_and_the_ready_linked_to_and_goal_filters(conn, cfg, tmp_path):
+    for i in range(1, 6):
+        mk(conn, i)
+    link(conn, 1, 2, "waits_on")
+    link(conn, 3, 4, "part_of")
+    ctx = _ctx(cfg, tmp_path)
+    by_id = {t["id"]: t for t in _call(ctx, "tasks_query")["tasks"]}
+    assert (by_id[1]["rel"], by_id[2]["rel"], by_id[3]["rel"], by_id[4]["rel"]) == ("waits on 2", "frees 1", "part of 4", "steps 1/1 open")
+    assert "rel" not in by_id[5]
+    assert {t["id"] for t in _call(ctx, "tasks_query", ready=True)["tasks"]} == {2, 3, 4, 5}
+    assert {t["id"] for t in _call(ctx, "tasks_query", linked_to=2)["tasks"]} == {1}
+    assert {t["id"] for t in _call(ctx, "tasks_query", goal=4)["tasks"]} == {3}
+    batches.apply(conn, [{"op": "done", "task_id": 2, "fields": {}}], "ui", TODAY)
+    assert 1 in {t["id"] for t in _call(ctx, "tasks_query", ready=True)["tasks"]}          # what it waited on is done: ready now
+
+
+def test_short_names_every_kind_of_link_and_a_merge():
+    rel = {"links": [{"id": 9, "kind": "same_as", "dir": "out", "other": 12}, {"id": 10, "kind": "same_as", "dir": "in", "other": 13}],
+           "waits_on_open": [412], "frees_open": [430, 431], "goal_id": 380, "steps_open": 2, "steps_total": 5}
+    assert relations.short({"rel": rel}) == "waits on 412 · frees 430, 431 · part of 380 · steps 2/5 open · same as 12"
+    assert relations.short({"rel": {"links": [], "waits_on_open": [], "frees_open": [], "goal_id": None, "steps_total": 0}}) == ""
+    assert relations.short({}) == ""
+
+
+def test_side_word_reads_each_kind_from_either_end():
+    got = {(k, d): relations.side_word(k, d) for k in relations.KINDS for d in ("out", "in")}
+    assert got == {("part_of", "out"): "part of", ("part_of", "in"): "has step", ("waits_on", "out"): "waits on", ("waits_on", "in"): "frees",
+                   ("same_as", "out"): "merged into", ("same_as", "in"): "merged from"}
+
+
+def test_task_get_shows_linked_tasks_provenance_and_pending_evidence(conn, cfg, tmp_path):
+    for i in range(1, 7):
+        mk(conn, i)
+    link(conn, 1, 2, "waits_on", why="needs the data first")
+    for tid in (1, 6):
+        conn.execute("INSERT INTO links (task_id, kind, ref, label, created_at) VALUES (?, 'plaud_note', 'of_a', 'Lab meeting', ?)", (tid, now_iso()))
+    conn.execute("INSERT INTO links (task_id, kind, ref, label, created_at) VALUES (1, 'task', '5', NULL, ?)", (now_iso(),))
+    for n in range(7):
+        conn.execute("INSERT INTO evidence (task_id, kind, label, excerpt, at, judged_at) VALUES (1, 'thread_updated', ?, ?, ?, ?)",
+                     (f"mail {n}", "x" * 1000, f"2026-10-2{n}T00:00:00+00:00", "2026-10-30" if n == 6 else None))
+    conn.commit()
+    got = _call(_ctx(cfg, tmp_path), "task_get", task_id=1)
+    assert got["task"]["rel"] == "waits on 2"
+    assert [ln["kind"] for ln in got["links"]] == ["plaud_note"]                              # outside things only
+    (lk,) = got["linked"]
+    assert lk["kind"] == "waits on" and lk["other"] == {"id": 2, "name": "Task 2", "status": "open", "due": None}
+    assert (lk["why"], lk["made_by"]) == ("needs the data first", "ui") and lk["at"]
+    assert [(n["id"], n["via"]) for n in got["nearby"]] == [(6, "recording")]
+    assert [e["label"] for e in got["evidence"]] == ["mail 5", "mail 4", "mail 3", "mail 2", "mail 1"]   # newest unjudged, at most 5
+    assert all(len(e["excerpt"]) <= 300 and set(e) == {"id", "kind", "label", "excerpt", "at"} for e in got["evidence"])
+    other = _call(_ctx(cfg, tmp_path), "task_get", task_id=2)
+    assert other["task"]["rel"] == "frees 1" and other["linked"][0]["kind"] == "frees"
+    assert _call(_ctx(cfg, tmp_path), "task_get", task_id=3)["task"]["rel"] == ""
+
+
+def test_the_new_read_tools(conn, cfg, tmp_path):
+    for i in range(1, 4):
+        mk(conn, i)
+    link(conn, 1, 2, "waits_on"); link(conn, 2, 3, "waits_on")
+    ctx = _ctx(cfg, tmp_path)
+    nb = _call(ctx, "task_neighbours", task_id=1, depth=2)
+    assert nb["task"] == {"id": 1, "name": "Task 1", "status": "open"} and nb["cut"] == 0
+    assert [(n["id"], n["depth"]) for n in nb["nodes"]] == [(2, 1), (3, 2)]
+    assert {(ln["src"], ln["dst"], ln["kind"]) for ln in nb["links"]} == {(1, 2, "waits_on"), (2, 3, "waits_on")}
+    assert [n["id"] for n in _call(ctx, "task_neighbours", task_id=1)["nodes"]] == [2]
+
+    # waiting: 10 (hard Nov 5) waits on 11 (due Nov 8: late) and 12 (no date); 13 frees 15 (hard Nov 6), so 13 is needed by Nov 6 and 14 (Nov 9) is late
+    mk(conn, 10, project="Thesis", due="2026-11-05", hard=1); mk(conn, 11, project="Thesis", due="2026-11-08"); mk(conn, 12, project="Thesis")
+    mk(conn, 13, project="Thesis"); mk(conn, 14, project="Thesis", due="2026-11-09"); mk(conn, 15, project="Thesis", due="2026-11-06", hard=1)
+    link(conn, 10, 11, "waits_on"); link(conn, 10, 12, "waits_on"); link(conn, 13, 14, "waits_on"); link(conn, 15, 13, "waits_on")
+    w = {r["id"]: r for r in _call(ctx, "waiting_tasks", project="thes")["waiting"]}
+    assert set(w) == {10, 13, 15}
+    assert {b["id"]: b["late"] for b in w[10]["waits_on"]} == {11: True, 12: False}
+    assert w[13]["needed_by"] == "2026-11-06" and {b["id"]: b["late"] for b in w[13]["waits_on"]} == {14: True}
+    assert {b["id"]: b["late"] for b in w[15]["waits_on"]} == {13: False}
+
+    # twins: the same number after normalising, one from Canvas, within 36 hours; a sibling with another number never pairs
+    mk(conn, 20, name="Assignment 03", source="Canvas", due="2026-11-10T23:59", created_at="2026-10-05T00:00:00+00:00")
+    mk(conn, 21, name="Assignment 3", source="Plaud", due="2026-11-11")
+    mk(conn, 22, name="Assignment 4", source="Canvas", due="2026-11-10")
+    (p,) = _call(ctx, "twin_candidates")["pairs"]
+    assert (p["a"]["id"], p["b"]["id"], p["keep"], p["suggestion"]) == (21, 20, 20, None) and p["why"] == "same number 3, due 0 h apart"
+    assert set(p["a"]) == {"id", "name", "due", "source"}
+    ev = relations.suggest(conn, "same_as", 21, 20, p["why"], "twin"); conn.commit()
+    assert _call(ctx, "twin_candidates")["pairs"][0]["suggestion"] == ev
+    mk(conn, 30, name="Lab report", project="Thesis"); mk(conn, 31, name="Lab report", project="Thesis")
+    ev2 = relations.suggest(conn, "same_as", 31, 30, relations.IMPORT_WHY, "import"); conn.commit()
+    pairs = {(q["a"]["id"], q["b"]["id"]): q for q in _call(ctx, "twin_candidates")["pairs"]}
+    assert set(pairs) == {(21, 20), (31, 30)} and pairs[(31, 30)]["suggestion"] == ev2 and pairs[(31, 30)]["keep"] == 30
+    assert set(pairs[(31, 30)]) == {"a", "b", "keep", "why", "suggestion"}
+    assert [(q["a"]["id"], q["b"]["id"]) for q in _call(ctx, "twin_candidates", project="thes")["pairs"]] == [(31, 30)]
+    conn.execute("UPDATE evidence SET judged_at = ?, verdict = 'dismissed' WHERE id = ?", (now_iso(), ev)); conn.commit()
+    assert [(q["a"]["id"], q["b"]["id"]) for q in _call(ctx, "twin_candidates")["pairs"]] == [(31, 30)]   # a judged pair is left out
+
+    # a goal read from one of its steps
+    mk(conn, 40, name="Thesis chapter 2", due="2026-11-20", hard=1); mk(conn, 41); mk(conn, 42); mk(conn, 43)
+    link(conn, 41, 40, "part_of"); link(conn, 42, 40, "part_of"); link(conn, 42, 43, "waits_on")
+    batches.apply(conn, [{"op": "done", "task_id": 41, "fields": {"outcome": "Draft sent"}}], "ui", TODAY)
+    g = _call(ctx, "goal_tree", task_id=42)
+    assert g["goal"] == {"id": 40, "name": "Thesis chapter 2", "status": "open", "due": "2026-11-20", "hard": 1, "outcome": None}
+    assert [(s["id"], s["status"], s["outcome"], s["waits_on"]) for s in g["steps"]] == [(41, "done", "Draft sent", []), (42, "open", None, [43])]
+    assert (g["done"], g["total"]) == (1, 2) and _call(ctx, "goal_tree", task_id=40)["goal"]["id"] == 40
+    err = _rpc(ctx, 2, "tools/call", {"name": "goal_tree", "arguments": {"task_id": 43}})
+    assert err["result"]["isError"] and _text(err) == "Task-43 is not a goal or a step"
+
+
+def test_twin_pairs_counts_a_date_only_due_as_midnight_and_needs_canvas():
+    base = dict(status="open", project="COMPE 510", created_at="2026-10-01T00:00:00+00:00")
+    ts = [dict(base, id=1, name="Quiz 7", source="Canvas", due="2026-11-10"), dict(base, id=2, name="quiz 07 prep", source="Plaud", due="2026-11-11T12:00"),
+          dict(base, id=3, name="Quiz 7", source="Plaud", due="2026-11-12T13:00"),        # 61 h after task 1, 25 h after task 2 but neither is Canvas
+          dict(base, id=4, name="Quiz 7", source="Canvas", due=None), dict(base, id=5, name="Quiz 7", source="Canvas", due="2026-11-10", status="done"),
+          dict(base, id=6, name="Quiz 7", source="Canvas", due="2026-11-10", project="Thesis"), dict(base, id=7, name="Quiz", source="Canvas", due="2026-11-10")]
+    assert relations.twin_pairs(ts) == [(2, 1, "same number 7, due 36 h apart")]
+    old = dict(base, id=9, name="HW 2", source="Plaud", due="2026-11-10", created_at="2026-09-01T00:00:00+00:00")
+    assert relations.twin_pairs([dict(base, id=8, name="HW 2", source="Canvas", due="2026-11-10"), old]) == [(9, 8, "same number 2, due 0 h apart")]
+    both = [dict(old, id=8, source="Canvas", created_at="2026-10-01T00:00:00+00:00"), dict(old, source="Canvas")]   # both from Canvas: the older stays
+    assert relations.twin_pairs(both) == [(8, 9, "same number 2, due 0 h apart")]
+
+
+def test_reading_tools_record_the_tasks_they_showed(conn, cfg, tmp_path):
+    for i in range(1, 7):
+        mk(conn, i, name=f"Alpha {i}" if i in (3, 4) else f"Task {i}")
+    link(conn, 1, 2, "waits_on")
+    for tid in (1, 6):
+        conn.execute("INSERT INTO links (task_id, kind, ref, label, created_at) VALUES (?, 'plaud_note', 'of_a', 'Lab meeting', ?)", (tid, now_iso()))
+    conn.commit()
+    run_dir = tmp_path / "run"
+    ctx = _ctx(cfg, tmp_path, run_dir=run_dir)
+    assert M.tasks_seen(run_dir) == set()
+    got = _call(ctx, "task_get", task_id=1)
+    q = _call(ctx, "tasks_query", q="alpha")
+    shown = {got["task"]["id"]} | {lk["other"]["id"] for lk in got["linked"]} | {n["id"] for n in got["nearby"]} | {t["id"] for t in q["tasks"]}
+    assert shown == {1, 2, 6, 3, 4} and M.tasks_seen(run_dir) == shown
+    _call(ctx, "task_neighbours", task_id=2)
+    assert M.tasks_seen(run_dir) == shown                       # 2's neighbour is 1, already seen
+    _call(ctx, "waiting_tasks")
+    assert M.tasks_seen(run_dir) == shown
+
+
+def test_each_new_tool_description_starts_with_a_sentence_that_stands_alone():
+    for name in ("task_neighbours", "waiting_tasks", "twin_candidates", "goal_tree"):
+        first = next(t for t in M.TOOLS if t["name"] == name)["description"].split(". ")[0]
+        assert len(first) > 30 and "this" not in first.lower().split()[:2]
+
+
+def test_the_new_tools_are_read_only_named_for_the_chat_status_line_and_free_of_banned_words():
+    from factotum import chat
+    for name in ("task_neighbours", "waiting_tasks", "twin_candidates", "goal_tree"):
+        t = next(t for t in M.TOOLS if t["name"] == name)
+        assert t["annotations"] == M.READ_ONLY and not t["skill_only"] and name in chat.FRIENDLY
+    for t in M.TOOLS:
+        if t["name"] in ("tasks_query", "task_get", "task_neighbours", "waiting_tasks", "twin_candidates", "goal_tree"):
+            assert not {"blocked", "dependency", "dependencies"} & set(t["description"].lower().replace(",", " ").replace(".", " ").split())

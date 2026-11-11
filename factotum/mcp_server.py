@@ -155,6 +155,26 @@ def seen_threads(run_dir: Path | str) -> dict[str, dict]:
     return out
 
 
+def tasks_seen(run_dir: Path | str) -> set[int]:
+    """Every task id a reading tool showed in this run (`tasks_seen.jsonl`, `{"ids": [...]}` per line):
+    what a chat link proposal may name besides the attached tasks."""
+    p = Path(run_dir) / "tasks_seen.jsonl"
+    out: set[int] = set()
+    if p.exists():
+        for line in p.read_text(encoding="utf-8").splitlines():
+            try:
+                out.update(i for i in json.loads(line).get("ids") or () if type(i) is int)
+            except (ValueError, AttributeError, TypeError):
+                continue
+    return out
+
+
+def _seen_tasks(ctx: Context, ids) -> None:
+    ids = sorted({int(i) for i in ids if i is not None})
+    if ids:
+        ctx.record("tasks_seen", {"ids": ids})
+
+
 def drafts_made(run_dir: Path | str) -> list[dict]:
     p = Path(run_dir) / "drafts.jsonl"
     out = []
@@ -230,10 +250,21 @@ def _cut(s, n: int) -> str:
 TASK_COLS = ("id", "name", "project", "status", "due", "hard", "effort", "counterpart", "waiting_on", "why_now", "top_rank", "longterm", "created_at")
 
 
+TOOL_BUDGET = RESULT_CAP - 2000      # what a tool that drops rows fits its JSON into, so `_tool_result` never cuts it mid-JSON
+ACTIVE = "removed_at IS NULL"
+WAITS_ON_OPEN = ("EXISTS (SELECT 1 FROM relations r JOIN tasks b ON b.id = r.dst WHERE r.src = tasks.id AND r.kind = 'waits_on' "
+                 f"AND r.{ACTIVE} AND b.status = 'open')")
+
+
 @tool("tasks_query", "Factotum's task list (the source of truth). Compact rows: id, name, project, status, due, hard, effort, counterpart, "
-      "waiting_on, why_now, score. Filter by status (open by default), project substring, or a word in the name/context.",
+      "waiting_on, why_now, score. Filter by status (open by default), project substring, or a word in the name/context; `ready` (open and "
+      "waiting on no open task), `linked_to` (tasks linked to a task id) and `goal` (a goal's steps) narrow it, and a linked row carries `rel` "
+      "(\"waits on 412 · frees 430 · part of 380 · steps 2/5 open · same as 12\"). `cut` counts rows left out to keep the result small.",
       {"status": {"type": "string", "enum": ["open", "done", "dropped", "faded", "lapsed", "all"]}, "project": {"type": "string"},
-       "q": {"type": "string", "description": "substring matched against name, context and counterpart"}, "limit": {"type": "integer"}})
+       "q": {"type": "string", "description": "substring matched against name, context and counterpart"}, "limit": {"type": "integer"},
+       "ready": {"type": "boolean", "description": "only open tasks that wait on no open task"},
+       "linked_to": {"type": "integer", "description": "only tasks with a link of any kind to this task id"},
+       "goal": {"type": "integer", "description": "only the steps of this goal (a task id)"}})
 def tasks_query(ctx: Context, args: dict) -> dict:
     status = _str(args, "status", "open")
     where, params = [], []
@@ -244,6 +275,13 @@ def tasks_query(ctx: Context, args: dict) -> dict:
     if args.get("q"):
         q = f"%{str(args['q']).lower()}%"
         where.append("(LOWER(name) LIKE ? OR LOWER(COALESCE(context, '')) LIKE ? OR LOWER(COALESCE(counterpart, '')) LIKE ?)"); params += [q, q, q]
+    if str(args.get("ready")).lower() in ("true", "1"):
+        where.append(f"status = 'open' AND NOT {WAITS_ON_OPEN}")
+    linked_to, goal = _int(args, "linked_to"), _int(args, "goal")
+    if linked_to is not None:
+        where.append(f"id IN (SELECT dst FROM relations WHERE src = ? AND {ACTIVE} UNION SELECT src FROM relations WHERE dst = ? AND {ACTIVE})"); params += [linked_to, linked_to]
+    if goal is not None:
+        where.append(f"id IN (SELECT src FROM relations WHERE dst = ? AND kind = 'part_of' AND {ACTIVE})"); params.append(goal)
     limit = _int(args, "limit", 40, 1, ROW_CAP)
     ts = rows(ctx.conn, f"SELECT * FROM tasks{' WHERE ' + ' AND '.join(where) if where else ''} ORDER BY id DESC LIMIT 400", tuple(params))
     relations.scored(ctx.conn, ts, ctx.today, ctx.cfg)          # reads only: this connection is query_only
@@ -253,12 +291,24 @@ def tasks_query(ctx: Context, args: dict) -> dict:
         row["created_at"] = (t.get("created_at") or "")[:10]
         if t.get("status") == "open":
             row["score"] = t["score"]
+        rel = relations.short(t)
+        if rel:
+            row["rel"] = rel
         out.append(row)
     out.sort(key=lambda r: (0 if r.get("top_rank") else 1, r.get("top_rank") or 0, -(r.get("score") or 0), -r["id"]))
-    return {"tasks": out[:limit], "total": len(ts)}
+    res = {"tasks": out[:limit], "total": len(ts), "cut": 0}
+    while res["tasks"] and len(json.dumps(res, ensure_ascii=False, default=str)) > TOOL_BUDGET:     # whole rows from the end, never mid-JSON
+        res["tasks"].pop()
+        res["cut"] += 1
+    _seen_tasks(ctx, (r["id"] for r in res["tasks"]))
+    return res
 
 
-@tool("task_get", "One task in full: every field, its links (mail threads, Plaud notes, Canvas), pending reminders and the last changes.",
+LINKED_CAP, EVIDENCE_CAP = 20, 5
+
+
+@tool("task_get", "One task in full: every field, its links (mail threads, Plaud notes, Canvas), the tasks it is linked to (`linked`), "
+      "tasks that share a recording or mail thread with it (`nearby`), unjudged evidence, pending reminders and the last changes.",
       {"task_id": {"type": "integer"}}, ["task_id"])
 def task_get(ctx: Context, args: dict) -> dict:
     tid = _int(args, "task_id")
@@ -269,8 +319,15 @@ def task_get(ctx: Context, args: dict) -> dict:
         raise ToolError(f"no Task-{tid}")
     t["context"] = _cut(t.get("context"), 1500)
     relations.scored(ctx.conn, [t], ctx.today, ctx.cfg)
-    t.pop("rel")                                                 # Task 14 shows the links as `linked`
-    links = rows(ctx.conn, "SELECT kind, ref, label, account, created_at FROM links WHERE task_id = ? ORDER BY id DESC LIMIT 20", (tid,))
+    t["rel"] = relations.short(t)
+    linked = [{"kind": relations.side_word(r["kind"], r["dir"]), "other": {k: r["other"][k] for k in ("id", "name", "status", "due")},
+               "why": r["why"], "made_by": r["source"], "at": r["created_at"]} for r in relations.detail(ctx.conn, tid)[:LINKED_CAP]]
+    nearby = relations.nearby(ctx.conn, tid)
+    evidence = [{"id": e["id"], "kind": e["kind"], "label": _cut(e["label"], 200), "excerpt": _cut(e["excerpt"], 300), "at": e["at"]}
+                for e in rows(ctx.conn, "SELECT id, kind, label, excerpt, at FROM evidence WHERE task_id = ? AND judged_at IS NULL ORDER BY at DESC, id DESC LIMIT ?",
+                              (tid, EVIDENCE_CAP))]
+    _seen_tasks(ctx, [tid] + [x["other"]["id"] for x in linked] + [n["id"] for n in nearby])
+    links = rows(ctx.conn, "SELECT kind, ref, label, account, created_at FROM links WHERE task_id = ? AND kind <> 'task' ORDER BY id DESC LIMIT 20", (tid,))
     rems = rows(ctx.conn, "SELECT id, fire_at, label, repeat, status FROM reminders WHERE task_id = ? AND status IN ('pending', 'snoozed') ORDER BY fire_at LIMIT 10", (tid,))
     ch = rows(ctx.conn, "SELECT c.field, c.old, c.new, b.applied_at, b.source FROM changes c JOIN batches b ON b.id = c.batch_id WHERE c.task_id = ? ORDER BY c.id DESC LIMIT 10", (tid,))
     for c in ch:
@@ -280,7 +337,131 @@ def task_get(ctx: Context, args: dict) -> dict:
             except (json.JSONDecodeError, TypeError):
                 pass
             c[k] = _cut(c[k], 200) if isinstance(c[k], str) else c[k]
-    return {"task": t, "links": links, "reminders": rems, "recent_changes": ch}
+    return {"task": t, "links": links, "linked": linked, "nearby": nearby, "evidence": evidence, "reminders": rems, "recent_changes": ch}
+
+
+def _ids_param(ids) -> str:
+    """A list of ids for `IN (SELECT value FROM json_each(?))`."""
+    return json.dumps(sorted({int(i) for i in ids}))
+
+
+NEIGHBOUR_CAP, WAITING_CAP = 40, 40
+
+
+@tool("task_neighbours", "The tasks linked to one task, as nodes and links, out to a depth of 1 to 3. A node's depth is how many links away it is; "
+      "a link reads src → dst: part_of (src is a step of dst), waits_on (src waits on dst), same_as (src was merged into dst).",
+      {"task_id": {"type": "integer"}, "depth": {"type": "integer", "description": "1 to 3, default 1"}}, ["task_id"])
+def task_neighbours(ctx: Context, args: dict) -> dict:
+    tid = _int(args, "task_id")
+    if tid is None:
+        raise ToolError("task_id is required")
+    depth = _int(args, "depth", 1, 1, 3)
+    root = one(ctx.conn, "SELECT id, name, status FROM tasks WHERE id = ?", (tid,))
+    if not root:
+        raise ToolError(f"no Task-{tid}")
+    found, frontier = {tid: 0}, [tid]
+    for d in range(1, depth + 1):
+        nxt = []
+        for r in rows(ctx.conn, f"SELECT src, dst FROM relations WHERE {ACTIVE} AND (src IN (SELECT value FROM json_each(?)) OR dst IN (SELECT value FROM json_each(?))) "
+                                "ORDER BY id", (_ids_param(frontier),) * 2):
+            for x in (r["src"], r["dst"]):
+                if x not in found:
+                    found[x] = d
+                    nxt.append(x)
+        if not nxt:
+            break
+        frontier = nxt
+    reached = sorted((x for x in found if x != tid), key=lambda x: (found[x], x))
+    kept = reached[:NEIGHBOUR_CAP]
+    info = {r["id"]: r for r in rows(ctx.conn, "SELECT id, name, status, due, hard FROM tasks WHERE id IN (SELECT value FROM json_each(?))", (_ids_param(kept),))}
+    nodes = [dict(info[x], depth=found[x]) for x in kept if x in info]
+    inside = _ids_param(kept + [tid])
+    links = rows(ctx.conn, f"SELECT src, dst, kind FROM relations WHERE {ACTIVE} AND src IN (SELECT value FROM json_each(?)) AND dst IN (SELECT value FROM json_each(?)) "
+                           "ORDER BY id", (inside, inside))
+    _seen_tasks(ctx, [tid] + [n["id"] for n in nodes])
+    return {"task": root, "nodes": nodes, "links": links, "cut": len(reached) - len(kept)}
+
+
+@tool("waiting_tasks", "Open tasks that wait on another open task, each with what it waits on, flagging a task it waits on whose date falls after "
+      "the hard deadline it holds up. That deadline is the waiting task's own hard due date or, when it has none, its needed_by (the hard date "
+      "of a task it frees); `late` marks such a task.",
+      {"project": {"type": "string", "description": "project substring"}})
+def waiting_tasks(ctx: Context, args: dict) -> dict:
+    sql, params = f"SELECT id, name, project, due, hard FROM tasks WHERE status = 'open' AND {WAITS_ON_OPEN}", ()
+    if args.get("project"):
+        sql += " AND LOWER(COALESCE(project, '')) LIKE ?"; params = (f"%{str(args['project']).lower()}%",)
+    ts = relations.annotate(ctx.conn, rows(ctx.conn, sql + " ORDER BY id", params))
+    targets: dict[int, list[dict]] = {}
+    for r in rows(ctx.conn, f"SELECT r.src, b.id, b.name, b.status, b.due FROM relations r JOIN tasks b ON b.id = r.dst WHERE r.kind = 'waits_on' AND r.{ACTIVE} "
+                            "AND r.src IN (SELECT value FROM json_each(?)) ORDER BY b.status <> 'open', b.id", (_ids_param(t["id"] for t in ts),)):
+        targets.setdefault(r.pop("src"), []).append(r)
+    out = []
+    for t in ts:
+        bar = (str(t["due"])[:10] if t.get("hard") and t.get("due") else None) or t["rel"]["needed_by"]
+        waits = [dict(b, late=bool(bar and b["status"] == "open" and b["due"] and str(b["due"])[:10] > bar)) for b in targets.get(t["id"], [])]
+        out.append({"id": t["id"], "name": t["name"], "project": t["project"], "due": t["due"], "hard": t["hard"], "needed_by": t["rel"]["needed_by"], "waits_on": waits})
+    out.sort(key=lambda w: (not any(b["late"] for b in w["waits_on"]), str(w["due"] or "9999"), w["id"]))
+    out = out[:WAITING_CAP]
+    _seen_tasks(ctx, [w["id"] for w in out] + [b["id"] for w in out for b in w["waits_on"]])
+    return {"waiting": out}
+
+
+@tool("twin_candidates", "Pairs of open tasks that look like the same task created twice (same project and number, due within 36 hours, one from "
+      "Canvas), plus pending same-as suggestions. In a pair `a` is the one that would go and `b` the one kept (`keep`); `suggestion` is the id of a "
+      "pending suggestion for the pair, or null. Pairs the user already judged are left out.",
+      {"project": {"type": "string", "description": "project substring"}, "limit": {"type": "integer", "description": "default 20, at most 40"}})
+def twin_candidates(ctx: Context, args: dict) -> dict:
+    limit = _int(args, "limit", 20, 1, 40)
+    proj = str(args.get("project") or "").lower()
+    match = lambda t: proj in str(t.get("project") or "").lower()                                  # noqa: E731
+    open_rows = {t["id"]: t for t in rows(ctx.conn, "SELECT id, name, project, status, due, source, created_at FROM tasks WHERE status = 'open'")}
+    pending: dict[frozenset, tuple] = {}                         # unordered pair → (goes, keep, why, evidence id)
+    for tid, sugg in relations.pending_suggestions(ctx.conn).items():
+        for s in sugg:
+            if s["kind"] == "same_as" and s["keep"] == s["other"]:       # listed under the end that would go
+                pending.setdefault(frozenset((tid, s["other"])), (tid, s["other"], s.get("why"), s["evidence_id"]))
+    merged = {frozenset((r["src"], r["dst"])) for r in rows(ctx.conn, f"SELECT src, dst FROM relations WHERE kind = 'same_as' AND {ACTIVE}")}
+    cands = [p + (None,) for p in relations.twin_pairs([t for t in open_rows.values() if match(t)])] + sorted(pending.values(), key=lambda p: p[3])
+    card = lambda x: {k: open_rows[x][k] for k in ("id", "name", "due", "source")}                    # noqa: E731
+    pairs, done = [], set()
+    for goes, keep, why, _ in cands:
+        pair = frozenset((goes, keep))
+        if pair in done or pair in merged or goes not in open_rows or keep not in open_rows:
+            continue
+        if not (match(open_rows[goes]) or match(open_rows[keep])) or relations.pair_judged(ctx.conn, "same_as", goes, keep):
+            continue
+        done.add(pair)
+        pairs.append({"a": card(goes), "b": card(keep), "keep": keep, "why": why, "suggestion": pending[pair][3] if pair in pending else None})
+        if len(pairs) >= limit:
+            break
+    _seen_tasks(ctx, [x for p in pairs for x in (p["a"]["id"], p["b"]["id"])])
+    return {"pairs": pairs}
+
+
+@tool("goal_tree", "A goal and its steps (give the goal or any of its steps), with each step's state and outcome. A step's `waits_on` lists the "
+      "open tasks it waits on; `done` counts the steps done.",
+      {"task_id": {"type": "integer"}}, ["task_id"])
+def goal_tree(ctx: Context, args: dict) -> dict:
+    tid = _int(args, "task_id")
+    if tid is None:
+        raise ToolError("task_id is required")
+    if not one(ctx.conn, "SELECT id FROM tasks WHERE id = ?", (tid,)):
+        raise ToolError(f"no Task-{tid}")
+    up = one(ctx.conn, f"SELECT dst FROM relations WHERE src = ? AND kind = 'part_of' AND {ACTIVE} ORDER BY id LIMIT 1", (tid,))
+    gid = up["dst"] if up else tid
+    steps = rows(ctx.conn, f"SELECT t.id, t.name, t.status, t.due, t.outcome FROM relations r JOIN tasks t ON t.id = r.src "
+                           f"WHERE r.dst = ? AND r.kind = 'part_of' AND r.{ACTIVE} ORDER BY r.id", (gid,))
+    if not steps:
+        raise ToolError(f"Task-{tid} is not a goal or a step")
+    goal = one(ctx.conn, "SELECT id, name, status, due, hard, outcome FROM tasks WHERE id = ?", (gid,))
+    waits: dict[int, list[int]] = {}
+    for r in rows(ctx.conn, f"SELECT r.src, r.dst FROM relations r JOIN tasks b ON b.id = r.dst WHERE r.kind = 'waits_on' AND r.{ACTIVE} AND b.status = 'open' "
+                            "AND r.src IN (SELECT value FROM json_each(?)) ORDER BY r.dst", (_ids_param(s["id"] for s in steps),)):
+        waits.setdefault(r["src"], []).append(r["dst"])
+    for s in steps:
+        s["waits_on"] = waits.get(s["id"], [])
+    _seen_tasks(ctx, [gid] + [s["id"] for s in steps])
+    return {"goal": goal, "steps": steps, "done": sum(1 for s in steps if s["status"] == "done"), "total": len(steps)}
 
 
 @tool("reminders_list", "Pending reminders, soonest first, with the task they belong to. Optionally for one task.",

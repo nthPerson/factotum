@@ -5,8 +5,9 @@ an `evidence` row (§5.4), never a link. Nothing here commits."""
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
-from datetime import date
+from datetime import date, datetime, timedelta
 
 from . import scoring
 from .db import now_iso
@@ -113,11 +114,15 @@ def default_survivor(db: Db, a: int, b: int) -> tuple[int, int]:
     itself); both or neither → the older (`created_at`, then the lower id)."""
     rows = {r["id"]: dict(r) for r in db.execute("SELECT id, source, created_at FROM tasks WHERE id IN (?, ?)", (a, b)).fetchall()}
     ra, rb = rows.get(a) or {"id": a}, rows.get(b) or {"id": b}
+    return (a, b) if _kept(ra, rb) is ra else (b, a)
+
+
+def _kept(ra: dict, rb: dict) -> dict:
+    """`default_survivor`'s rule on two rows (`id`, `source`, `created_at`): the one that stays."""
     ca, cb = ra.get("source") == "Canvas", rb.get("source") == "Canvas"
     if ca != cb:
-        return (a, b) if ca else (b, a)
-    first = min((ra, rb), key=lambda r: (r.get("created_at") or "", r["id"]))
-    return (a, b) if first is ra else (b, a)
+        return ra if ca else rb
+    return min((ra, rb), key=lambda r: (r.get("created_at") or "", int(r["id"])))
 
 
 def survivor(db: Db, task_id: int) -> int:
@@ -416,3 +421,78 @@ def words(t: dict) -> str:
         d = date.fromisoformat(str(rel["needed_by"])[:10])
         out.append(f"needed for {d.strftime('%b')} {d.day}")
     return " · ".join(out)
+
+
+def short(t: dict) -> str:
+    """An annotated row's links as `tasks_query` shows them, bare ids `" · "`-joined:
+    "waits on 412 · frees 430, 431 · part of 380 · steps 2/5 open · same as 12"; "" when it has none."""
+    rel = t.get("rel") or {}
+    ids = lambda xs: ", ".join(str(x) for x in xs)                                                # noqa: E731
+    out = []
+    if rel.get("waits_on_open"):
+        out.append("waits on " + ids(rel["waits_on_open"]))
+    if rel.get("frees_open"):
+        out.append("frees " + ids(rel["frees_open"]))
+    if rel.get("goal_id") is not None:
+        out.append(f"part of {rel['goal_id']}")
+    if rel.get("steps_total"):
+        out.append(f"steps {rel.get('steps_open') or 0}/{rel['steps_total']} open")
+    merged = [ln["other"] for ln in rel.get("links") or () if ln.get("kind") == "same_as" and ln.get("dir") == "out"]
+    if merged:
+        out.append("same as " + ids(merged))
+    return " · ".join(out)
+
+
+SIDE_WORDS = {("part_of", "out"): "part of", ("part_of", "in"): "has step", ("waits_on", "out"): "waits on", ("waits_on", "in"): "frees",
+              ("same_as", "out"): "merged into", ("same_as", "in"): "merged from"}
+
+
+def side_word(kind: str, dir: str) -> str:
+    """A link's kind as read from one end (`dir` as in `rel.links`: "out" when the task is `src`)."""
+    return SIDE_WORDS.get((kind, dir), WORDS.get(kind, kind))
+
+
+# --- twins (design §10.1): the same task created twice, once by Canvas ------------------------------
+
+TWIN_HOURS = 36
+_DIGITS = re.compile(r"\d+")
+
+
+def _twin_number(name) -> int | None:
+    """The last run of digits in a name, as an integer ("Assignment 03" and "Assignment 3" both 3)."""
+    runs = _DIGITS.findall(str(name or "")[:300])
+    return int(runs[-1]) if runs else None
+
+
+def _due_at(due) -> datetime | None:
+    """A due value as a naive datetime; a date-only due is midnight."""
+    try:
+        return datetime.fromisoformat(str(due)[:16]) if due else None
+    except ValueError:
+        return None
+
+
+def twin_pairs(tasks: list[dict]) -> list[tuple[int, int, str]]:
+    """Pairs that look like one task made twice (design §10.1), pure: both open, the same non-empty
+    project, both dated, the same number in the name, due within TWIN_HOURS, at least one from Canvas.
+    Name similarity alone is never a signal. Returns `(goes, keep, why)`, `keep` as `default_survivor`
+    picks it (the Canvas row, else the older); ordered by the two ids."""
+    groups: dict[tuple, list[dict]] = {}
+    for t in tasks:
+        n, at = _twin_number(t.get("name")), _due_at(t.get("due"))
+        if t.get("status") == "open" and t.get("project") and n is not None and at is not None:
+            groups.setdefault((t["project"], n), []).append(dict(t, _at=at))
+    out = []
+    for (_, n), ts in groups.items():
+        ts.sort(key=lambda t: int(t["id"]))
+        for i, x in enumerate(ts):
+            for y in ts[i + 1:]:
+                if "Canvas" not in (x.get("source"), y.get("source")):
+                    continue
+                gap = abs(x["_at"] - y["_at"])
+                if gap > timedelta(hours=TWIN_HOURS):
+                    continue
+                keep = _kept(x, y)
+                goes = y if keep is x else x
+                out.append((int(goes["id"]), int(keep["id"]), f"same number {n}, due {round(gap.total_seconds() / 3600)} h apart"))
+    return sorted(out, key=lambda p: (min(p[:2]), max(p[:2])))
