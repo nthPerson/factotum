@@ -30,7 +30,8 @@
   const folded = (key, dflt) => Object.prototype.hasOwnProperty.call(folds, key) ? !!folds[key] : !!dflt;
   function setFold(key, shut) { folds[key] = !!shut; try { localStorage.setItem('factotum.folds', JSON.stringify(folds)); } catch (_) {} }
   let ui = { tab: 'today', focus: null, sel: new Set(), open: new Set(), reviewIdx: 0, laterOpen: false, datePick: false, trayOpen: false, trayOff: new Set(), reviewPaused: false, rvNote: { id: null, text: '' }, remOpen: null, dueOpen: null, rvReply: null,
-             railOpen: !window.matchMedia('(max-width: 860px)').matches, chatDrawer: false };
+             railOpen: !window.matchMedia('(max-width: 860px)').matches, chatDrawer: false,
+             page: null, pageTask: null, pageScroll: 0 };     // the phone task page: its id, the row fetched when the list lacks it, the list's scroll
   try { ui.tab = parseAddress().tab; } catch (_) {}
   try { const r = localStorage.getItem('factotum.rail'); if (r === '0' || r === '1') ui.railOpen = r === '1'; } catch (_) {}
   try { const s = JSON.parse(localStorage.getItem('factotum.staged') || '[]'); staged = new Map(s); } catch (_) {}
@@ -93,13 +94,20 @@
     if (replace) history.replaceState(null, '', path); else history.pushState(null, '', path);
   }
   function go(tab) { ui.tab = tab; ui.laterOpen = false; setAddress(addressOf(tab)); render(); }
-  // Once after the first load (no event), and on every popstate (with it). A task address opens the
-  // task's row where a list shows it and leaves that tab's address in place of /t/<id>.
+  // Once after the first load (no event), and on every popstate (with it). On a desktop a task address
+  // opens the task's row where a list shows it and leaves that tab's address in place of /t/<id>. On a
+  // phone it opens the task page; opened straight at /t/<id> (a reminder), / is put beneath it so the
+  // phone's Back lands on Today instead of leaving the app.
   function applyAddress(ev) {
     const a = parseAddress();
+    if (a.task !== null && PHONE()) {
+      if (!ev) { setAddress('/', true); setAddress('/t/' + a.task); }
+      openTask(a.task, false); return;
+    }
     if (a.task !== null) { jumpTo(a.task, true, true); setAddress(addressOf(ui.tab), true); return; }
     ui.tab = a.tab; ui.laterOpen = false;
     setAddress(addressOf(a.tab), true);      // a legacy /#<tab> or /today becomes the tab's path; otherwise nothing
+    if (ui.page !== null) { closeTask(); return; }      // Back from the task page
     render();
   }
 
@@ -287,12 +295,14 @@
 
   // ---------- rendering ----------
   function render() {
+    document.body.classList.toggle('page-on', ui.page !== null);      // before measuring: the page hides the bar on a phone
     const bar = document.querySelector('header.bar'); if (bar) document.documentElement.style.setProperty('--bar-h', bar.offsetHeight + 'px');
     renderRail();
     const p = document.getElementById('panel');
     const fns = { today: renderToday, timeline: renderTimeline, projects: renderProjects, review: renderReview, chat: renderChat, log: renderLog, settings: renderSettings };
     const act = document.activeElement, held = act && ['cmd', 'rv-ask', 'chat-pick', 'rv-note'].includes(act.id) ? { id: act.id, a: act.selectionStart, b: act.selectionEnd } : null;
-    p.innerHTML = pendingHtml() + fns[ui.tab]();
+    if (ui.page !== null && !byId(ui.page) && !(ui.pageTask && ui.pageTask.id === ui.page)) fetchPageTask(ui.page);
+    p.innerHTML = ui.page !== null ? taskPageHtml() : pendingHtml() + fns[ui.tab]();
     if (held) { const el = document.getElementById(held.id); if (el) { el.focus({ preventScroll: true }); try { el.setSelectionRange(held.a, held.b); } catch (_) {} } }
     p.querySelectorAll('textarea.grow').forEach(grow);
     document.querySelectorAll('#tabs button').forEach(b => { b.setAttribute('aria-selected', b.dataset.tab === ui.tab); if (b.dataset.tab === ui.tab && PHONE() && b.scrollIntoView) b.scrollIntoView({ block: 'nearest', inline: 'center' }); });
@@ -333,6 +343,7 @@
   // `replace` (only when opening at /t/<id>) swaps the address instead of pushing the tab's: a /timeline
   // pushed above /t/<id> would let Back return there, jump and push again, so Back could never leave.
   function jumpTo(id, expand, replace = false) {
+    if (expand && PHONE()) { openTask(id); return; }      // a phone opens the task page instead (a Top tile's double-tap)
     const tabs = [ui.tab, 'today', 'timeline'].filter((t, i, a) => ['today', 'timeline', 'projects'].includes(t) && a.indexOf(t) === i);
     let hit = null;
     for (const tab of tabs) { const g = groupsOf(tab).find(g => g.rows.some(r => r.id === id)); if (g) { hit = { tab, key: g.key }; break; } }
@@ -372,10 +383,11 @@
       : PHONE() ? 'done 389 · push 364 fri · or ask Claude' : 'Command: done 389 392 · push 364 fri · nodue 364 · top 23 · longterm 38 · or ask Claude in plain words';
     const box = `<div class="cmd"><textarea id="cmd" class="grow" rows="1" placeholder="${ph}" aria-label="Prompt or command">${esc(draft.cmd)}</textarea><button class="btn primary" id="cmd-go" ${inChat && chat.busy ? 'disabled' : ''}>Send</button></div>`;
     if (inChat) return `<div class="composer">${chatAttach()}${box}</div>`;       // no row hints and no bulk bar here: there are no rows
-    return `<div class="composer"><div class="attach">${ids.length ? 'Attached: ' + ids.map(id => `<span class="chip">Task-${id}</span>`).join('') : 'Nothing attached · tap a row to attach it'}</div>
+    const phone = PHONE();      // a tap opens the task page there; the tick box selects
+    return `<div class="composer"><div class="attach">${ids.length ? 'Attached: ' + ids.map(id => `<span class="chip">Task-${id}</span>`).join('') : phone ? 'Nothing attached · tick a row to attach it' : 'Nothing attached · tap a row to attach it'}</div>
       ${box}
       <p class="hint keys">Tap a row to select it (the bulk bar appears) · <kbd>j</kbd><kbd>k</kbd> move · <kbd>d</kbd> done · <kbd>x</kbd> drop · <kbd>s</kbd> snooze · <kbd>t</kbd> top · <kbd>l</kbd> long-term · <kbd>e</kbd> details · double-click a row for details · <kbd>Esc</kbd> deselect</p>
-      <p class="hint touch">Tap a row to select it · double-tap or ▸ for details</p></div>
+      <p class="hint touch">${phone ? 'Tap a row to open it · tick the box to select it' : 'Tap a row to select it · double-tap or ▸ for details'}</p></div>
       <div class="bulk" id="bulk"><b id="bulk-n"></b> selected
         <button class="btn small" data-bulk="done">Done</button><button class="btn small" data-bulk="drop">Drop</button>
         <button class="btn small" data-bulk="snooze">Snooze to tomorrow</button>
@@ -391,12 +403,24 @@
     return `<section class="group ${shut ? 'folded' : ''}"><h3 class="${g.cls || ''}"><button class="fold" data-fold="${esc(g.key)}" aria-expanded="${!shut}">${g.title}<span class="n">${g.rows.length}</span></button></h3>${shut ? '' : `<div class="rows">${g.rows.map(x => row(x, g.tag ? g.tag(x) : '')).join('')}</div>`}</section>`;
   }
   function row(x, extraChip) {
+    const cls = ['row', x.status === 'done' ? 'done' : '', x.status === 'dropped' ? 'drop' : '', ui.open.has(x.id) ? 'open' : '', ui.sel.has(x.id) ? 'sel' : '', ui.focus === x.id ? 'focus' : ''].join(' ');
+    return `<div class="${cls}" data-id="${x.id}">
+      <div class="main">
+        <input type="checkbox" id="ck-${x.id}" aria-label="Select" ${ui.sel.has(x.id) ? 'checked' : ''}>
+        <div class="title"><span class="code">Task-${x.id}</span> <span class="name">${esc(x.name)}</span></div>
+        <button class="chev" aria-label="Details" data-chev="${x.id}"></button>
+        <div class="meta">${chipsHtml(x, extraChip)}</div>
+      </div>
+      <div class="details">
+        ${detailsHtml(x)}</div></div>`;
+  }
+  // A task's chips (Top, long-term, date, effort, what is staged…): the row's .meta and the task page's.
+  function chipsHtml(x, extraChip) {
     const d = fmtDue(x.due);
     const st = staged.get(x.id);
     const dueCls = d ? (d.days < 0 ? 'crit' : d.days <= 1 ? 'warn' : '') : '';
     const fadeDays = x.fade_at ? daysTo(x.fade_at) : null;
-    const cls = ['row', x.status === 'done' ? 'done' : '', x.status === 'dropped' ? 'drop' : '', ui.open.has(x.id) ? 'open' : '', ui.sel.has(x.id) ? 'sel' : '', ui.focus === x.id ? 'focus' : ''].join(' ');
-    const chips = [
+    return [
       x.top_rank ? `<span class="chip top">Top ${topPos.get(x.id) || x.top_rank}</span>` : '',
       x.longterm_effective ? `<span class="chip lt">Long-term</span>` : '',
       x.close_on_sent_since ? `<span class="chip" title="Closes itself when a message to ${esc(x.close_on_sent_to || 'the watched address')} is sent">✉ closes on send</span>` : '',
@@ -408,6 +432,10 @@
       `<span class="chip eff">${esc(x.effort || '?')}</span>`,
       st ? `<span class="chip staged">${esc(st.label)}</span>` : '',
     ].join('');
+  }
+  // What an opened row shows (score, why now, context, source, links, lifecycle, reminders) and, for
+  // an open task, its actions: the row's .details and the task page's.
+  function detailsHtml(x) {
     const links = (x.links || []).map(l => {
       if (l.kind === 'plaud_note') return `<a href="https://web.plaud.ai/file/${esc(l.ref)}" target="_blank" rel="noopener" title="${esc(l.label || '')}">Plaud</a>`;
       if (l.kind === 'note_page') return `<a href="${esc(l.ref)}" target="_blank" rel="noopener" title="${esc(l.label || '')}">Note</a>`;
@@ -417,21 +445,13 @@
       return `<a href="${esc(l.ref)}" target="_blank" rel="noopener">${esc(l.label || l.kind)}</a>`;
     }).join('');
     const srcLink = x.source_link ? `<a href="${esc(x.source_link)}" target="_blank" rel="noopener">${x.source === 'Plaud' ? 'Plaud note' : x.source === 'Canvas' ? 'Canvas' : 'Source'}</a>` : '';
-    return `<div class="${cls}" data-id="${x.id}">
-      <div class="main">
-        <input type="checkbox" id="ck-${x.id}" aria-label="Select" ${ui.sel.has(x.id) ? 'checked' : ''}>
-        <div class="title"><span class="code">Task-${x.id}</span> <span class="name">${esc(x.name)}</span></div>
-        <button class="chev" aria-label="Details" data-chev="${x.id}"></button>
-        <div class="meta">${chips}</div>
-      </div>
-      <div class="details">
-        <dl><dt>Score</dt><dd>${x.score} · ${x.priority} · ${esc((x.score_reasons || []).join(' · '))}</dd>
+    return `<dl><dt>Score</dt><dd>${x.score} · ${x.priority} · ${esc((x.score_reasons || []).join(' · '))}</dd>
             <dt>Why now</dt><dd>${esc(x.why_now) || '<span class="code">none yet</span>'}</dd>
             <dt>Context</dt><dd>${esc(x.context) || '<span class="code">none</span>'}</dd></dl>
         <dl><dt>Source</dt><dd>${esc(x.source || '?')}${x.account ? ' · ' + esc(x.account) : ''} · ${x.mentions} mention${x.mentions === 1 ? '' : 's'} · created ${esc((x.created_at || '').slice(0, 10))}${x.legacy_status ? ' · was ' + esc(x.legacy_status) : ''}</dd>
             <dt>Links</dt><dd class="links">${srcLink}${links || (srcLink ? '' : '<span class="code">none</span>')}</dd>
             <dt>Lifecycle</dt><dd>${x.tier}${x.fade_at ? ' · fades ' + x.fade_at : ''}${x.last_call_at ? ' · last call ' + x.last_call_at : ''}${x.snoozed_until ? ' · snoozed until ' + x.snoozed_until : ''}</dd>
-            <dt>Reminders</dt><dd>${(x.reminders || []).map(r => `<span class="chip rem">${fmtWhen(r.fire_at)}${r.repeat ? ' · ' + esc(r.repeat) : ''} ${esc(r.label || '')}</span>`).join(' ') || '<span class="code">none</span>'}</dd></dl>
+            <dt>Reminders</dt><dd>${(x.reminders || []).map(r => `<span class="chip rem">${fmtWhen(r.fire_at)}${r.repeat ? ' · ' + esc(r.repeat) : ''} ${esc(r.label || '')}</span>`).join(' ') || '<span class="code">none</span>'}</dd></dl>${x.status !== 'open' ? '' : `
         <div class="actions">
           <button class="btn small" data-act="done" data-id="${x.id}">Done</button>
           <button class="btn small" data-act="drop" data-id="${x.id}">Drop</button>
@@ -443,9 +463,41 @@
           <span class="spacer"></span>
           <button class="btn small" data-chat-canned="search_mail" data-id="${x.id}" title="A chat turn: finds the threads about this task and offers to link them">✉ Search related emails</button>
           <button class="btn small" data-chat-canned="draft_reply" data-id="${x.id}" title="A chat turn: saves a reply draft in Mailbird, never sends">✉ Draft reply</button>
-        </div></div></div>`;
+        </div>`}`;
   }
-  const dueDays = x => x.due ? fmtDue(x.due).days : null;
+  // ---------- the phone task page (stage 1) ----------
+  // On a phone a tap opens a task full-screen, rendered into #panel in place of the tab (render()).
+  // An open task is drawn like its row, staged changes included; whether it is closed is the server's
+  // word (a staged Done keeps the actions, so the tray's Discard still makes sense). A task the open
+  // list lacks (closed, or closed since) is fetched once and shown read-only.
+  let pageFetch = null;       // the id whose /api/tasks/<id> is in flight
+  function fetchPageTask(id) {
+    if (pageFetch === id) return;
+    pageFetch = id;
+    api(`/api/tasks/${id}`).then(t => t, e => e.message === '404' ? { id, missing: true } : { id, failed: e.message })
+      .then(t => { if (pageFetch === id) pageFetch = null; if (ui.page !== id) return; ui.pageTask = t; render(); });
+  }
+  function taskPageHtml() {
+    const id = ui.page, pt = ui.pageTask && ui.pageTask.id === id ? ui.pageTask : null;
+    const bar = `<div class="pbar"><button class="btn" id="page-back">‹ Back</button><span class="code">Task-${id}</span></div>`;
+    const srv = byId(id) || (pt && !pt.missing && !pt.failed ? pt : null);
+    if (!srv) return `<div class="taskpage" data-id="${id}">${bar}<div class="empty">${!pt ? `Loading Task-${id}…` : pt.missing ? `Task-${id} does not exist.` : `Could not load Task-${id} (${esc(pt.failed)}).`}</div></div>`;
+    const closed = srv.status !== 'open';
+    const x = closed ? srv : Object.assign({}, view(srv), { status: srv.status });
+    return `<div class="taskpage" data-id="${id}">${bar}<h2>${esc(x.name)}</h2><div class="meta">${chipsHtml(x)}</div>
+      ${closed ? `<p class="closed">This task is ${esc(srv.status)}.</p>` : ''}<div class="details">${detailsHtml(x)}</div></div>`;
+  }
+  // On a phone the task page; elsewhere the task's row, expanded in place. `push` is false when the address is already /t/<id>.
+  function openTask(id, push = true) {
+    if (!PHONE()) { jumpTo(id, true); return; }
+    if (ui.page === null) ui.pageScroll = window.scrollY;      // the list's place; a page opened over a page keeps it
+    ui.page = id; ui.pageTask = null;
+    if (push) setAddress('/t/' + id);
+    render();                  // fetches the task when the open list lacks it
+    window.scrollTo(0, 0);
+  }
+  function closeTask() { ui.page = null; render(); window.scrollTo(0, ui.pageScroll); }
+  const dueDays = x =>x.due ? fmtDue(x.due).days : null;
   function todayGroups() {
     const o = openOnes().filter(x => !(x.snoozed_until && x.snoozed_until > data.today));   // Later = hidden until its date
     const by = f => o.filter(f);
@@ -652,7 +704,7 @@
     if (chat.busy) { toast('A chat turn is already running'); return; }
     chat.busy = true; chat.live = { status: 'Starting…', texts: [] }; chat.from = from || null; chat.scroll = !from;
     // the threads first: go() renders, and a Chat render with no threads loads them and the current thread's messages over this turn's
-    if (!from) { if (!chat.threads) { try { const r = await api('/api/chat/threads'); chat.threads = r.threads; } catch (_) { chat.threads = []; } } go('chat'); }
+    if (!from) { if (!chat.threads) { try { const r = await api('/api/chat/threads'); chat.threads = r.threads; } catch (_) { chat.threads = []; } } ui.page = null; go('chat'); }
     const threadId = from ? null : chat.current;    // a Review question starts its own thread
     if (!from) chat.messages = [...chat.messages, { role: 'user', text: text || (canned === 'search_mail' ? 'Search related emails' : 'Draft a reply'), attached }];
     render();
@@ -887,20 +939,24 @@
       // Two taps on the same row within 400 ms are a double-click: the first tap's selection flip
       // is undone and the details open. Tracked by hand because render() replaces the DOM node
       // between the two clicks, so the browser's dblclick event would not fire.
+      // On a phone a tap opens the task page and only the tick box selects.
       r.querySelector('.main').addEventListener('click', e => {
         if (e.target.closest('input, button, .chip.due')) return;
+        if (PHONE()) { openTask(id); return; }
         const now = Date.now();
         if (lastTap.id === id && now - lastTap.at < 400) { lastTap = { id: null, at: 0 }; ui.sel.has(id) ? ui.sel.delete(id) : ui.sel.add(id); ui.open.has(id) ? ui.open.delete(id) : ui.open.add(id); render(); return; }
         lastTap = { id, at: now }; toggleSel();
       });
       r.querySelector('input[type=checkbox]').addEventListener('change', toggleSel);
-      r.querySelector('[data-chev]').addEventListener('click', () => { ui.open.has(id) ? ui.open.delete(id) : ui.open.add(id); render(); });
+      r.querySelector('[data-chev]').addEventListener('click', () => { if (PHONE()) { openTask(id); return; } ui.open.has(id) ? ui.open.delete(id) : ui.open.add(id); render(); });
       r.querySelector('.main').setAttribute('draggable', 'true');
       r.querySelector('.main').addEventListener('dragstart', e => e.dataTransfer.setData('text/plain', String(id)));
     });
+    const pb = document.getElementById('page-back'); if (pb) pb.onclick = () => history.back();
     panel.querySelectorAll('[data-act]').forEach(b => b.addEventListener('click', () => act(+b.dataset.id, b.dataset.act)));
     panel.querySelectorAll('[data-due]').forEach(c => c.addEventListener('click', () => {
-      const id = +c.dataset.due; const x = view(byId(id));
+      const id = +c.dataset.due; if (!byId(id)) return;      // a closed task's page: its date is not for changing
+      const x = view(byId(id));
       const order = [isoPlus(1), nextFri(), isoPlus(7), null];
       const i = order.indexOf(x.due ? x.due.slice(0, 10) : null);
       act(id, 'due', order[(i + 1) % order.length]);
@@ -1121,11 +1177,13 @@
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape') {   // Esc: deselect everything; in Chat the selection is what a prompt carries, so it only closes the task picker
       lastTap = { id: null, at: 0 };
-      if (ui.tab === 'chat') { if (ui.pickOpen) { ui.pickOpen = false; render(); } }
+      if (ui.page !== null) history.back();      // the task page closes like the phone's Back
+      else if (ui.tab === 'chat') { if (ui.pickOpen) { ui.pickOpen = false; render(); } }
       else if (ui.sel.size) { ui.sel.clear(); render(); }
       if (e.target.matches('input, select, textarea')) e.target.blur(); return;
     }
     if (e.target.matches('input, select, textarea')) return;
+    if (ui.page !== null) return;      // the task page covers the tab: no key acts on what is under it
     if (ui.tab === 'review') { const map = { d: 'done', k: 'keep', s: 'later', x: 'drop', t: 'top', l: 'longterm' }; if (map[e.key]) { e.preventDefault(); reviewAct(map[e.key]); } return; }
     const visible = [...document.querySelectorAll('#panel .row')].map(r => +r.dataset.id); if (!visible.length) return;
     const i = visible.indexOf(ui.focus);
