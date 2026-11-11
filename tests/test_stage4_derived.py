@@ -1,9 +1,11 @@
 """Stage 4a, the derived half (design §7): one step (`relations.annotate`) derives every neighbour fact
 under `task["rel"]`, and every surface that scores or runs the lifecycle reads annotated rows."""
+import copy
 from datetime import date
 
 from factotum import batches, config as C, lifecycle, relations, scoring
 from factotum.db import connect, now_iso, rows
+from conftest import task
 from stage4_helpers import TODAY, link, mk
 
 
@@ -146,3 +148,67 @@ def test_every_surface_reads_annotated_rows(conn, cfg, tmp_path, monkeypatch, ca
     seen.clear()
     cli.main(["expire"])
     assert seen == [True], "__main__ expire"
+
+
+# --- Task 9: scoring
+
+def _r(**kw): return dict({"waits_on_open": [], "frees_open": [], "needed_by": None, "needed_by_id": None, "needed_by_via": None}, **kw)
+
+
+def test_links_off_reproduces_todays_scores_exactly(cfg):
+    off = copy.deepcopy(cfg); off["scoring"]["links"]["enabled"] = False
+    for t in (task(project="FAMAIL", rel=_r(waits_on_open=[2])), task(project="FAMAIL", rel=_r(frees_open=[3, 4], needed_by="2026-11-06", needed_by_id=3, needed_by_via="frees"))):
+        bare = {k: v for k, v in t.items() if k != "rel"}
+        assert scoring.score(t, TODAY, off) == scoring.score(bare, TODAY, cfg)
+
+
+def test_a_waiting_task_is_capped_unless_its_own_hard_date_is_near(cfg):
+    soft = task(project="FAMAIL", due="2026-11-02", rel=_r(waits_on_open=[2]))
+    s, _, why = scoring.score(soft, TODAY, cfg); assert s == 30 and "waits on Task-2" in why
+    assert scoring.score(task(project="FAMAIL", due="2026-11-03", hard=1, rel=_r(waits_on_open=[2])), TODAY, cfg)[0] == 80   # exempt: hard, 2 days
+    assert scoring.score(task(project="FAMAIL", due="2026-11-02", manual_priority="P1", rel=_r(waits_on_open=[2])), TODAY, cfg)[0] == 65  # floor wins
+    many = task(project="FAMAIL", rel=_r(waits_on_open=[2, 3, 4]))
+    assert "waits on Task-2, Task-3 and 1 more" in scoring.score(many, TODAY, cfg)[2][-1]
+
+
+def test_a_task_that_frees_a_hard_date_is_scored_as_if_due_then(cfg):
+    s, _, why = scoring.score(task(project="FAMAIL", rel=_r(frees_open=[3], needed_by="2026-11-06", needed_by_id=3, needed_by_via="frees")), TODAY, cfg)
+    assert s == 65 and "frees Task-3, hard, Nov 6" in why and "frees 1 +5" in why
+    s, _, why = scoring.score(task(project="FAMAIL", rel=_r(frees_open=[3], needed_by="2026-11-06", needed_by_id=3, needed_by_via="chain")), TODAY, cfg)
+    assert s == 65 and "needed for Task-3, hard, Nov 6" in why
+    s, _, why = scoring.score(task(project="FAMAIL", rel=_r(needed_by="2026-11-06", needed_by_id=3, needed_by_via="goal")), TODAY, cfg)
+    assert s == 60 and "part of Task-3, hard, Nov 6" in why
+    s, _, why = scoring.score(task(project="FAMAIL", due="2026-11-03", rel=_r(frees_open=[3], needed_by="2026-11-06", needed_by_id=3, needed_by_via="frees")), TODAY, cfg)
+    assert s == 70 and not any("hard, Nov" in r for r in why)
+
+
+def test_the_frees_bonus_is_capped_at_15(cfg):
+    s, _, why = scoring.score(task(project="FAMAIL", rel=_r(frees_open=[2, 3, 4, 5])), TODAY, cfg)
+    assert s == 30 and "frees 4 +15" in why
+
+
+def test_open_steps_never_cap_a_goal(cfg):
+    t = task(project="FAMAIL", due="2026-11-02")
+    assert scoring.score(dict(t, rel=_r(steps_open=3)), TODAY, cfg) == scoring.score(t, TODAY, cfg)
+
+
+def test_real_scores_agree_across_surfaces(conn, cfg, tmp_path):
+    from factotum import chat, mcp_server as M, planner
+    from factotum.api import create_app
+    from fastapi.testclient import TestClient
+    D = date.today()
+    mk(conn, 1, project="FAMAIL", due=(D + __import__("datetime").timedelta(days=1)).isoformat())
+    mk(conn, 2, project="FAMAIL")
+    mk(conn, 3, project="FAMAIL", due=(D + __import__("datetime").timedelta(days=5)).isoformat(), hard=1)
+    mk(conn, 4, project="FAMAIL", due=(D + __import__("datetime").timedelta(days=1)).isoformat(), hard=1)
+    for i in (1, 3, 4):
+        link(conn, i, 2, "waits_on")
+    want = {1: 30, 2: 95, 3: 30, 4: 80}
+    path = tmp_path / "t.db"
+    conn.execute("PRAGMA wal_checkpoint(FULL)")
+    client = TestClient(create_app(cfg, db_path=str(path)))
+    assert {t["id"]: t["score"] for t in client.get("/api/tasks").json()["tasks"]} == want
+    assert {r["id"]: r["score"] for r in planner.bundle(conn, cfg, D)["rows"]} == want
+    ctx = M.Context(connect(path), cfg, today=D)
+    assert {t["id"]: t["score"] for t in M.tasks_query(ctx, {})["tasks"]} == want
+    assert {r["id"]: r["score"] for r in chat.attached_rows(conn, cfg, [1, 2, 3, 4], D)} == want

@@ -136,6 +136,13 @@ scoring:
   start_now: { efforts: [L], within_days: 7, bonus: 10 }
   manual: { P0_floor: 85, P1_floor: 65, P3_cap: 40 }
   bands: { P0: 80, P1: 60, P2: 35 }
+  links:                       # what a link between tasks does to the score (design §7.2)
+    enabled: true
+    waiting_cap: 30            # a task that waits on an open task scores at most this…
+    waiting_exempt_days: 2     # …unless its own hard due date is within this many days or past
+    frees_bonus: 5             # per open task it frees
+    frees_bonus_cap: 15
+    inherit_hard_dates: true   # a task that frees a hard-dated task (or a step of a hard-dated goal) is scored as if due then
 
 sources:
   plaud:

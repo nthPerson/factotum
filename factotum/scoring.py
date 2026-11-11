@@ -15,6 +15,19 @@ def score(task: dict, today: date, cfg: dict) -> tuple[int, str, list[str]]:
     reasons: list[str] = []
     d = days_until(task.get("due"), today)
     hard = bool(task.get("hard"))
+    own_d, own_hard = d, hard
+    lk = sc.get("links", {}) or {}
+    rel = task.get("rel") if isinstance(task.get("rel"), dict) else None
+    if rel is not None and not lk.get("enabled", True):
+        rel = None
+    inherited = None
+    if rel and lk.get("inherit_hard_dates", True) and rel.get("needed_by"):
+        nd = days_until(rel["needed_by"], today)
+        if nd is not None and (d is None or nd < d or (nd == d and not hard)):
+            d, hard = nd, True
+            word = {"frees": "frees", "chain": "needed for", "goal": "part of"}.get(rel.get("needed_by_via"), "frees")
+            nb = date.fromisoformat(str(rel["needed_by"])[:10])
+            inherited = f"{word} Task-{rel.get('needed_by_id')}, hard, {nb.strftime('%b ')}{nb.day}"
     longterm = bool(task.get("longterm"))
 
     hard_t = sc.get("hard", {})
@@ -44,6 +57,8 @@ def score(task: dict, today: date, cfg: dict) -> tuple[int, str, list[str]]:
             base = max(0, base - sc.get("soft_penalty", 15))
             why = "soft, " + why
         reasons.append(why)
+    if inherited:
+        reasons[0] = inherited
 
     total = float(base)
     weight = C.project_weight(cfg, task.get("project"))
@@ -71,6 +86,17 @@ def score(task: dict, today: date, cfg: dict) -> tuple[int, str, list[str]]:
     if d is not None and 0 <= d <= sn.get("within_days", 7) and eff in (sn.get("efforts") or []):
         total += sn.get("bonus", 10)
         reasons.append("start now")
+
+    if rel:
+        fo = rel.get("frees_open") or []
+        fb = min(lk.get("frees_bonus_cap", 15), lk.get("frees_bonus", 5) * len(fo))
+        if fb:
+            total += fb
+            reasons.append(f"frees {len(fo)} +{fb}")
+        wo = rel.get("waits_on_open") or []
+        if wo and not (own_hard and own_d is not None and own_d <= lk.get("waiting_exempt_days", 2)):
+            total = min(total, lk.get("waiting_cap", 30))
+            reasons.append("waits on Task-" + ", Task-".join(str(i) for i in wo[:2]) + (f" and {len(wo) - 2} more" if len(wo) > 2 else ""))
 
     man = sc.get("manual", {})
     mp = task.get("manual_priority")
