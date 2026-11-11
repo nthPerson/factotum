@@ -17,7 +17,7 @@ SETTABLE = {
     "last_reviewed_at", "why_now", "calendar_event",
 }
 OPS = {"set", "done", "drop", "reopen", "pin_top", "unpin", "keep", "longterm", "fade", "lapse", "add_reminder", "judge_evidence",
-       "create", "watch_sent", "unwatch_sent", "link", "unlink"}
+       "create", "watch_sent", "unwatch_sent", "link", "unlink", "add_note"}
 # What a `create` may carry; score, priority, status and mentions stay derived.
 CREATABLE = {"name", "project", "area", "due", "due_is_datetime", "hard", "effort", "context", "counterpart", "waiting_on", "manual_priority", "longterm", "snoozed_until"}
 CREATED_SOURCE = "Claude"          # the Source of a task a connector or skill created
@@ -145,13 +145,25 @@ def _resolve(conn: sqlite3.Connection, change: dict, today: date, closed_by: str
     return fields
 
 
-def apply(conn: sqlite3.Connection, changes: list[dict], source: str, today: date | None = None, closed_by: str | None = None) -> dict:
-    """Apply a list of changes atomically. Returns {"batch_id", "applied": n, "skipped": [...],
+def _norm_text(v) -> str:
+    return " ".join(str(v or "").split())
+
+
+def _same_value(cur_v, want) -> bool:
+    """Undo's comparison: strings whitespace-normalised, None equal to "", anything else by ==."""
+    if isinstance(cur_v, str) or isinstance(want, str):
+        return _norm_text(cur_v) == _norm_text(want)
+    return cur_v == want
+
+
+def apply(conn: sqlite3.Connection, changes: list[dict], source: str, today: date | None = None, closed_by: str | None = None, cause: dict | None = None) -> dict:
+    """Apply a list of changes atomically; `cause` (what set the batch off) is stored as cause_json. Returns {"batch_id", "applied": n, "skipped": [...],
     "created": [task ids a `create` made], "refs": {ref: task id}}."""
     today = today or date.today()
     closed_by = closed_by or source
     cur = conn.cursor()
-    cur.execute("INSERT INTO batches (created_at, applied_at, source) VALUES (?, ?, ?)", (now_iso(), now_iso(), source))
+    cur.execute("INSERT INTO batches (created_at, applied_at, source, cause_json) VALUES (?, ?, ?, ?)",
+                (now_iso(), now_iso(), source, json.dumps(cause) if cause else None))
     batch_id = cur.lastrowid
     undo: list[dict] = []
     applied = 0
@@ -161,12 +173,16 @@ def apply(conn: sqlite3.Connection, changes: list[dict], source: str, today: dat
     try:
         for ch in changes:
             op = ch.get("op") if isinstance(ch, dict) else None
+            before = cur.execute("SELECT COALESCE(MAX(id), 0) FROM changes").fetchone()[0]
             if op == "create":
                 applied += _create(conn, cur, ch, batch_id, source, today, undo, skipped, created)
             elif op in ("link", "unlink"):
                 applied += _link_op(conn, cur, ch, batch_id, source, undo, skipped, refs)
             elif _apply_one(conn, cur, ch, batch_id, source, today, closed_by, undo, skipped):
                 applied += 1
+            note = str(ch.get("note") or "").strip()[:300] if isinstance(ch, dict) else ""
+            if note:
+                cur.execute("UPDATE changes SET note = ? WHERE batch_id = ? AND id > ?", (note, batch_id, before))
     except Exception:
         conn.rollback()   # one shared connection serves every request; never leave it mid-transaction
         raise
@@ -268,7 +284,13 @@ def _apply_one(conn, cur, ch: dict, batch_id: int, source: str, today: date, clo
         _add_reminder(cur, task["id"], rf, batch_id, source, undo)
         return True
     try:
-        if ch.get("op") == "watch_sent":                     # the watch columns are written by these two ops only
+        if ch.get("op") == "add_note":                       # appended here, so it lands after whatever the text is by now
+            text = str((ch.get("fields") or {}).get("text") or "").strip()[:1000]
+            if not text:
+                raise ValueError("a note needs fields.text")
+            old = task.get("context") or ""
+            fields = {"context": (old + "\n" if old else "") + f"{today.isoformat()}: {text}"}
+        elif ch.get("op") == "watch_sent":                     # the watch columns are written by these two ops only
             fields = watch_fields(task, (ch.get("fields") or {}).get("to"))
         elif ch.get("op") == "unwatch_sent":
             fields = {"close_on_sent_since": None, "close_on_sent_to": None}
@@ -282,13 +304,25 @@ def _apply_one(conn, cur, ch: dict, batch_id: int, source: str, today: date, clo
         # it, so an undated row is not left "hard" or flagged as carrying a time.
         fields["due"] = None
         fields["hard"] = fields["due_is_datetime"] = 0      # even beside an explicit hard: true
+    expect = ch.get("expect")
+    if isinstance(expect, dict):                             # a staged edit carries the text it started from
+        for k, want in expect.items():
+            if k in fields and _norm_text(task.get(k)) != _norm_text(want):
+                skipped.append({"task_id": task["id"], "why": f"Task-{task['id']} {k} changed since this edit was staged; not applied"})
+                return False
+    return _write_fields(cur, task, fields, batch_id, undo)
+
+
+def _write_fields(cur, task: dict, fields: dict, batch_id: int, undo: list) -> bool:
+    """Diff `fields` against the task, write what differs: one changes row and one undo entry (with
+    the value written, so undo can tell a later edit) per field, edited_at bumped. False when nothing differs."""
     diffs = {k: v for k, v in fields.items() if task.get(k) != v}
     if not diffs:
         return False
     for k, v in diffs.items():
         cur.execute("INSERT INTO changes (batch_id, task_id, field, old, new) VALUES (?, ?, ?, ?, ?)",
                     (batch_id, task["id"], k, json.dumps(task.get(k)), json.dumps(v)))
-        undo.append({"task_id": task["id"], "field": k, "old": task.get(k)})
+        undo.append({"task_id": task["id"], "field": k, "old": task.get(k), "new": v})
     sets = ", ".join(f"{k} = ?" for k in diffs) + ", edited_at = ?"
     cur.execute(f"UPDATE tasks SET {sets} WHERE id = ?", tuple(diffs.values()) + (now_iso(), task["id"]))
     return True
@@ -350,9 +384,18 @@ def undo(conn: sqlite3.Connection, batch_id: int) -> dict:
             elif "evidence_id" in u:
                 conn.execute("UPDATE evidence SET judged_at = NULL, verdict = NULL WHERE id = ?", (u["evidence_id"],))
             elif "created_task_id" in u:                         # a created task is dropped, not deleted — and left alone once a later decision closed it
+                t = conn.execute("SELECT status FROM tasks WHERE id = ?", (u["created_task_id"],)).fetchone()
+                if t and t["status"] != "open":
+                    skipped.append({"task_id": u["created_task_id"], "why": f"Task-{u['created_task_id']} was closed after it was created; left as it is"})
+                    continue
                 conn.execute("UPDATE tasks SET status = 'dropped', completed_at = ?, closed_by = 'undo', top_rank = NULL, edited_at = ? WHERE id = ? AND status = 'open'",
                              (date.today().isoformat(), now_iso(), u["created_task_id"]))
             elif "field" in u:
+                if "new" in u:                                   # entries from before this check carry no `new` and are restored unchecked
+                    now_v = conn.execute(f"SELECT {u['field']} FROM tasks WHERE id = ?", (u["task_id"],)).fetchone()
+                    if now_v is not None and not _same_value(now_v[0], u["new"]):
+                        skipped.append({"task_id": u["task_id"], "why": f"Task-{u['task_id']} {u['field']} was changed after this batch; left as it is"})
+                        continue
                 conn.execute(f"UPDATE tasks SET {u['field']} = ?, edited_at = ? WHERE id = ?", (u["old"], now_iso(), u["task_id"]))
             else:
                 skipped.append({"task_id": u.get("task_id"), "why": UNKNOWN_UNDO})

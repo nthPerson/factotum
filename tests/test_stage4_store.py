@@ -193,3 +193,76 @@ def test_undo_route_answers_404_only_for_a_missing_batch_and_never_leaves_a_tran
     other.execute("BEGIN IMMEDIATE")
     other.rollback()
     other.close()
+
+
+# --- Task 3: undo checks, expect, add_note, note, cause
+
+def test_undo_skips_a_field_changed_after_the_batch_and_says_so(conn):
+    mk(conn, 1)
+    a = batches.apply(conn, [{"task_id": 1, "op": "set", "fields": {"due": "2026-11-05", "effort": "S"}}], "ui", TODAY)
+    batches.apply(conn, [{"task_id": 1, "op": "set", "fields": {"due": "2026-11-09"}}], "ui", TODAY)
+    res = batches.undo(conn, a["batch_id"])
+    t = one(conn, "SELECT due, effort FROM tasks WHERE id = 1")
+    assert t["due"] == "2026-11-09" and t["effort"] is None                       # the later edit stays; the untouched field is undone
+    assert res["restored"] == 1 and res["skipped"] == [{"task_id": 1, "why": "Task-1 due was changed after this batch; left as it is"}]
+
+
+def test_legacy_undo_entries_without_new_are_restored_as_before(conn):
+    mk(conn, 1, due="2026-11-05")
+    cur = conn.execute("INSERT INTO batches (created_at, applied_at, source, undo_json) VALUES ('t', 't', 'ui', ?)",
+                       (json.dumps([{"task_id": 1, "field": "due", "old": None}]),))
+    conn.commit()
+    res = batches.undo(conn, cur.lastrowid)
+    assert one(conn, "SELECT due FROM tasks WHERE id = 1")["due"] is None and res["restored"] == 1 and res["skipped"] == []
+
+
+def test_undo_of_a_create_reports_a_task_closed_since(conn):
+    a = batches.apply(conn, [{"op": "create", "fields": {"name": "New thing"}}], "connector", TODAY)
+    tid = a["created"][0]
+    batches.apply(conn, [{"op": "done", "task_id": tid}], "ui", TODAY)
+    res = batches.undo(conn, a["batch_id"])
+    assert one(conn, "SELECT status FROM tasks WHERE id = ?", (tid,))["status"] == "done"
+    assert res["skipped"] == [{"task_id": tid, "why": f"Task-{tid} was closed after it was created; left as it is"}]
+
+
+def test_a_staged_text_edit_is_skipped_when_the_text_changed_since(conn):
+    mk(conn, 1, context="B")
+    r = batches.apply(conn, [{"task_id": 1, "op": "set", "fields": {"context": "A + mine"}, "expect": {"context": "A"}}], "ui", TODAY)
+    assert r["applied"] == 0 and r["skipped"] == [{"task_id": 1, "why": "Task-1 context changed since this edit was staged; not applied"}]
+    assert one(conn, "SELECT context FROM tasks WHERE id = 1")["context"] == "B"
+    mk(conn, 2, context="A")
+    r = batches.apply(conn, [{"task_id": 2, "op": "set", "fields": {"context": "A + mine"}, "expect": {"context": "A  "}}], "ui", TODAY)
+    assert r["applied"] == 1 and one(conn, "SELECT context FROM tasks WHERE id = 2")["context"] == "A + mine"
+
+
+def test_add_note_appends_a_dated_line_at_apply_time(conn):
+    mk(conn, 1, context="Old")
+    r = batches.apply(conn, [{"task_id": 1, "op": "add_note", "fields": {"text": "Lab replied"}}], "chat", TODAY)
+    assert one(conn, "SELECT context FROM tasks WHERE id = 1")["context"] == f"Old\n{TODAY.isoformat()}: Lab replied"
+    ch = one(conn, "SELECT old, new FROM changes WHERE batch_id = ? AND field = 'context'", (r["batch_id"],))
+    assert json.loads(ch["old"]) == "Old"
+    batches.undo(conn, r["batch_id"])
+    assert one(conn, "SELECT context FROM tasks WHERE id = 1")["context"] == "Old"
+    r = batches.apply(conn, [{"task_id": 1, "op": "add_note", "fields": {"text": "  "}}], "chat", TODAY)
+    assert r["applied"] == 0 and r["skipped"][0]["why"] == "a note needs fields.text"
+    mk(conn, 2)
+    batches.apply(conn, [{"task_id": 2, "op": "add_note", "fields": {"text": "First"}}], "chat", TODAY)
+    assert one(conn, "SELECT context FROM tasks WHERE id = 2")["context"] == f"{TODAY.isoformat()}: First"
+
+
+def test_a_change_note_lands_on_every_row_it_writes(conn):
+    mk(conn, 1); mk(conn, 2)
+    r = batches.apply(conn, [{"task_id": 1, "op": "done", "note": "finished in the meeting"}, {"task_id": 2, "op": "done"}], "ui", TODAY)
+    n1 = [x["note"] for x in conn.execute("SELECT note FROM changes WHERE batch_id = ? AND task_id = 1", (r["batch_id"],))]
+    n2 = [x["note"] for x in conn.execute("SELECT note FROM changes WHERE batch_id = ? AND task_id = 2", (r["batch_id"],))]
+    assert len(n1) >= 3 and set(n1) == {"finished in the meeting"}
+    assert n2 and set(n2) == {None}
+
+
+def test_cause_is_stored_on_the_batch(conn):
+    mk(conn, 1)
+    cause = {"kind": "ripple", "from": [5], "run": 3}
+    a = batches.apply(conn, [{"task_id": 1, "op": "set", "fields": {"effort": "S"}}], "ripple", TODAY, cause=cause)
+    b = batches.apply(conn, [{"task_id": 1, "op": "set", "fields": {"effort": "M"}}], "ui", TODAY)
+    assert json.loads(one(conn, "SELECT cause_json FROM batches WHERE id = ?", (a["batch_id"],))["cause_json"]) == cause
+    assert one(conn, "SELECT cause_json FROM batches WHERE id = ?", (b["batch_id"],))["cause_json"] is None
