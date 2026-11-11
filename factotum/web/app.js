@@ -37,7 +37,7 @@
   function setFold(key, shut) { folds[key] = !!shut; try { localStorage.setItem('factotum.folds', JSON.stringify(folds)); } catch (_) {} }
   let ui = { tab: 'today', focus: null, sel: new Set(), open: new Set(), reviewIdx: 0, laterOpen: false, datePick: false, trayOpen: false, trayOff: new Set(), reviewPaused: false, rvNote: { id: null, text: '' }, remOpen: null, dueOpen: null, rvReply: null,
              railOpen: !window.matchMedia('(max-width: 860px)').matches, chatDrawer: false,
-             page: null, pageTask: null, pageScroll: 0,      // the phone task page: its id, the row fetched when the list lacks it, the list's scroll
+             page: null, pageScroll: 0, pageMore: false, pageLater: false,      // the task page: its id, the list's scroll, a phone's More and Later open
              bulkMore: false };      // the phone's short bar shows its second line (back to false when nothing is selected)
   try { ui.tab = parseAddress().tab; } catch (_) {}
   try { const r = localStorage.getItem('factotum.rail'); if (r === '0' || r === '1') ui.railOpen = r === '1'; } catch (_) {}
@@ -123,25 +123,32 @@
     const name = p.slice(1);
     return { tab: TABS.includes(name) ? name : 'today', task: null, legacy: false };
   }
-  // A task entry carries { page: true }: it was put there by the app, so a list address already lies
+  // A task entry carries { page: true, from }: it was put there by the app, so a list address already lies
   // beneath it. A reload or self-update on a phone task page sees the mark and adds nothing under it.
-  function setAddress(path, replace) {
+  // `from` is the task page this one was opened from (the trail: the page's back button reads
+  // "‹ Task-<from>"); kept in the entry, so it survives a reload.
+  function setAddress(path, replace, from = null) {
     if (location.pathname + location.hash === path) return;
-    const state = /^\/t\//.test(path) ? { page: true } : null;
+    const state = /^\/t\//.test(path) ? { page: true, from } : null;
     if (replace) history.replaceState(state, '', path); else history.pushState(state, '', path);
   }
-  function go(tab) { ui.tab = tab; ui.laterOpen = false; setAddress(addressOf(tab)); render(); }
+  function go(tab) { ui.tab = tab; ui.laterOpen = false; ui.page = null; setAddress(addressOf(tab)); render(); }      // a tab covers a desktop's task page
   // Once after the first load (no event), and on every popstate (with it). On a desktop a task address
-  // opens the task's row where a list shows it and leaves that tab's address in place of /t/<id>. On a
-  // phone it opens the task page; opened straight at /t/<id> (a reminder), / is put beneath it so the
-  // phone's Back lands on Today instead of leaving the app.
+  // opens the task's row where a list shows it and leaves that tab's address in place of /t/<id>; a task
+  // no list shows (closed, merged, missing) opens as the task page and keeps /t/<id>. On a phone it
+  // opens the task page. A task page opened straight at /t/<id> (a reminder) gets / put beneath it, so
+  // Back lands on Today instead of leaving the app.
   function applyAddress(ev) {
     const a = parseAddress();
     if (a.task !== null && PHONE()) {
       if (!ev && !(history.state && history.state.page)) { setAddress('/', true); setAddress('/t/' + a.task); }
       openTask(a.task, false); return;
     }
-    if (a.task !== null) { jumpTo(a.task, true, true); setAddress(addressOf(ui.tab), true); return; }
+    if (a.task !== null) {
+      if (jumpTo(a.task, true, true) === 'row') setAddress(addressOf(ui.tab), true);
+      else if (!ev && !(history.state && history.state.page)) { setAddress('/', true); setAddress('/t/' + a.task); }      // as on a phone: Back lands on Today
+      return;
+    }
     ui.tab = a.tab; ui.laterOpen = false;
     setAddress(addressOf(a.tab), true);      // a legacy /#<tab> or /today becomes the tab's path; otherwise nothing
     if (ui.page !== null) { closeTask(); return; }      // Back from the task page
@@ -503,6 +510,7 @@
       longterm: () => stage(id, 'set', { longterm: t.longterm ? 0 : 1 }, t.longterm ? 'not long-term' : 'long-term'),
       keep: () => stage(id, 'keep', {}, 'kept'),
       due: () => stageDue(id, extra),
+      reopen: () => stage(id, 'reopen', {}, 'reopened'),
     };
     (ops[kind] || (() => {}))();
   }
@@ -730,6 +738,12 @@
   }
   // A badge's tap: the named task's row on a desktop, its page on a phone.
   function goTask(id) { if (PHONE()) openTask(id); else jumpTo(id, false); }
+  // A task named on the task page (a Linked tasks card, a Task-N in History): on a phone, or when no list
+  // shows it, its page opens over this one with the trail; otherwise its row, like a badge's tap.
+  function goFromPage(id) {
+    if (ui.page !== null && (PHONE() || !listed(id))) openPage(id, true, ui.page);
+    else goTask(id);
+  }
   // Some open task has something a badge shows (a finished merge's same_as alone does not count).
   function hasLinks() {
     return openOnes().some(x => x.rel && ((x.rel.links || []).some(l => l.kind === 'part_of' || l.kind === 'waits_on') || (x.rel.suggestions || []).length || x.rel.changed));
@@ -885,9 +899,11 @@
     detailBusy.delete(id);
     if (gen !== detailGen) d.stale = true;
     detailCache.set(id, d);
-    typingNow() ? swapDetail(id) : render();
+    // A task page still saying "Loading…" has no containers to swap (and no box to type in): it is drawn whole.
+    typingNow() && document.querySelector(`#panel [data-dhist="${id}"]`) ? swapDetail(id) : render();
   }
-  // Called at the end of render(): fetch what an opened row or the page needs and has not got (or got before a load()).
+  // Called at the end of render(): fetch what an opened row or the task page needs and has not got (or got
+  // before a load()). The task page reads its task from here when no open list holds it.
   function ensureDetails() {
     const ids = PHONE() ? [] : [...ui.open].filter(id => document.querySelector(`#panel .row.open[data-id="${id}"]`));
     if (ui.page !== null) ids.push(ui.page);
@@ -1003,7 +1019,7 @@
     document.querySelectorAll(`#panel [data-dhist="${id}"]`).forEach(el => { el.innerHTML = historyHtml(id); wireDetail(el); });
   }
   function wireDetail(root) {
-    root.querySelectorAll('[data-open-task]').forEach(a => a.onclick = e => { e.preventDefault(); goTask(+a.dataset.openTask); });
+    root.querySelectorAll('[data-open-task]').forEach(a => a.onclick = e => { e.preventDefault(); goFromPage(+a.dataset.openTask); });
     root.querySelectorAll('[data-hist-undo]').forEach(b => b.onclick = async () => {
       const id = +b.closest('[data-dhist]').dataset.dhist;
       b.disabled = true;
@@ -1025,7 +1041,6 @@
     const p = document.getElementById('panel');
     const fns = { today: renderToday, timeline: renderTimeline, projects: renderProjects, review: renderReview, chat: renderChat, log: renderLog, settings: renderSettings };
     const act = document.activeElement, held = act && DRAFT_BOXES.includes(act.id) ? { id: act.id, a: act.selectionStart, b: act.selectionEnd } : null;
-    if (ui.page !== null && !byId(ui.page) && !(ui.pageTask && ui.pageTask.id === ui.page)) fetchPageTask(ui.page);
     p.innerHTML = ui.page !== null ? taskPageHtml() : starterHtml() + pendingHtml() + fns[ui.tab]();
     if (held) { const el = document.getElementById(held.id); if (el) { el.focus({ preventScroll: true }); try { el.setSelectionRange(held.a, held.b); } catch (_) {} } }
     p.querySelectorAll('textarea.grow').forEach(grow);
@@ -1069,30 +1084,39 @@
     if ((tab === 'today' || tab === 'timeline') && effectiveLinkView() === 'linked') return linkedGroups();
     return tab === 'today' ? todayGroups().groups : tab === 'timeline' ? timelineGroups() : tab === 'projects' ? projectGroups().map(([p, rows]) => ({ key: 'projects:' + p, rows })) : [];
   }
+  // The list (this tab, else Today, else Timeline) and section that draws the task's row, or null.
+  function findRow(id) {
+    const tabs = [ui.tab, 'today', 'timeline'].filter((t, i, a) => ['today', 'timeline', 'projects'].includes(t) && a.indexOf(t) === i);
+    for (const tab of tabs) { const g = groupsOf(tab).find(g => g.kind !== 'twin' && g.rows.some(r => r.id === id)); if (g) return { tab, key: g.key }; }      // a twin card draws no rows to scroll to
+    return null;
+  }
+  // Some list draws the task's row once the link filter is All.
+  function listed(id) {
+    const was = linkView; linkView = 'all';
+    try { return !!findRow(id); } finally { linkView = was; }
+  }
   // `replace` (only when opening at /t/<id>) swaps the address instead of pushing the tab's: a /timeline
   // pushed above /t/<id> would let Back return there, jump and push again, so Back could never leave.
+  // Returns 'row', or 'page' when no list holds the task (closed, merged, missing): its page opens instead.
   function jumpTo(id, expand, replace = false) {
-    if (expand && PHONE()) { openTask(id); return; }      // a phone opens the task page instead (a Top tile's double-tap)
-    const tabs = [ui.tab, 'today', 'timeline'].filter((t, i, a) => ['today', 'timeline', 'projects'].includes(t) && a.indexOf(t) === i);
-    const find = () => {      // a twin card draws no rows to scroll to
-      for (const tab of tabs) { const g = groupsOf(tab).find(g => g.kind !== 'twin' && g.rows.some(r => r.id === id)); if (g) return { tab, key: g.key }; }
-      return null;
-    };
-    let hit = find();
+    if (expand && PHONE()) { openTask(id); return 'page'; }      // a phone opens the task page instead (a Top tile's double-tap)
+    let hit = findRow(id);
     if (!hit && linkView !== 'all') {      // filtered out by Linked or Ready now: All shows it (the choice stays when All does not either)
       const was = linkView; linkView = 'all';
-      hit = find();
+      hit = findRow(id);
       if (hit) setLinkView('all'); else linkView = was;
     }
-    if (!hit) { toast(`Task-${id} is not in a list right now`); return; }
-    const from = ui.tab;
+    if (!hit) { openPage(id, !replace); return 'page'; }
+    const from = ui.tab, wasPage = ui.page !== null;
+    ui.page = null;      // a desktop's task page gives way to the row
     if (folded(hit.key, hit.tab === 'projects')) setFold(hit.key, false);
     ui.tab = hit.tab; ui.focus = id; if (expand) ui.open.add(id);
-    if (from !== hit.tab) setAddress(addressOf(hit.tab), replace);
+    if (from !== hit.tab || wasPage) setAddress(addressOf(hit.tab), replace);
     render();
     const el = document.querySelector(`#panel .row[data-id="${id}"]`);
     if (el) { el.scrollIntoView({ block: 'center', behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' }); el.classList.add('flash'); }
     if (hit.tab === 'timeline' && from !== 'timeline') toast(`Task-${id} is not on Today · shown in Timeline`);
+    return 'row';
   }
   // What a prompt carries: the selected rows; on the list tabs, the focused row when nothing is
   // selected. In Chat only what is attached there, so a thread can start with nothing at all.
@@ -1190,9 +1214,13 @@
   }
   // What an opened row shows, in two columns: Where this stands, Linked tasks, Came from the same place and
   // the facts (score, why now, source, links, lifecycle, reminders); History beside them; then, for an open
-  // task, its actions. The row's .details and the task page's. The two [data-…] containers fill when the
-  // task's own payload arrives (detailCache).
+  // task, its actions. The task page lays out the same parts (taskPageHtml). The two [data-…] containers
+  // fill when the task's own payload arrives (detailCache).
   function detailsHtml(x) {
+    return `<div class="dgrid"><div class="dcol">${whereHtml(x)}<div data-dlinks="${x.id}">${detailAsyncHtml(x.id)}</div>${factsHtml(x)}</div>
+        <div class="dcol" data-dhist="${x.id}">${historyHtml(x.id)}</div></div>${x.status !== 'open' ? '' : actionsHtml(x)}`;
+  }
+  function factsHtml(x) {
     const links = (x.links || []).map(l => {
       if (l.kind === 'plaud_note') return `<a href="https://web.plaud.ai/file/${esc(l.ref)}" target="_blank" rel="noopener" title="${esc(l.label || '')}">Plaud</a>`;
       if (l.kind === 'note_page') return `<a href="${esc(l.ref)}" target="_blank" rel="noopener" title="${esc(l.label || '')}">Note</a>`;
@@ -1202,15 +1230,15 @@
       return `<a href="${esc(l.ref)}" target="_blank" rel="noopener">${esc(l.label || l.kind)}</a>`;
     }).join('');
     const srcLink = x.source_link ? `<a href="${esc(x.source_link)}" target="_blank" rel="noopener">${x.source === 'Plaud' ? 'Plaud note' : x.source === 'Canvas' ? 'Canvas' : 'Source'}</a>` : '';
-    return `<div class="dgrid"><div class="dcol">${whereHtml(x)}<div data-dlinks="${x.id}">${detailAsyncHtml(x.id)}</div>
-        <dl><dt>Score</dt><dd>${x.score} · ${x.priority} · ${esc((x.score_reasons || []).join(' · '))}</dd>
+    return `<dl><dt>Score</dt><dd>${x.score} · ${x.priority} · ${esc((x.score_reasons || []).join(' · '))}</dd>
             <dt>Why now</dt><dd>${esc(x.why_now) || '<span class="code">none yet</span>'}</dd></dl>
         <dl><dt>Source</dt><dd>${esc(x.source || '?')}${x.account ? ' · ' + esc(x.account) : ''} · ${x.mentions} mention${x.mentions === 1 ? '' : 's'} · created ${esc((x.created_at || '').slice(0, 10))}${x.legacy_status ? ' · was ' + esc(x.legacy_status) : ''}</dd>
             <dt>Links</dt><dd class="links">${srcLink}${links || (srcLink ? '' : '<span class="code">none</span>')}</dd>
             <dt>Lifecycle</dt><dd>${x.tier}${x.fade_at ? ' · fades ' + x.fade_at : ''}${x.last_call_at ? ' · last call ' + x.last_call_at : ''}${x.snoozed_until ? ' · snoozed until ' + x.snoozed_until : ''}</dd>
-            <dt>Reminders</dt><dd>${(x.reminders || []).map(r => `<span class="chip rem">${fmtWhen(r.fire_at)}${r.repeat ? ' · ' + esc(r.repeat) : ''} ${esc(r.label || '')}</span>`).join(' ') || '<span class="code">none</span>'}</dd></dl></div>
-        <div class="dcol" data-dhist="${x.id}">${historyHtml(x.id)}</div></div>${x.status !== 'open' ? '' : `
-        <div class="actions">
+            <dt>Reminders</dt><dd>${(x.reminders || []).map(r => `<span class="chip rem">${fmtWhen(r.fire_at)}${r.repeat ? ' · ' + esc(r.repeat) : ''} ${esc(r.label || '')}</span>`).join(' ') || '<span class="code">none</span>'}</dd></dl>`;
+  }
+  function actionsHtml(x) {
+    return `<div class="actions">
           <button class="btn small" data-act="done" data-id="${x.id}">Done</button>
           <button class="btn small" data-act="drop" data-id="${x.id}">Drop</button>
           <button class="btn small" data-act="snooze" data-id="${x.id}">Snooze to tomorrow</button>
@@ -1222,40 +1250,62 @@
           <button class="btn small" data-chat-canned="search_mail" data-id="${x.id}" title="A chat turn: finds the threads about this task and offers to link them">✉ Search related emails</button>
           <button class="btn small" data-chat-canned="draft_reply" data-id="${x.id}" title="A chat turn: saves a reply draft in Mailbird, never sends">✉ Draft reply</button>
           <button class="btn small" data-chat-canned="related" data-id="${x.id}" title="A chat turn: finds the tasks this one belongs with and offers to link them">Ask Claude what else is related</button>
-        </div>`}`;
+        </div>`;
   }
-  // ---------- the phone task page (stage 1) ----------
-  // On a phone a tap opens a task full-screen, rendered into #panel in place of the tab (render()).
-  // An open task is drawn like its row, staged changes included; whether it is closed is the server's
-  // word (a staged Done keeps the actions, so the tray's Discard still makes sense). A task the open
-  // list lacks (closed, or closed since) is fetched once and shown read-only.
-  let pageFetch = null;       // the id whose /api/tasks/<id> is in flight
-  function fetchPageTask(id) {
-    if (pageFetch === id) return;
-    pageFetch = id;
-    api(`/api/tasks/${id}`).then(t => t, e => e.message === '404' ? { id, missing: true } : { id, failed: e.message })
-      .then(t => { if (pageFetch === id) pageFetch = null; if (ui.page !== id) return; ui.pageTask = t; render(); });
-  }
+  // ---------- the task page (stage 1, stage 4b) ----------
+  // A task full-screen, rendered into #panel in place of the tab (render()): on a phone every task a tap
+  // opens; on a desktop a task no list shows (closed, merged, missing), styled for a wide screen. An
+  // open task is drawn like its row, staged changes included; whether it is closed is the server's word
+  // (a staged Done keeps the actions, so the tray's Discard still makes sense). A task the open list
+  // lacks comes from the opened task's payload (detailCache, asked by ensureDetails) and is read-only,
+  // with Reopen. On a phone an open task's Done / Later / More are pinned at the bottom (.pagebar); its
+  // other actions show under More.
   function taskPageHtml() {
-    const id = ui.page, pt = ui.pageTask && ui.pageTask.id === id ? ui.pageTask : null;
-    const bar = `<div class="pbar"><button class="btn" id="page-back">‹ Back</button><span class="code">Task-${id}</span></div>`;
-    const srv = byId(id) || (pt && !pt.missing && !pt.failed ? pt : null);
-    if (!srv) return `<div class="taskpage" data-id="${id}">${bar}<div class="empty">${!pt ? `Loading Task-${id}…` : pt.missing ? `Task-${id} does not exist.` : `Could not load Task-${id} (${esc(pt.failed)}).`}</div></div>`;
-    const closed = srv.status !== 'open';
+    const id = ui.page, d = detailCache.get(id), from = history.state && history.state.from;
+    const bar = `<div class="pbar"><button class="btn" id="page-back">‹ ${Number.isInteger(from) ? 'Task-' + from : 'Back'}</button><span class="code">Task-${id}</span></div>`;
+    const srv = byId(id) || (d && !d.missing && !d.failed ? d : null);
+    if (!srv) return `<div class="taskpage" data-id="${id}">${bar}<div class="empty">${!d ? `Loading Task-${id}…` : d.missing ? `Task-${id} does not exist.` : `Could not load Task-${id} (${esc(d.failed)}).`}</div></div>`;
+    const closed = srv.status !== 'open', phone = PHONE();
     const x = closed ? srv : Object.assign({}, view(srv), { status: srv.status });
-    return `<div class="taskpage" data-id="${id}">${bar}<h2>${esc(x.name)}</h2><div class="meta">${chipsHtml(x)}</div>
-      ${closed ? `<p class="closed">This task is ${esc(srv.status)}.</p>` : ''}<div class="details">${detailsHtml(x)}</div></div>`;
+    const st = staged.get(id);
+    const reopen = !closed ? '' : st && st.op === 'reopen' ? `<span class="chip staged">${esc(st.label)}</span>`
+      : `<button class="btn" data-act="reopen" data-id="${id}">Reopen</button>`;
+    const acts = closed || (phone && !ui.pageMore) ? '' : phone ? `<section class="dsec pmore"><h4>More</h4>${actionsHtml(x)}</section>` : actionsHtml(x);
+    const later = ui.pageLater ? `<div class="page-later"><span>Comes back on:</span><button class="btn small" data-page-later="tomorrow">Tomorrow</button><button class="btn small" data-page-later="fri">Friday</button><button class="btn small" data-page-later="nextweek">Next week</button></div>` : '';
+    const pagebar = closed || !phone ? '' : `<div class="pagebar">${later}<button data-page="done">Done</button><button data-page="later" aria-expanded="${ui.pageLater}">Later</button><button data-page="more" aria-expanded="${ui.pageMore}">More</button></div>`;
+    return `<div class="taskpage${pagebar ? ' barred' : ''}" data-id="${id}">${bar}<h2>${esc(x.name)}</h2><div class="meta">${chipsHtml(x)}</div>
+      ${closed ? `<div class="closedline"><p>This task is ${esc(srv.status)}.</p>${reopen}</div>` : ''}
+      <div class="details"><div class="dgrid"><div class="dcol">${whereHtml(x)}<div data-dlinks="${id}">${detailAsyncHtml(id)}</div>${factsHtml(x)}</div>
+        <div class="dcol" data-dhist="${id}">${historyHtml(id)}</div></div>${acts}</div>${pagebar}</div>`;
   }
-  // On a phone the task page; elsewhere the task's row, expanded in place. `push` is false when the address is already /t/<id>.
-  function openTask(id, push = true) {
+  // A Later on the page's pinned bar: the task leaves the lists until the day, like the Review card's Later.
+  function pageLater(kind) {
+    const id = ui.page, when = { tomorrow: [isoPlus(1), 'tomorrow'], fri: [nextFri(), 'Friday'], nextweek: [isoPlus(7 - ((TODAY().getDay() + 6) % 7)), 'next week'] }[kind];
+    if (id === null || !when) return;
+    ui.pageLater = false;
+    stage(id, 'set', { snoozed_until: when[0] }, 'later · back ' + when[1]);
+  }
+  // On a phone the task page; elsewhere the task's row, expanded in place. `push` is false when the address
+  // is already /t/<id>; `from` is the task page it was opened from (the trail).
+  function openTask(id, push = true, from = null) {
     if (!PHONE()) { jumpTo(id, true); return; }
+    openPage(id, push, from);
+  }
+  // The task page on either device.
+  function openPage(id, push = true, from = null) {
     if (ui.page === null) ui.pageScroll = window.scrollY;      // the list's place; a page opened over a page keeps it
-    ui.page = id; ui.pageTask = null;
-    if (push) setAddress('/t/' + id);
-    render();                  // fetches the task when the open list lacks it
+    ui.page = id; ui.pageMore = ui.pageLater = false;
+    if (push) setAddress('/t/' + id, false, from);
+    render();                  // ensureDetails asks for the task's payload when it has none
     window.scrollTo(0, 0);
   }
   function closeTask() { ui.page = null; render(); window.scrollTo(0, ui.pageScroll); }
+  // The task page's pinned bar sits above the tray when the tray shows (like the bulk bar on a desktop).
+  function placePageBar() {
+    const pb = document.querySelector('#panel .pagebar'); if (!pb) return;
+    const tray = document.getElementById('tray');
+    pb.style.bottom = tray.classList.contains('on') ? tray.offsetHeight + 'px' : '';
+  }
   const dueDays = x => x.due ? fmtDue(x.due).days : null;
   // Shown wherever a list of open tasks would be, when there are none. Only says how tasks arrive today.
   function noTasksHtml() {
@@ -1741,7 +1791,15 @@
       r.querySelector('.main').addEventListener('dragstart', e => e.dataTransfer.setData('text/plain', String(id)));
     });
     const pb = document.getElementById('page-back'); if (pb) pb.onclick = () => history.back();
-    panel.querySelectorAll('[data-lb]').forEach(a => a.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); goTask(+a.dataset.lb); }));
+    panel.querySelectorAll('[data-page]').forEach(b => b.onclick = () => {
+      const k = b.dataset.page;
+      if (k === 'done') { ui.pageLater = false; act(ui.page, 'done'); }
+      else if (k === 'later') { ui.pageLater = !ui.pageLater; render(); }
+      else if (k === 'more') { ui.pageMore = !ui.pageMore; render(); }
+    });
+    panel.querySelectorAll('[data-page-later]').forEach(b => b.onclick = () => pageLater(b.dataset.pageLater));
+    placePageBar();
+    panel.querySelectorAll('[data-lb]').forEach(a => a.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); goFromPage(+a.dataset.lb); }));
     panel.querySelectorAll('[data-lb-open]').forEach(a => a.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); openTask(+a.dataset.lbOpen); }));
     panel.querySelectorAll('[data-act]').forEach(b => b.addEventListener('click', () => act(+b.dataset.id, b.dataset.act)));
     panel.querySelectorAll('[data-due]').forEach(c => c.addEventListener('click', () => {
@@ -1881,7 +1939,7 @@
     if (cmd) typing(cmd, 'cmd', cmdSend);
     document.getElementById('tray-apply').onclick = () => applyAll();
     document.getElementById('tray-discard').onclick = () => discardStaged();
-    document.getElementById('tray-toggle').onclick = () => { ui.trayOpen = !ui.trayOpen; renderTray(); };
+    document.getElementById('tray-toggle').onclick = () => { ui.trayOpen = !ui.trayOpen; renderTray(); placePageBar(); };
     const save = document.getElementById('settings-save'); if (save) save.onclick = saveSettings;
     const arm = document.getElementById('conn-arm'); if (arm) arm.onclick = async () => { try { await api('/api/connectors/arm', { method: 'POST' }); await loadSettings(); toast('A new connector may be approved for 10 minutes'); } catch (e) { toast('Failed: ' + e.message); } };
     panel.querySelectorAll('[data-conn-revoke]').forEach(b => b.onclick = async () => {
