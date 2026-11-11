@@ -34,6 +34,9 @@ For each task in §3, choose one effect.
 - `text`: rewrite its text so it says where the task stands now, after what changed ("Where this
   stands"). The rewrite replaces the old text; History keeps the old one. Rules:
   - keep every web address and every `Task-N` the old text had, word for word;
+  - keep the sentences the owner wrote, and add where things stand after them;
+  - never remove or soften a requirement the owner wrote ("in person", "by Friday"); when what
+    changed conflicts with one, keep it and say that it conflicts;
   - add no email address and no web address the old text did not have (such a rewrite waits on
     Review for the owner's tap instead of being applied);
   - at most {{rewrite_cap}} characters;
