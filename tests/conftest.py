@@ -2,6 +2,7 @@
 import os
 import re
 from datetime import date
+from pathlib import Path
 
 import pytest
 
@@ -9,6 +10,7 @@ from factotum import config as C
 from factotum.db import connect, init_db
 
 TODAY = date(2026, 11, 1)
+FIXTURE = Path(__file__).parent / "fixtures" / "factotum.fixture.yaml"
 
 
 def _example_env_names() -> set[str]:
@@ -29,7 +31,7 @@ def _no_real_env(monkeypatch):
 
 @pytest.fixture
 def cfg():
-    return C.load(C.ROOT / "config" / "factotum.example.yaml")
+    return C.load(FIXTURE)
 
 
 @pytest.fixture

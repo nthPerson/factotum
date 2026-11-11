@@ -1,5 +1,6 @@
 import json
 from datetime import date
+from pathlib import Path
 
 import pytest
 
@@ -12,7 +13,7 @@ TODAY = date(2026, 11, 1)
 
 @pytest.fixture
 def cfg():
-    return C.load(C.ROOT / "config" / "factotum.example.yaml")
+    return C.load(Path(__file__).parent / "fixtures" / "factotum.fixture.yaml")
 
 
 @pytest.fixture
