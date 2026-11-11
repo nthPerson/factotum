@@ -430,3 +430,41 @@ def test_the_scheduler_logs_free_now_like_a_reminder(conn, cfg):
     batches.apply(conn, [{"op": "done", "task_id": 1}], "ui", TODAY)
     s.tick(datetime(2026, 11, 1, 12, 1))
     assert "free now: Task-2 Deliver the units" in [r["summary"] for r in conn.execute("SELECT summary FROM runs WHERE kind = 'reminder'")]
+
+
+# --- Task 11: the outcome is asked only when something hangs on the task
+def _reminded_with(cfg, tmp_path, links):
+    """Task 1 with a sent reminder, tasks 2 and 3 open, and `links` as (src, dst, kind)."""
+    from test_core import _rem
+    from factotum import reminders
+    app = create_app(cfg, db_path=str(tmp_path / "r.db"))
+    c = app.state.conn
+    mk(c, 1, name="Ask the chair"); mk(c, 2); mk(c, 3)
+    for src, dst, kind in links:
+        link(c, src, dst, kind)
+    batches.apply(c, [{"task_id": 1, "op": "add_reminder", "fields": {"fire_at": "2026-11-03T09:00"}}], "ui", TODAY)
+    reminders.fire(c, cfg, datetime(2026, 11, 3, 9, 0, 30), lambda *a, **k: "m1")
+    tok = [r["token"] for r in _rem(c, 1) if r["status"] == "sent"][0]
+    return TestClient(app), c, tok
+
+
+def test_a_task_that_only_waits_on_another_is_not_asked(cfg, tmp_path):
+    client, c, tok = _reminded_with(cfg, tmp_path, [(1, 2, "waits_on"), (3, 1, "part_of")])     # 1 waits on 2; 3 is a step of 1
+    assert "How did it turn out?" not in client.get(f"/r/{tok}", params={"a": "done"}).text
+
+
+def test_a_step_of_an_open_goal_is_asked(cfg, tmp_path):
+    client, c, tok = _reminded_with(cfg, tmp_path, [(1, 2, "part_of")])
+    assert "One task hangs on this one." in client.get(f"/r/{tok}", params={"a": "done"}).text
+
+
+def test_hanging_on_counts_open_tasks_that_wait_on_it_and_its_open_goal(conn):
+    from factotum import reminders
+    for i in range(1, 6):
+        mk(conn, i)
+    link(conn, 2, 1, "waits_on"); link(conn, 3, 1, "waits_on")       # two wait on 1
+    link(conn, 1, 4, "part_of")                                       # 1 is a step of 4
+    link(conn, 1, 5, "waits_on")                                      # 1 waits on 5: 5 does not hang on 1
+    assert reminders.hanging_on(conn, 1) == 3
+    batches.apply(conn, [{"op": "done", "task_id": 3}, {"op": "drop", "task_id": 4}], "ui", TODAY)
+    assert reminders.hanging_on(conn, 1) == 1

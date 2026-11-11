@@ -216,10 +216,13 @@ def act(conn: sqlite3.Connection, cfg: dict, token: str, action: str, now_local:
 
 
 def hanging_on(conn: sqlite3.Connection, task_id: int) -> int:
-    """How many distinct OPEN tasks have an active relation to this one (either direction, any kind)."""
+    """How many distinct OPEN tasks hang on this one (design §8.5): those that wait on it, and the goal
+    it is a step of. A task it only waits on, or a step of its own, does not hang on it; the page's
+    `hangsOn` asks on the same two."""
     return conn.execute(
-        "SELECT COUNT(DISTINCT t.id) FROM relations r JOIN tasks t ON t.id = CASE WHEN r.src = ? THEN r.dst ELSE r.src END "
-        "WHERE r.removed_at IS NULL AND (r.src = ? OR r.dst = ?) AND t.status = 'open'", (task_id, task_id, task_id)).fetchone()[0]
+        "SELECT COUNT(DISTINCT t.id) FROM relations r JOIN tasks t ON t.id = CASE WHEN r.kind = 'waits_on' THEN r.src ELSE r.dst END "
+        "WHERE r.removed_at IS NULL AND t.status = 'open' "
+        "AND ((r.kind = 'waits_on' AND r.dst = ?) OR (r.kind = 'part_of' AND r.src = ?))", (task_id, task_id)).fetchone()[0]
 
 
 def save_outcome(conn: sqlite3.Connection, cfg: dict, token: str, text: str) -> dict:

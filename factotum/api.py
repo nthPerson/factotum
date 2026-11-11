@@ -1151,7 +1151,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         free = ask = None
         if res["action"] == "done":
             free = relations.freed_by(conn, res["task_id"])           # tasks that waited only on this one (stage 4b)
-            k = reminders.hanging_on(conn, res["task_id"])            # any open neighbour: the outcome question (stage 5)
+            k = reminders.hanging_on(conn, res["task_id"])            # open tasks that wait on it, its open goal: the outcome question (stage 5)
             if k > 0:
                 ask = {"action": f"{base}/r/{token}/outcome", "hang": k, "ripples": bool(C.value(eff_cfg(), "claude.ripple.enabled"))}
         return HTMLResponse(_page(f"Task-{res['task_id']} {what}", res["task_name"], base, undo=res["action"] == "done", task_id=res["task_id"],

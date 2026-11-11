@@ -385,6 +385,21 @@ body.tray-open main { padding-bottom: 60vh; }
 .toast button { font: inherit; background: none; border: 0; color: var(--accent-soft); cursor: pointer; text-decoration: underline; }
 /* On a phone a toast that names a skipped change runs to three lines: the full width, and corners that do not cut the text. */
 @media (max-width: 700px) { .toast { width: max-content; max-width: calc(100vw - 32px); border-radius: 18px; } }
+/* The outcome question (ripples, stage 5) is drawn in the toast: a panel, not a pill. It sits over the bottom of
+   the list, above the tray, and never takes more than 30% of the screen. 16 px in the box: no iPhone zoom. */
+.toast.ask { flex-direction: column; align-items: stretch; gap: 8px; box-sizing: border-box; width: min(520px, calc(100vw - 32px)); max-width: none; max-height: 30vh; overflow: auto;
+  background: var(--surface); color: var(--fg); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; font-size: 14px; box-shadow: 0 8px 28px rgba(0,0,0,.22); }
+.toast.ask .q { font-weight: 600; }
+.toast.ask a { color: var(--accent); font-family: var(--mono); }
+.toast.ask .tname { color: var(--muted); font-size: 12px; margin-top: -6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.toast.ask input { font: inherit; font-size: 16px; min-height: 44px; box-sizing: border-box; width: 100%; padding: 8px 12px; border: 1px solid var(--accent); border-radius: var(--radius); background: var(--surface); color: var(--fg); }
+.toast.ask .hint { margin: 0; }
+.toast.ask .hint.bad { color: var(--crit); }
+.toast.ask .acts { display: flex; gap: 8px; flex-wrap: wrap; }
+.toast.ask .btn { min-height: 44px; padding: 8px 14px; background: var(--surface); color: var(--fg); border: 1px solid var(--line); text-decoration: none; }
+.toast.ask .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 500; }
+body.tray-open .toast.ask { bottom: calc(38vh + 110px + env(safe-area-inset-bottom, 0px)); }
+@media (max-width: 700px) { .toast.ask { width: calc(100vw - 32px); border-radius: 12px; } }
 /* Signed out (stage 1): covers the whole app until "Sign in again" reloads it at the same address. */
 .signedout { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; background: var(--bg); padding: max(24px, env(safe-area-inset-top)) 16px; }
 .signedout[hidden] { display: none; }      /* without it display: grid beats the hidden attribute */

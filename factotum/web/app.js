@@ -19,7 +19,8 @@
   let railTap = { id: null, timer: null };   // a Top tile waits a moment for a second tap before it acts
   // What is being typed, kept outside the DOM: every render() rebuilds the panel (a chat turn's status
   // line re-renders it every second), and a long prompt must survive that with its caret.
-  const draft = { cmd: '', ask: '', askFor: null, pick: '' };
+  const draft = { cmd: '', ask: '', askFor: null, pick: '', outcome: '' };
+  let asking = null;        // {id, name} of the task whose outcome the toast asks (ripples (stage 5): the outcome question)
   try { draft.cmd = sessionStorage.getItem('factotum.cmd') || ''; sessionStorage.removeItem('factotum.cmd'); } catch (_) {}   // kept by reloadKeepingDraft
   const TOUCH = () => window.matchMedia('(hover: none)').matches;
   let logView = 'all', logQuiet = false, logLimit = 60, logOpen = new Set();
@@ -352,7 +353,7 @@
   // otherwise keep the lists stale on every return). render() uses the same list.
   const DRAFT_BOXES = ['cmd', 'rv-ask', 'chat-pick', 'rv-note'];
   function typingNow() {
-    if ([draft.cmd, draft.ask, draft.pick, ui.rvNote.text].some(s => (s || '').trim())) return true;
+    if ([draft.cmd, draft.ask, draft.pick, draft.outcome, ui.rvNote.text].some(s => (s || '').trim())) return true;
     if (ui.remOpen !== null || ui.dueOpen !== null || chat.busy) return true;
     const a = document.activeElement;
     return !!(a && a.matches('input, textarea, select') && a.closest('#panel') && !DRAFT_BOXES.includes(a.id));
@@ -524,6 +525,10 @@
       return c;
     });
     if (!changes.length) return;
+    // A Done or Drop on a task others hang on, with no outcome said yet: the toast offers to say one (design §8.5).
+    // Read before the request, while the task is still in the open list with its links.
+    const say = picked.map(([, s]) => s).filter(s => (s.op === 'done' || s.op === 'drop') && !(s.fields || {}).outcome && hangsOn(byId(s.task_id)))
+      .map(s => sayInfo(byId(s.task_id)));
     try {
       const res = await api('/api/batches/apply', { method: 'POST', body: JSON.stringify({ source: ui.tab === 'review' ? 'review' : 'ui', changes }) });
       lastBatch = res.batch_id;
@@ -539,14 +544,24 @@
         await loadReview();
         ui.reviewPaused = true; render();
       }
-      toast(`${res.applied} change${res.applied === 1 ? '' : 's'} applied` + (res.skipped.length ? ` · ${res.skipped.length} skipped: ${res.skipped[0].why}` : ''), true);
+      const msg = `${res.applied} change${res.applied === 1 ? '' : 's'} applied` + (res.skipped.length ? ` · ${res.skipped.length} skipped: ${res.skipped[0].why}` : '');
+      const closed = say.filter(x => !res.skipped.some(k => k.task_id === x.id));      // a skipped Done closed nothing
+      closed.forEach(x => sayable.set(x.id, x));
+      if (closed.length) toast(msg, true, { buttons: [{ text: 'Say how it went', attrs: `data-say="${closed[0].id}"`, run: () => askOutcome(closed[0].id) }], holdMs: 20000 });
+      else toast(msg, true);
     } catch (e) { toast('Apply failed: ' + e.message); }
   }
-  function toast(msg, undo) {
+  // opts: {buttons: [{text, attrs, run}], holdMs}: buttons after Undo, and how long the toast stays (8 s otherwise).
+  // While the outcome question is open the toast is the question: the latest message waits and shows when it closes.
+  function toast(msg, undo, opts) {
     const el = document.getElementById('toast');
-    el.innerHTML = esc(msg) + (undo && lastBatch ? ' <button id="undo">Undo</button>' : '');
+    if (asking) { toast.held = [msg, undo, opts]; return; }
+    const o = opts || {}, extra = o.buttons || [];
+    el.classList.remove('ask');
+    el.innerHTML = esc(msg) + (undo && lastBatch ? ' <button id="undo">Undo</button>' : '') + extra.map((b, i) => ` <button data-tb="${i}" ${b.attrs || ''}>${esc(b.text)}</button>`).join('');
     el.classList.add('on');
-    clearTimeout(toast.t); toast.t = setTimeout(() => el.classList.remove('on'), 8000);
+    clearTimeout(toast.t); toast.t = setTimeout(() => el.classList.remove('on'), o.holdMs || 8000);
+    extra.forEach((b, i) => { el.querySelector(`[data-tb="${i}"]`).onclick = () => b.run(); });
     const u = document.getElementById('undo');
     if (u) u.onclick = async () => {
       const id = lastBatch; u.disabled = true;
@@ -555,6 +570,82 @@
       if (lastBatch === id) lastBatch = null;
       await load(); toast(undoSaid(res));
     };
+  }
+
+  // ---------- ripples (stage 5): the outcome question ----------
+  // Done is instant; the question follows, in the toast, and never blocks (design §8.5). It is asked only
+  // when something hangs on the task: an open task waits on it, or it is a step of an open goal (the
+  // server's `reminders.hanging_on` counts the same two). A task that only waits on another is not asked.
+  const sayable = new Map();      // task id → what the question says about it, read before the Apply that closed it
+  function hangsOn(t) {
+    return !!(t && t.rel && ((t.rel.frees_open || []).length || (t.rel.goal_id != null && isOpenTask(t.rel.goal_id))));
+  }
+  function sayInfo(t) {
+    return { id: t.id, name: t.name, frees: (t.rel.frees_open || []).slice(), goal: t.rel.goal_id != null && isOpenTask(t.rel.goal_id) ? t.rel.goal_id : null };
+  }
+  function askOutcome(id) {
+    const s = sayable.get(id) || { id, name: (nameOf(id) || {}).name || '', frees: [], goal: null };
+    const again = !!(asking && asking.id === id);      // redrawn with a reason it was not saved: the line and the reason stay
+    if (!again) draft.outcome = '';
+    asking = { id, name: s.name, err: again ? asking.err : '' };
+    clearTimeout(toast.t);
+    const el = document.getElementById('toast');
+    el.classList.add('on', 'ask');
+    el.innerHTML = outcomeHtml();
+    const box = document.getElementById('outcome-say');
+    box.oninput = () => { draft.outcome = box.value; };
+    box.onkeydown = e => {
+      if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); saveOutcome(); }
+      else if (e.key === 'Escape') { e.preventDefault(); closeAsk(); }
+      e.stopPropagation();      // no key typed here acts on the list
+    };
+    el.onkeydown = e => { if (e.key === 'Escape' && asking) { e.preventDefault(); e.stopPropagation(); closeAsk(); } };      // focus on a button
+    el.querySelector('[data-say-save]').onclick = saveOutcome;
+    el.querySelector('[data-say-skip]').onclick = () => closeAsk();
+    el.querySelectorAll('[data-open-task]').forEach(a => a.onclick = e => { e.preventDefault(); goTask(+a.dataset.openTask); });
+    box.focus();
+  }
+  function outcomeHtml() {
+    const s = sayable.get(asking.id) || { frees: [], goal: null };
+    const ref = n => `<a href="/t/${n}" data-open-task="${n}">Task-${n}</a>`;
+    const hangs = [];
+    if (s.frees.length) hangs.push(`${s.frees.map(ref).join(s.frees.length === 2 ? ' and ' : ', ')} ${s.frees.length === 1 ? 'waits' : 'wait'} on this`);
+    if (s.goal != null) hangs.push(`a step of ${ref(s.goal)}`);
+    return `<div class="q">How did ${ref(asking.id)} turn out?</div>
+      ${asking.name ? `<div class="tname">${esc(asking.name)}</div>` : ''}
+      <input id="outcome-say" maxlength="300" autocomplete="off" placeholder="Optional, one line" aria-label="How did Task-${asking.id} turn out?" value="${esc(draft.outcome)}">
+      <div class="hint">Optional${hangs.length ? ' · ' + hangs.join(' · ') : ''}</div>
+      ${asking.err ? `<div class="hint bad">${esc(asking.err)}</div>` : ''}
+      <div class="acts"><button class="btn primary" data-say-save>Save</button><button class="btn" data-say-skip>Nothing to add</button></div>`;
+  }
+  function closeAsk() {
+    asking = null; draft.outcome = '';
+    const el = document.getElementById('toast');
+    el.classList.remove('ask', 'on'); el.innerHTML = ''; el.onkeydown = null;
+    const held = toast.held; toast.held = null;
+    if (held) toast(...held);
+  }
+  // The owner's own line, applied at once through the write path (one batch, undoable): an outcome ripples at once.
+  async function saveOutcome() {
+    if (!asking || asking.busy) return;
+    const id = asking.id, text = draft.outcome.trim();
+    if (!text) { closeAsk(); return; }
+    asking.busy = true;
+    document.querySelectorAll('#toast .acts button').forEach(b => { b.disabled = true; });
+    let res;
+    try { res = await api('/api/batches/apply', { method: 'POST', body: JSON.stringify({ source: 'ui', changes: [{ task_id: id, op: 'set', fields: { outcome: text } }] }) }); }
+    catch (e) {
+      if (!asking || asking.id !== id) return;
+      asking.busy = false;
+      asking.err = e.message === 'signed out' ? '' : 'Not saved: ' + (e.detail || e.message) + '. Your line is kept.';
+      askOutcome(id);
+      return;
+    }
+    if (asking && asking.id === id) { toast.held = null; closeAsk(); }
+    if (!res.applied) { toast('Not saved: ' + ((res.skipped[0] || {}).why || 'nothing changed')); return; }
+    lastBatch = res.batch_id; logData = null;
+    await load();
+    toast('Saved', true);
   }
   // The sign-in has expired (see `expired`): a full-screen "Sign in again" over the whole app, whose
   // button reloads at the same address. The tray is in localStorage, so it survives the reload. The rest
@@ -1463,7 +1554,7 @@
         <h2>${esc(x.name)}</h2>
         <div class="sub"><span class="code">Task-${x.id}</span><span class="chip proj">${esc(x.project || '—')}</span>${d ? `<span class="chip due ${d.days < 0 ? 'crit' : ''} ${x.hard ? 'hard' : ''}">${d.label}</span>` : '<span class="chip">no date</span>'}<span class="chip eff">${esc(x.effort || '?')}</span>${x.rel && x.rel.steps_total ? stepsChip(x.rel) : ''}<span class="chip">${x.mentions} mention${x.mentions === 1 ? '' : 's'}</span><span class="chip">score ${x.score}</span></div>
         <p>${esc(x.why_now || (x.score_reasons || []).join(' · '))}</p>${x.context ? `<p class="ctx ${ui.ctxOpen === x.id ? 'open' : ''}">${esc(x.context)}</p><button class="btn small more" data-ctx-more="${x.id}">${ui.ctxOpen === x.id ? 'Less' : 'More'}</button>` : ''}
-        <textarea id="rv-note" rows="2" placeholder="Note to save with this decision (optional) — appended to the task's context">${esc(note)}</textarea>
+        <textarea id="rv-note" rows="2" placeholder="Optional note · Done or Drop: the outcome · Keep or Later: added to the text">${esc(note)}</textarea>
         <div class="links">${x.source_link ? `<a href="${esc(x.source_link)}" target="_blank" rel="noopener">${x.source === 'Plaud' ? 'Plaud note' : 'Source'}</a>` : ''}</div>
         <div class="big"><button class="done" data-rv="done">Done <kbd>d</kbd></button><button data-rv="keep">Keep <kbd>k</kbd></button><button class="later" data-rv="later">Later <kbd>s</kbd></button><button class="drop" data-rv="drop">Drop <kbd>x</kbd></button></div>
         <div class="later-menu ${ui.laterOpen ? 'on' : ''}"><span class="hint">Comes back on:</span><button class="btn small" data-rv="tomorrow">Tomorrow</button><button class="btn small" data-rv="fri">Friday</button><button class="btn small" data-rv="nextweek">Next week</button><button class="btn small" data-rv="pickdate">📅 ${ui.datePick ? 'Hide date' : 'Pick a date…'}</button></div>
@@ -2095,12 +2186,15 @@
     if (kind === 'later') { ui.laterOpen = !ui.laterOpen; ui.datePick = false; render(); return; }
     if (kind === 'pickdate') { ui.datePick = !ui.datePick; render(); return; }
     if (kind === 'top' || kind === 'longterm') { act(id, kind); return; }   // extras, not decisions
-    // A decision is a review: it sets last_reviewed_at (Keep does so server-side). An optional note is
-    // staged beside it as add_note under "<id>:note": the server appends it, dated, to the context as it
-    // is at Apply, so nothing typed here writes over a newer text.
+    // A decision is a review: it sets last_reviewed_at (Keep does so server-side). An optional note saved
+    // with Done or Drop is the task's outcome (design §8.5: appended to the text as well, it would ripple
+    // twice). With Keep or Later it is staged beside the decision as add_note under "<id>:note": the server
+    // appends it, dated, to the context as it is at Apply, so nothing typed here writes over a newer text.
     const text = ui.rvNote.id === id ? ui.rvNote.text.trim() : '';
     const later = (day, label) => stage(id, 'set', { snoozed_until: day, last_reviewed_at: data.today }, 'later · back ' + label);
-    if (kind === 'done') stage(id, 'done', {}, 'done');
+    const closes = kind === 'done' || kind === 'drop';
+    if (closes && text) stageChange({ task_id: id, op: kind, fields: { outcome: text } }, kind === 'done' ? 'done' : 'dropped');
+    else if (kind === 'done') stage(id, 'done', {}, 'done');
     else if (kind === 'drop') stage(id, 'drop', {}, 'dropped');
     else if (kind === 'keep') stage(id, 'keep', {}, 'kept');
     else if (kind === 'tomorrow') later(isoPlus(1), 'tomorrow');
@@ -2108,7 +2202,7 @@
     else if (kind === 'nextweek') later(isoPlus(7 - ((TODAY().getDay() + 6) % 7)), 'next week');
     else if (kind === 'date') { if (!dateStr) return; later(dateStr, dateStr); }
     else return;
-    if (text) stageChange({ task_id: id, op: 'add_note', fields: { text } }, '');
+    if (text && !closes) stageChange({ task_id: id, op: 'add_note', fields: { text } }, '');
     // The flags that brought the card here (a thread update, a planner proposal) are judged in the
     // same batch, so the card does not come back tomorrow for the same reason.
     (items[0].evidence || []).forEach(e => { if (!staged.has('e:' + e.id)) stageJudge(e.id, id, 'reviewed', (e.kind === 'proposal' ? 'suggestion seen' : 'thread seen')); });
