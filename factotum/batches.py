@@ -277,6 +277,7 @@ def _link_op(conn, cur, ch: dict, batch_id: int, source: str, undo: list, skippe
         rel = dict(cur.execute("SELECT * FROM relations WHERE id = ?", (rid,)).fetchone())
         _link_changes(cur, batch_id, rel, added=True)
         undo.append({"relation_id": rid, "undo": "remove"})
+        _judge_suggestions(conn, cur, a, b, batch_id, undo, skipped)
         return True
     if not rel:
         skipped.append({"task_id": a, "why": f"Task-{a} has no {R.WORDS[kind]} link to Task-{b}"})
@@ -364,7 +365,16 @@ def _merge(conn, cur, ch: dict, batch_id: int, source: str, today: date, undo: l
         rid = R.add(cur, goes, keep, "same_as", f.get("why"), source, batch_id)
         _link_changes(cur, batch_id, dict(cur.execute("SELECT * FROM relations WHERE id = ?", (rid,)).fetchone()), added=True, extra={keep: {"moved": moved}})
         undo.append({"relation_id": rid, "undo": "remove"})
+    _judge_suggestions(conn, cur, goes, keep, batch_id, undo, skipped)
     return True
+
+
+def _judge_suggestions(conn, cur, a: int, b: int, batch_id: int, undo: list, skipped: list) -> None:
+    """The link or merge just written answers every waiting suggestion for the pair (either order,
+    any kind): judged `applied` in this batch, so its undo brings the card back."""
+    for s in R.pending_suggestions(cur, {a}).get(a, []):
+        if s["other"] == b:
+            _judge_evidence(conn, cur, {"op": "judge_evidence", "task_id": a, "fields": {"evidence_id": s["evidence_id"], "verdict": "applied"}}, batch_id, undo, skipped)
 
 
 def _apply_one(conn, cur, ch: dict, batch_id: int, source: str, today: date, closed_by: str, undo: list, skipped: list) -> bool:

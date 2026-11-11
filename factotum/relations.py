@@ -1,8 +1,10 @@
 """Links between tasks (design §5.1, §6): the rules a new link must pass and the row helpers. Every
 function takes `db`, the batch's own connection or cursor, so links made earlier in the same batch
-count. Writes go through `batches` only; nothing here commits."""
+count. Links are written through `batches` (the importer and migration 1 aside); a suggested link is
+an `evidence` row (§5.4), never a link. Nothing here commits."""
 from __future__ import annotations
 
+import json
 import sqlite3
 
 from .db import now_iso
@@ -15,6 +17,12 @@ WHY_MAX = 160
 WORDS = {"part_of": "part of", "waits_on": "waits on", "same_as": "same as"}
 CYCLE_DEPTH = 50
 SURVIVOR_HOPS = 5
+# Suggested links (design §5.4): `evidence` rows, never `relations` rows. `any` is a pair Python found
+# without knowing the kind; `same_as` and `any` name an unordered pair, the others a directed one.
+SUGGEST_KINDS = ("same_as", "part_of", "waits_on", "any")
+SYMMETRIC = ("same_as", "any")
+EVIDENCE_KIND = "link_suggestion"
+IMPORT_WHY = "duplicate source key in import"
 
 Db = sqlite3.Connection | sqlite3.Cursor
 
@@ -121,6 +129,101 @@ def survivor(db: Db, task_id: int) -> int:
         cur = r[0]
         seen.add(cur)
     return cur
+
+
+def _suggestion_rows(db: Db, a: int, b: int, judged: bool) -> list[dict]:
+    """`link_suggestion` rows on either task (a row lives on its `a`), judged or not, with `ref` parsed."""
+    out = []
+    for r in db.execute(f"SELECT id, ref FROM evidence WHERE kind = ? AND task_id IN (?, ?) AND judged_at IS {'NOT ' if judged else ''}NULL ORDER BY id",
+                        (EVIDENCE_KIND, a, b)).fetchall():
+        try:
+            ref = json.loads(r["ref"] or "")
+        except (TypeError, ValueError):
+            continue
+        if isinstance(ref, dict):
+            out.append(dict(ref, evidence_id=r["id"]))
+    return out
+
+
+def _same_pair(ref: dict, kind: str, a: int, b: int) -> bool:
+    """`ref` is about this kind and pair (unordered when the kind is symmetric), or is an `any` row
+    for the unordered pair, which stands for every kind."""
+    pair = (ref.get("a"), ref.get("b"))
+    if ref.get("kind") == "any" and set(pair) == {a, b}:
+        return True
+    return ref.get("kind") == kind and (pair == (a, b) or (kind in SYMMETRIC and pair == (b, a)))
+
+
+def pair_judged(db: Db, kind: str, a: int, b: int) -> bool:
+    """A judged suggestion for this kind and pair, or a judged `any` for the pair: never suggested again."""
+    return any(_same_pair(r, kind, a, b) for r in _suggestion_rows(db, a, b, judged=True))
+
+
+def suggest(db: Db, kind: str, a: int, b: int, why: str, signal: str) -> int | None:
+    """Store a suggested link as `link_suggestion` evidence on `a`; returns its id, or None (nothing
+    written) when the kind is unknown, the two are one task or a task is missing, the pair was judged,
+    the same suggestion is already waiting, or a link of any kind already joins them. For `same_as`,
+    `a` is the row that would go away and `b` the one kept. The caller commits."""
+    if kind not in SUGGEST_KINDS or a == b:
+        return None
+    if db.execute("SELECT COUNT(*) FROM tasks WHERE id IN (?, ?)", (a, b)).fetchone()[0] < 2:
+        return None
+    if pair_judged(db, kind, a, b) or any(_same_pair(r, kind, a, b) for r in _suggestion_rows(db, a, b, judged=False)):
+        return None
+    if db.execute("SELECT 1 FROM relations WHERE ((src = ? AND dst = ?) OR (src = ? AND dst = ?)) AND removed_at IS NULL LIMIT 1", (a, b, b, a)).fetchone():
+        return None
+    why = str(why or "")
+    ref = {"kind": kind, "a": a, "b": b, "why": why, "signal": signal}
+    cur = db.execute("INSERT INTO evidence (task_id, kind, ref, label, excerpt, at) VALUES (?, ?, ?, ?, ?, ?)",
+                     (a, EVIDENCE_KIND, json.dumps(ref), f"{WORDS.get(kind, 'linked to')} Task-{b}?", why[:300], now_iso()))
+    return cur.lastrowid
+
+
+def pending_suggestions(db: Db, ids: set[int] | None = None) -> dict[int, list[dict]]:
+    """Unjudged suggestions by task id, listed under both ends (only the ids in `ids`, when given)."""
+    out: dict[int, list[dict]] = {}
+    for r in db.execute("SELECT id, ref FROM evidence WHERE kind = ? AND judged_at IS NULL ORDER BY id", (EVIDENCE_KIND,)).fetchall():
+        try:
+            ref = json.loads(r["ref"] or "")
+            kind, a, b = ref["kind"], int(ref["a"]), int(ref["b"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        for tid, other in ((a, b), (b, a)):
+            if ids is None or tid in ids:
+                out.setdefault(tid, []).append({"evidence_id": r["id"], "kind": kind, "other": other, "keep": b if kind == "same_as" else None,
+                                                "why": ref.get("why"), "signal": ref.get("signal")})
+    return out
+
+
+def import_duplicate(db: Db, loser: int, owner: int) -> str:
+    """A row the importer found sharing another row's source key (design §5.3). A closed loser was a
+    duplicate that is over: `same_as` the owner, source `import`. An open one becomes a merge card,
+    never a link (a `same_as` between two open rows would send mentions away from an open task).
+    Returns "same_as", "suggested" or "skipped" (a row is missing, or the two are one)."""
+    status = {r["id"]: r["status"] for r in db.execute("SELECT id, status FROM tasks WHERE id IN (?, ?)", (loser, owner)).fetchall()}
+    if loser == owner or len(status) < 2:
+        return "skipped"
+    if status[loser] != "open":
+        if not find(db, loser, owner, "same_as"):
+            add(db, loser, owner, "same_as", IMPORT_WHY, "import", None)
+        return "same_as"
+    keep, goes = default_survivor(db, loser, owner)
+    suggest(db, "same_as", goes, keep, IMPORT_WHY, "import")
+    return "suggested"
+
+
+def migration_1(conn: sqlite3.Connection) -> None:
+    """The importer's old `links` rows of kind `task` (`task_id` the loser, `ref` the owner's id)
+    become `same_as` rows or merge suggestions, then are deleted; a non-numeric ref is just deleted."""
+    for ln in conn.execute("SELECT task_id, ref FROM links WHERE kind = 'task' ORDER BY id").fetchall():
+        ref = str(ln["ref"] or "").strip()
+        if ref.isascii() and ref.isdigit():
+            import_duplicate(conn, int(ln["task_id"]), int(ref))
+    conn.execute("DELETE FROM links WHERE kind = 'task'")
+
+
+def migration_1_needs_backup(conn: sqlite3.Connection) -> bool:
+    return conn.execute("SELECT 1 FROM links WHERE kind = 'task' LIMIT 1").fetchone() is not None
 
 
 def change_value(rel: dict, task_id: int, other_name: str | None) -> dict:

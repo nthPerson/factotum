@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS reminders (
 CREATE TABLE IF NOT EXISTS links (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   task_id INTEGER NOT NULL REFERENCES tasks(id),
-  kind TEXT NOT NULL,                            -- plaud_note|notion_page|canvas|mail_thread|mail_message|calendar|task
+  kind TEXT NOT NULL,                            -- plaud_note|notion_page|canvas|mail_thread|mail_message|calendar (the old `task` kind: migration 1)
   ref TEXT NOT NULL, label TEXT, account TEXT,
   created_at TEXT NOT NULL, last_seen_at TEXT,
   UNIQUE(task_id, kind, ref)
@@ -189,7 +189,19 @@ class Migration(NamedTuple):
     needs_backup: Callable[[sqlite3.Connection], bool] | None = None   # True when fn will change data (not just add a column)
 
 
-VERSIONED: list[Migration] = []   # data migrations, run once each in version order, tracked by PRAGMA user_version
+def _migration_1(conn: sqlite3.Connection) -> None:
+    from . import relations                    # relations imports db
+    relations.migration_1(conn)
+
+
+def _migration_1_needs_backup(conn: sqlite3.Connection) -> bool:
+    from . import relations
+    return relations.migration_1_needs_backup(conn)
+
+
+VERSIONED: list[Migration] = [   # data migrations, run once each in version order, tracked by PRAGMA user_version
+    Migration(1, "import task links become same_as links or merge suggestions", _migration_1, _migration_1_needs_backup),
+]
 
 
 def schema_version(conn: sqlite3.Connection) -> int:

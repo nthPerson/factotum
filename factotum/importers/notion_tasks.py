@@ -23,7 +23,7 @@ from datetime import date
 
 import httpx
 
-from .. import config as C
+from .. import config as C, relations
 from ..db import add_link, now_iso, upsert_task
 from ..lifecycle import IMPORT_BUCKETS, classify_import
 
@@ -233,6 +233,7 @@ def run(conn, cfg: dict, *, apply: bool, from_json: str | None = None, new_only:
                 out(f"    Task-{t['id']:<4} {t['project'] or '-':<22} {(t['name'] or '')[:70]}")
 
     if apply:
+        dups: list[tuple[int, int]] = []
         for t in parsed:
             if t["_new_status"] != t["status"]:
                 t["status"] = t["_new_status"]
@@ -247,11 +248,13 @@ def run(conn, cfg: dict, *, apply: bool, from_json: str | None = None, new_only:
             t.pop("_bucket", None); t.pop("_new_status", None)
             tid = upsert_task(conn, t)
             if dup_of is not None:
-                add_link(conn, tid, "task", str(dup_of), "duplicate source key in import")
+                dups.append((tid, dup_of))
             if t.get("notion_page_id"):
                 add_link(conn, tid, "notion_page", t["notion_page_id"], "Notion task row")
             for n in notes:
                 add_link(conn, tid, "plaud_note", n, "Plaud note (Notion page id)")
+        for loser, owner in dups:          # after every row is written: an owner may come later in the list
+            relations.import_duplicate(conn, loser, owner)
         conn.commit()
         out(f"\nWrote {len(parsed)} tasks.")
     return {"counts": dict(counts), "open_after": open_after, "total": len(parsed), "skipped_existing": skipped_existing}

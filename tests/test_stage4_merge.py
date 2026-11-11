@@ -206,3 +206,110 @@ def test_survivor_follows_a_chain_and_stops_on_a_repeat(conn):
     assert (relations.survivor(conn, 1), relations.survivor(conn, 2), relations.survivor(conn, 3), relations.survivor(conn, 4)) == (3, 3, 3, 4)
     relations.add(conn, 3, 1, "same_as", None, "test", None)              # a loop in old data must not spin
     assert relations.survivor(conn, 1) == 3
+
+
+# --- Task 7: suggestions and migration 1
+
+def _sugg(conn, eid):
+    return one(conn, "SELECT judged_at, verdict FROM evidence WHERE id = ?", (eid,))
+
+
+def test_suggest_stores_evidence_and_never_repeats_a_judged_pair(conn):
+    mk(conn, 1); mk(conn, 2); mk(conn, 3)
+    e = relations.suggest(conn, "same_as", 1, 2, "same number 3", "twin")
+    ev = one(conn, "SELECT * FROM evidence WHERE id = ?", (e,))
+    assert ev["kind"] == "link_suggestion" and ev["task_id"] == 1 and json.loads(ev["ref"]) == {"kind": "same_as", "a": 1, "b": 2, "why": "same number 3", "signal": "twin"}
+    assert ev["label"] == "same as Task-2?" and ev["excerpt"] == "same number 3"
+    assert relations.suggest(conn, "same_as", 2, 1, "again", "text") is None                     # pending, unordered
+    batches.apply(conn, [{"task_id": 1, "op": "judge_evidence", "fields": {"evidence_id": e, "verdict": "dismissed"}}], "review", TODAY)
+    assert relations.pair_judged(conn, "same_as", 2, 1) and relations.suggest(conn, "same_as", 2, 1, "x", "thread") is None
+    assert relations.suggest(conn, "waits_on", 1, 3, "x", "text") and relations.suggest(conn, "waits_on", 3, 1, "x", "text")   # directed: both orders are different pairs
+    assert relations.suggest(conn, "waits_on", 3, 1, "x", "text") is None
+    # a dismissed "any" for (2, 3) blocks waits_on (3, 2) and same_as (2, 3)
+    a = relations.suggest(conn, "any", 2, 3, "same thread", "thread")
+    assert one(conn, "SELECT label FROM evidence WHERE id = ?", (a,))["label"] == "linked to Task-3?"
+    batches.apply(conn, [{"task_id": 2, "op": "judge_evidence", "fields": {"evidence_id": a, "verdict": "dismissed"}}], "review", TODAY)
+    assert relations.pair_judged(conn, "waits_on", 3, 2) and relations.pair_judged(conn, "same_as", 2, 3)
+    assert relations.suggest(conn, "waits_on", 3, 2, "x", "text") is None and relations.suggest(conn, "same_as", 2, 3, "x", "twin") is None
+    assert not relations.pair_judged(conn, "waits_on", 1, 3)
+    # unknown kind, the same task twice, a missing task, a pair already joined: nothing written
+    mk(conn, 4); mk(conn, 5); link(conn, 4, 5, "part_of")
+    n = one(conn, "SELECT COUNT(*) AS n FROM evidence")["n"]
+    assert [relations.suggest(conn, *args) for args in (("blocks", 4, 5, "x", "t"), ("same_as", 4, 4, "x", "t"), ("same_as", 4, 99, "x", "t"), ("waits_on", 5, 4, "x", "t"))] == [None] * 4
+    assert one(conn, "SELECT COUNT(*) AS n FROM evidence")["n"] == n
+
+
+def test_pending_suggestions_list_both_ends(conn):
+    mk(conn, 1); mk(conn, 2); mk(conn, 3)
+    e1 = relations.suggest(conn, "same_as", 1, 2, "twin", "twin"); e2 = relations.suggest(conn, "waits_on", 3, 1, "after", "text")
+    p = relations.pending_suggestions(conn)
+    assert p[1] == [{"evidence_id": e1, "kind": "same_as", "other": 2, "keep": 2, "why": "twin", "signal": "twin"},
+                    {"evidence_id": e2, "kind": "waits_on", "other": 3, "keep": None, "why": "after", "signal": "text"}]
+    assert [s["other"] for s in p[2]] == [1] and [s["other"] for s in p[3]] == [1]
+    assert set(relations.pending_suggestions(conn, {2})) == {2}
+
+
+def test_accepting_a_suggestion_is_one_batch_and_undo_reopens_it(conn):
+    mk(conn, 1); mk(conn, 2)
+    e = relations.suggest(conn, "same_as", 1, 2, "same number 3", "twin"); conn.commit()
+    res = batches.apply(conn, [{"op": "merge", "task_id": 1, "fields": {"into": 2}},
+                               {"task_id": 1, "op": "judge_evidence", "fields": {"evidence_id": e, "verdict": "applied"}}], "review", TODAY)
+    assert res["skipped"] == [] and _sugg(conn, e)["verdict"] == "applied"
+    batches.undo(conn, res["batch_id"])
+    s = _sugg(conn, e)
+    assert (s["judged_at"], s["verdict"]) == (None, None)
+    assert one(conn, "SELECT status FROM tasks WHERE id = 1")["status"] == "open" and not any(k == "same_as" for *_, k in active_rels(conn))
+
+
+def test_making_the_link_judges_a_pending_suggestion_for_the_pair(conn):
+    mk(conn, 1); mk(conn, 2); mk(conn, 3)
+    e = relations.suggest(conn, "any", 1, 2, "same thread", "thread"); other = relations.suggest(conn, "any", 1, 3, "same thread", "thread"); conn.commit()
+    res = link(conn, 1, 2, "waits_on")
+    assert _sugg(conn, e)["verdict"] == "applied" and _sugg(conn, other)["verdict"] is None
+    assert one(conn, "SELECT COUNT(*) AS n FROM changes WHERE batch_id = ? AND field = 'evidence'", (res["batch_id"],))["n"] == 1
+    batches.undo(conn, res["batch_id"])
+    s = _sugg(conn, e)
+    assert (s["judged_at"], s["verdict"]) == (None, None) and active_rels(conn) == set()
+
+
+def test_migration_1_turns_import_task_links_into_same_as_or_suggestions(conn, tmp_path):
+    mk(conn, 10, status="dropped", completed_at="2026-10-01"); mk(conn, 11)
+    mk(conn, 12, created_at="2026-10-20T00:00:00+00:00"); mk(conn, 13, created_at="2026-09-01T00:00:00+00:00")
+    for loser, ref in ((10, "11"), (12, "13"), (12, "not-a-number")):
+        conn.execute("INSERT INTO links (task_id, kind, ref, label, created_at) VALUES (?, 'task', ?, 'duplicate source key in import', 'now')", (loser, ref))
+    conn.execute("PRAGMA user_version = 0"); conn.commit()
+    assert db.migrate(conn) == ["import task links become same_as links or merge suggestions"]
+    assert active_rels(conn) == {(10, 11, "same_as")}
+    assert one(conn, "SELECT source FROM relations WHERE src = 10")["source"] == "import"
+    sg = rows(conn, "SELECT ref, judged_at FROM evidence WHERE kind = 'link_suggestion'")
+    assert len(sg) == 1 and sg[0]["judged_at"] is None
+    assert json.loads(sg[0]["ref"]) == {"kind": "same_as", "a": 12, "b": 13, "why": "duplicate source key in import", "signal": "import"}
+    assert not rows(conn, "SELECT 1 FROM links WHERE kind = 'task'")
+    assert len(list((tmp_path / "backups").glob("*-before-v1.db"))) == 1
+    assert db.schema_version(conn) == 1 and db.migrate(conn) == []
+
+
+def test_the_importer_writes_relations_not_task_links(conn, cfg, tmp_path):
+    from factotum.importers.notion_tasks import run
+    from test_core import _notion_row
+    upsert_task(conn, task(id=2, name="already here", source_key="gcal:abc")); conn.commit()
+    f = tmp_path / "pages.json"
+    f.write_text(json.dumps([_notion_row(5, "re-created by the old sync", "Next", "gcal:abc", created="2026-10-25T00:00:00.000Z")]))   # recent: imported open
+    run(conn, cfg, apply=True, from_json=str(f), new_only=True, today=TODAY, out=lambda *_: None)
+    assert one(conn, "SELECT status FROM tasks WHERE id = 5")["status"] == "open"
+    assert not rows(conn, "SELECT 1 FROM links WHERE kind = 'task'")
+    sg = rows(conn, "SELECT ref FROM evidence WHERE kind = 'link_suggestion' AND judged_at IS NULL")
+    assert len(sg) == 1 and {json.loads(sg[0]["ref"])[k] for k in ("a", "b")} == {2, 5}
+    assert active_rels(conn) == set()
+
+
+def test_the_planner_and_review_cards_do_not_read_link_suggestions(conn, cfg, tmp_path):
+    from fastapi.testclient import TestClient
+    from factotum import api, planner
+    mk(conn, 1); mk(conn, 2)
+    relations.suggest(conn, "any", 1, 2, "same thread", "thread")
+    conn.execute("INSERT INTO evidence (task_id, kind, label, at) VALUES (1, 'thread_updated', 'Max wrote', 'now')"); conn.commit()
+    assert [c["kind"] for c in planner.bundle(conn, cfg, TODAY)["candidates"]] == ["thread_updated"]
+    app = api.create_app(cfg, db_path=str(tmp_path / "t.db"))
+    items = {i["task"]["id"]: i for i in TestClient(app).get("/api/review").json()["items"]}
+    assert [e["kind"] for e in items[1]["evidence"]] == ["thread_updated"]

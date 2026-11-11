@@ -212,11 +212,13 @@ def test_new_only_sync_duplicate_of_a_stored_key_keeps_the_stored_row_as_owner(c
     upsert_task(conn, task(id=2, name="already here", source_key="gcal:abc"))
     conn.commit()
     f = tmp_path / "pages.json"
-    f.write_text(json.dumps([_notion_row(5, "re-created by the old sync", "Next", "gcal:abc")]))
+    f.write_text(json.dumps([_notion_row(5, "re-created by the old sync", "Next", "gcal:abc", created="2026-10-25T00:00:00.000Z")]))   # recent: imported open
     run(conn, cfg, apply=True, from_json=str(f), new_only=True, today=TODAY, out=lambda *_: None)
     rows = {r["id"]: r for r in conn.execute("SELECT id, source_key FROM tasks")}
     assert rows[2]["source_key"] == "gcal:abc" and rows[5]["source_key"] is None
-    assert conn.execute("SELECT ref FROM links WHERE task_id = 5 AND kind = 'task'").fetchone()[0] == "2"
+    assert conn.execute("SELECT COUNT(*) FROM links WHERE kind = 'task'").fetchone()[0] == 0
+    sg = conn.execute("SELECT ref FROM evidence WHERE kind = 'link_suggestion' AND judged_at IS NULL").fetchall()
+    assert len(sg) == 1 and {json.loads(sg[0][0])[k] for k in ("a", "b")} == {5, 2}
 
 
 # --- reminders ------------------------------------------------------------------------------
