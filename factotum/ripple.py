@@ -340,7 +340,15 @@ TASK_REF_RE = re.compile(r"\bTask-(\d{1,6})\b")
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,255}\.[A-Za-z]{2,24}")
 SET_FIELDS = ("name", "due", "hard", "effort", "project")     # what a ripple's `set` or `create` card may carry
 NEVER_FIELDS = ("counterpart", "waiting_on")                  # a ripple never copies an address or a person (design §8.6)
+# A web address a ripple may not bring to a task on its own (design §8.6): a scheme or www. link, or a
+# bare host-looking token with a path (name.tld/path) or a common top-level domain (name.com); a bare
+# token like report.pdf or Node.js is not one. Bounded like every pattern here.
+WEB_RE = re.compile(r"(?:https?://|www\.)[^\s<>\"')\]]{1,2000}"
+                    r"|\b[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63}){0,8}\.([A-Za-z]{2,24})\b(/[^\s<>\"')\]]{0,2000})?", re.I)
+COMMON_TLDS = frozenset("com net org edu gov mil int io co ai app dev me info biz ly gl gg to xyz link site online shop "
+                        "us uk ca de fr eu nl es it ru cn in jp au nz ie br".split())
 LEFT_OUT = "[address left out]"
+WITHHELD = "its reason named an address this task did not have, so it is left out"    # a note's fixed words then
 NAME_MAX = 80                                                 # a task's name, as `mcp_server.NAME_MAX` and the cleaner's cut
 SHAPE = 'the reply is not {"ripples": [...]}'
 
@@ -397,6 +405,28 @@ def _emails(text: str) -> list[str]:
     return list(dict.fromkeys(m.lower() for m in EMAIL_RE.findall(text or "")))
 
 
+def _web(m: re.Match) -> str | None:
+    """The web address a `WEB_RE` match names (no scheme, lowercased, no trailing punctuation or
+    slash), or None for a bare token that is not one."""
+    if m.group(1) is not None and not m.group(2) and m.group(1).lower() not in COMMON_TLDS:
+        return None
+    return re.sub(r"^https?://", "", m.group(0).rstrip(".,;:!?"), flags=re.I).lower().rstrip("/") or None
+
+
+def _had(addr: str, old: str) -> bool:
+    """True when the old text already holds `addr` (a normalised web address), with or without a
+    scheme, not as the tail of a longer host (x.com is not in fox.com)."""
+    return re.search(r"(?<![a-z0-9-])" + re.escape(addr), (old or "").lower()) is not None
+
+
+def _new_addresses(old: str, new: str) -> tuple[list[str], list[str]]:
+    """The email addresses and the web addresses `new` names that `old` did not."""
+    had = set(_emails(old))
+    mail = [m for m in _emails(new) if m not in had]
+    web = [w for w in dict.fromkeys(_web(m) for m in WEB_RE.finditer(new or "")) if w and not _had(w, old)]
+    return mail, web
+
+
 def _loss(old: str, new: str) -> str | None:
     """Why a rewrite loses something, or None: empty, over `REWRITE_CAP`, or a web address or a
     `Task-N` of the old text missing. Such a rewrite is never applied nor offered: it becomes a note."""
@@ -422,11 +452,9 @@ def guard(old: str, new: str) -> str | None:
     why = _loss(old, new)
     if why:
         return why
-    old, new = old or "", new or ""
-    mail = [m for m in _emails(new) if m not in set(_emails(old))]
+    mail, web = _new_addresses(old, new)
     if mail:
         return f"adds the address {_short(mail[0])}"
-    web = [u for u in _urls(new) if u not in set(_urls(old))]
     if web:
         return f"adds the web address {_short(web[0])}"
     return None
@@ -434,13 +462,16 @@ def guard(old: str, new: str) -> str | None:
 
 def _no_new_addresses(text: str, old: str) -> str:
     """`text` with every email or web address `old` lacks replaced by `LEFT_OUT`."""
-    had_m, had_u = set(_emails(old)), set(_urls(old))
+    had = set(_emails(old))
+    text = EMAIL_RE.sub(lambda m: m.group(0) if m.group(0).lower() in had else LEFT_OUT, text)
 
-    def url(m: re.Match) -> str:
-        u = m.group(0).rstrip(".,;:!?")
-        return m.group(0) if u in had_u else LEFT_OUT + m.group(0)[len(u):]
-    text = URL_RE.sub(url, text)
-    return EMAIL_RE.sub(lambda m: m.group(0) if m.group(0).lower() in had_m else LEFT_OUT, text)
+    def web(m: re.Match) -> str:
+        w = _web(m)
+        if w is None or _had(w, old):
+            return m.group(0)
+        tok = m.group(0)
+        return LEFT_OUT + tok[len(tok.rstrip(".,;:!?")):]
+    return WEB_RE.sub(web, text)
 
 
 def _task_ref(v) -> int | None:
@@ -529,7 +560,8 @@ def clean_proposal(conn: sqlite3.Connection, cfg: dict, p: dict, task_id: int, b
 def apply(conn: sqlite3.Connection, cfg: dict, b: dict, entries: list[dict], run_id: int | None, today: date) -> dict:
     """Write what a parsed reply decided. A text rewrite that passes `guard` is a `set` carrying the
     text the run read as `expect` (a hand edit made meanwhile wins); one that loses something (`_loss`)
-    becomes a dated `add_note` that names no address the old text lacked; both ride in ONE `ripple`
+    becomes a dated `add_note` (its reason, or fixed words when the reason names an address the old
+    text lacked); both ride in ONE `ripple`
     batch with the cause and each entry's `why` as the change's note. A rewrite that only adds an
     email or web address is a Review card (the same `set` with its `expect`), or a note when no card
     can be staged. A neighbour no longer open is left alone. Every proposal is a Review card
@@ -581,7 +613,8 @@ def apply(conn: sqlite3.Connection, cfg: dict, b: dict, entries: list[dict], run
                     f"rewrite the text of Task-{tid}: it {why_not}", e["why"]):
                 pass                                         # it only adds an address: the owner decides on Review (design §8.6)
             else:
-                said = f"Ripple from Task-{first}: {why}" if why else f"Ripple from Task-{first}"
+                # the note is task text: a reason that named a new address is not written at all
+                said = f"Ripple from Task-{first}: {e['why'] if why == e['why'] else WITHHELD}" if why else f"Ripple from Task-{first}"
                 changes.append({"task_id": tid, "op": "add_note", "fields": {"text": said}, "note": why})
                 noted.append({"task_id": tid, "why": why_not})
         for p in e["proposals"]:
