@@ -17,7 +17,7 @@
 - Do not install packages.
 - No real Claude runs, no scheduler, no sweeps, no sudo. A scenario never presses Send in Chat, Ask on a Review card, a starter prompt, "Search related emails", "Draft reply" or "Ask Claude what else is related" (each starts a real Claude run).
 - Never open `config/factotum.yaml`, `.env` or `/home/robert/factotum/data`.
-- Commits: small commits on branch `linked-tasks`, the WHOLE suite green at every commit (`/home/robert/factotum/.venv/bin/pytest -q` from WT), never push. Every commit message ends with the line `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>` (CLAUDE.md's trailer, exactly). Message style is the repository's: `web: what changed and why` (or `api:`, `relations:`, `docs:`).
+- Commits: small commits on branch `linked-tasks`, the WHOLE suite green at every commit (`/home/robert/factotum/.venv/bin/pytest -q` from WT), never push. Every commit message ends with the line `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>` (CLAUDE.md's trailer, exactly; the `git commit -m "…"` lines below show the subject only, so add the trailer as a second `-m`). Message style is the repository's: `web: what changed and why` (or `api:`, `relations:`, `docs:`).
 - Vocabulary (design §4): the page says "part of", "steps", "waits on", "frees", "same as". The words "blocked" and "dependency" never appear in anything the page shows (Task 1 adds a test over `factotum/web/`).
 - Desktop behaviour that exists today does not change except where a task says so.
 - Every surface is checked at 1280 px and at 390 px.
@@ -111,13 +111,12 @@ Implementer: **sonnet**. UI task: no (the seed is checked by its JSON and the AP
 """Stage 4b, the page: the few server pieces it needs (suggestion direction, Free now after Done) and
 a guard on the words it shows."""
 import re
-from datetime import datetime
 
 from fastapi.testclient import TestClient
 
-from factotum import api, batches, relations, reminders
+from factotum import api, relations
 from factotum.db import connect, init_db
-from stage4_helpers import TODAY, link, mk
+from stage4_helpers import mk
 
 
 def _client(cfg, tmp_path):
@@ -217,8 +216,8 @@ Implementer: **opus**. UI task: yes.
 
 - [ ] **Step 3: The three places that turned unknown ops into `set`.**
   - `propKey(p, mid, i)` = `stageKey(p, ['done', 'drop', 'pin_top', 'longterm'].includes(p.op) ? undefined : 'c' + mid + '-' + i)`; `proposalsHtml`'s "staged" test becomes `staged.has(key)`.
-  - `stageProposal(p, mid, i)`: `create`, `link_thread` → false (unchanged); `done` / `drop` → `stage(p.task_id, p.op, p.fields || {}, label)` (the outcome rides along); `pin_top` / `longterm` → as today; `add_reminder` → as today; `link`, `unlink`, `merge`, `add_note` → `stageChange(p, label, {}, 'c' + mid + '-' + i)`; `set` → `stageExtra(propKey(...), p.task_id, 'set', p.fields, label, {expect: textExpect(p.task_id, p.fields)})` (omit `expect` when undefined); any other op → return false (not staged; the toast's count says so).
-  - The `[data-rv-accept]` handler: `c = Object.assign({task_id: tid}, e.change)`; `done` / `drop` → `stage(tid, c.op, c.fields || {}, e.label)` (rest unchanged); `pin_top` / `longterm` / `add_reminder` unchanged; `link`, `unlink`, `merge`, `add_note` → `stageChange(c, e.label, {}, 'a' + eid)`; `set` → as today plus `expect: textExpect(tid, c.fields)`; any other op → `toast('This suggestion cannot be staged here')` and return before judging. Judging the planner's evidence (`stageJudge(eid, tid, 'applied', …)`) stays for every staged kind.
+  - `stageProposal(p, mid, i)`: `create`, `link_thread` → false (unchanged); `done` / `drop` → `stage(p.task_id, p.op, p.fields || {}, changeWords(p) || label)` (the outcome rides along, and the tray says it: T2 expects `done · “Dataset received”`); `pin_top` / `longterm` → as today; `add_reminder` → as today; `link`, `unlink`, `merge`, `add_note` → `stageChange(p, label, {}, 'c' + mid + '-' + i)`; `set` → `stageExtra(propKey(...), p.task_id, 'set', p.fields, label, {expect: textExpect(p.task_id, p.fields)})` (omit `expect` when undefined); any other op → return false (not staged; the toast's count says so).
+  - The `[data-rv-accept]` handler: `c = Object.assign({task_id: tid}, e.change)`; `done` / `drop` → `stage(tid, c.op, c.fields || {}, changeWords(c) || e.label)` (rest unchanged); `pin_top` / `longterm` / `add_reminder` unchanged; `link`, `unlink`, `merge`, `add_note` → `stageChange(c, e.label, {}, 'a' + eid)`; `set` → as today plus `expect: textExpect(tid, c.fields)`; any other op → `toast('This suggestion cannot be staged here')` and return before judging. Judging the planner's evidence (`stageJudge(eid, tid, 'applied', …)`) stays for every staged kind.
   - `sendPrompt`: `res.changes.forEach(c => stageChange(c, <today's label expression>))`.
 
 - [ ] **Step 4: The Review note is appended by the server.** In `reviewAct`, remove the `extra` context; every decision keeps its fields without `context`; after the decision is staged, when the note is non-empty, `stageChange({task_id: id, op: 'add_note', fields: {text}}, '')`. The note box, its placeholder and the card do not change.
@@ -261,12 +260,12 @@ Implementer: **opus**. UI task: yes.
   - `nameOf(id: number) -> {id, name, status, due?, completed_at?, outcome?} | null` = `byId(id) || (data.neighbours || {})[String(id)] || null`.
   - `overlayRel(t) -> rel|undefined` and its use in `view(t)`: when a staged `link` / `unlink` / `merge` entry names `t.id` at either end, or a staged entry makes `suggestionStaged` true for one of `t.rel.suggestions`, `view` returns a copy whose `rel` (an empty compact rel when `t.rel` is absent: `links: [], waits_on_open: [], frees_open: [], goal_id: null, steps_open: 0, steps_total: 0, needed_by: null, needed_by_id: null, needed_by_via: null, changed: null, suggestions: []`) shows it: a staged `link` adds `{kind, dir, other, staged: true}` to both ends' `links`, `waits_on_open` / `frees_open` (when the other end is open), `goal_id` / `steps_total` / `steps_open`; `unlink` removes them; `merge` sets the duplicate's `status` to `'dropped'` and removes the pair's suggestions; a staged suggestion verdict removes that suggestion. Never mutates `data`.
   - `isWaiting(x) -> boolean` = `!!(x.rel && x.rel.waits_on_open && x.rel.waits_on_open.length)`.
-  - `badgesFor(x) -> Array<{kind, look, text, jump?, open?, title}>`, in this order (design §12.1), each present only when its condition holds:
+  - `badgesFor(x) -> Array<{kind, look, text, jump?, open?, title}>`, in this order (design §12.1's kinds, ordered as the approved frames 1 and 8 draw them: "updated by" before "part of"), each present only when its condition holds:
     1. `frees` — `rel.frees_open.length`: text `do first: frees Task-N` when `rel.needed_by`, else `frees Task-N`; N = `rel.needed_by_id` when `needed_by_via === 'frees'`, else `rel.frees_open[0]`; look `ok`; `jump` N.
     2. `waits` — `rel.waits_on_open.length`: `waits on Task-N`; look `wait`; `jump` N.
     3. `steps` — `rel.steps_total > 0`: `<done> of <total> steps done` (done = total − open) with a bar; look `ok`; `open` x.id.
-    4. `partof` — `rel.goal_id != null`: `part of Task-N`; look `ok`; `jump` N.
-    5. `changed` — `rel.changed`: `updated by Task-N` (`by`), or `updated by a linked task` when `by` is null; look `chg`; `open` x.id.
+    4. `changed` — `rel.changed`: `updated by Task-N` (`by`), or `updated by a linked task` when `by` is null; look `chg`; `open` x.id.
+    5. `partof` — `rel.goal_id != null`: `part of Task-N`; look `ok`; `jump` N.
     6. `suggest` — `rel.suggestions.length`: kind `same_as` → `same as Task-N?`; `part_of` → `part of Task-N?` (dir out) / `step: Task-N?` (in); `waits_on` → `waits on Task-N?` (out) / `frees Task-N?` (in); `any` → `linked to Task-N?`; look `sus`; `jump` N.
     When several tasks fit one kind, the text ends ` +k`. A badge whose named link is `staged` has look `staged`. `title` = `Task-N · <nameOf(N).name>` plus ` (done)` / ` (dropped)` for a closed one.
   - `badgeHtml(b) -> string`: `<a class="lb <look>" href="/t/<N>" data-lb="<N>" title="…">…</a>` for a jump, `data-lb-open="<id>"` for an open; the steps badge holds `<span class="bar"><span style="width:P%"></span></span>`; `frees` an arrow icon, `waits` a clock icon, `changed` a dot (frame 1's inline SVGs).
@@ -274,7 +273,7 @@ Implementer: **opus**. UI task: yes.
   - `stepsChip(rel) -> string`: the steps badge alone, not a link (`<span class="lb ok steps">`), for Review (Task 8).
   - `goTask(id)`: phone → `openTask(id)`; desktop → `jumpTo(id, false)`.
   - `legendHtml() -> string`: frame 1's three entries, desktop only, and only when `hasLinks()`: `a link you or Claude confirmed`, `a link the app suspects, one tap to confirm`, `changed by a linked task since you last looked`.
-  - `hasLinks() -> boolean` = some `openOnes()` row with `rel` whose `links` or `suggestions` is non-empty or `changed` is set (Task 4 uses it too).
+  - `hasLinks() -> boolean` = some `openOnes()` row with `rel` whose `links` hold a `part_of` or `waits_on` link, or whose `suggestions` is non-empty, or whose `changed` is set (Task 4 uses it too). A `same_as` link alone does not count: it is a finished merge with no badge and no Linked group (the dev copy, like the live database, has an import-merge survivor that is open; counting it would draw the bar and legend with "Linked 0" on every list).
 
 - [ ] **Step 1: Implement the section**, the `view` overlay, and the hooks: `chipsHtml` puts `linkChipsHtml(x)` first; `row()` adds class `waiting` when `isWaiting(x)`; `renderToday` and `renderTimeline` append `legendHtml()` after their groups; in `wire()`, `[data-lb]` → `preventDefault`, `stopPropagation`, `goTask(+id)`; `[data-lb-open]` → `preventDefault`, `stopPropagation`, `openTask(+id)`; the `.main` click guard becomes `e.target.closest('input, button, a, .chip.due')`.
 
@@ -319,7 +318,7 @@ Implementer: **opus**. UI task: yes.
     - `waits` (key `linked:w<id>`): every open task that frees an open task and waits on none; `rows` = it, then everything that waits on it, depth first through `rel.frees_open` (a seen set guards a loop); header `One task is holding up another` (one waiting) or `One task is holding up <k> others`; on the right, when a waiting task is hard-dated and overdue, `the waiting task is <fmtDue label>` in crit.
     - `twin` (key `linked:t<evidence_id>`): one per unstaged `same_as` suggestion (deduplicated by `evidence_id`), both ends open: `goes` = the end that is not `keep`, `keep` = `s.keep`; header `Possibly the same task, twice`, the suggestion's `why` on the right; two columns, each `Task-N name` over `from <source>, due <fmtDue label>` (`Canvas` → `from Canvas`, `Plaud` → `from a recording`, `Mail` → `from mail`, `Manual` → `made by hand`, else `from <source>`; `no date` when undated); buttons `Merge into <keep>` (`data-twin-merge="<goes>:<keep>:<eid>"`) and `Not the same` (`data-twin-not="<eid>:<goes>:<keep>"`).
     A task may appear in more than one group.
-  - `linkedHtml() -> string`: the groups as `<section class="lgroup [twin]">`; open rows through `row(x)` (steps and waiting rows get class `under`); a closed step is `<a class="lstep closed" href="/t/N" data-lb="N">` with a tick, the struck-through name, `Outcome: <outcome>` when set, and a chip `done <Mon D>` / `dropped <Mon D>` from `completed_at`. When nothing qualifies: `<div class="empty">No linked tasks.</div>`.
+  - `linkedHtml() -> string`: the groups as `<section class="lgroup [twin]">`; open rows through `row(x)` (steps and waiting rows get class `under`: this task makes `row()` add class `under` when `x.under`, and passes such a row as a copy, `Object.assign({}, x, {under: true})`, never setting `under` on the object `openOnes()` returned, which is `data`'s own row when nothing is staged); a closed step is `<a class="lstep closed" href="/t/N" data-lb="N">` with a tick, the struck-through name, `Outcome: <outcome>` when set, and a chip `done <Mon D>` / `dropped <Mon D>` from `completed_at`. When nothing qualifies: `<div class="empty">No linked tasks.</div>`.
   - `linkBarHtml() -> string` (only when `hasLinks()`): `<div class="linkbar"><div class="seg" role="tablist" aria-label="Show">` with `All <n>`, `Linked <n>`, `Ready now <n>` (`data-linkview`; counts: open tasks, distinct rows `linkedGroups` shows, open tasks passing `readyRow`), then the hint `A badge names the linked task. Click it to jump there.` (`Tasks that belong together, shown together.` while Linked is chosen).
   - `groupsOf('today'|'timeline')` returns `linkedGroups()` while Linked is chosen.
   - `jumpTo`: when no group holds the id and `linkView !== 'all'`, `setLinkView('all')` and search again (then unfold as today).
@@ -353,17 +352,18 @@ git commit -m "web: All / Linked / Ready now on Today and Timeline, remembered; 
 Implementer: **opus**. UI task: yes.
 
 **Files:**
-- Modify: `factotum/web/app.js` — new section `// ---------- links (stage 4b): Today's order ----------`; `todayGroups` calls it; `row()` reads `x.under`.
+- Modify: `factotum/web/app.js` — new section `// ---------- links (stage 4b): Today's order ----------`; `todayGroups` calls it; `row()` already reads `x.under` (Task 4).
 - Modify: `factotum/web/app.css` (only if `.row.under` from Task 4 needs a Today variant).
 
 **Interfaces:**
 - Consumes: `isWaiting`, `readyRow`, `effectiveLinkView`.
-- Produces: `arrangeToday(groups: Array<{key, rows}>) -> same groups with new row arrays`, applied by `todayGroups()` after the Ready filter. Rows are the `view()` copies `openOnes()` returns, so it may set `x.under = true` on them; `row()` adds class `under` when `x.under`.
+- Produces: `arrangeToday(groups: Array<{key, rows}>) -> same groups with new row arrays`, applied by `todayGroups()` after the Ready filter. `view()` returns `data`'s own row when nothing is staged, so a row that gets `under` is replaced in its group by `Object.assign({}, x, {under: true})`; nothing is set on the row given (a flag left on `data` would indent the row on Timeline too, until the next `load()`). `row()` adds class `under` when `x.under` (Task 4).
 
 - [ ] **Step 1: Implement `arrangeToday`** (nothing happens to a group without links, so a list without links is unchanged, order included):
 
 ```
-1. pull forward: for every open task x (openOnes(), passing the Ready filter) with rel.needed_by and
+1. pull forward: for every open task x (todayGroups' own list `o`, so a snoozed task is never pulled in,
+   passing the Ready filter) with rel.needed_by and
    needed_by_via in ('frees', 'chain'), let H = rel.needed_by_id and h = index of the first group whose
    rows hold H. If h exists and no group at index <= h holds x: remove x from every group after h and
    insert it into group h just before H.
@@ -405,7 +405,7 @@ Implementer: **opus**. UI task: yes.
 - Produces:
   - `const detailCache = new Map()` (id → the `GET /api/tasks/{id}` payload, plus `stale: true` after a `load()`, or `{id, missing: true}` on 404, or `{id, failed: <message>}`); `const detailBusy = new Set()`.
   - `loadDetail(id: number, before?: number) -> Promise<void>`: one request per id at a time; with `before`, appends `history.entries` and replaces `more` / `next_before`; on success clears `rel.changed` on the list's row (`byId(id)`, the server just stamped it); then `typingNow() ? swapDetail(id) : render()`.
-  - `ensureDetails()`, called at the end of `render()`: on a desktop, for each id in `ui.open` whose `.row.open` is on screen, `loadDetail(id)` when it is not cached, is stale, and is not in flight.
+  - `ensureDetails()`, called at the end of `render()`: on a desktop, for each id in `ui.open` whose `.row.open` is on screen, and on either device for `ui.page` when set, `loadDetail(id)` when it is not cached, is stale, and is not in flight (the phone page renders `detailsHtml` too, so without `ui.page` its History would read "Loading History…" until Task 7).
   - `load()` marks every cached entry `stale` (what is shown stays until the new answer arrives).
   - `fieldSaid(c) -> string`: today's `say` from `batchDigest`, moved to module level (Task 9 and History use it).
   - `whereHtml(x) -> string`: `<section class="dsec"><h4>Where this stands</h4><p class="ctx">` the context, or `Nothing written yet.` `</p></section>`.
@@ -462,7 +462,7 @@ Implementer: **opus**. UI task: yes.
   - `openPage(id, push = true, from = null)`: the page on either device (`ui.page = id`, `ui.pageMore = ui.pageLater = false`, scroll position kept as today, `/t/<id>` pushed unless `push` is false).
   - `jumpTo(id, expand, replace)` returns `'row'` or `'page'`: when no list holds the id it calls `openPage(id, !replace)` and returns `'page'` (no more "is not in a list" toast); when it finds the row while `ui.page` is set on a desktop, it clears `ui.page` and pushes the tab's address.
   - `applyAddress`: desktop branch keeps `/t/<id>` when `jumpTo(...)` returned `'page'` (replaces it with the tab's address only for `'row'`).
-  - `ensureDetails()` also loads `ui.page`'s payload (both devices).
+  - `ensureDetails()` already loads `ui.page`'s payload (Task 6); the page now reads it from the cache.
   - `taskPageHtml()`: the bar `‹ Task-<from>` when `history.state && history.state.from`, else `‹ Back`, then `Task-<id>`; the title; `chipsHtml`; for a closed task `This task is <status>.` and `<button class="btn" data-act="reopen" data-id="<id>">Reopen</button>` (or the staged chip when a reopen is staged); `whereHtml`, `[data-dlinks]`, `[data-dhist]`, the facts (`<dl>`s); for an open task the actions block only while `ui.pageMore` (heading `More`), and on a phone `<div class="pagebar"><button data-page="done">Done</button><button data-page="later" aria-expanded>Later</button><button data-page="more" aria-expanded>More</button></div>` with, while `ui.pageLater`, a line `Comes back on:` `Tomorrow` / `Friday` / `Next week` (`data-page-later="tomorrow|fri|nextweek"`, staging `set snoozed_until` like the Review card's Later, label `later · back <when>`). On a desktop the actions are always shown (no pinned bar). The task comes from `byId(id)` or the cache; `Loading Task-<id>…`, `Task-<id> does not exist.`, `Could not load Task-<id> (<message>).` as today.
   - `act(id, 'reopen')` → `stage(id, 'reopen', {}, 'reopened')`.
   - In `wireDetail`, `[data-open-task]`: when `ui.page !== null` and (phone, or the target is in no list) → `openTask`/`openPage(N, true, ui.page)` (the trail); otherwise `goTask(N)`.
@@ -479,7 +479,7 @@ Implementer: **opus**. UI task: yes.
   - P3 (Review Focus 4, phone): reload at `/t/<goal>`: the bar still reads `‹ Task-<step_freed>`; press it: `/t/<step_freed>`, bar `‹ Back`; press Back: `/`, the list, scrolled where it was. Log each path and bar text.
   - P4 (desktop): `/t/<step_freed>` expands the row in place on Timeline/Today as before (path back to the tab's address); log it.
   - P5 (Review Focus 1, both): open `goal`'s Linked tasks (desktop: expand the row; phone: its page) and click the struck-through `step_done` → its page (desktop too): `This task is done.`, `Reopen`, Linked tasks `part of Task-<goal>`, History with `Created.` / `done`; no pinned bar; shot `s4b-7-closed`. Press `Reopen`: the tray shows `Task-<step_done> reopened`; Discard. Then `/t/<merged_away>`: `This task is dropped.`, Linked tasks `merged into Task-<merged_into>`. Then `/t/99999999`: `Task-99999999 does not exist.` (an expected 404 on `/api/tasks/99999999`).
-  - P6 (desktop): from the closed page click `part of Task-<goal>` (an open task): the page closes, `goal`'s row is open and flashing on its tab, the address is the tab's.
+  - P6 (desktop): from the closed page click `part of Task-<goal>` (an open task): the page closes, `goal`'s row is focused and flashing on its tab (a jump, `goTask` → `jumpTo(id, false)`: not expanded), the address is the tab's.
   - `noSideScroll` true on phone shots. End with `seed('--fresh')`.
 
 - [ ] **Step 5: Look at every screenshot, then commit**
@@ -520,8 +520,8 @@ Implementer: **opus**. UI task: yes (the only task whose scenario loads Review).
 
 - [ ] **Step 4: Write and run `DEV/scenarios/s4b-8-review.mjs`** (both devices; `S = seed('--fresh')`; this scenario loads Review).
   - R1: `/review`; walk the cards with Keep (`[data-rv="keep"]`) until the card's `data-id` is one of the seed ids, taking a shot of each seed card: `step_freed` (`Free now: Task-<step_done> is done`, green), `goal` (`1 of 3 steps done` chip in `.sub`), `goal_done` (`All steps are done. Close this, or is there more?`, chip `1 of 1 steps done`), `waits_dropped` (`Task-<dropped_blocker> was dropped. Is this still needed?`), `pair_a` and `pair_b` (a `Suggested link` line `Related to Task-… ?` with the four buttons), `twin_goes` / `twin_kept` (`Same task as …?`, `Merge into <twin_kept>`). Log each card's `.why` text and class. Compare with frame 4's reason line and chip (frame 10 on the phone). Shots `s4b-8-<key>`.
-  - R2: on `pair_a`'s card press `waits on it`: the line disappears, the tray reads `Task-<pair_a> now waits on Task-<pair_b>`; press `Discard all`: the line is back.
-  - R3: on `pair_a`'s card the planner line (`Planner suggests` … `Accept`) is there; press Accept: the tray holds `rel:<pair_a>:waits_on:<chain_1>` (`Task-<pair_a> now waits on Task-<chain_1>`) and `e:<planner_evidence>` (`suggestion accepted`) — Task 2's Accept branch; log the keys. Press `Not related` on the pair suggestion: `e:<pair_evidence>` staged. Press Keep. Open the tray, untick every entry whose key does not name `pair_a`, `planner_evidence` or `pair_evidence` (the walk staged Keeps on other cards), Apply selected; log the response (no skips) and that `GET /api/tasks/<pair_a>` now has a `waits_on` relation to `chain_1`. Discard all.
+  - R2: R1's Keeps staged a decision on every card it passed (`pair_a`'s included, which hides its card and its planner line): press `Discard all`, then walk with Keep over the cards before it, up to `pair_a`'s card. On it press `waits on it`: the line disappears, the tray reads `Task-<pair_a> now waits on Task-<pair_b>`; press `Discard all`: the line is back.
+  - R3: on `pair_a`'s card the planner line (`Planner suggests` … `Accept`) is there; press Accept: the tray holds `rel:<pair_a>:waits_on:<chain_1>` (`Task-<pair_a> now waits on Task-<chain_1>`) and `e:<planner_evidence>` (`suggestion accepted`) — Task 2's Accept branch; log the keys. Press `Not related` on the pair suggestion: `e:<pair_evidence>` staged. Type `checked with the lab` into the card's note box, press Keep: the tray holds `<pair_a>` (`kept`) and `<pair_a>:note` (`note “checked with the lab”`), Task 2's Review note (log the keys). Open the tray, untick every entry whose key does not name `pair_a`, `planner_evidence` or `pair_evidence` (the walk staged Keeps on other cards), Apply selected; log the response (no skips) and that `GET /api/tasks/<pair_a>` now has a `waits_on` relation to `chain_1` and a context ending `: checked with the lab`. Discard all.
   - R4: Review's `Task-N` in a reason text is a link: click it on `step_freed`'s card → `/t/<step_done>` read-only page (phone) / page (desktop); Back returns to Review.
   - `noSideScroll` true. End with `seed('--fresh')`.
 
@@ -539,14 +539,15 @@ git commit -m "web: a Review card says its link reason in the server's words (Fr
 Implementer: **sonnet**. UI task: yes.
 
 **Files:**
-- Modify: `factotum/web/app.js` — `SOURCE_NAMES`, `changeLines`, `batchLine`, `batchDigest`, `timelineHtml` (the line text).
+- Modify: `factotum/web/app.js` — `SOURCE_NAMES`, `changeLines`, `batchLine`, `batchDigest`, `fieldSaid` (its `context` branch), `timelineHtml` (the line text).
 
 **Interfaces:**
 - Consumes: `linkPredicate` (Task 2), `fieldSaid` (Task 6), the Log's `b.cause` and `c.note`.
 - Produces:
-  - `logLinkWords(c) -> string|null`: for a `link` change, `Task-<task_id> ` + `linkPredicate(v.kind, v.other, removed)` where `v` is `c.new` (added) or `c.old` (removed); `null` for a row whose `dir` is `in` (the other row of the same relation says it).
+  - `logLinkWords(c) -> string|null`: for a `link` change, `linkPredicate(v.kind, v.other, removed)` where `v` is `c.new` (added) or `c.old` (removed), with no `Task-<task_id>` in front (every Log surface already prints the row's task code before it); `null` for a row whose `dir` is `in` (the other row of the same relation says it).
+  - `fieldSaid(c)`'s `context` branch says `note added: ` only when the new text starts with the old one, else `context: ` (today's `say` calls a ripple's rewrite "note added").
   - `SOURCE_NAMES` gains `ripple: 'ripple'`, `ntfy: 'reminder'`, `command: 'you'`, `import: 'import'`.
-  - `batchLine(b)`: `link` rows read `now waits on Task-14` etc. (rank 4; `in` rows skipped); when `b.cause && b.cause.kind === 'ripple'`: `Ripple from Task-N: <k> task(s) updated` (k = distinct task ids, N = `cause.from[0]`); another cause with `from`: `after Task-N · ` + the usual line.
+  - `batchLine(b)`: `link` rows read `now waits on Task-14` etc. (`logLinkWords`; rank 4, except a `same_as` row, rank 6, so a merge reads `merged into Task-N` rather than the duplicate's `dropped`; `in` rows skipped; a create batch still reads `created`, rank 5); when `b.cause && b.cause.kind === 'ripple'`: `Ripple from Task-N: <k> task(s) updated` (k = distinct task ids, N = `cause.from[0]`); another cause with `from`: `after Task-N · ` + the usual line.
   - `batchDigest(b)`: a link row → `logLinkWords(c)`; a change with `note` → its words followed by ` — <note>`.
   - `changeLines(b)` (Changes view): a link row reads `logLinkWords(c)` instead of JSON; `in` rows are left out; a note is shown after the row.
 
@@ -555,7 +556,7 @@ Implementer: **sonnet**. UI task: yes.
 - [ ] **Step 2: Run the suite** (all pass).
 
 - [ ] **Step 3: Write and run `DEV/scenarios/s4b-9-log.mjs`** (both devices; `S = seed('--fresh')`).
-  - G1: `/log`, Timeline view → shot `s4b-9-timeline`: the seed's batches read `Task-<step_freed> is now part of Task-<goal>` / `now waits on …`, the merge `Task-<merged_away> merged into Task-<merged_into>`, the ripple `Ripple from Task-<step_done>: 1 task updated` with chip `ripple`; no raw `link` or JSON. Open the ripple line: the digest shows `context: …` followed by ` — Task-<step_done> recorded that the chair can serve remotely`.
+  - G1: `/log`, Timeline view → shot `s4b-9-timeline`: the seed's create batches read `… created` as before; opening the first one, its digest says `Task-<step_freed> <name> … is now part of Task-<goal> · now waits on Task-<step_done>`; the merge line reads `Task-<merged_away> merged into Task-<merged_into>`, the ripple `Ripple from Task-<step_done>: 1 task updated` with chip `ripple`; no raw `link` or JSON. Open the ripple line: the digest shows `context: …` followed by ` — Task-<step_done> recorded that the chair can serve remotely`.
   - G2: Changes view → shot `s4b-9-changes`: link rows in words, one per relation.
   - `noSideScroll` true. End with `seed('--fresh')`.
 
@@ -583,7 +584,7 @@ Implementer: **sonnet**. UI task: no (server-rendered; tested in pytest).
   - `api._page(title, text, base, undo=False, task_id=None, free: list[dict] | None = None) -> str`: when `free` is non-empty, after the text: `<p style="margin:16px 0 4px;font-weight:600">Free now:</p><ul style="margin:0;padding-left:20px">` and one `<li><a href="{base}/t/{id}" style="color:#2a6">Task-{id}</a> {escaped name}</li>` each, `</ul>`. Without `free` the page is byte-for-byte today's.
   - The Done branch of `/r/{token}` passes `free=relations.freed_by(conn, res["task_id"])`; Snooze and the error pages pass nothing.
 
-- [ ] **Step 1: Write the failing tests** in `tests/test_stage4b.py`
+- [ ] **Step 1: Write the failing tests** in `tests/test_stage4b.py` (and extend its imports: `from datetime import datetime`, `batches` and `reminders` from `factotum`, `TODAY` and `link` from `stage4_helpers`; Task 1 imports only what its own tests use)
 
 ```python
 def _done_page(cfg, tmp_path, setup):
