@@ -97,6 +97,16 @@ def test_an_outcome_runs_at_once_and_wakes_the_scheduler(conn):
         ripple.set_waker(None)
 
 
+def test_undo_takes_its_batch_out_of_the_queue(conn):
+    mk(conn, 1); mk(conn, 2); mk(conn, 3); link(conn, 2, 1, "waits_on"); link(conn, 3, 2, "waits_on")
+    b1 = batches.apply(conn, [{"op": "done", "task_id": 1}, {"op": "set", "task_id": 2, "fields": {"name": "Two"}}], "ui", TODAY)["batch_id"]
+    b2 = batches.apply(conn, [{"op": "set", "task_id": 2, "fields": {"due": "2026-11-20"}}], "ui", TODAY)["batch_id"]
+    batches.undo(conn, b1)
+    assert set(queue(conn)) == {2} and queue(conn)[2]["batches"] == [b2] and queue(conn)[2]["what"] == ["due"]
+    batches.undo(conn, b2)
+    assert queue(conn) == {}
+
+
 def test_a_merge_queues_the_survivor_not_the_duplicate(conn):
     mk(conn, 1); mk(conn, 2); mk(conn, 3); link(conn, 3, 1, "waits_on")
     batches.apply(conn, [{"op": "merge", "task_id": 1, "fields": {"into": 2}}], "ui", TODAY)
@@ -151,6 +161,23 @@ def test_a_failed_run_backs_off_an_hour(conn, cfg, monkeypatch):
     s = Scheduler(on(cfg), conn, push=lambda *a, **k: None, ripple=ripple)
     s.tick(datetime(2026, 11, 1, 12, 0)); s.tick(datetime(2026, 11, 1, 12, 10))
     assert len(calls) == 1 and get_settings(conn)["state.last_fail.ripples"] == "2026-11-01T12:00"
+
+
+def test_a_failure_before_the_run_rolls_back_and_frees_the_write_lock(conn, cfg, monkeypatch):
+    mk(conn, 1); mk(conn, 2); link(conn, 2, 1, "waits_on"); batches.apply(conn, [{"op": "done", "task_id": 1}], "ui", TODAY)
+
+    def broken(c, now_utc=None):
+        c.execute("DELETE FROM ripple_queue")
+        raise RuntimeError("disk")
+    monkeypatch.setattr(ripple, "drop_stale", broken)
+    s = Scheduler(on(cfg), conn, push=lambda *a, **k: None, ripple=ripple)
+    with pytest.raises(RuntimeError):
+        s._ripples(on(cfg), datetime(2026, 11, 1, 12, 0), {}, [])
+    assert not conn.in_transaction and 1 in queue(conn)
+    monkeypatch.setattr(ripple, "clear", lambda c: (c.execute("DELETE FROM ripple_queue"), 1 / 0))
+    with pytest.raises(ZeroDivisionError):
+        s._ripples(cfg, datetime(2026, 11, 1, 12, 0), {}, [])
+    assert not conn.in_transaction and 1 in queue(conn)
 
 
 def test_a_tick_runs_the_due_group(conn, cfg, monkeypatch):
@@ -216,6 +243,15 @@ def test_undoing_the_cause_after_a_hand_edit_keeps_the_ripple_and_flags_it(conn,
     alone = batches.undo(conn, r)
     assert get_task(conn, 3)["context"] == "Old three" and get_task(conn, 2)["context"] == "Mine now"
     assert alone["skipped"] == [{"task_id": 2, "why": "Task-2 context was changed after this batch; left as it is"}]
+
+
+def test_undo_reverts_the_ripple_before_the_cause_so_a_field_both_wrote_comes_back(conn, cfg):
+    mk(conn, 1); mk(conn, 2, context="Old two"); link(conn, 2, 1, "waits_on")
+    b = batches.apply(conn, [{"op": "done", "task_id": 1}, {"op": "set", "task_id": 2, "fields": {"context": "Cause two"}}], "ui", TODAY)["batch_id"]
+    r = batches.apply(conn, [{"op": "set", "task_id": 2, "fields": {"context": "Ripple two"}}], "ripple", TODAY,
+                      cause={"kind": "ripple", "from": [1], "run": 0, "batches": [b]})["batch_id"]
+    res = batches.undo(conn, b)
+    assert res["ripples_undone"] == [r] and res["skipped"] == [] and get_task(conn, 2)["context"] == "Old two" and get_task(conn, 1)["status"] == "open"
 
 
 def test_a_ripple_batch_undoes_on_its_own_and_leaves_its_cause(conn, cfg):

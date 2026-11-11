@@ -362,15 +362,19 @@ class Scheduler:
         backs off an hour like every job; its rows stay queued (a group that fails twice is set aside)."""
         if self.ripple is None:
             return
-        if not C.value(ecfg, "claude.ripple.enabled"):
-            self.ripple.clear(self.conn)
+        try:
+            if not C.value(ecfg, "claude.ripple.enabled"):
+                self.ripple.clear(self.conn)
+                self.conn.commit()
+                return
+            aside = self.ripple.drop_stale(self.conn)
+            if aside:
+                log_run(self.conn, "ripples", 0, ok=True, summary="set aside unrun: " + ", ".join(f"Task-{t}" for t in aside))
             self.conn.commit()
-            return
-        aside = self.ripple.drop_stale(self.conn)
-        if aside:
-            log_run(self.conn, "ripples", 0, ok=True, summary="set aside unrun: " + ", ".join(f"Task-{t}" for t in aside))
-        self.conn.commit()
-        ids = self.ripple.next_group(self.conn, ecfg)
+            ids = self.ripple.next_group(self.conn, ecfg)
+        except Exception:
+            self.conn.rollback()        # never leave this thread holding the write lock (every UI Apply would wait on it)
+            raise
         if not ids:
             return
 

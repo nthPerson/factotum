@@ -96,6 +96,35 @@ def enqueue(cur, batch_id: int, source: str) -> dict[int, list[str]]:
     return queued
 
 
+def _what_of(cur, task_id: int, batch_ids: list[int]) -> set[str]:
+    """What these batches did to one task that ripples (`_what` over each)."""
+    out: set[str] = set()
+    for bid in batch_ids:
+        out |= _what(cur, bid).get(task_id, set())
+    return out
+
+
+def unqueue(cur, batch_id: int) -> list[int]:
+    """Take an undone batch out of the queue, in the undo's own transaction: a row that held it keeps
+    only its other batches, its `what` and `now` recomputed from them and its `last_batch_id` the
+    newest left (so a run in flight that read it does not delete it, and the rest ripples again); a
+    row left with no batch, or with nothing that ripples, is deleted. Returns those rows' task ids."""
+    gone: list[int] = []
+    for r in cur.execute("SELECT task_id, batches_json FROM ripple_queue ORDER BY task_id").fetchall():
+        ids = _load(r["batches_json"]) or []
+        if batch_id not in ids:
+            continue
+        left = [i for i in ids if i != batch_id]
+        what = _what_of(cur, r["task_id"], left)
+        if not left or not what:
+            cur.execute("DELETE FROM ripple_queue WHERE task_id = ?", (r["task_id"],))
+            gone.append(r["task_id"])
+        else:
+            cur.execute("UPDATE ripple_queue SET batches_json = ?, last_batch_id = ?, what_json = ?, now = ? WHERE task_id = ?",
+                        (json.dumps(left), max(left), json.dumps(_ordered(what)), 1 if "outcome" in what else 0, r["task_id"]))
+    return gone
+
+
 def pending(conn: sqlite3.Connection) -> list[dict]:
     """The queued rows, `batches` and `what` parsed, oldest `queued_at` first."""
     out = []
@@ -159,6 +188,22 @@ def _changed(conn: sqlite3.Connection, t: dict, batch_ids: list[int], what: list
             "context": t["context"], "what": what, "before": before, "merged": merged}
 
 
+NET_FIELD = {"closed": "status", "name": "name", "text": "context", "due": "due", "hard": "hard", "outcome": "outcome"}
+
+
+def _net(conn: sqlite3.Connection, c: dict) -> dict | None:
+    """A queued task as it stands now: a field whose value is back to its "before" (closed, then
+    reopened; renamed and renamed back) is no change, a duplicate whose `same_as` is gone (reopened)
+    is no longer merged into it, and `what` keeps only what still holds. None when nothing does."""
+    before = {f: v for f, v in c["before"].items() if not batches._same_value(v, c.get(f))}
+    merged = [m for m in c["merged"] if conn.execute("SELECT 1 FROM relations WHERE src = ? AND dst = ? AND kind = 'same_as' "
+                                                     "AND removed_at IS NULL", (m, c["id"])).fetchone()]
+    what = [w for w in c["what"] if (merged if w == "merge" else NET_FIELD.get(w) in before)]
+    if not what:
+        return None
+    return dict(c, before=before, merged=merged, what=what)
+
+
 def _neighbour_links(conn: sqlite3.Connection, changed: list[int]) -> list[tuple[int, str]]:
     """(task id, how it is linked, from its side) for every task one link away from a changed task,
     in relation order, then the other steps of each changed task's goal."""
@@ -184,26 +229,33 @@ def bundle(conn: sqlite3.Connection, cfg: dict, task_ids: list[int], today: date
     """What one ripple run reads (design §8.2), capped: each changed task before and after, and each
     open task one link away from one, then the other steps of the same goal (`NEIGHBOUR_CAP` in
     all, each once, never a changed task). `texts` keeps each neighbour's whole text as it was read,
-    the `expect` of its rewrite; `queue` the `last_batch_id` the run may delete a queue row for."""
+    the `expect` of its rewrite; `queue` the `last_batch_id` the run may delete a queue row for.
+    A queued task's `what` is read again from its batches that are not undone, and a task with
+    nothing left (every batch undone, or each change put back: `_net`) is not a changed task at all;
+    its row stays in `queue`, so the run deletes it."""
     rows = {r["task_id"]: r for r in pending(conn)}
     changed: list[dict] = []
     queue: dict[int, int] = {}
     causes: set[int] = set()
     for tid in task_ids:
         t = get_task(conn, tid)
+        if tid in rows:
+            queue[tid] = rows[tid]["last_batch_id"]
         if not t:
             continue
         if tid in rows:
             q = rows[tid]
-            queue[tid] = q["last_batch_id"]
             marks = ",".join("?" * len(q["batches"]))
             ids = [r["id"] for r in conn.execute(f"SELECT id FROM batches WHERE id IN ({marks}) AND undone_at IS NULL ORDER BY id",
                                                  tuple(q["batches"])).fetchall()] if q["batches"] else []
-            what = q["what"]
+            c = _net(conn, _changed(conn, t, ids, _ordered(_what_of(conn, tid, ids))))
+            if c is None:
+                continue
         else:
-            ids, what = _material_batches(conn, tid)
+            ids, what = _material_batches(conn, tid)       # asked for from the CLI: as asked
+            c = _changed(conn, t, ids, what)
         causes.update(ids)
-        changed.append(_changed(conn, t, ids, what))
+        changed.append(c)
     from_ids = [c["id"] for c in changed]
     neighbours: list[dict] = []
     texts: dict[int, str] = {}
@@ -224,35 +276,48 @@ def bundle(conn: sqlite3.Connection, cfg: dict, task_ids: list[int], today: date
             "from": from_ids, "queue": queue, "batches": sorted(causes), "what": {str(c["id"]): c["what"] for c in changed}}
 
 
+LINE_CAP = 300                      # characters of a name, an outcome or a waiting_on in the prompt
+FIELD_CAP = {"context": TEXT_CAP}   # any other field's value: LINE_CAP
+# What JSON leaves raw with ensure_ascii=False and a reader may still take for a line break.
+_BREAKS = str.maketrans({"\u2028": "\\u2028", "\u2029": "\\u2029", "\x85": "\\u0085"})
+
+
 def _esc(v) -> str:
     return html.escape(str(v or ""), quote=False)
 
 
+def _q(v, cap: int = LINE_CAP) -> str:
+    """A value a task holds, as the prompt shows it: cut to `cap`, escaped, then ONE JSON string, so no
+    line break it holds ever starts a line of the prompt (a stranger's "# 5. Return" stays inside quotes)."""
+    return json.dumps(_esc(str(v)[:cap]), ensure_ascii=False).translate(_BREAKS)
+
+
 def _shown(field: str, v) -> str:
-    """A before or after value in the prompt: texts cut and escaped, an empty value said."""
+    """A before or after value in the prompt: a JSON string cut to its field's cap, an empty value said."""
     if field == "hard":
         return "hard" if v else "not hard"
     if v is None or v == "":
         return "(none)"
-    return _esc(str(v)[:TEXT_CAP])
+    return _q(v, FIELD_CAP.get(field, LINE_CAP))
 
 
 def _changed_text(c: dict) -> str:
-    lines = [f"Task-{c['id']} | {_esc(c['status'])} | {_esc(c['name'])}"]
+    lines = [f"Task-{c['id']} | {_esc(c['status'])} | {_q(c['name'])}"]
     for f, old in c["before"].items():
         lines.append(f"  {f}: {_shown(f, old)} → {_shown(f, c.get(f))}")
     if c.get("outcome"):
-        lines.append(f"  outcome: {_esc(c['outcome'])}")
+        lines.append(f"  outcome: {_q(c['outcome'])}")
     lines += [f"  merged into it: Task-{m}" for m in c["merged"]]
     return "\n".join(lines)
 
 
 def _neighbour_text(n: dict) -> str:
-    due = f"due {_esc(n['due'])}{' hard' if n['hard'] else ''}" if n["due"] else "undated"
+    due = f"due {_q(n['due'], 20)}{' hard' if n['hard'] else ''}" if n["due"] else "undated"
     waits = "waits on " + (", ".join(f"Task-{w}" for w in n["waits_on"]) or "no task")
     if n["waiting_on"]:
-        waits += f"; on {_esc(n['waiting_on'])}"
-    return f"Task-{n['id']} | {n['via']} | {due} | {waits} | {_esc(n['name'])}\n  text: {_esc(n['context']) or '(none)'}"
+        waits += f"; on {_q(n['waiting_on'])}"
+    text = _q(n["context"], TEXT_CAP) if n["context"] else "(none)"
+    return f"Task-{n['id']} | {n['via']} | {due} | {waits} | {_q(n['name'])}\n  text: {text}"
 
 
 def build_prompt(cfg: dict, b: dict, today: date, clock: str = "") -> str:
@@ -276,6 +341,7 @@ EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,255}\.[A-Za-z]{2,
 SET_FIELDS = ("name", "due", "hard", "effort", "project")     # what a ripple's `set` or `create` card may carry
 NEVER_FIELDS = ("counterpart", "waiting_on")                  # a ripple never copies an address or a person (design §8.6)
 LEFT_OUT = "[address left out]"
+NAME_MAX = 80                                                 # a task's name, as `mcp_server.NAME_MAX` and the cleaner's cut
 SHAPE = 'the reply is not {"ripples": [...]}'
 
 
@@ -331,9 +397,9 @@ def _emails(text: str) -> list[str]:
     return list(dict.fromkeys(m.lower() for m in EMAIL_RE.findall(text or "")))
 
 
-def guard(old: str, new: str) -> str | None:
-    """Why a rewrite of `old` into `new` is refused, or None: empty, over `REWRITE_CAP`, a web
-    address or a `Task-N` of the old text missing, or an email address the old text did not have."""
+def _loss(old: str, new: str) -> str | None:
+    """Why a rewrite loses something, or None: empty, over `REWRITE_CAP`, or a web address or a
+    `Task-N` of the old text missing. Such a rewrite is never applied nor offered: it becomes a note."""
     old, new = old or "", new or ""
     if not new.strip():
         return "empty"
@@ -347,17 +413,34 @@ def guard(old: str, new: str) -> str | None:
     for n in dict.fromkeys(int(n) for n in TASK_REF_RE.findall(old)):
         if n not in refs:
             return f"drops Task-{n}"
-    had = set(_emails(old))
-    for m in _emails(new):
-        if m not in had:
-            return f"adds the address {m}"
+    return None
+
+
+def guard(old: str, new: str) -> str | None:
+    """Why a rewrite of `old` into `new` is not applied on its own, or None: what `_loss` says, else
+    an address it adds."""
+    why = _loss(old, new)
+    if why:
+        return why
+    old, new = old or "", new or ""
+    mail = [m for m in _emails(new) if m not in set(_emails(old))]
+    if mail:
+        return f"adds the address {_short(mail[0])}"
+    web = [u for u in _urls(new) if u not in set(_urls(old))]
+    if web:
+        return f"adds the web address {_short(web[0])}"
     return None
 
 
 def _no_new_addresses(text: str, old: str) -> str:
-    """`text` with every email address `old` lacks replaced by `LEFT_OUT`."""
-    had = set(_emails(old))
-    return EMAIL_RE.sub(lambda m: m.group(0) if m.group(0).lower() in had else LEFT_OUT, text)
+    """`text` with every email or web address `old` lacks replaced by `LEFT_OUT`."""
+    had_m, had_u = set(_emails(old)), set(_urls(old))
+
+    def url(m: re.Match) -> str:
+        u = m.group(0).rstrip(".,;:!?")
+        return m.group(0) if u in had_u else LEFT_OUT + m.group(0)[len(u):]
+    text = URL_RE.sub(url, text)
+    return EMAIL_RE.sub(lambda m: m.group(0) if m.group(0).lower() in had_m else LEFT_OUT, text)
 
 
 def _task_ref(v) -> int | None:
@@ -397,6 +480,12 @@ def clean_proposal(conn: sqlite3.Connection, cfg: dict, p: dict, task_id: int, b
         return None, f"{head}: a ripple never sets {' or '.join(never)}"
     if "context" in fields:
         return None, f"{head}: the text is the rewrite's job, not a proposal's"
+    if op in ("set", "create") and "name" in fields:        # the cleaner would stage "set name none" or cut it silently
+        n = fields["name"]
+        if not isinstance(n, str) or not n.strip():
+            return None, f"{head}: a name cannot be blank"
+        if len(n.strip()) > NAME_MAX:
+            return None, f"{head}: the name is over {NAME_MAX} characters"
     if op in ("done", "drop"):
         return {"task_id": task_id, "op": op, "fields": {}}, f"{op} Task-{task_id}"
     if op in ("set", "create"):
@@ -439,10 +528,12 @@ def clean_proposal(conn: sqlite3.Connection, cfg: dict, p: dict, task_id: int, b
 
 def apply(conn: sqlite3.Connection, cfg: dict, b: dict, entries: list[dict], run_id: int | None, today: date) -> dict:
     """Write what a parsed reply decided. A text rewrite that passes `guard` is a `set` carrying the
-    text the run read as `expect` (a hand edit made meanwhile wins); one that fails becomes a dated
-    `add_note`; both ride in ONE `ripple` batch with the cause and each entry's `why` as the change's
-    note. A neighbour no longer open is left alone. Every proposal is a Review card (`proposal`
-    evidence, `account = 'ripple'`), at most `PROPOSAL_CAP`, never one already waiting. Commits."""
+    text the run read as `expect` (a hand edit made meanwhile wins); one that loses something (`_loss`)
+    becomes a dated `add_note` that names no address the old text lacked; both ride in ONE `ripple`
+    batch with the cause and each entry's `why` as the change's note. A rewrite that only adds an
+    email or web address is a Review card (the same `set` with its `expect`), or a note when no card
+    can be staged. A neighbour no longer open is left alone. Every proposal is a Review card
+    (`proposal` evidence, `account = 'ripple'`), at most `PROPOSAL_CAP`, never one already waiting. Commits."""
     first = b["from"][0] if b["from"] else None
     changes: list[dict] = []
     rewrites: list[int] = []
@@ -455,6 +546,21 @@ def apply(conn: sqlite3.Connection, cfg: dict, b: dict, entries: list[dict], run
         w = _load(r["ref"])
         if isinstance(w, dict):
             waiting.append(w)
+
+    def stage(ch: dict, label: str, reason: str) -> bool:
+        """One Review card, unless the same one waits or the run has staged `PROPOSAL_CAP`."""
+        if any(_same_suggestion(ch, w) for w in waiting):
+            skipped.append(f"{label}: already waiting in Review")
+            return False
+        if len(staged) >= PROPOSAL_CAP:
+            skipped.append(f"{label}: over the {PROPOSAL_CAP} cards a run may stage")
+            return False
+        conn.execute("INSERT INTO evidence (task_id, kind, ref, account, label, excerpt, at) VALUES (?, 'proposal', ?, ?, ?, ?, ?)",
+                     (ch["task_id"], json.dumps(ch), ACCOUNT, label, reason, now_iso()))
+        waiting.append(ch)
+        staged.append(label)
+        return True
+
     for e in entries:
         tid = e["task_id"]
         if e["effect"] == "none":
@@ -466,27 +572,24 @@ def apply(conn: sqlite3.Connection, cfg: dict, b: dict, entries: list[dict], run
         if e["effect"] == "text":
             old = b["texts"][tid]
             why_not = guard(old, e["context"])
+            why = _no_new_addresses(e["why"], old)           # History's line for the change brings no address either
             if why_not is None:
-                changes.append({"task_id": tid, "op": "set", "fields": {"context": e["context"]}, "expect": {"context": old}, "note": e["why"]})
+                changes.append({"task_id": tid, "op": "set", "fields": {"context": e["context"]}, "expect": {"context": old}, "note": why})
                 rewrites.append(tid)
+            elif _loss(old, e["context"]) is None and stage(
+                    {"task_id": tid, "op": "set", "fields": {"context": e["context"]}, "expect": {"context": old}},
+                    f"rewrite the text of Task-{tid}: it {why_not}", e["why"]):
+                pass                                         # it only adds an address: the owner decides on Review (design §8.6)
             else:
-                said = f"Ripple from Task-{first}: {e['why']}" if e["why"] else f"Ripple from Task-{first}"
-                changes.append({"task_id": tid, "op": "add_note", "fields": {"text": _no_new_addresses(said, old)}, "note": e["why"]})
+                said = f"Ripple from Task-{first}: {why}" if why else f"Ripple from Task-{first}"
+                changes.append({"task_id": tid, "op": "add_note", "fields": {"text": said}, "note": why})
                 noted.append({"task_id": tid, "why": why_not})
         for p in e["proposals"]:
             ch, label = clean_proposal(conn, cfg, p, tid, b)
             if ch is None:
                 refused.append(label)
-            elif any(_same_suggestion(ch, w) for w in waiting):
-                skipped.append(f"{label}: already waiting in Review")
-            elif len(staged) >= PROPOSAL_CAP:
-                skipped.append(f"{label}: over the {PROPOSAL_CAP} cards a run may stage")
             else:
-                reason = " ".join(str(p.get("reason") or "").split())[:WHY_CAP]
-                conn.execute("INSERT INTO evidence (task_id, kind, ref, account, label, excerpt, at) VALUES (?, 'proposal', ?, ?, ?, ?, ?)",
-                             (ch["task_id"], json.dumps(ch), ACCOUNT, label, reason, now_iso()))
-                waiting.append(ch)
-                staged.append(label)
+                stage(ch, label, " ".join(str(p.get("reason") or "").split())[:WHY_CAP])
     batch_id = None
     rewritten: list[int] = []
     if changes:
@@ -547,7 +650,8 @@ def _preview(conn: sqlite3.Connection, cfg: dict, b: dict, entries: list[dict]) 
         verdict = "nothing"
         if e["effect"] == "text":
             why_not = guard(b["texts"][tid], e["context"])
-            verdict = "would rewrite" if why_not is None else f"would add a note: {why_not}"
+            verdict = ("would rewrite" if why_not is None else f"would add a note: {why_not}" if _loss(b["texts"][tid], e["context"])
+                       else f"would stage a card: it {why_not}")
         out.append({"task_id": tid, "effect": e["effect"], "verdict": verdict})
         for p in e["proposals"]:
             ch, label = clean_proposal(conn, cfg, p, tid, b)
@@ -587,6 +691,11 @@ def run(conn: sqlite3.Connection, cfg: dict, task_ids: list[int], today: date | 
         today = today or now.date()
         at = at or now.strftime("%Y-%m-%dT%H:%M")
     b = bundle(conn, cfg, task_ids, today)
+    if not b["changed"]:                                    # every change that queued it was undone or put back
+        if not dry_run:
+            _drop_queued(conn, b)
+            conn.commit()
+        return {"ok": True, "line": "nothing left to ripple: what queued it was undone or put back", "cost_usd": 0.0}
     if not b["neighbours"]:
         if not dry_run:
             _drop_queued(conn, b)
@@ -613,6 +722,16 @@ def run(conn: sqlite3.Connection, cfg: dict, task_ids: list[int], today: date | 
         log_run(conn, RUN_KIND, ms, ok=True, summary=f"dry run: {_tasks(b['from'])}, {len(entries)} entries", cost_usd=res.cost_usd)
         conn.commit()
         return {"ok": True, "dry_run": True, "data": res.data, "entries": entries, "preview": preview, "prompt": prompt, "cost_usd": res.cost_usd}
+    gone = [r["id"] for r in conn.execute(f"SELECT id FROM batches WHERE id IN ({','.join('?' * len(b['batches']))}) AND undone_at IS NOT NULL "
+                                          "ORDER BY id", tuple(b["batches"])).fetchall()] if b["batches"] else []
+    if gone:
+        # Undone while Claude was thinking: the reply answers a change that is no longer there. Nothing is
+        # applied; undo already took that batch out of the queue, so what is left there ripples again.
+        line = f"Ripple from {_tasks(b['from'])}: not applied, batch {', '.join(map(str, gone))} was undone during the run"
+        run_id = log_run(conn, RUN_KIND, ms, ok=True, summary=line, cost_usd=res.cost_usd)
+        conn.commit()
+        return {"ok": True, "line": line, "cost_usd": res.cost_usd, "run_id": run_id, "batch_id": None,
+                "rewritten": [], "noted": [], "staged": [], "refused": [], "skipped": []}
     run_id = log_run(conn, RUN_KIND, ms, ok=True, summary="applying", cost_usd=res.cost_usd)
     try:
         out = apply(conn, cfg, b, entries, run_id, today)

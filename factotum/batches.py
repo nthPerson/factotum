@@ -195,7 +195,8 @@ def _same_value(cur_v, want) -> bool:
 
 def apply(conn: sqlite3.Connection, changes: list[dict], source: str, today: date | None = None, closed_by: str | None = None, cause: dict | None = None) -> dict:
     """Apply a list of changes atomically; `cause` (what set the batch off) is stored as cause_json. Returns {"batch_id", "applied": n, "skipped": [...],
-    "created": [task ids a `create` made], "refs": {ref: task id}}."""
+    "created": [task ids a `create` made], "refs": {ref: task id}, "ripple_queued": [task ids this batch queued for a ripple
+    (`ripple.enqueue`, sorted; never any for a ripple's own batch)]}."""
     today = today or date.today()
     closed_by = closed_by or source
     cur = conn.cursor()
@@ -506,8 +507,11 @@ def _judge_evidence(conn, cur, ch: dict, batch_id: int, undo: list, skipped: lis
 
 def undo(conn: sqlite3.Connection, batch_id: int) -> dict:
     """Undo a batch once. An entry that can no longer be undone safely (a link restore that would
-    duplicate or loop, an entry it does not know) is skipped and reported, never raised. Any error
-    rolls back: the API shares one connection, and an open transaction holds the write lock."""
+    duplicate or loop, an entry it does not know) is skipped and reported, never raised. The ripples
+    it caused are followed first (newest writes go first, so a field both wrote comes back whole), and
+    a ripple it queued that has not run is taken out of the queue (`ripple.unqueue`), in the same
+    transaction. Any error rolls back: the API shares one connection, and an open transaction holds
+    the write lock."""
     b = conn.execute("SELECT * FROM batches WHERE id = ?", (batch_id,)).fetchone()
     if not b:
         raise NoSuchBatch(batch_id)
@@ -516,10 +520,12 @@ def undo(conn: sqlite3.Connection, batch_id: int) -> dict:
     undone: list[int] = []
     kept: list[int] = []
     try:
+        if b["source"] != "ripple":                              # a ripple's own undo looks for nothing: a ripple never causes one
+            _follow_ripples(conn, batch_id, undone, kept)        # before the cause's own entries: the ripple wrote after it
         restored, skipped = _undo_entries(conn, json.loads(b["undo_json"] or "[]"))
         conn.execute("UPDATE batches SET undone_at = ? WHERE id = ?", (now_iso(), batch_id))
-        if b["source"] != "ripple":                              # a ripple's own undo looks for nothing: a ripple never causes one
-            _follow_ripples(conn, batch_id, undone, kept)
+        from . import ripple                                     # here, not at the top: ripple imports batches
+        ripple.unqueue(conn, batch_id)                           # a ripple it queued that has not run never runs for it
         conn.commit()
     except Exception:
         conn.rollback()
