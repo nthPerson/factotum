@@ -139,3 +139,99 @@ def test_subscribe_validates_and_upserts_by_endpoint(conn):
     AP.subscribe(conn, **good); assert AP.device_count(conn) == 2   # http://127.0.0.1 is a fine origin (the dev instance)
     assert AP.unsubscribe(conn, endpoint="https://push.example/d2") == 1 and AP.unsubscribe(conn, device_id=did) == 1
     assert AP.device_count(conn) == 0 and AP.unsubscribe(conn, device_id=999) == 0
+
+
+# --- Task 3: the payload and sending
+
+NOTICE = {"title": "Call Reza", "body": "before the meeting · due Nov 5", "path": "/t/12", "tag": "task-12",
+          "actions": [{"action": "done", "title": "Done", "path": "/r/tok?a=done"}, {"action": "snooze", "title": "Snooze 1 h", "path": "/r/tok?a=snooze"}],
+          "urgency": "high", "ttl": 86400, "data": {"task_id": 12}}
+
+
+def _service(answers):
+    """A fake push service: answers[endpoint] is a status code or an exception; records (endpoint, request)."""
+    got = []
+    def handler(req):
+        got.append((str(req.url), req))
+        a = answers.get(str(req.url), 201)
+        if isinstance(a, Exception):
+            raise a
+        return httpx.Response(a, text="nope" if a >= 400 else "")
+    return got, httpx.MockTransport(handler)
+
+
+def test_the_payload_is_the_declarative_format_on_the_devices_origin():
+    p = json.loads(AP.payload(NOTICE, "https://f.example"))
+    assert p == {"web_push": 8030, "notification": {
+        "title": "Call Reza", "body": "before the meeting · due Nov 5", "navigate": "https://f.example/t/12", "tag": "task-12", "renotify": True,
+        "actions": [{"action": "done", "title": "Done", "navigate": "https://f.example/r/tok?a=done"},
+                    {"action": "snooze", "title": "Snooze 1 h", "navigate": "https://f.example/r/tok?a=snooze"}],
+        "data": {"task_id": 12}}}
+    bare = json.loads(AP.payload({**NOTICE, "actions": [], "data": None, "path": "/review", "tag": "review"}, "http://127.0.0.1:8751"))
+    assert "actions" not in bare["notification"] and "data" not in bare["notification"] and "mutable" not in bare
+    assert bare["notification"]["navigate"] == "http://127.0.0.1:8751/review"
+
+
+def test_a_payload_never_exceeds_the_limit_and_keeps_its_links():
+    big = {**NOTICE, "title": "T" * 5000, "body": "é" * 5000}
+    raw = AP.payload(big, "https://f.example")
+    n = json.loads(raw)["notification"]
+    assert len(raw) <= W.MAX_PLAINTEXT and n["navigate"] == "https://f.example/t/12" and n["tag"] == "task-12"
+    assert n["title"].startswith("TTT") and n["body"].endswith("…") and n["actions"][0]["navigate"].endswith("/r/tok?a=done")
+    huge = {**NOTICE, "title": "T" * 9000, "body": ""}
+    assert len(AP.payload(huge, "https://f.example")) <= W.MAX_PLAINTEXT
+
+
+def test_send_all_reaches_every_device_with_its_own_links(conn, cfg):
+    AP.keys(conn, create=True)
+    _, ua1, a1 = _device(conn, "https://push.example/d1", "https://f.example")
+    _, ua2, a2 = _device(conn, "https://push.example/d2", "http://127.0.0.1:8751")
+    got, t = _service({})
+    res = AP.send_all(conn, cfg, NOTICE, transport=t)
+    assert res == {"devices": 2, "sent": 2, "removed": 0, "failed": 0, "errors": []}
+    bodies = {u: json.loads(W.decrypt(r.content, ua, a)) for (u, r), ua, a in zip(got, (ua1, ua2), (a1, a2))}
+    assert bodies["https://push.example/d1"]["notification"]["navigate"] == "https://f.example/t/12"
+    assert bodies["https://push.example/d2"]["notification"]["navigate"] == "http://127.0.0.1:8751/t/12"
+    assert all(r.headers["Topic"] == "task-12" and r.headers["Urgency"] == "high" and r.headers["TTL"] == "86400" for _, r in got)
+    assert all(d["last_success_at"] for d in AP.devices(conn))
+
+
+def test_a_device_that_has_gone_is_removed_and_the_others_still_get_it(conn, cfg):
+    AP.keys(conn, create=True)
+    _device(conn, "https://push.example/gone"); _device(conn, "https://push.example/flaky"); _device(conn, "https://push.example/ok")
+    _, t = _service({"https://push.example/gone": 410, "https://push.example/flaky": 503})
+    res = AP.send_all(conn, cfg, NOTICE, transport=t)
+    assert res["sent"] == 1 and res["removed"] == 1 and res["failed"] == 1
+    left = {d["endpoint"]: d for d in AP.devices(conn)}
+    assert set(left) == {"https://push.example/flaky", "https://push.example/ok"}
+    assert left["https://push.example/flaky"]["last_error"] == "503 from push.example: nope"
+    conn.rollback()                                              # send_all committed its own rows
+    assert AP.device_count(conn) == 2
+
+
+def test_when_no_device_accepts_send_all_records_then_raises(conn, cfg):
+    AP.keys(conn, create=True); _device(conn, "https://push.example/a"); _device(conn, "https://push.example/b")
+    _, t = _service({"https://push.example/a": 404, "https://push.example/b": httpx.ConnectError("down")})
+    with pytest.raises(AP.NothingSent, match="could not reach push.example: ConnectError"):
+        AP.send_all(conn, cfg, NOTICE, transport=t)
+    conn.rollback()
+    assert [d["endpoint"] for d in AP.devices(conn)] == ["https://push.example/b"] and AP.devices(conn)[0]["last_failure_at"]
+
+
+def test_send_all_with_no_device_or_no_key_file(conn, cfg):
+    assert AP.send_all(conn, cfg, NOTICE) == {"devices": 0, "sent": 0, "removed": 0, "failed": 0, "errors": []}   # no key file needed
+    _device(conn)
+    got, t = _service({})
+    with pytest.raises(AP.KeyFileError, match="missing"):
+        AP.send_all(conn, cfg, NOTICE, transport=t)
+    assert got == [] and AP.devices(conn)[0]["last_failure_at"] is None      # nothing sent, nothing written
+
+
+def test_send_test_reaches_only_that_device(conn, cfg):
+    AP.keys(conn, create=True); _, ua, a = _device(conn, "https://push.example/me"); _device(conn, "https://push.example/other")
+    got, t = _service({})
+    out = AP.send_test(conn, cfg, "https://push.example/me", transport=t)
+    assert out["ok"] and [u for u, _ in got] == ["https://push.example/me"]
+    n = json.loads(W.decrypt(got[0][1].content, ua, a))["notification"]
+    assert n["title"] == "Factotum" and n["body"] == "Notifications work on this device." and n["navigate"] == "https://f.example/settings"
+    assert AP.send_test(conn, cfg, "https://push.example/nobody", transport=t) is None
