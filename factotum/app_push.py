@@ -12,7 +12,10 @@ A *notice* is what a caller wants shown: `{"title", "body", "path", "tag", "acti
 "title", "path"}], "urgency", "ttl", "data"}` (`actions` and `data` may be absent; paths start with
 `/`). `payload` turns it into the Push API's declarative message (`"web_push": 8030`) with its
 links on each device's own origin, trimmed to `webpush.MAX_PLAINTEXT`; `send_all` delivers it to
-every device and records what each push service answered.
+every device and records what each push service answered (its status, never its body).
+
+The server posts only to known push services (`PUSH_HOSTS`, `PUSH_SUFFIXES`, plus the config file's
+`notify.app.push_hosts`), checked when a device subscribes and again before every send.
 """
 from __future__ import annotations
 
@@ -33,8 +36,17 @@ from . import webpush as W
 from .db import now_iso
 
 KEY_FILE = "push-keys.json"
-ORIGIN_RE = re.compile(r"^https?://[^/?#\s]+$")
+ORIGIN_RE = re.compile(r"https?://[^/?#\s]+")            # used with fullmatch: a trailing newline is refused too
 ELLIPSIS = "…"
+
+# The push services a subscription may name (a browser picks its own; the server POSTs to it). Anything
+# else is refused when a device subscribes AND again before every send, so the server never posts to an
+# address a caller chose (an internal host, say). More hosts: `notify.app.push_hosts` in the config file
+# (exact names). `.invalid` never resolves (RFC 2606); the UI checks use it.
+PUSH_HOSTS = ("fcm.googleapis.com", "updates.push.services.mozilla.com", "web.push.apple.com")
+PUSH_SUFFIXES = (".push.apple.com", ".notify.windows.com", ".invalid")
+HOST_RE = re.compile(r"([a-z0-9-]+\.)*[a-z][a-z0-9-]*")    # a name whose last label starts with a letter: never 2130706433 or 0x7f000001
+NOT_PUSH = "not a push service address"
 
 TEST_NOTICE = {"title": "Factotum", "body": "Notifications work on this device.", "path": "/settings", "tag": "test",
                "actions": [], "urgency": "high", "ttl": 600}
@@ -100,22 +112,50 @@ def keys(conn: sqlite3.Connection, create: bool = False) -> Keys:
     return Keys(private, public)
 
 
-def subscribe(conn: sqlite3.Connection, endpoint: str, p256dh: str, auth: str, label: str, origin: str) -> int:
-    """Validate and upsert a device by endpoint; returns its row id. Does not commit."""
-    bad = ValueError("not a push service address")
+def extra_push_hosts(cfg: dict | None) -> set[str]:
+    hosts = C.get(cfg or {}, "notify.app.push_hosts", []) or []
+    if not isinstance(hosts, list):
+        return set()
+    return {str(h).strip().lower().rstrip(".") for h in hosts if str(h).strip()}
+
+
+def endpoint_problem(endpoint, cfg: dict | None = None) -> str | None:
+    """Why the server must not post to this endpoint, or None when it is a known push service.
+
+    `NOT_PUSH` for what is no push service at all (not https, credentials in it, an IP literal,
+    localhost, a host that is not a plain DNS name or that a resolver may read as a number); a plain
+    name that is not on the list gets a reason that names it and the config key that would allow it."""
+    if not isinstance(endpoint, str):
+        return NOT_PUSH
     try:
         u = urlsplit(endpoint)
-        host = u.hostname
-    except ValueError:
-        raise bad
-    if u.scheme != "https" or not host or host.lower() == "localhost":
-        raise bad
+        host = (u.hostname or "").rstrip(".")
+        u.port                                            # raises on a port that is not a number
+        other = httpx.URL(endpoint).raw_host.decode("ascii").lower().rstrip(".")
+    except (ValueError, httpx.InvalidURL, UnicodeError):
+        return NOT_PUSH
+    if u.scheme != "https" or not host or u.username is not None or other != host:
+        return NOT_PUSH                                   # the two parsers must agree on where it goes
     try:
         ipaddress.ip_address(host)
     except ValueError:
         pass
     else:
-        raise bad
+        return NOT_PUSH
+    if host == "localhost" or host.endswith(".localhost") or not HOST_RE.fullmatch(host):
+        return NOT_PUSH
+    if host in PUSH_HOSTS or host.endswith(PUSH_SUFFIXES) or host in extra_push_hosts(cfg):
+        return None
+    return f"{host} is not a known push service (add it to notify.app.push_hosts in the config file to allow it)"
+
+
+def subscribe(conn: sqlite3.Connection, endpoint: str, p256dh: str, auth: str, label: str, origin: str,
+              *, cfg: dict | None = None) -> int:
+    """Validate and upsert a device by endpoint; returns its row id. Does not commit.
+    `cfg` supplies `notify.app.push_hosts`; without it only the built-in push services are taken."""
+    problem = endpoint_problem(endpoint, cfg)
+    if problem:
+        raise ValueError(problem)
     try:
         W.load_public(W.unb64u(p256dh))
     except Exception:
@@ -126,7 +166,7 @@ def subscribe(conn: sqlite3.Connection, endpoint: str, p256dh: str, auth: str, l
         secret = b""
     if len(secret) != 16:
         raise ValueError("the device secret must be 16 bytes")
-    if not isinstance(origin, str) or not ORIGIN_RE.match(origin):
+    if not isinstance(origin, str) or not ORIGIN_RE.fullmatch(origin):
         raise ValueError("origin must be scheme://host[:port]")
     label = (label or "").strip()[:60] or "A device"
     conn.execute(
@@ -163,9 +203,13 @@ def _encode(message: dict) -> bytes:
 
 
 def payload(notice: dict, origin: str) -> bytes:
-    """The declarative message for one device, compact UTF-8 JSON of at most `webpush.MAX_PLAINTEXT`
+    """The declarative message for one device, compact UTF-8 JSON, trimmed to fit `webpush.MAX_PLAINTEXT`
     bytes. Over the limit: the body is cut from the end (ending in "…", down to "…" alone), then the
-    title (down to its first character and "…"), then the buttons go. The links and the tag never change."""
+    title (down to its first character and "…"), then the buttons are dropped. `navigate` (the path),
+    the tag and `data` are never cut, so a notice whose path, tag or data alone is too large still
+    comes back over the limit; `webpush.encrypt` then refuses it and `deliver` records that as a
+    failure. Every notice Factotum makes (`reminders.notice`, the review nudge, the test) has a short
+    path, tag and data."""
     n: dict = {"title": notice["title"], "body": notice["body"], "navigate": origin + notice["path"]}
     if notice.get("tag"):
         n["tag"] = notice["tag"]
@@ -211,9 +255,18 @@ def vapid_sub(cfg: dict, origin: str) -> str | None:
 # ---------- sending ----------
 
 def deliver(device: dict, notice: dict, keys: Keys, cfg: dict, transport=None) -> dict:
-    """One push to one device. Network only: never raises, writes nothing."""
-    host = urlsplit(device["endpoint"]).hostname or device["endpoint"]
+    """One push to one device. Network only: never raises, writes nothing.
+
+    The endpoint is checked against the push services again first (a row stored before the list, or
+    written by hand, is never posted to). The error is one of a fixed set of reasons with the status
+    code: a push service's own answer is never repeated, so a request the server makes cannot be
+    turned into a way to read what some other host says."""
     out = {"id": device["id"], "ok": False, "status": None, "removed": False, "error": None}
+    problem = endpoint_problem(device["endpoint"], cfg)
+    if problem:
+        out["error"] = f"not sent: {problem}"
+        return out
+    host = urlsplit(device["endpoint"]).hostname
     try:
         r = W.send(device["endpoint"], device["p256dh"], device["auth"], payload(notice, device["origin"]),
                    keys.private, sub=vapid_sub(cfg, device["origin"]), ttl=notice["ttl"],
@@ -231,8 +284,7 @@ def deliver(device: dict, notice: dict, keys: Keys, cfg: dict, transport=None) -
         out["removed"] = True
         out["error"] = f"the push service no longer knows this device ({r.status_code})"
     else:
-        text = r.text.strip()[:200]
-        out["error"] = f"{r.status_code} from {host}: {text}" if text else f"{r.status_code} from {host}"
+        out["error"] = f"HTTP {r.status_code} from {host}"              # never the body: see the docstring
     return out
 
 

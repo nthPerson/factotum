@@ -489,7 +489,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
                 raise ValueError("the device key is not a P-256 public key")
             if auth is None:
                 raise ValueError("the device secret must be 16 bytes")
-            app_push.subscribe(conn, body.endpoint, p256dh, auth, body.label, body.origin)
+            app_push.subscribe(conn, body.endpoint, p256dh, auth, body.label, body.origin, cfg=eff_cfg())
         except ValueError as e:
             conn.rollback()
             return JSONResponse({"detail": str(e)}, status_code=400)
