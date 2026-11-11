@@ -62,7 +62,6 @@ main.rail-min { grid-template-columns: 58px minmax(0, 1fr); }
 .btn.small { padding: 4px 8px; font-size: 12px; }
 @media (hover: none), (max-width: 700px) {
   .btn, .btn.small { min-height: 36px; padding: 6px 12px; font-size: 13px; }
-  .card .rvask textarea { font-size: 16px; }
   .cmd input, .cmd textarea, .settings input, .settings select, .remform input, .remform select, .card .later-menu input[type=date] { min-height: 40px; font-size: 16px; }   /* 16px: iOS does not zoom the page */
   .row .details { padding-left: 12px; }
   .details .actions { gap: 8px; }
@@ -623,8 +622,8 @@ body.tray-on .chat-main .composer { bottom: 84px; }
 .msg .bubble p { margin: 0 0 8px; } .msg .bubble p:last-child { margin-bottom: 0; }
 .msg .bubble ul, .msg .bubble ol { margin: 4px 0 8px; padding-left: 20px; }
 .msg .bubble h4 { margin: 4px 0 6px; font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
-.msg .bubble pre, .rvreply pre { background: var(--surface-2); padding: 8px 10px; border-radius: 6px; overflow: auto; font-family: var(--mono); font-size: 12px; }
-.msg .bubble code, .rvreply code { font-family: var(--mono); font-size: 12px; background: var(--surface-2); padding: 0 4px; border-radius: 4px; }
+.msg .bubble pre, .pmsg pre { background: var(--surface-2); padding: 8px 10px; border-radius: 6px; overflow: auto; font-family: var(--mono); font-size: 12px; }
+.msg .bubble code, .pmsg code { font-family: var(--mono); font-size: 12px; background: var(--surface-2); padding: 0 4px; border-radius: 4px; }
 .msg .bubble a { color: var(--accent); }
 .msg .att { display: flex; gap: 4px; flex-wrap: wrap; }
 .msg .meta { display: flex; gap: 6px; }
@@ -639,11 +638,60 @@ body.tray-on .chat-main .composer { bottom: 84px; }
 .prop label { display: flex; gap: 4px; align-items: center; font-size: 12px; color: var(--muted); }
 .prop .plabel { font-weight: 500; }
 .rej { font-size: 12px; color: var(--muted); } .rej summary { cursor: pointer; } .rej div { padding: 2px 0 0 12px; }
-.card .rvask { margin-top: 12px; } .card .rvask input, .card .rvask textarea { font-size: 13px; }
-.card .hint.keysonly { margin: 4px 0 0; }
 .card .hint.from { margin: 6px 0 0; overflow-wrap: anywhere; }
-.rvreply { margin-top: 8px; padding: 10px 12px; background: var(--surface-2); border-radius: 8px; font-size: 13px; }
-.rvreply p { margin: 0 0 6px; color: var(--fg); }
+
+/* The conversation in place (stage 6, frame 4): a Review card's, the Today box's, an opened task's */
+.place { border-top: 1px solid var(--line); padding-top: 12px; margin-top: 14px; display: flex; flex-direction: column; gap: 10px; }
+.place .phead { display: flex; align-items: center; gap: 8px; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; }
+.place .phead .phint { font-size: 12px; text-transform: none; letter-spacing: 0; font-weight: 400; }
+.pmsg { font-size: 13px; border-radius: 12px; padding: 9px 13px; overflow-wrap: anywhere; }
+.pmsg.user { align-self: flex-end; max-width: 86%; background: var(--accent-soft); white-space: pre-wrap; }
+.pmsg.ai { align-self: flex-start; max-width: 96%; background: var(--surface); border: 1px solid var(--line); }
+.pmsg.ai.bad { border-color: var(--crit); color: var(--crit); }
+.place .pmsg p { margin: 0 0 6px; color: inherit; max-width: none; } .place .pmsg p:last-child { margin-bottom: 0; }
+.pmsg ul, .pmsg ol { margin: 4px 0 6px; padding-left: 20px; }
+.pmsg a, .pread a, .pprop a, .pchips a { color: var(--accent); }
+.pread { font-size: 12px; color: var(--muted); margin-top: -4px; }
+.place .tref { font-family: var(--mono); font-size: 12px; }
+.pprops { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; display: flex; flex-direction: column; }
+.pprops .pphead { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding-bottom: 4px; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); font-weight: 600; }
+.pprops .pphead .hint { margin: 0; text-transform: none; letter-spacing: 0; font-weight: 400; }
+.pprop { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; gap: 8px; align-items: start; padding: 8px 0; border-top: 1px solid var(--line); font-size: 13px; }
+label.pprop { cursor: pointer; }
+.pprop input[type=checkbox] { width: 16px; height: 16px; margin: 2px 0 0; accent-color: var(--accent); }
+.pprop .pw { min-width: 0; overflow-wrap: anywhere; }
+.pprop .pm { font-weight: 500; }
+.pprop .ps { color: var(--muted); }
+.pprop .chip { align-self: center; }
+.pmore { padding: 8px 0; border-top: 1px solid var(--line); font-size: 13px; color: var(--muted); }
+.linkish { font: inherit; font-weight: 500; color: var(--accent); background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline; }
+.pfoot { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding-top: 8px; border-top: 1px solid var(--line); }
+.pfoot .hint { margin: 0; }
+.pdrafts { display: flex; flex-direction: column; gap: 6px; }
+.pdraft { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; font-size: 13px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 8px; overflow-wrap: anywhere; }
+.prej { font-size: 12px; color: var(--muted); } .prej summary { cursor: pointer; } .prej div { padding: 2px 0 0 12px; overflow-wrap: anywhere; }
+.plive { font-size: 13px; color: var(--muted); font-style: italic; }
+.plive .hint { margin: 4px 0 0; font-style: normal; }
+.preply { display: flex; gap: 8px; align-items: flex-end; }
+.place .preply textarea { flex: 1; min-width: 0; font-size: 13px; min-height: 44px; padding: 10px 12px; background: var(--bg); resize: none; }
+.preply .btn { min-height: 44px; padding: 8px 16px; }
+.place .btn:disabled { opacity: .5; cursor: default; }      /* Ask while Claude answers, Stage with nothing ticked */
+.pchips { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+.pchips .chip { font-family: var(--mono); background: var(--surface-2); }
+@media (max-width: 700px) {
+  .pprop .ps { display: block; font-size: 12px; }
+  .pprop input[type=checkbox] { width: 20px; height: 20px; margin: 0; }
+  .place .preply textarea, .place .btn { font-size: 16px; min-height: 44px; }
+  .pfoot .btn { flex: 1 1 100%; min-height: 48px; }
+  /* Review's decisions are pinned at the bottom (frame 10); wire() lifts them above the tray when it shows */
+  .review .card .big { position: fixed; left: 0; right: 0; bottom: 0; z-index: 6; margin: 0; background: var(--surface); border-top: 1px solid var(--line);
+    padding-top: 10px; padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px)); padding-left: max(12px, env(safe-area-inset-left, 0px)); padding-right: max(12px, env(safe-area-inset-right, 0px));
+    grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .review .card .big button { min-height: 48px; padding: 8px 4px; }
+  .review .card { padding-bottom: calc(88px + var(--kb, 0px)); }
+  /* a box being typed in on a phone: nothing pinned covers it or the keyboard */
+  body.kb-open .tray, body.kb-open .review .card .big, body.kb-open .pagebar, body.kb-open .fab { display: none; }
+}
 
 /* A batch a skill staged (phase 6): above every tab until Apply or Dismiss */
 .pending { background: var(--top-soft); border: 1px solid var(--top); border-radius: 10px; padding: 10px 12px; margin-bottom: 14px; }

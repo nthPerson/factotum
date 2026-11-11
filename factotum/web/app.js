@@ -14,7 +14,7 @@
   let connectors = null;    // /api/connectors payload (Settings → Connections)
   let staged = new Map();   // task id -> {op, fields, label}
   let lastBatch = null;
-  let chat = { threads: null, current: null, messages: [], live: null, busy: false, from: null };   // from: {review: id} when a turn was asked from a Review card
+  let chat = { threads: null, current: null, messages: [], live: null, busy: false, place: null };   // place: the key of the conversation in place whose turn runs (stage 6)
   let lastTap = { id: null, at: 0 };   // for the hand-rolled double-click on rows
   let railTap = { id: null, timer: null };   // a Top tile waits a moment for a second tap before it acts
   // What is being typed, kept outside the DOM: every render() rebuilds the panel (a chat turn's status
@@ -36,14 +36,14 @@
   if (!folds || typeof folds !== 'object' || Array.isArray(folds)) folds = {};
   const folded = (key, dflt) => Object.prototype.hasOwnProperty.call(folds, key) ? !!folds[key] : !!dflt;
   function setFold(key, shut) { folds[key] = !!shut; try { localStorage.setItem('factotum.folds', JSON.stringify(folds)); } catch (_) {} }
-  let ui = { tab: 'today', focus: null, sel: new Set(), open: new Set(), reviewIdx: 0, laterOpen: false, datePick: false, trayOpen: false, trayOff: new Set(), reviewPaused: false, rvNote: { id: null, text: '' }, remOpen: null, dueOpen: null, rvReply: null, sinceOpen: null,
+  let ui = { tab: 'today', focus: null, sel: new Set(), open: new Set(), reviewIdx: 0, laterOpen: false, datePick: false, trayOpen: false, trayOff: new Set(), reviewPaused: false, rvNote: { id: null, text: '' }, remOpen: null, dueOpen: null, sinceOpen: null,
              railOpen: !window.matchMedia('(max-width: 860px)').matches, chatDrawer: false,
              page: null, pageScroll: 0, pageMore: false, pageLater: false,      // the task page: its id, the list's scroll, a phone's More and Later open
              bulkMore: false };      // the phone's short bar shows its second line (back to false when nothing is selected)
   try { ui.tab = parseAddress().tab; } catch (_) {}
   try { const r = localStorage.getItem('factotum.rail'); if (r === '0' || r === '1') ui.railOpen = r === '1'; } catch (_) {}
   try { const s = JSON.parse(localStorage.getItem('factotum.staged') || '[]'); staged = new Map(s); } catch (_) {}
-  for (const [k, v] of staged) { if (!v || typeof v !== 'object') staged.delete(k); else if (v.task_id == null) v.task_id = typeof k === 'number' ? k : parseInt(k, 10); }  // trays saved before entries carried task_id
+  for (const [k, v] of staged) { if (!v || typeof v !== 'object') staged.delete(k); else if (v.task_id == null && v.op !== 'create') v.task_id = typeof k === 'number' ? k : parseInt(k, 10); }  // trays saved before entries carried task_id (a new task has none)
 
   const TODAY = () => new Date(data.today + 'T12:00:00');
   const PHONE = () => window.matchMedia('(max-width: 700px)').matches;
@@ -350,13 +350,13 @@
   // live only in the DOM), a chat turn running, or focus in a box of the panel (Settings, among others).
   // Focus in an empty draft-backed box does not count: its text lives in `draft` and render() puts the
   // focus and caret back, so a reload of the lists loses nothing (a box left focused and empty would
-  // otherwise keep the lists stale on every return). render() uses the same list.
+  // otherwise keep the lists stale on every return). render() uses the same list, through isDraftBox.
   const DRAFT_BOXES = ['cmd', 'rv-ask', 'chat-pick', 'rv-note'];
   function typingNow() {
     if ([draft.cmd, draft.ask, draft.pick, draft.outcome, ui.rvNote.text].some(s => (s || '').trim())) return true;
     if (ui.remOpen !== null || ui.dueOpen !== null || chat.busy) return true;
     const a = document.activeElement;
-    return !!(a && a.matches('input, textarea, select') && a.closest('#panel') && !DRAFT_BOXES.includes(a.id));
+    return !!(a && a.matches('input, textarea, select') && a.closest('#panel') && !isDraftBox(a.id));
   }
   // The app came back to the front. A newer build on the server reloads the page, or only says
   // "Update ready" while something is typed or staged; otherwise the lists are reloaded, unless
@@ -518,12 +518,16 @@
   // keys: the staged entries to apply (the tray's dropdown); undefined = every one
   async function applyAll(keys) {
     const picked = keys ? [...staged].filter(([k]) => keys.has(String(k))) : [...staged];
-    const changes = picked.map(([, s]) => {      // what the server takes: never the label or `ev`
+    // New tasks first: the batch resolves a link's ref to a new task only after that task is made.
+    const ordered = picked.filter(([, s]) => s.op === 'create').concat(picked.filter(([, s]) => s.op !== 'create'));
+    const changes = ordered.map(([, s]) => {      // what the server takes: never the label or `ev`
       const c = { task_id: s.task_id, op: s.op, fields: s.fields };
       if (s.expect) c.expect = s.expect;
       if (s.note) c.note = s.note;
+      if (s.from_chat) c.from_chat = s.from_chat;      // the server makes the stored proposal, never these fields
       return c;
     });
+    const chatMids = [...new Set(picked.map(([, s]) => s.from_chat && s.from_chat.message_id).filter(Boolean))];
     if (!changes.length) return;
     // A Done or Drop on a task others hang on, with no outcome said yet: the toast offers to say one (design §8.5).
     // Read before the request, while the task is still in the open list with its links.
@@ -544,6 +548,7 @@
         await loadReview();
         ui.reviewPaused = true; render();
       }
+      if (chatMids.length) reloadPlacesWith(chatMids);      // a staged new task now reads "created Task-N" where it was proposed
       const msg = `${res.applied} change${res.applied === 1 ? '' : 's'} applied` + (res.skipped.length ? ` · ${res.skipped.length} skipped: ${res.skipped[0].why}` : '');
       const closed = say.filter(x => !res.skipped.some(k => k.task_id === x.id));      // a skipped Done closed nothing
       closed.forEach(x => sayable.set(x.id, x));
@@ -708,7 +713,7 @@
   function domHoldsTyping() {
     if (ui.remOpen !== null || ui.dueOpen !== null) return true;
     const a = document.activeElement;
-    return !!(a && a.matches('input, textarea, select') && a.closest('#panel') && !DRAFT_BOXES.includes(a.id));
+    return !!(a && a.matches('input, textarea, select') && a.closest('#panel') && !isDraftBox(a.id));
   }
   async function rippleLanded(landed) {
     const ids = new Set(landed.flatMap(l => l.tasks.map(t => t.id))), n = ids.size;
@@ -749,6 +754,7 @@
     if (c.op === 'add_note') return `${id}:${suffix || 'note'}`;
     if (c.op === 'add_reminder') return id + ':r';
     if (c.op === 'judge_evidence') return 'e:' + f.evidence_id;
+    if (c.op === 'create') return 'new:' + (suffix || Date.now());      // a task that does not exist yet has no id to key it by
     return suffix ? `${id}:${suffix}` : id;
   }
   function cut60(s) { s = String(s == null ? '' : s); return s.length > 60 ? s.slice(0, 60) + '…' : s; }
@@ -805,7 +811,8 @@
   // A task's links with what is staged drawn in: a staged link at either end, an unlink, a merge, a suggestion
   // judged in the tray. undefined when nothing staged touches it (the server's `rel` stands as it is).
   function overlayRel(t) {
-    const mine = [...staged.values()].filter(s => REL_OPS.includes(s.op) && (s.task_id === t.id || (s.fields || {}).other === t.id || (s.fields || {}).into === t.id));
+    // A link to a staged new task (its other end a tray ref, `m<message>-<index>`) is drawn once that task exists.
+    const mine = [...staged.values()].filter(s => REL_OPS.includes(s.op) && typeof (s.fields || {}).other !== 'string' && (s.task_id === t.id || (s.fields || {}).other === t.id || (s.fields || {}).into === t.id));
     const sugg = (t.rel && t.rel.suggestions) || [];
     if (!mine.length && !sugg.some(s => suggestionStaged(s.evidence_id))) return undefined;
     const base = t.rel || emptyRel();
@@ -1232,9 +1239,9 @@
     renderRail();
     const p = document.getElementById('panel');
     const fns = { today: renderToday, timeline: renderTimeline, projects: renderProjects, review: renderReview, chat: renderChat, log: renderLog, settings: renderSettings };
-    const act = document.activeElement, held = act && DRAFT_BOXES.includes(act.id) ? { id: act.id, a: act.selectionStart, b: act.selectionEnd } : null;
+    const held = heldDraftBox(p);
     p.innerHTML = ui.page !== null ? taskPageHtml() : starterHtml() + pendingHtml() + fns[ui.tab]();
-    if (held) { const el = document.getElementById(held.id); if (el) { el.focus({ preventScroll: true }); try { el.setSelectionRange(held.a, held.b); } catch (_) {} } }
+    restoreDraftBox(held);
     p.querySelectorAll('textarea.grow').forEach(grow);
     document.querySelectorAll('#tabs button').forEach(b => { b.setAttribute('aria-selected', b.dataset.tab === ui.tab); if (b.dataset.tab === ui.tab && PHONE() && b.scrollIntoView) b.scrollIntoView({ block: 'nearest', inline: 'center' }); });
     document.getElementById('n-today').textContent = openOnes().filter(x => x.due && fmtDue(x.due).days <= 1).length || '';
@@ -1674,7 +1681,7 @@
         ${(items[0].evidence || []).filter(e => e.change && !staged.has('e:' + e.id)).map(e => e.by === 'ripple' ? rippleLineHtml(e, x.id) : `<div class="extra"><span class="chip">Planner suggests</span><span>${esc(e.label)}${e.reason ? ` <span class="hint" style="margin:0">— ${esc(e.reason)}</span>` : ''}</span><button class="btn small primary" data-rv-accept="${e.id}">Accept</button></div>`).join('')}
         ${linkSuggestionsHtml(items[0])}
         <div class="extra"><button class="btn small" data-rv="top">★ Pin to Top</button><button class="btn small" data-rv="longterm">Mark long-term (never fades)</button>${dueForm(x.id, x.due)}${reminderForm(x.id)}</div>
-        ${reviewAsk(x.id)}
+        ${reviewPlaceHtml(x.id)}
       </div>
       <div class="note">Keep = no change; the item will not be asked about again until something changes. Later = hidden until the date you pick, then back in Review and Today. Decisions stage into the tray; Apply writes them all at once.</div></div>`;
   }
@@ -1783,14 +1790,27 @@
   async function loadChatThread(id) { try { const r = await api(`/api/chat/threads/${id}`); chat.current = id; chat.messages = r.messages; chat.scroll = true; } catch (_) { chat.current = null; chat.messages = []; } render(); }
   const propKey = (p, mid, i) => stageKey(p, ['done', 'drop', 'pin_top', 'longterm'].includes(p.op) ? undefined : 'c' + mid + '-' + i);
   // An op the page cannot stage is left out (false), never turned into a `set`; the toast's count says so.
+  // A new task is staged as `from_chat` (the server makes the stored proposal); a link to a new task of the
+  // same reply names it by its tray ref, `m<message>-<index>`, and is labelled with its name.
   function stageProposal(p, mid, i) {
-    if (p.op === 'create' || p.op === 'link_thread') return false;
+    if (p.op === 'link_thread') return false;
+    if (p.op === 'create') {
+      stageExtra('new:c' + mid + '-' + i, null, 'create', p.fields || {}, 'new task: ' + cut60((p.fields || {}).name), { from_chat: { message_id: mid, index: i } });
+      return true;
+    }
+    if (p.op === 'link' && typeof (p.fields || {}).other === 'string') {
+      const f = p.fields, sib = siblingOf(proposalsOf(mid), f.other); if (!sib) return false;
+      const other = 'm' + mid + '-' + sib.j;
+      stageExtra(relKey(p.task_id, f.kind, other), p.task_id, 'link', Object.assign({}, f, { other }),
+        `${f.kind === 'part_of' ? 'is now part of' : 'now waits on'} “${cut60(sib.name)}”`);
+      return true;
+    }
     const label = p.label || p.op;
     if (['done', 'drop'].includes(p.op)) stage(p.task_id, p.op, p.fields || {}, changeWords(p) || label);      // an outcome rides along
     else if (['pin_top', 'longterm'].includes(p.op)) stage(p.task_id, p.op, {}, label);
     else if (p.op === 'add_reminder') stageExtra(p.task_id + ':r', p.task_id, 'add_reminder', p.fields, label);
     else if (['link', 'unlink', 'merge', 'add_note'].includes(p.op)) stageChange(p, label, {}, 'c' + mid + '-' + i);
-    else if (p.op === 'set') stageExtra(propKey(p, mid, i), p.task_id, 'set', p.fields, label, { expect: textExpect(p.task_id, p.fields) });
+    else if (p.op === 'set') stageExtra(propKey(p, mid, i), p.task_id, 'set', p.fields, setWords(p.fields) || label, { expect: textExpect(p.task_id, p.fields) });
     else return false;
     return true;
   }
@@ -1846,61 +1866,312 @@
          <div class="starters">${STARTERS.map((t, i) => `<button class="btn small" data-starter="${i}">${esc(t)}</button>`).join('')}</div>`;
     return `<div class="chat">${list}<div class="chat-main">${head}<div class="msgs" id="msgs">${body}</div>${composer()}</div><div class="backdrop ${ui.chatDrawer ? 'on' : ''}" id="chat-backdrop"></div></div>`;
   }
-  function reviewAsk(id) {
-    const live = chat.busy && chat.from && chat.from.review === id ? `<div class="hint"><span class="spin"></span> ${esc((chat.live || {}).status || 'Working…')}</div>` : '';
-    const reply = ui.rvReply && ui.rvReply.id === id ? `<div class="rvreply">${md(ui.rvReply.text)}${ui.rvReply.note ? `<div class="hint">${esc(ui.rvReply.note)}</div>` : ''}<div class="hint"><a href="/chat" data-goto-chat="${ui.rvReply.thread}">Open in Chat</a></div></div>` : '';
-    if (draft.askFor !== id) { draft.ask = ''; draft.askFor = id; }      // a new card starts with an empty box
-    return `<div class="cmd rvask"><textarea id="rv-ask" class="grow" rows="1" placeholder="Ask Claude about this task — e.g. “add that the first pass is done”; its proposals stage with this decision" aria-label="Ask Claude">${esc(draft.ask)}</textarea><button class="btn small" id="rv-ask-go" ${chat.busy ? 'disabled' : ''}>Ask</button></div>${TOUCH() ? '' : '<div class="hint keysonly">Enter sends · Shift+Enter starts a new line</div>'}${live}${reply}`;
+  const CANNED_SAID = { search_mail: 'Search related emails', draft_reply: 'Draft a reply', related: 'What else is related?', split: 'Split into steps' };      // a canned turn's own bubble
+  // A turn's server-sent events, one `onEvent(ev)` each, until the stream ends.
+  async function readTurn(resp, onEvent) {
+    const reader = resp.body.getReader(); const dec = new TextDecoder(); let buf = '';
+    for (;;) {
+      const { value, done } = await reader.read(); if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i; while ((i = buf.indexOf('\n\n')) >= 0) {
+        const chunk = buf.slice(0, i); buf = buf.slice(i + 2);
+        const line = chunk.split('\n').find(l => l.startsWith('data:')); if (!line) continue;
+        onEvent(JSON.parse(line.slice(5)));
+      }
+    }
   }
-  const CANNED_SAID = { search_mail: 'Search related emails', draft_reply: 'Draft a reply', related: 'What else is related?' };      // a canned turn's own bubble
-  // One turn: POST, then read the server-sent events until done. From a Review card (`from.review`)
-  // the tab stays put and the proposals about that task are staged straight into the tray.
-  async function sendChat(text, canned, attached, from) {
+  // One turn of the Chat tab: POST, then read the server-sent events until done.
+  async function sendChat(text, canned, attached) {
     if (chat.busy) { toast('A chat turn is already running'); return; }
-    chat.busy = true; chat.live = { status: 'Starting…', texts: [] }; chat.from = from || null; chat.scroll = !from;
+    chat.busy = true; chat.live = { status: 'Starting…', texts: [] }; chat.scroll = true;
     // the threads first: go() renders, and a Chat render with no threads loads them and the current thread's messages over this turn's
-    if (!from) { if (!chat.threads) { try { const r = await api('/api/chat/threads'); chat.threads = r.threads; } catch (_) { chat.threads = []; } } ui.page = null; go('chat'); }
-    const threadId = from ? null : chat.current;    // a Review question starts its own thread
-    if (!from) chat.messages = [...chat.messages, { role: 'user', text: text || CANNED_SAID[canned] || canned, attached }];
+    if (!chat.threads) { try { const r = await api('/api/chat/threads'); chat.threads = r.threads; } catch (_) { chat.threads = []; } }
+    ui.page = null; go('chat');
+    const threadId = chat.current;
+    chat.messages = [...chat.messages, { role: 'user', text: text || CANNED_SAID[canned] || canned, attached }];
     render();
     let result = null, error = null;
     try {
       const resp = await fetch('/api/chat/turn', { method: 'POST', headers: { 'Content-Type': 'application/json' }, redirect: 'manual', body: JSON.stringify({ thread_id: threadId, text, attached, canned }) });
       if (expired(resp)) { signedOut(); throw new Error('signed out'); }
       if (!resp.ok) throw new Error('HTTP ' + resp.status);
-      const reader = resp.body.getReader(); const dec = new TextDecoder(); let buf = '';
-      for (;;) {
-        const { value, done } = await reader.read(); if (done) break;
-        buf += dec.decode(value, { stream: true });
-        let i; while ((i = buf.indexOf('\n\n')) >= 0) {
-          const chunk = buf.slice(0, i); buf = buf.slice(i + 2);
-          const line = chunk.split('\n').find(l => l.startsWith('data:')); if (!line) continue;
-          const ev = JSON.parse(line.slice(5));
-          if (ev.type === 'meta') { if (!from) chat.current = ev.thread_id; }
-          else if (ev.type === 'status') { chat.live.status = ev.text; render(); }
-          else if (ev.type === 'text') { chat.live.texts.push(ev.text); render(); }
-          else if (ev.type === 'done') result = ev.result;
-          else if (ev.type === 'error') error = ev.error;
-        }
-      }
+      await readTurn(resp, ev => {
+        if (ev.type === 'meta') chat.current = ev.thread_id;
+        else if (ev.type === 'status') { chat.live.status = ev.text; render(); }
+        else if (ev.type === 'text') { chat.live.texts.push(ev.text); render(); }
+        else if (ev.type === 'done') result = ev.result;
+        else if (ev.type === 'error') error = ev.error;
+      });
     } catch (e) { error = e.message; }
     chat.busy = false; chat.live = null;
-    if (from && from.review) {
-      if (result) {
-        let n = 0; (result.proposals || []).forEach((p, i) => { if (p.task_id === from.review && stageProposal(p, result.message_id, i)) n++; });
-        const other = (result.proposals || []).filter(p => p.task_id !== from.review && p.op !== 'link_thread').length;
-        ui.rvReply = { id: from.review, text: result.reply_md, thread: result.thread_id, note: (n ? `${n} proposal${n === 1 ? '' : 's'} staged with this decision.` : 'Nothing to stage.') + (other ? ` ${other} about other tasks are in the Chat tab.` : '') };
-        toast(n ? `${n} proposal${n === 1 ? '' : 's'} staged · $${Number(result.cost_usd || 0).toFixed(2)}` : `Answered · $${Number(result.cost_usd || 0).toFixed(2)}`);
-      } else toast('Chat failed: ' + error);
-      chat.threads = null;  // the Review question made a new thread; refresh the list next time
-      render(); return;
-    }
     try { const r = await api('/api/chat/threads'); chat.threads = r.threads; } catch (_) {}
     if (chat.current !== null) { try { const r = await api(`/api/chat/threads/${chat.current}`); chat.messages = r.messages; chat.scroll = true; } catch (_) {} }
     if (result) { toast(`Answered · $${Number(result.cost_usd || 0).toFixed(2)}` + (result.drafts && result.drafts.length ? ' · draft saved in Mailbird' : '')); if ((result.proposals || []).some(p => p.applied)) load(); }
     else toast('Chat failed: ' + error);
     render();
   }
+
+  // ---------- in place (stage 6): the conversation ----------
+  // One component (design §12.6) for a Review card, the Today box and an opened task: the place's thread, what
+  // Claude is doing while it answers, every proposal with a tick box (this task, other tasks, new tasks, links),
+  // drafts, rejections, and a reply box that continues the same thread. One turn runs at a time on the page.
+  // A text box whose text lives in `draft`: render() and swapPlace() put its focus and caret back. The second
+  // form is the editor's fields and a step's line (`ed-name-12`, `step-line-12`).
+  function isDraftBox(id) { return DRAFT_BOXES.includes(id) || /^(ed-(name|context|who)|step-line)-\d+$/.test(id || ''); }
+  let refocusing = false;      // focus is being put back after a redraw: the phone's keyboard handling leaves the scroll alone
+  function heldDraftBox(root) {
+    const a = document.activeElement;
+    return a && root.contains(a) && isDraftBox(a.id) ? { id: a.id, a: a.selectionStart, b: a.selectionEnd } : null;
+  }
+  function restoreDraftBox(held) {
+    if (!held) return;
+    const el = document.getElementById(held.id); if (!el) return;
+    refocusing = true;
+    try { el.focus({ preventScroll: true }); try { el.setSelectionRange(held.a, held.b); } catch (_) {} } finally { refocusing = false; }
+  }
+  const places = new Map();      // key → place; the key is origin + ':' + task id ("review:30", "task:30", "today:")
+  function placeOf(origin, taskId) {
+    const key = origin + ':' + (taskId ?? '');
+    if (!places.has(key)) places.set(key, { key, origin, task_id: taskId ?? null, thread_id: null, messages: [], named: {}, live: null, loaded: false, off: new Set(), more: false, fresh: false });
+    return places.get(key);
+  }
+  async function loadPlace(pl) {
+    if (pl.loading) return;
+    pl.loading = true;
+    let r = null;
+    try { r = await api('/api/chat/place?origin=' + pl.origin + (pl.task_id != null ? '&task_id=' + pl.task_id : '')); }
+    catch (e) { if (!(e && (e.message === 'signed out' || e.network))) console.error('Loading a conversation failed:', e); }
+    pl.loading = false; pl.loaded = true;      // a failure shows the place empty rather than asking again on every redraw
+    if (r && !pl.live) {      // while a turn runs its own answer is appended when it ends
+      pl.thread_id = r.thread ? r.thread.id : null; pl.messages = r.messages || []; pl.named = r.named || {};
+    }
+    if (typingNow()) swapPlace(pl); else render();
+  }
+  // The place's container alone, redrawn and wired, with the focus and caret of a box inside it kept.
+  function swapPlace(pl) {
+    const el = document.querySelector(`#panel [data-place="${pl.key}"]`); if (!el || !pl.opts) return;
+    const held = heldDraftBox(el);
+    el.outerHTML = placeHtml(pl, pl.opts);
+    const fresh = document.querySelector(`#panel [data-place="${pl.key}"]`); if (!fresh) return;
+    restoreDraftBox(held);
+    fresh.querySelectorAll('textarea.grow').forEach(grow);
+    wirePlaces(fresh);
+  }
+  // Every loaded place showing one of these messages reads it again (a proposal there was made into a task).
+  function reloadPlacesWith(mids) { for (const pl of places.values()) if (pl.loaded && pl.messages.some(m => mids.includes(m.id))) loadPlace(pl); }
+  // A turn from a place. The caller has emptied draft[draftKey]; a refused or unsent turn puts the text back
+  // there, ahead of anything typed since.
+  async function sendTurn(pl, text, canned, draftKey) {
+    const giveBack = () => { if (draftKey && text) draft[draftKey] = (draft[draftKey] || '').trim() ? text + '\n' + draft[draftKey] : text; };
+    if (chat.busy) { giveBack(); render(); toast('Claude is still answering · your text is kept'); return; }
+    chat.busy = true; chat.place = pl.key; pl.live = { status: 'Starting…', texts: [] };
+    render();
+    const body = { thread_id: pl.thread_id, origin: pl.origin, task_id: pl.task_id, fresh: pl.fresh, text, attached: pl.task_id ? [pl.task_id] : attachedIds(), canned };
+    let result = null, error = null, refused = null, started = false;
+    try {
+      const resp = await fetch('/api/chat/turn', { method: 'POST', headers: { 'Content-Type': 'application/json' }, redirect: 'manual', body: JSON.stringify(body) });
+      noteBuild(resp);
+      if (expired(resp)) { signedOut(); refused = ''; }      // the sign-in screen says it; its reload keeps nothing but the command box
+      else if (resp.status === 409) refused = 'Claude is still answering in this conversation · your text is kept';
+      else if (!resp.ok) refused = `Not sent (HTTP ${resp.status}) · your text is kept`;
+      else await readTurn(resp, ev => {
+        if (ev.type === 'meta') { started = true; if (ev.thread_id) pl.thread_id = ev.thread_id; }
+        else if (ev.type === 'status') { pl.live.status = ev.text; render(); }
+        else if (ev.type === 'text') { pl.live.texts.push(ev.text); render(); }
+        else if (ev.type === 'done') result = ev.result;
+        else if (ev.type === 'error') { error = ev.error || 'run failed'; if (ev.result && ev.result.thread_id) pl.thread_id = ev.result.thread_id; }
+      });
+    } catch (e) {
+      if (started) error = e.message;      // the question reached the server: the thread holds it
+      else refused = 'Not sent: the server did not answer · your text is kept';
+    }
+    if (refused === null && !result && !error) error = 'the answer ended before Claude finished';
+    chat.busy = false; chat.place = null; pl.live = null;
+    if (refused !== null) { giveBack(); render(); if (refused) toast(refused); return; }
+    const said = text || CANNED_SAID[canned] || canned || '';
+    if (result) {
+      pl.messages.push({ role: 'user', text: said },
+        { id: result.message_id, role: 'assistant', text: result.reply_md, proposals: result.proposals || [], drafts: result.drafts || [], rejected: result.rejected || [], read: result.read || [], cost_usd: result.cost_usd, duration_ms: result.duration_ms });
+      pl.thread_id = result.thread_id; Object.assign(pl.named, result.named || {}); pl.fresh = false;
+      toast(`Answered · $${Number(result.cost_usd || 0).toFixed(2)}`);
+    } else {
+      pl.messages.push({ role: 'user', text: said }, { role: 'assistant', error });
+      toast('Claude failed: ' + error);
+    }
+    chat.threads = null;      // the Chat tab lists this thread too; read the list again there
+    render();
+  }
+  // The words of a proposal: `main` (what it does), `sub` (where it hangs, and whether it is another task).
+  const cut40 = s => { s = String(s == null ? '' : s); return s.length > 40 ? s.slice(0, 40) + '…' : s; };
+  const PLACE_OPS = new Set(['create', 'set', 'done', 'drop', 'pin_top', 'longterm', 'add_reminder', 'add_note', 'link', 'unlink', 'merge']);      // what stageProposal stages
+  function proposalsOf(mid) {
+    for (const pl of places.values()) { const m = pl.messages.find(x => x.id === mid); if (m) return m.proposals || []; }
+    const m = chat.messages.find(x => x.id === mid); return (m && m.proposals) || [];
+  }
+  function siblingOf(props, ref) {
+    const j = (props || []).findIndex(q => q && q.op === 'create' && (q.fields || {}).ref === ref);
+    return j < 0 ? null : { j, name: String(props[j].fields.name || '') };
+  }
+  const dayWords = iso => { const d = new Date(String(iso).slice(0, 10) + 'T12:00:00'); return isNaN(d) ? String(iso) : d.toLocaleDateString([], { weekday: 'short' }) + ' ' + d.toLocaleDateString([], { month: 'short', day: 'numeric' }); };
+  function setWords(f) {
+    const out = [];
+    for (const [k, v] of Object.entries(f || {})) {
+      if (k === 'due') out.push(v ? 'due ' + dayWords(v) : 'due date removed');
+      else if (k === 'name') out.push(`name “${cut60(v)}”`);
+      else if (k === 'context') out.push('text rewritten');
+      else if (k === 'project') out.push('project ' + (v || 'none'));
+      else if (k === 'effort') out.push('effort ' + (v || 'none'));
+      else if (k === 'hard') out.push(v ? 'hard deadline' : 'soft date');
+      else if (k === 'waiting_on') out.push(v ? 'waiting on ' + v : 'no longer waiting');
+      else if (k === 'counterpart') out.push(v ? 'for ' + v : 'for nobody named');
+      else if (k === 'snoozed_until') out.push(v ? 'later, back ' + dayWords(v) : 'back now');
+      else if (k !== 'due_is_datetime') out.push(`${k} ${v == null ? 'cleared' : cut60(v)}`);
+    }
+    return out.join(', ');
+  }
+  function proposalText(p, m, pl) {
+    const f = p.fields || {}, props = (m && m.proposals) || [], T = 'Task-' + p.task_id, sub = [];
+    let main;
+    if (p.op === 'create') {
+      main = 'New task: ' + (f.name || '');
+      for (const l of f.links || []) {
+        const word = l.kind === 'part_of' ? 'part of' : 'waits on';
+        if (typeof l.other === 'string') { const s = siblingOf(props, l.other); sub.push(`${word} “${cut40(s ? s.name : l.other)}”`); }
+        else sub.push(`${word} Task-${l.other}`);
+      }
+    } else if (p.op === 'link' && typeof f.other === 'string') {
+      const s = siblingOf(props, f.other);
+      main = `${T} ${f.kind === 'part_of' ? 'is now part of' : 'now waits on'}: ${s ? s.name : f.other}`;
+    } else if (REL_OPS.includes(p.op)) main = `${T} ${changeWords(p)}`;
+    else if (p.op === 'set') main = `${T}: ${setWords(f)}`;
+    else main = (p.task_id != null ? T + ': ' : '') + (changeWords(p) || p.label || p.op);
+    if (p.task_id != null && p.task_id !== pl.task_id) sub.push('a change to another task, staged from here');
+    return { main, sub: sub.join(', ') };
+  }
+  // The tray key stageProposal puts a proposal under: a link to a new task by its tray ref, the rest as propKey.
+  function placeKey(p, mid, i) {
+    const f = p.fields || {};
+    if (p.op === 'create') return 'new:c' + mid + '-' + i;
+    if (p.op === 'link' && typeof f.other === 'string') { const s = siblingOf(proposalsOf(mid), f.other); return relKey(p.task_id, f.kind, 'm' + mid + '-' + (s ? s.j : f.other)); }
+    return propKey(p, mid, i);
+  }
+  // Ticked, not staged, not made yet: what the stage button stages.
+  const placeOpen = (p, mid, i) => PLACE_OPS.has(p.op) && !p.applied && !staged.has(placeKey(p, mid, i));
+  const andList = a => a.length < 2 ? a.join('') : a.slice(0, -1).join(', ') + ' and ' + a[a.length - 1];
+  function placeMsgHtml(pl, m, newest) {
+    if (m.role === 'user') return `<div class="pmsg user">${esc(m.text)}</div>`;
+    if (m.error) return `<div class="pmsg ai bad">The run failed: ${esc(m.error)}</div>`;
+    const read = (m.read || []).length ? `<div class="pread">Read ${andList(m.read.map(tref))}.</div>` : '';
+    const props = m.proposals || [];
+    let list = '';
+    if (props.length) {
+      const row = (p, i) => {
+        const k = `${pl.key}|${m.id}|${i}`, t = proposalText(p, m, pl);
+        const words = `<span class="pw"><span class="pm">${linkTasks(t.main)}</span>${t.sub ? ` <span class="ps">${linkTasks(t.sub)}</span>` : ''}</span>`;
+        if (p.op === 'link_thread' || p.applied) return `<div class="pprop"><span></span>${words}<span class="chip staged">${p.op === 'create' && p.task_id ? 'created ' + tref(p.task_id) : 'linked'}</span></div>`;
+        if (staged.has(placeKey(p, m.id, i))) return `<div class="pprop"><span></span>${words}<span class="chip staged">staged</span></div>`;
+        if (!PLACE_OPS.has(p.op)) return `<div class="pprop"><span></span>${words}<span></span></div>`;
+        return `<label class="pprop"><input type="checkbox" data-pprop="${esc(k)}" ${pl.off.has(k) ? '' : 'checked'} aria-label="Stage this">${words}${p.op === 'create' ? `<button class="btn small" data-place-create="${esc(k)}">Create</button>` : '<span></span>'}</label>`;
+      };
+      const short = PHONE() && !pl.more && props.length > 2;
+      const rows = (short ? props.slice(0, 2) : props).map((p, i) => row(p, i)).join('')
+        + (short ? `<div class="pmore">and ${props.length - 2} more · <button class="linkish" data-place-more="${esc(pl.key)}">Show</button></div>` : '');
+      let foot = '';
+      if (newest && props.some((p, i) => placeOpen(p, m.id, i))) {
+        const n = props.filter((p, i) => placeOpen(p, m.id, i) && !pl.off.has(`${pl.key}|${m.id}|${i}`)).length;
+        const what = pl.opts.decision ? `Stage ${n > 1 ? 'all ' : ''}${n} with this decision` : `Stage ${n}`;
+        foot = `<div class="pfoot"><button class="btn primary" data-place-stage="${esc(pl.key)}|${m.id}" ${n ? '' : 'disabled'}>${what}</button><span class="hint">One Apply, one Undo.</span></div>`;
+      }
+      list = `<div class="pprops"><div class="pphead"><span>Proposals</span><span class="hint">untick any you do not want</span></div>${rows}${foot}</div>`;
+    }
+    const drafts = (m.drafts || []).length ? `<div class="pdrafts">${m.drafts.map((d, i) => `<div class="pdraft"><span>✉ draft ${esc(d.subject || (d.kind === 'reply' ? 'reply' : 'new message'))}${d.to && d.to.length ? ' → ' + esc(d.to.join(', ')) : ''}</span><button class="btn small" data-pdraft="${esc(pl.key)}|${m.id}|${i}">Open in Mailbird</button></div>`).join('')}</div>` : '';
+    const rej = (m.rejected || []).length ? `<details class="prej"><summary>${m.rejected.length} proposal${m.rejected.length === 1 ? '' : 's'} rejected by Factotum</summary>${m.rejected.map(r => `<div>${esc(r)}</div>`).join('')}</details>` : '';
+    return `<div class="pmsg ai">${md(m.text)}</div>${read}${list}${drafts}${rej}`;
+  }
+  // opts: {decision, title, hint, box: {id, key, first, next}}: the stage button's words (with a Review decision or
+  // alone), the head, and the reply box (its id, its `draft` key, its placeholder before and after the first answer).
+  function placeHtml(pl, opts) {
+    pl.opts = opts;
+    const msgs = pl.messages, lastAi = msgs.map(m => m.role).lastIndexOf('assistant'), ai = lastAi >= 0 ? msgs[lastAi] : null;
+    const body = msgs.map((m, i) => placeMsgHtml(pl, m, i === lastAi)).join('');
+    const live = pl.live ? `<div class="plive"><span class="spin"></span> ${esc(pl.live.status || 'Working…')}${pl.live.texts.length ? `<div class="hint">${esc(String(pl.live.texts[pl.live.texts.length - 1]).slice(0, 300))}</div>` : ''}</div>` : '';
+    const b = opts.box;
+    const chips = ai ? `<div class="pchips">${ai.cost_usd != null ? `<span class="chip">$${Number(ai.cost_usd).toFixed(2)}</span>` : ''}${ai.duration_ms ? `<span class="chip">${Math.round(ai.duration_ms / 1000)} s</span>` : ''}${pl.thread_id ? `<a href="/chat" data-goto-chat="${pl.thread_id}">Also kept as a thread in Chat</a>` : ''}</div>` : '';
+    return `<div class="place" data-place="${esc(pl.key)}">
+      <div class="phead"><span>${esc(opts.title)}</span><span class="spacer"></span><span class="phint">${esc(opts.hint)}</span></div>
+      ${body}${live}
+      <div class="preply"><textarea id="${b.id}" class="grow" rows="1" placeholder="${esc(msgs.length ? b.next : b.first)}" aria-label="${esc(opts.title)}">${esc(draft[b.key] || '')}</textarea><button class="btn" data-place-ask="${esc(pl.key)}" ${chat.busy ? 'disabled' : ''}>Ask</button></div>
+      ${chips}</div>`;
+  }
+  // Every ticked, unstaged, unmade proposal of that message, into the tray.
+  function stagePlace(pl, mid, decision) {
+    const props = proposalsOf(mid);
+    let n = 0;
+    props.forEach((p, i) => { if (placeOpen(p, mid, i) && !pl.off.has(`${pl.key}|${mid}|${i}`) && stageProposal(p, mid, i)) n++; });
+    toast(decision ? `${n} staged with this decision · decide on the card, then Apply` : `${n} staged · press Apply in the tray`);
+    render();
+  }
+  async function placeCreate(mid, i) {
+    try {
+      const r = await api('/api/chat/create', { method: 'POST', body: JSON.stringify({ message_id: mid, index: i }) });
+      toast(`Created Task-${r.task_id}` + ((r.skipped || []).length ? ` · ${r.skipped[0].why}` : ''));
+      await load();
+      reloadPlacesWith([mid]);
+    } catch (e) { toast('Create failed: ' + (e.detail || e.message)); }
+  }
+  function askPlace(pl) {
+    const b = pl.opts.box, v = (draft[b.key] || '').trim(); if (!v) return;
+    draft[b.key] = '';
+    const el = document.getElementById(b.id); if (el) { el.value = ''; grow(el); }
+    sendTurn(pl, v, null, b.key);
+  }
+  function wirePlaces(root) {      // root: the panel, or one place's container (swapPlace)
+    (root.matches('[data-place]') ? [root] : root.querySelectorAll('[data-place]')).forEach(el => {
+      const pl = places.get(el.dataset.place); if (!pl || !pl.opts) return;
+      const box = el.querySelector('#' + pl.opts.box.id); if (box) typing(box, pl.opts.box.key, () => askPlace(pl));
+      el.querySelectorAll('[data-place-ask]').forEach(b => b.onclick = () => askPlace(pl));
+      el.querySelectorAll('[data-pprop]').forEach(ck => ck.onchange = () => { const k = ck.dataset.pprop; if (ck.checked) pl.off.delete(k); else pl.off.add(k); swapPlace(pl); });
+      el.querySelectorAll('[data-place-more]').forEach(b => b.onclick = e => { e.preventDefault(); pl.more = true; swapPlace(pl); });
+      el.querySelectorAll('[data-place-stage]').forEach(b => b.onclick = () => stagePlace(pl, +b.dataset.placeStage.split('|')[1], !!pl.opts.decision));
+      el.querySelectorAll('[data-place-create]').forEach(b => b.onclick = e => { e.preventDefault(); const [, mid, i] = b.dataset.placeCreate.split('|'); placeCreate(+mid, +i); });
+      el.querySelectorAll('[data-pdraft]').forEach(b => b.onclick = async () => {
+        const [, mid, i] = b.dataset.pdraft.split('|'); const m = pl.messages.find(x => x.id === +mid); const d = m && (m.drafts || [])[+i]; if (!d) return;
+        try { await api('/api/chat/drafts/open', { method: 'POST', body: JSON.stringify({ draft: d }) }); toast('Shown in Mailbird'); }
+        catch (e) { toast('Mailbird did not open it (' + e.message + '); the draft is in its Drafts folder'); }
+      });
+      el.querySelectorAll('[data-open-task]').forEach(a => a.onclick = e => { e.preventDefault(); goFromPage(+a.dataset.openTask); });
+      el.querySelectorAll('[data-goto-chat]').forEach(a => a.onclick = e => { e.preventDefault(); chat.current = +a.dataset.gotoChat; chat.threads = null; go('chat'); });
+    });
+  }
+  // Review: the card's conversation, at the bottom of the card (frame 4). A new card starts with an empty box.
+  function reviewPlaceHtml(id) {
+    if (draft.askFor !== id) { draft.ask = ''; draft.askFor = id; }
+    const pl = placeOf('review', id);
+    if (!pl.loaded) loadPlace(pl);
+    return placeHtml(pl, { decision: true, title: 'Ask Claude about this task', hint: 'the conversation stays on this card',
+      box: { id: 'rv-ask', key: 'ask', first: 'Ask Claude about this task, e.g. “which steps are left?”; what it proposes stages with your decision', next: 'Ask a follow-up, or say what to change' } });
+  }
+  // The phone's keyboard: --kb is its height (what the visual viewport lost at the bottom), so a sheet or the Review
+  // card can pad for it; while a text box in the panel or the sheet has focus, nothing pinned covers it (kb-open).
+  function fitKeyboard() {
+    const vv = window.visualViewport; if (!vv) return;
+    document.documentElement.style.setProperty('--kb', Math.max(0, Math.round(innerHeight - vv.height - vv.offsetTop)) + 'px');
+    const a = document.activeElement;
+    if (document.body.classList.contains('kb-open') && a && a.matches('input, textarea')) {      // a smaller window: the box stays in view
+      const r = a.getBoundingClientRect();
+      if (r.top < 0 || r.bottom > vv.height) a.scrollIntoView({ block: 'center' });
+    }
+  }
+  if (window.visualViewport) { visualViewport.addEventListener('resize', fitKeyboard); visualViewport.addEventListener('scroll', fitKeyboard); }
+  const typesText = el => el && el.matches && el.matches('textarea, input:not([type=checkbox]):not([type=radio]):not([type=button]):not([type=submit])') && !!el.closest('#panel, #sheet');
+  document.addEventListener('focusin', e => {
+    if (!PHONE() || !typesText(e.target)) return;
+    document.body.classList.add('kb-open');
+    if (refocusing) return;      // a redraw put the focus back: the box is where it was
+    const t = e.target;
+    setTimeout(() => { if (document.activeElement === t) t.scrollIntoView({ block: 'center', behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' }); }, 300);
+  });
+  document.addEventListener('focusout', () => document.body.classList.remove('kb-open'));
   let logData = null;
   async function loadLog() { logData = await api('/api/log?limit=' + logLimit); render(); }
   // The Log has four views of the same two lists (SPEC §9): Timeline merges changes and runs by time,
@@ -2121,6 +2392,17 @@
   }
 
   // ---------- wiring ----------
+  // A text box that grows: Enter sends (Shift+Enter is a new line); on a touch keyboard Enter is a new line and the button sends.
+  function typing(el, key, send) {
+    el.oninput = () => { draft[key] = el.value; grow(el); };
+    el.addEventListener('keydown', e => { if (e.key === 'Escape') return; if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229 && !TOUCH()) { e.preventDefault(); send(); } e.stopPropagation(); });      // 229: Safari's Enter that commits an IME candidate
+  }
+  // On a phone Review's decisions are pinned at the bottom (app.css), above the tray when it shows, as the page bar is.
+  function placeReviewBar() {
+    const big = document.querySelector('#panel .review .card .big'); if (!big) return;
+    const tray = document.getElementById('tray');
+    big.style.bottom = PHONE() && tray.classList.contains('on') ? tray.offsetHeight + 'px' : '';
+  }
   function wire() {
     const panel = document.getElementById('panel');
     panel.querySelectorAll('.row').forEach(r => {
@@ -2253,15 +2535,8 @@
     const tt = document.getElementById('chat-threads-toggle'); if (tt) tt.onclick = () => { ui.chatDrawer = !ui.chatDrawer; render(); };
     ['chat-threads-close', 'chat-backdrop'].forEach(id => { const el = document.getElementById(id); if (el) el.onclick = () => { ui.chatDrawer = false; render(); }; });
     if (ui.tab === 'chat' && chat.scroll) { chat.scroll = false; window.scrollTo({ top: document.documentElement.scrollHeight }); }
-    // A text box that grows: Enter sends (Shift+Enter is a new line); on a touch keyboard Enter is a new line and the button sends.
-    const typing = (el, key, send) => {
-      el.oninput = () => { draft[key] = el.value; grow(el); };
-      el.addEventListener('keydown', e => { if (e.key === 'Escape') return; if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229 && !TOUCH()) { e.preventDefault(); send(); } e.stopPropagation(); });      // 229: Safari's Enter that commits an IME candidate
-    };
-    const ask = document.getElementById('rv-ask'), askGo = document.getElementById('rv-ask-go');
-    const askSend = () => { const v = draft.ask.trim(); if (!v || chat.busy) return; draft.ask = ''; const card = ask.closest('.card'); sendChat(v, null, [+card.dataset.id], { review: +card.dataset.id }); };
-    if (askGo) askGo.onclick = askSend;
-    if (ask) typing(ask, 'ask', askSend);
+    wirePlaces(panel);
+    placeReviewBar();
     const po = document.getElementById('chat-pick-open'); if (po) po.onclick = () => { ui.pickOpen = !ui.pickOpen; draft.pick = ''; render(); const el = document.getElementById('chat-pick'); if (el) el.focus(); };
     const pk = document.getElementById('chat-pick');
     if (pk) {
@@ -2306,7 +2581,7 @@
     if (cmd) typing(cmd, 'cmd', cmdSend);
     document.getElementById('tray-apply').onclick = () => applyAll();
     document.getElementById('tray-discard').onclick = () => discardStaged();
-    document.getElementById('tray-toggle').onclick = () => { ui.trayOpen = !ui.trayOpen; renderTray(); placePageBar(); };
+    document.getElementById('tray-toggle').onclick = () => { ui.trayOpen = !ui.trayOpen; renderTray(); placePageBar(); placeReviewBar(); };
     const save = document.getElementById('settings-save'); if (save) save.onclick = saveSettings;
     const arm = document.getElementById('conn-arm'); if (arm) arm.onclick = async () => { try { await api('/api/connectors/arm', { method: 'POST' }); await loadSettings(); toast('A new connector may be approved for 10 minutes'); } catch (e) { toast('Failed: ' + e.message); } };
     panel.querySelectorAll('[data-conn-revoke]').forEach(b => b.onclick = async () => {
