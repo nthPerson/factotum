@@ -437,7 +437,7 @@ def test_log_lists_batches_with_their_changes_and_runs(cfg, tmp_path):
     log = client.get("/api/log").json()
     b = log["batches"][0]
     assert b["source"] == "review" and b["undone_at"] is None
-    assert b["changes"][0] == {"task_id": 1, "task_name": "Call Reza", "field": "due", "old": None, "new": "2026-11-05"}
+    assert b["changes"][0] == {"task_id": 1, "task_name": "Call Reza", "field": "due", "old": None, "new": "2026-11-05", "note": None}
     assert log["runs"][0]["kind"] == "sync-file" and log["runs"][0]["cost_usd"] == 0.37
 
 

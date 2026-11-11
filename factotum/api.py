@@ -1,7 +1,7 @@
 """HTTP API + static UI (SPEC.md §9). Phase 1 surface:
 
   GET  /api/tasks?status=open|all        tasks with computed score/priority/tier/fade/last-call
-  GET  /api/tasks/{id}                   one task with links, reminders, recent changes
+  GET  /api/tasks/{id}?before=&limit=    one task, any status: links, reminders, its task links, where it came from, a page of History (stamps neighbours_seen_at)
   POST /api/commands  {text}             parse the grammar → changes (nothing applied)
   POST /api/batches/apply {source, changes}   the one write path
   POST /api/batches/{id}/undo
@@ -39,7 +39,7 @@ from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
 from . import batches, commands, config as C, lifecycle, oauth, relations, reminders, summary
-from .db import connect, get_settings, get_task, init_db, rows, seed_accounts, set_setting
+from .db import connect, get_settings, get_task, init_db, now_iso, rows, seed_accounts, set_setting
 from .dates import parse_date
 
 WEB = Path(__file__).resolve().parent / "web"
@@ -94,6 +94,25 @@ class DraftOpenBody(BaseModel):
 
 
 SUGGESTION_KINDS = ("proposal", "slack_mention")      # evidence with no task that Review offers as a Create / Dismiss card
+
+
+def _json_value(s: str | None):
+    """A `changes.old` / `new` cell parsed; text that is not JSON comes back as it is."""
+    if s is None:
+        return None
+    try:
+        return json.loads(s)
+    except ValueError:
+        return s
+
+
+def _json_or_none(s: str | None) -> dict | None:
+    """A batch's `cause_json` parsed, or None when absent or unreadable."""
+    try:
+        v = json.loads(s or "")
+    except ValueError:
+        return None
+    return v if isinstance(v, dict) else None
 
 
 def _consent_page(req: dict, csrf: str, base: str, who: str, tools: int, again: bool, direct: bool = False) -> str:
@@ -253,17 +272,52 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         return {"today": today.isoformat(), "tasks": out, "neighbours": {str(k): v for k, v in neighbours.items()},
                 "projects": C.project_names(ecfg), "top_cap": C.get(ecfg, "lifecycle.top_cap", 7)}
 
+    def history(task_id: int, before: int | None, limit: int) -> dict:
+        """One page of the task's History, newest first (plan "GET /api/tasks/{id}"): each change with
+        its batch's source, cause and undone flag, its note, how much the batch wrote (for "Undo all 3
+        changes made together") and, for a link change, the other task as it is now."""
+        es = rows(conn,
+                  "SELECT c.id AS change_id, c.batch_id, b.applied_at AS at, b.source, b.cause_json, b.undone_at, c.field, c.old, c.new, c.note, "
+                  "g.n AS batch_changes, g.tasks AS batch_tasks FROM changes c JOIN batches b ON b.id = c.batch_id "
+                  "JOIN (SELECT batch_id, COUNT(*) AS n, COUNT(DISTINCT task_id) AS tasks FROM changes "
+                  "      WHERE batch_id IN (SELECT batch_id FROM changes WHERE task_id = ?) GROUP BY batch_id) g ON g.batch_id = c.batch_id "
+                  f"WHERE c.task_id = ?{' AND c.id < ?' if before is not None else ''} ORDER BY c.id DESC LIMIT ?",
+                  (task_id, task_id, *((before,) if before is not None else ()), limit + 1))
+        more = len(es) > limit
+        es = es[:limit]
+        for e in es:
+            e["cause"] = _json_or_none(e.pop("cause_json"))
+            e["undone"] = e.pop("undone_at") is not None
+            e["old"], e["new"] = _json_value(e["old"]), _json_value(e["new"])
+        ends = {e["change_id"]: next((v["other"] for v in (e["new"], e["old"]) if isinstance(v, dict) and type(v.get("other")) is int), None)
+                for e in es if e["field"] == "link"}
+        named = {r["id"]: r for r in rows(conn, "SELECT id, name, status FROM tasks WHERE id IN (SELECT value FROM json_each(?))",
+                                          (json.dumps(sorted({x for x in ends.values() if x is not None})),))} if ends else {}
+        entries = []
+        for e in es:                                             # the plan's key order
+            entries.append({k: e[k] for k in ("change_id", "batch_id", "at", "source", "cause", "undone", "field", "old", "new", "note")}
+                           | {"other": named.get(ends.get(e["change_id"])), "batch_changes": e["batch_changes"], "batch_tasks": e["batch_tasks"]})
+        return {"entries": entries, "more": more, "next_before": entries[-1]["change_id"] if more else None}
+
     @app.get("/api/tasks/{task_id}")
-    def get_one(task_id: int):
+    def get_one(task_id: int, before: int | None = None, limit: int = 30):
         t = get_task(conn, task_id)
         if not t:
             raise HTTPException(404)
+        limit = max(1, min(int(limit), 100))
         decorate_all([t], date.today(), eff_cfg())
-        t.pop("rel", None)                                       # the payload gains rel in Task 13
-        t["links"] = rows(conn, "SELECT * FROM links WHERE task_id = ?", (task_id,))
+        t["rel"] = relations.compact(t.get("rel") or {}, keep_empty=True)
+        t["links"] = rows(conn, "SELECT * FROM links WHERE task_id = ? AND kind != 'task'", (task_id,))
         t["reminders"] = rows(conn, "SELECT * FROM reminders WHERE task_id = ?", (task_id,))
         t["mentions_log"] = rows(conn, "SELECT * FROM mentions WHERE task_id = ? ORDER BY at DESC LIMIT 20", (task_id,))
         t["changes"] = rows(conn, "SELECT c.*, b.source, b.applied_at FROM changes c JOIN batches b ON b.id = c.batch_id WHERE c.task_id = ? ORDER BY c.id DESC LIMIT 30", (task_id,))
+        t["relations"] = relations.detail(conn, task_id)
+        t["nearby"] = relations.nearby(conn, task_id)
+        t["history"] = history(task_id, before, limit)
+        # The value before this request (the page marks what changed since), then the stamp that
+        # clears the task's "changed" marker: opening a task is looking at its neighbours.
+        conn.execute("UPDATE tasks SET neighbours_seen_at = ? WHERE id = ?", (now_iso(), task_id))
+        conn.commit()
         return t
 
     @app.post("/api/commands")
@@ -492,10 +546,12 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
     def log(limit: int = 40):
         """Recent batches with every field change, task named, plus the Claude runs with their cost."""
         limit = max(1, min(int(limit), 200))
-        bs = rows(conn, "SELECT id, created_at, applied_at, undone_at, source FROM batches ORDER BY id DESC LIMIT ?", (limit,))
+        bs = rows(conn, "SELECT id, created_at, applied_at, undone_at, source, cause_json FROM batches ORDER BY id DESC LIMIT ?", (limit,))
+        for b in bs:
+            b["cause"] = _json_or_none(b.pop("cause_json"))
         if bs:
             ids = tuple(b["id"] for b in bs)
-            ch = rows(conn, f"SELECT c.batch_id, c.task_id, t.name AS task_name, c.field, c.old, c.new FROM changes c "
+            ch = rows(conn, f"SELECT c.batch_id, c.task_id, t.name AS task_name, c.field, c.old, c.new, c.note FROM changes c "
                             f"LEFT JOIN tasks t ON t.id = c.task_id WHERE c.batch_id IN ({','.join('?' * len(ids))}) ORDER BY c.id", ids)
             by: dict[int, list] = {}
             for c in ch:

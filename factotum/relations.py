@@ -359,6 +359,47 @@ def compact(rel: dict, keep_empty: bool = False) -> dict | None:
     return {k: rel.get(k) for k in COMPACT_KEYS}
 
 
+# --- the opened task (plan "GET /api/tasks/{id}") --------------------------------------------------
+
+def detail(db: Db, task_id: int) -> list[dict]:
+    """The task's active relations, oldest first, each with the other task's current state."""
+    out = []
+    for r in db.execute(
+            "SELECT r.id, r.kind, r.src, r.why, r.source, r.created_at, r.batch_id, "
+            "t.id AS oid, t.name, t.status, t.due, t.hard, t.completed_at, t.outcome FROM relations r "
+            "JOIN tasks t ON t.id = CASE WHEN r.src = ? THEN r.dst ELSE r.src END "
+            "WHERE (r.src = ? OR r.dst = ?) AND r.removed_at IS NULL ORDER BY r.id", (task_id, task_id, task_id)):
+        out.append({"id": r["id"], "kind": r["kind"], "dir": "out" if r["src"] == task_id else "in", "why": r["why"], "source": r["source"],
+                    "created_at": r["created_at"], "batch_id": r["batch_id"],
+                    "other": {"id": r["oid"], "name": r["name"], "status": r["status"], "due": r["due"], "hard": r["hard"],
+                              "completed_at": r["completed_at"], "outcome": r["outcome"]}})
+    return out
+
+
+NEARBY_VIA = {"plaud_note": "recording", "mail_thread": "mail thread"}
+
+
+def nearby(db: Db, task_id: int, limit: int = 8) -> list[dict]:
+    """Provenance (design §4), computed when read and never stored: other tasks that share a recording
+    or a mail thread link with this one, leaving out those it already has an active relation with.
+    Open first, then the newest; one entry per task (a recording before a mail thread)."""
+    out, seen = [], set()
+    for r in db.execute(
+            "SELECT t.id, t.name, t.status, mine.kind, COALESCE(mine.label, theirs.label) AS label FROM links mine "
+            "JOIN links theirs ON theirs.kind = mine.kind AND theirs.ref = mine.ref AND theirs.task_id <> mine.task_id "
+            "JOIN tasks t ON t.id = theirs.task_id "
+            "WHERE mine.task_id = ? AND mine.kind IN ('plaud_note', 'mail_thread') AND NOT EXISTS (SELECT 1 FROM relations r WHERE r.removed_at IS NULL "
+            "AND ((r.src = mine.task_id AND r.dst = t.id) OR (r.dst = mine.task_id AND r.src = t.id))) "
+            "ORDER BY t.status = 'open' DESC, t.created_at DESC, t.id DESC, mine.kind = 'plaud_note' DESC", (task_id,)):
+        if r["id"] in seen:
+            continue
+        seen.add(r["id"])
+        out.append({"id": r["id"], "name": r["name"], "status": r["status"], "via": NEARBY_VIA[r["kind"]], "label": r["label"]})
+        if len(out) >= limit:
+            break
+    return out
+
+
 def words(t: dict) -> str:
     """An annotated row's link facts for a prompt, `" · "`-joined; "" when it has none."""
     rel = t.get("rel") or {}
