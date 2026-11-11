@@ -114,6 +114,15 @@ CREATE TABLE IF NOT EXISTS oauth_tokens (
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY, value_json TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS push_subscriptions (    -- one row per device that turned app notifications on (stage 2)
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  endpoint TEXT NOT NULL UNIQUE,                  -- the push service's address for this device
+  p256dh TEXT NOT NULL, auth TEXT NOT NULL,       -- the device's public key and secret, base64url as the browser gives them
+  label TEXT NOT NULL,                            -- "iPhone", "Chrome on Windows"
+  origin TEXT NOT NULL,                           -- the app's origin on that device; a notification's links are built on it
+  created_at TEXT NOT NULL,
+  last_success_at TEXT, last_failure_at TEXT, last_error TEXT
+);
 """
 
 TASK_FIELDS = [

@@ -1,4 +1,4 @@
-import json, os, re
+import json, os, re, stat
 
 import httpx
 import pytest
@@ -6,6 +6,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
 
+from factotum import app_push as AP
 from factotum import webpush as W
 
 
@@ -78,3 +79,63 @@ def test_send_posts_one_encrypted_record_with_the_push_headers():
     W.send("https://push.example/x", W.b64u(W.public_bytes(ua)), W.b64u(auth), b"{}", key, sub=None, ttl=1, urgency="normal",
            topic="not a valid topic!", transport=httpx.MockTransport(handler))
     assert "Topic" not in seen[1].headers                        # a topic outside [A-Za-z0-9_-]{1,32} is left out
+
+
+# --- Task 2: the key pair and the devices table
+
+def _device(conn, endpoint="https://push.example/d1", origin="https://f.example", label="Phone"):
+    ua = ec.generate_private_key(ec.SECP256R1()); auth = os.urandom(16)
+    did = AP.subscribe(conn, endpoint, W.b64u(W.public_bytes(ua)), W.b64u(auth), label, origin); conn.commit()
+    return did, ua, auth
+
+
+def test_the_key_pair_is_made_once_beside_the_database_and_kept_private(conn, tmp_path):
+    p = AP.key_path(conn)
+    assert p == tmp_path / "push-keys.json" and not p.exists()
+    with pytest.raises(AP.KeyFileError, match="missing"):
+        AP.keys(conn)
+    k1 = AP.keys(conn, create=True)
+    assert stat.S_IMODE(p.stat().st_mode) == 0o600
+    assert AP.keys(conn).public == k1.public == W.b64u(W.public_bytes(k1.private)) and len(W.unb64u(k1.public)) == 65
+    assert set(json.loads(p.read_text())) == {"private", "public", "created_at"}
+
+
+def test_a_missing_key_file_is_made_again_and_the_old_devices_go(conn):
+    AP.keys(conn, create=True); _device(conn); assert AP.device_count(conn) == 1
+    AP.key_path(conn).unlink()
+    with pytest.raises(AP.KeyFileError, match="missing"):
+        AP.keys(conn)                                            # the sender never makes a pair
+    assert AP.device_count(conn) == 1
+    AP.keys(conn, create=True)                                   # the page asking for the public key does
+    assert AP.device_count(conn) == 0                            # each was bound to the old key and can never work again
+
+
+def test_an_unreadable_key_file_is_never_overwritten(conn):
+    AP.key_path(conn).write_text("not json")
+    for create in (False, True):
+        with pytest.raises(AP.KeyFileError, match="unreadable"):
+            AP.keys(conn, create=create)
+    assert AP.key_path(conn).read_text() == "not json"
+
+
+def test_subscribe_validates_and_upserts_by_endpoint(conn):
+    did, _, _ = _device(conn, label="  Chrome on Windows  ")
+    row = AP.devices(conn)[0]
+    assert row["id"] == did and row["label"] == "Chrome on Windows" and row["origin"] == "https://f.example" and row["created_at"]
+    conn.execute("UPDATE push_subscriptions SET last_failure_at = 'x', last_error = 'y'")
+    again, _, _ = _device(conn, label="")                        # same endpoint, new keys
+    row2 = AP.devices(conn)[0]
+    assert again == did and AP.device_count(conn) == 1 and row2["label"] == "A device"
+    assert row2["created_at"] == row["created_at"] and row2["last_failure_at"] is None and row2["last_error"] is None
+    good = dict(endpoint="https://push.example/d2", p256dh=row2["p256dh"], auth=row2["auth"], label="x", origin="http://127.0.0.1:8751")
+    for change, msg in [({"endpoint": "http://push.example/d2"}, "not a push service address"),
+                        ({"endpoint": "https://10.0.0.5/d2"}, "not a push service address"),
+                        ({"endpoint": "https://localhost/d2"}, "not a push service address"),
+                        ({"p256dh": W.b64u(b"\x04" + b"\x01" * 64)}, "the device key is not a P-256 public key"),
+                        ({"auth": W.b64u(b"short")}, "the device secret must be 16 bytes"),
+                        ({"origin": "https://f.example/settings"}, "origin must be scheme://host\\[:port\\]")]:
+        with pytest.raises(ValueError, match=msg):
+            AP.subscribe(conn, **{**good, **change})
+    AP.subscribe(conn, **good); assert AP.device_count(conn) == 2   # http://127.0.0.1 is a fine origin (the dev instance)
+    assert AP.unsubscribe(conn, endpoint="https://push.example/d2") == 1 and AP.unsubscribe(conn, device_id=did) == 1
+    assert AP.device_count(conn) == 0 and AP.unsubscribe(conn, device_id=999) == 0
