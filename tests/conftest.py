@@ -1,4 +1,6 @@
 """Shared fixtures. test_core.py keeps its own copies; new test modules use these."""
+import os
+import re
 from datetime import date
 
 import pytest
@@ -7,6 +9,22 @@ from factotum import config as C
 from factotum.db import connect, init_db
 
 TODAY = date(2026, 11, 1)
+
+
+def _example_env_names() -> set[str]:
+    """The variable names `.env.example` lists (lines like NAME=...)."""
+    text = (C.ROOT / ".env.example").read_text()
+    return set(re.findall(r"^([A-Z][A-Z0-9_]*)=", text, re.M))
+
+
+@pytest.fixture(autouse=True)
+def _no_real_env(monkeypatch):
+    """The owner's .env sits in the main checkout's root; a test that passes only because a real token is present proves nothing (and may reach the real service)."""
+    monkeypatch.setattr(C, "load_dotenv", lambda *a, **k: False)
+    for name in _example_env_names():
+        monkeypatch.delenv(name, raising=False)
+    for name in [k for k in os.environ if k.startswith("SLACK_TOKEN_")]:
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture

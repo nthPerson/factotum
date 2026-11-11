@@ -235,7 +235,8 @@ def test_markdown_becomes_notion_blocks_with_chunking():
     assert len(long) == 3 and all(len(r["text"]["content"]) <= 2000 for r in long)
 
 
-def test_notes_sink_creates_then_updates_on_source_link(cfg):
+def test_notes_sink_creates_then_updates_on_source_link(cfg, monkeypatch):
+    monkeypatch.setenv("NOTION_TOKEN", "t")
     import httpx
     from factotum import notion_notes as nn
     requests, state = [], {"exists": False}
