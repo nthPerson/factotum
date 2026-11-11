@@ -53,7 +53,9 @@ stderr line, a banner on every tab); absent means off for every paid or mailing 
 code defaults (`config.DEFAULTS`, read through `C.value`); `factotum effective` prints each switch's value and
 origin; accounts are seeded once (`state.accounts_seeded`); Settings shows effective values and saves only the
 control that changed; the example is a reference with placeholders, and the suite loads
-`tests/fixtures/factotum.fixture.yaml` instead. Retiring the old Notion
+`tests/fixtures/factotum.fixture.yaml` instead. Stage 2 (2026-11-10): notifications from the app
+(`factotum/webpush.py`, `factotum/app_push.py`, `web/sw.js`, Settings → Notifications, `notify.provider`:
+ntfy, the app or both). Retiring the old Notion
 pages and plaud-sync is the user's checklist (SETUP §15). Update this paragraph when something lands.
 
 ## Where things live
@@ -99,6 +101,7 @@ pages and plaud-sync is the user's checklist (SETUP §15). Update this paragraph
 | the installable app: manifest, icons, the page head | design §13, SPEC §9 | `factotum/web/manifest.webmanifest`, `index.html`, `tools/make_icons.py` |
 | addresses, Back, the phone task page, the short bar, signed out, return and update | SPEC §9 | `web/app.js` (`parseAddress`, `setAddress`, `go`, `applyAddress`, `openTask`, `closeTask`, `taskPageHtml`, `signedOut`, `typingNow`, `onReturn`), `api.py` (`PAGE_TABS`, `STAMPED`, `build_stamp`, `BuildStamp`, `_index_html`) |
 | the starter, code defaults, absent means off, `effective` | SPEC §9 "Configuration", SETUP §18 | `factotum/config.py` (`STARTER_CONFIG`, `DEFAULTS`, `PAID_SWITCHES`, `value`, `explain`), `config/factotum.starter.yaml`, `__main__.py` (`_effective`), `web/app.js` (`starterHtml`, `settingsDirty`), `tests/test_stage3.py` (`_code_defaults`) |
+| notifications from the app: the key pair, devices, payload, sending, the worker, Settings → Notifications | design §14, SPEC §10 | `factotum/webpush.py` (`encrypt`, `vapid_header`, `send`), `factotum/app_push.py` (`keys`, `subscribe`, `payload`, `send_all`, `send_test`), `notify.py` (`providers`, `ready`), `reminders.py` (`notice`), `api.py` (`/api/push*`, `/sw.js`), `web/sw.js` (`shape`, `handlePush`, `handleClick`, `openApp`), `web/app.js` (`pushView`, `pushOn`, `followPath`, `reviewPushOn`) |
 
 ## Commands
 
@@ -303,6 +306,30 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
 - **Accounts are seeded once** (2026-11-10): `db.seed_accounts` records `state.accounts_seeded`, so a
   table emptied on purpose stays empty; a table that already has rows is marked without inserting, an
   empty seed list does not use the seeding up, and the starter is never seeded from.
+- **The service worker has no fetch handler, ever** (2026-11-10): it would let the worker store or
+  serve the app and make it stale. `/sw.js` is served from its own route with no-cache and is not in
+  `api.STAMPED` (the browser re-checks a worker on each navigation; a worker change must not reload
+  open pages).
+- **The push key pair is `push-keys.json` beside the database** (2026-11-10): 0600, never in git,
+  never in an `/api` answer but its public half. Only `GET /api/push` and subscribe make one, and a
+  new pair empties `push_subscriptions` (every device was bound to the old key). The scheduler never
+  makes one: missing or unreadable at send time is a `KeyFileError`, nothing sent, the reminder
+  waits, the Log says why. An unreadable file is never overwritten; fix or delete it by hand.
+- **A notification's look is defined twice** (2026-11-10): Safari shows the declarative payload
+  (`app_push.payload`) without running the worker; other browsers run `sw.js` `shape()` on the same
+  JSON. Change both together. No `mutable` member: with it Safari would run the worker and wait on it.
+- **`app_push.send_all` makes every network call before its first write, then commits the device
+  rows itself** (2026-11-10): a 410 removal must survive the caller's rollback. It raises
+  `NothingSent` when no device took it.
+- **The payload is at most 3993 bytes of plaintext** (2026-11-10, `webpush.MAX_PLAINTEXT`, one
+  4096-byte record): `payload()` trims the body, then the title, never a link.
+- **The permission is asked first thing in the tap handler** (2026-11-10, `pushOn`): an `await`
+  before `Notification.requestPermission()` makes iOS refuse it.
+- **Notification buttons use the reminder's token links, which stay behind the sign-in**
+  (2026-11-10): never add `/r/*` or `/sw.js` to an Access bypass; a button that gets a redirect, an
+  error or no network opens the task page.
+- **A device's links are built on its own origin** (2026-11-10, `push_subscriptions.origin`), so the
+  dev instance's test notifications open the dev instance.
 
 ## Gotchas carried over from plaud-sync (dates are when they were learned)
 

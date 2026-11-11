@@ -72,6 +72,8 @@ A JSON-RPC result with `serverInfo` is a pass. Claude Code already reaches it th
    put it in `.env` as `NTFY_TOKEN`. Not required to publish to an unreserved topic; it raises
    the rate limits and lets you reserve the topic on a paid tier.
 5. Put the topic in `config/factotum.yaml` under `notify.ntfy.topic` (or the Settings tab).
+6. ntfy is one of the choices in Settings → Notifications → "Send reminders to" (ntfy, The app,
+   Both); absent means ntfy. The app's own notifications are §19.
 
 Check:
 ```bash
@@ -516,7 +518,8 @@ Factotum is its own OAuth server for `/mcp` (SPEC §15). Four steps, each once.
 
 ## 17. Installing the app on a phone and a desktop
 
-- **iPhone:** Safari, Share, Add to Home Screen. It opens full-screen. Notifications come in stage 2.
+- **iPhone:** Safari, Share, Add to Home Screen. It opens full-screen. For notifications from the
+  app, see §19.
 - **Android:** Chrome, menu, Install app (not tested yet).
 - **Desktop Edge or Chrome:** the install icon in the address bar, or menu, Apps, Install.
 
@@ -557,3 +560,57 @@ missing: add the key to `config/factotum.yaml` with the value from the before fi
 Settings), run the two commands again, then restart (check `journalctl -u factotum -n 5` for a Claude
 run in flight first). Lines with origin `settings` are values the Settings tab froze into the database;
 they win over the file.
+
+## 19. Notifications from the app
+
+Factotum can send reminders and the evening review nudge as its own notifications, to every device
+where they were turned on; a tap opens the task they are about (SPEC §10). ntfy stays available.
+
+**Turning them on.**
+- **Desktop (Chrome, Edge, Firefox):** Settings → Notifications → "Turn on notifications on this
+  device", allow when the browser asks, then "Send a test".
+- **iPhone** (iOS 16.4 or later; the declarative format needs 18.4): install the app first (§17),
+  open it from the Home Screen, then the same. The permission prompt appears only from that tap; in
+  a Safari tab Settings says to install the app first.
+- **Android:** as a desktop (not tested).
+
+Each device is turned on separately and is listed under "Devices with notifications on", where any
+other device can be removed.
+
+**Choosing where reminders go.** Settings → Notifications → "Send reminders to": ntfy, The app or
+Both. ntfy stays available and unchanged, and an existing setup keeps ntfy until this is changed
+(the key `notify.provider` is absent, which means ntfy). To move fully to the app: choose The app,
+check that a test arrives on each device, then the ntfy app may be removed.
+
+**Where the key lives.** The server's key pair is `push-keys.json` beside the database (with the
+default database, in `data/`), mode 0600, made the first time the page asks for it (`GET /api/push`,
+on the first page load after this deploy).
+Back it up with the database. Deleting it means turning notifications on again on every device (a new
+pair empties the devices list). Nothing goes in `.env`. If the file becomes unreadable, Settings says
+"Factotum cannot send notifications right now", reminders to the app wait and the Log says why;
+Factotum never overwrites it, so restore it from the backup or delete it.
+
+**What was verified and what was not.** Verified offline (the test suite): the encryption against
+RFC 8291's own test vector, VAPID signatures, sending, removal on 404/410, trimming, the provider
+choice, the routes. Verified in a headless browser: the worker registers and controls the app, its
+payload handling, a button press that cannot reach its link opening the task, every Settings state
+(some stubbed: unsupported, the permission denied, Factotum cannot send, a refusal from the browser). Not verified:
+a real subscription with a push service, any real delivery, Apple's acceptance of the VAPID claims,
+the declarative display on an iPhone, the notification icon behind the sign-in, Android.
+
+**For the owner to check on real devices.**
+1. iPhone, installed app: turn on; the prompt appears; "Send a test" arrives within seconds; tapping
+   it opens Settings in the app.
+2. iPhone, a real reminder: the task's name and body; a tap opens the task page, not Today; no
+   buttons (or, if iOS shows them, Done opens the "marked done" page).
+3. iPhone in a Safari tab: the "install first" line.
+4. Desktop Edge or Chrome: turn on, test; a reminder shows Done and Snooze 1 h; Done closes the task
+   and the notification becomes "Marked done"; a second reminder for the same task replaces the
+   first.
+5. After the sign-in has expired (or in a private window signed out), Done opens the task page and
+   "Sign in again" shows.
+6. Two devices both get a reminder; Remove on one stops it there only.
+7. "Both": ntfy behaves exactly as before and the app also gets it.
+8. The review nudge opens Review.
+9. The icon on the notification (it sits behind the sign-in and may show a generic one).
+10. Delete the app from the iPhone: after the next reminder its row is gone from the devices list.
