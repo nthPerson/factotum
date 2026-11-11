@@ -552,22 +552,30 @@
       if ((res.ripple_queued || []).length) watchRipple(res.batch_id);
     } catch (e) { toast('Apply failed: ' + e.message); }
   }
-  // opts: {buttons: [{text, attrs, run}], holdMs}: buttons after Undo, and how long the toast stays (8 s otherwise).
-  // While the outcome question is open the toast is the question: the latest message waits and shows when it closes.
+  // opts: {buttons: [{text, attrs, run}], holdMs, batch}: buttons after Undo, how long the toast stays (8 s
+  // otherwise), and the batch its Undo names (the latest Apply's otherwise).
+  // While the outcome question is open the toast is the question: the latest message waits (with the batch its
+  // Undo meant then) and shows when it closes. `toast.next` is a message that shows when the current one ends.
   function toast(msg, undo, opts) {
     const el = document.getElementById('toast');
-    if (asking) { toast.held = [msg, undo, opts]; return; }
-    const o = opts || {}, extra = o.buttons || [];
+    if (asking) { toast.held = [msg, undo, Object.assign({}, opts, { batch: (opts || {}).batch != null ? opts.batch : lastBatch })]; return; }
+    const o = opts || {}, extra = o.buttons || [], batch = o.batch != null ? o.batch : lastBatch;
     el.classList.remove('ask');
-    el.innerHTML = esc(msg) + (undo && lastBatch ? ' <button id="undo">Undo</button>' : '') + extra.map((b, i) => ` <button data-tb="${i}" ${b.attrs || ''}>${esc(b.text)}</button>`).join('');
+    el.innerHTML = esc(msg) + (undo && batch ? ' <button id="undo">Undo</button>' : '') + extra.map((b, i) => ` <button data-tb="${i}" ${b.attrs || ''}>${esc(b.text)}</button>`).join('');
     el.classList.add('on');
-    clearTimeout(toast.t); toast.t = setTimeout(() => el.classList.remove('on'), o.holdMs || 8000);
+    clearTimeout(toast.t);
+    toast.t = setTimeout(() => {
+      el.classList.remove('on');
+      const next = toast.next; toast.next = null;
+      if (next && !asking) toast(...next);
+      else if (next) toast.held = toast.held || next;
+    }, o.holdMs || 8000);
     extra.forEach((b, i) => { el.querySelector(`[data-tb="${i}"]`).onclick = () => b.run(); });
     const u = document.getElementById('undo');
     if (u) u.onclick = async () => {
-      const id = lastBatch; u.disabled = true;
+      const id = batch; u.disabled = true;
       let res;
-      try { res = await undoBatch(id); } catch (e) { toast('Undo failed: ' + e.message, true); return; }     // the batch stays undoable: Undo again
+      try { res = await undoBatch(id); } catch (e) { toast('Undo failed: ' + e.message, true, { batch: id }); return; }     // the batch stays undoable: Undo again
       if (lastBatch === id) lastBatch = null;
       await load(); toast(undoSaid(res));
     };
@@ -577,6 +585,7 @@
   // Done is instant; the question follows, in the toast, and never blocks (design §8.5). It is asked only
   // when something hangs on the task: an open task waits on it, or it is a step of an open goal (the
   // server's `reminders.hanging_on` counts the same two). A task that only waits on another is not asked.
+  const OUTCOME_MAX = 300;        // an outcome's length, as batches._fields cuts it
   const sayable = new Map();      // task id → what the question says about it, read before the Apply that closed it
   function hangsOn(t) {
     return !!(t && t.rel && ((t.rel.frees_open || []).length || (t.rel.goal_id != null && isOpenTask(t.rel.goal_id))));
@@ -600,7 +609,11 @@
       else if (e.key === 'Escape') { e.preventDefault(); closeAsk(); }
       e.stopPropagation();      // no key typed here acts on the list
     };
-    el.onkeydown = e => { if (e.key === 'Escape' && asking) { e.preventDefault(); e.stopPropagation(); closeAsk(); } };      // focus on a button
+    el.onkeydown = e => {      // focus on a button or a link in the question: no key reaches the list or the Review card behind it
+      if (!asking) return;
+      if (e.key === 'Escape') { e.preventDefault(); closeAsk(); }
+      e.stopPropagation();
+    };
     el.querySelector('[data-say-save]').onclick = saveOutcome;
     el.querySelector('[data-say-skip]').onclick = () => closeAsk();
     el.querySelectorAll('[data-open-task]').forEach(a => a.onclick = e => { e.preventDefault(); goTask(+a.dataset.openTask); });
@@ -614,7 +627,7 @@
     if (s.goal != null) hangs.push(`a step of ${ref(s.goal)}`);
     return `<div class="q">How did ${ref(asking.id)} turn out?</div>
       ${asking.name ? `<div class="tname">${esc(asking.name)}</div>` : ''}
-      <input id="outcome-say" maxlength="300" autocomplete="off" placeholder="Optional, one line" aria-label="How did Task-${asking.id} turn out?" value="${esc(draft.outcome)}">
+      <input id="outcome-say" maxlength="${OUTCOME_MAX}" autocomplete="off" placeholder="Optional, one line" aria-label="How did Task-${asking.id} turn out?" value="${esc(draft.outcome)}">
       <div class="hint">Optional${hangs.length ? ' · ' + hangs.join(' · ') : ''}</div>
       ${asking.err ? `<div class="hint bad">${esc(asking.err)}</div>` : ''}
       <div class="acts"><button class="btn primary" data-say-save>Save</button><button class="btn" data-say-skip>Nothing to add</button></div>`;
@@ -642,11 +655,16 @@
       askOutcome(id);
       return;
     }
-    if (asking && asking.id === id) { toast.held = null; closeAsk(); }
-    if (!res.applied) { toast('Not saved: ' + ((res.skipped[0] || {}).why || 'nothing changed')); return; }
+    // A message held while the question was open (an Apply that failed meanwhile, a ripple that landed) is
+    // not dropped: it shows when this one's own message ends.
+    let held = null;
+    if (asking && asking.id === id) { held = toast.held; toast.held = null; closeAsk(); }
+    if (held) toast.next = held;
+    const brief = held ? { holdMs: 4000 } : undefined;
+    if (!res.applied) { toast('Not saved: ' + ((res.skipped[0] || {}).why || 'nothing changed'), false, brief); return; }
     lastBatch = res.batch_id; logData = null;
     await load();
-    toast('Saved', true);
+    toast('Saved', true, brief);
     if ((res.ripple_queued || []).length) watchRipple(res.batch_id);
   }
 
@@ -1648,7 +1666,7 @@
         <div class="sub"><span class="code">Task-${x.id}</span><span class="chip proj">${esc(x.project || '—')}</span>${d ? `<span class="chip due ${d.days < 0 ? 'crit' : ''} ${x.hard ? 'hard' : ''}">${d.label}</span>` : '<span class="chip">no date</span>'}<span class="chip eff">${esc(x.effort || '?')}</span>${x.rel && x.rel.steps_total ? stepsChip(x.rel) : ''}<span class="chip">${x.mentions} mention${x.mentions === 1 ? '' : 's'}</span><span class="chip">score ${x.score}</span></div>
         ${sinceHtml(items[0])}
         <p>${esc(x.why_now || (x.score_reasons || []).join(' · '))}</p>${x.context ? `<p class="ctx ${ui.ctxOpen === x.id ? 'open' : ''}">${esc(x.context)}</p><button class="btn small more" data-ctx-more="${x.id}">${ui.ctxOpen === x.id ? 'Less' : 'More'}</button>` : ''}
-        <textarea id="rv-note" rows="2" placeholder="Optional note · Done or Drop: the outcome · Keep or Later: added to the text">${esc(note)}</textarea>
+        <textarea id="rv-note" rows="2" placeholder="Optional note · Done or Drop: the outcome (up to ${OUTCOME_MAX} characters) · Keep or Later: added to the text">${esc(note)}</textarea>
         <div class="links">${x.source_link ? `<a href="${esc(x.source_link)}" target="_blank" rel="noopener">${x.source === 'Plaud' ? 'Plaud note' : 'Source'}</a>` : ''}</div>
         <div class="big"><button class="done" data-rv="done">Done <kbd>d</kbd></button><button data-rv="keep">Keep <kbd>k</kbd></button><button class="later" data-rv="later">Later <kbd>s</kbd></button><button class="drop" data-rv="drop">Drop <kbd>x</kbd></button></div>
         <div class="later-menu ${ui.laterOpen ? 'on' : ''}"><span class="hint">Comes back on:</span><button class="btn small" data-rv="tomorrow">Tomorrow</button><button class="btn small" data-rv="fri">Friday</button><button class="btn small" data-rv="nextweek">Next week</button><button class="btn small" data-rv="pickdate">📅 ${ui.datePick ? 'Hide date' : 'Pick a date…'}</button></div>
@@ -2023,6 +2041,12 @@
   }
   let rippleInfo = null;    // GET /api/ripple, fetched with the settings (Settings → Claude says when ripples wait)
   async function loadSettings() { [settings, connectors, rippleInfo] = await Promise.all([api('/api/settings'), api('/api/connectors').catch(() => null), api('/api/ripple').catch(() => null)]); render(); }
+  // The ripple model's choices: the three names, plus the effective value when the config names another
+  // (a full model id), first, so the page never says a model other than the one the runs use.
+  function rippleModels(cur) {
+    const names = ['sonnet', 'haiku', 'opus'];
+    return cur && !names.includes(cur) ? [String(cur), ...names] : names;
+  }
   function renderSettings() {
     if (!settings) { loadSettings(); return '<div class="empty">Loading settings…</div>'; }
     if (pushInfo === null) loadPush();
@@ -2065,7 +2089,7 @@
       <h3>Claude</h3>
       ${f('claude.planner.enabled', 'Morning planner', 'One Claude run before the brief: the verdict, why-now lines and proposals. Off = the plain brief.', bool('claude.planner.enabled'))}
       ${f('claude.summary.auto', 'Today summary', 'Rewritten by one light Claude run when a task it is about changes, something becomes urgent, or the day turns. Off: the Today tab still says what changed, and Refresh rewrites it.', bool('claude.summary.auto') + ' &nbsp; at most every ' + num('claude.summary.auto_minutes', 1, 240) + ' min')}
-      ${f('claude.ripple.enabled', 'Ripples', 'When a linked task is closed or changes, one light Claude run brings the tasks linked to it up to date: it may rewrite their text (each rewrite is in History with Undo) and suggests anything else on Review. About 3 cents a run (measured 2026-11-11), at most ' + esc(e['claude.ripple.hourly_cap']) + ' runs an hour.', bool('claude.ripple.enabled') + ' &nbsp; after ' + num('claude.ripple.delay_seconds', 10, 3600) + ' s of quiet · at most ' + num('claude.ripple.hourly_cap', 1, 60) + ' runs an hour · $ ' + num('claude.budgets_usd.ripple', 0.05, 2) + ' a run · ' + `<select id="s-claude.ripple.model" data-key="claude.ripple.model" aria-label="Ripple model">${['sonnet', 'haiku', 'opus'].map(m => `<option value="${m}" ${(e['claude.ripple.model'] || 'sonnet') === m ? 'selected' : ''}>${m}</option>`).join('')}</select>`)}
+      ${f('claude.ripple.enabled', 'Ripples', 'When a linked task is closed or changes, one light Claude run brings the tasks linked to it up to date: it may rewrite their text (each rewrite is in History with Undo) and suggests anything else on Review. About 3 cents a run (measured 2026-11-11), at most ' + esc(e['claude.ripple.hourly_cap']) + ' runs an hour.', bool('claude.ripple.enabled') + ' &nbsp; after ' + num('claude.ripple.delay_seconds', 10, 3600) + ' s of quiet · at most ' + num('claude.ripple.hourly_cap', 1, 60) + ' runs an hour · $ ' + num('claude.budgets_usd.ripple', 0.05, 2) + ' a run · ' + `<select id="s-claude.ripple.model" data-key="claude.ripple.model" aria-label="Ripple model">${rippleModels(e['claude.ripple.model']).map(m => `<option value="${esc(m)}" ${(e['claude.ripple.model'] || 'sonnet') === m ? 'selected' : ''}>${esc(m)}</option>`).join('')}</select>`)}
       ${rippleInfo && rippleInfo.waiting_for_scheduler ? `<p class="hint warn">${rippleInfo.pending.length} ${rippleInfo.pending.length === 1 ? 'ripple' : 'ripples'} waiting: this instance runs no scheduler, so they run when the service does.</p>` : ''}
       ${f('claude.budgets_usd.chat_turn', 'Chat turn budget', 'Dollars a single chat turn may spend before Claude stops.', '$ ' + num('claude.budgets_usd.chat_turn', 0.05, 5) )}
       <h3>Connections</h3>
@@ -2354,7 +2378,10 @@
     const text = ui.rvNote.id === id ? ui.rvNote.text.trim() : '';
     const later = (day, label) => stage(id, 'set', { snoozed_until: day, last_reviewed_at: data.today }, 'later · back ' + label);
     const closes = kind === 'done' || kind === 'drop';
-    if (closes && text) stageChange({ task_id: id, op: kind, fields: { outcome: text } }, kind === 'done' ? 'done' : 'dropped');
+    // An outcome is at most OUTCOME_MAX characters (the server cuts there): a longer note is never cut, it is
+    // added to the text in full beside the decision, as before outcomes, and the toast says so.
+    const long = closes && [...text].length > OUTCOME_MAX;
+    if (closes && text && !long) stageChange({ task_id: id, op: kind, fields: { outcome: text } }, kind === 'done' ? 'done' : 'dropped');
     else if (kind === 'done') stage(id, 'done', {}, 'done');
     else if (kind === 'drop') stage(id, 'drop', {}, 'dropped');
     else if (kind === 'keep') stage(id, 'keep', {}, 'kept');
@@ -2363,7 +2390,8 @@
     else if (kind === 'nextweek') later(isoPlus(7 - ((TODAY().getDay() + 6) % 7)), 'next week');
     else if (kind === 'date') { if (!dateStr) return; later(dateStr, dateStr); }
     else return;
-    if (text && !closes) stageChange({ task_id: id, op: 'add_note', fields: { text } }, '');
+    if (text && (!closes || long)) stageChange({ task_id: id, op: 'add_note', fields: { text } }, '');
+    if (long) toast(`The note is longer than an outcome (${OUTCOME_MAX} characters), so it goes to the task's text instead`);
     // The flags that brought the card here (a thread update, a planner proposal) are judged in the
     // same batch, so the card does not come back tomorrow for the same reason.
     (items[0].evidence || []).forEach(e => { if (!staged.has('e:' + e.id)) stageJudge(e.id, id, 'reviewed', (e.kind === 'proposal' ? 'suggestion seen' : 'thread seen')); });
