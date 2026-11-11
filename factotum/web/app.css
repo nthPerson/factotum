@@ -388,6 +388,12 @@ body.tray-open main { padding-bottom: 60vh; }
 .toast button { font: inherit; background: none; border: 0; color: var(--accent-soft); cursor: pointer; text-decoration: underline; white-space: nowrap; }      /* the message wraps, never "See | changes" */
 /* On a phone a toast that names a skipped change runs to three lines: the full width, and corners that do not cut the text. */
 @media (max-width: 700px) { .toast { width: max-content; max-width: calc(100vw - 32px); border-radius: 18px; } }
+/* On a touch screen or a phone the toast's buttons (Undo, Say how it went, See changes) are 44 px targets: the outcome
+   question and a landed ripple are reached only through them, for 15-20 s. The padding is the target, not the text. */
+@media (hover: none), (max-width: 700px) {
+  .toast:not(.ask) { padding: 4px 4px 4px 14px; gap: 0; }      /* 4 px: a message that wraps to three lines keeps off the edge */
+  .toast:not(.ask) button { min-height: 44px; min-width: 44px; padding: 0 10px; touch-action: manipulation; }
+}
 /* The outcome question (ripples, stage 5) is drawn in the toast: a panel, not a pill. It sits over the bottom of
    the list, above the tray, and never takes more than 30% of the screen. 16 px in the box: no iPhone zoom. */
 .toast.ask { flex-direction: column; align-items: stretch; gap: 8px; box-sizing: border-box; width: min(520px, calc(100vw - 32px)); max-width: none; max-height: 30vh; overflow: auto;
