@@ -234,6 +234,9 @@ notify:
     time: "06:30"               # taste: when the brief is sent. Settings → Outputs
     to: you@example.com         # Settings → Outputs
 
+links:                          # stage 7: suggested links between tasks (design §10)
+  suggestions_per_review: 5     # Settings → Review and lifecycle. Taste: at most this many suggested links are offered a day (Review and the dashed badges); the rest wait. 0 = none
+
 claude:                         # headless `claude -p` runs (§2 for the CLI; `factotum claude-check` tests the login)
   binary: claude                # absolute path (`which claude`): the service has systemd's minimal PATH
   models: { sync_file: sonnet, today_summary: sonnet, mail_triage: sonnet, planner_morning: sonnet, chat_turn: sonnet, check: haiku }   # the model per run kind

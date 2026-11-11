@@ -43,6 +43,7 @@ SETTINGS_KEYS = [
     "scoring.project_weights",
     "claude.models", "claude.planner.enabled", "claude.budgets_usd.chat_turn", "claude.summary.auto", "claude.summary.auto_minutes",
     "server.oauth.enabled", "server.mcp_writes",
+    "links.suggestions_per_review",                                       # stage 7
 ]
 
 # One default for every Settings key. Absent means off for anything that costs money or sends mail
@@ -65,6 +66,7 @@ DEFAULTS: dict[str, Any] = {
     "claude.models": {}, "claude.planner.enabled": False, "claude.budgets_usd.chat_turn": 1.0,
     "claude.summary.auto": False, "claude.summary.auto_minutes": 10,
     "server.oauth.enabled": False, "server.mcp_writes": "stage",
+    "links.suggestions_per_review": 5,                                    # stage 7
 }
 PAID_SWITCHES = ("notify.morning_brief.enabled", "claude.planner.enabled", "claude.summary.auto", "sinks.notion_notes.enabled")
 # The code's defaults before 2026-11-10 (the four paid / mailing switches were on when absent), for

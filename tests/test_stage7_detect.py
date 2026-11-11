@@ -146,6 +146,7 @@ def test_the_scheduler_runs_the_detectors_after_the_sweeps_every_half_hour(conn,
     mk(conn, 1, name="Take COMPE 510 Quiz 7", source="Canvas", due="2026-11-10T23:59"); mk(conn, 2, name="Quiz 7 prep", source="Plaud", due="2026-11-10")
     s = Scheduler(cfg, conn, push=lambda *a, **k: None, mailer=None)
     assert "link_suggestions: 1 suggested: twin 1" in s.tick(datetime(2026, 11, 2, 10, 0))
+    assert get_settings(conn)["state.links.session"]["ids"]
     assert not [d for d in s.tick(datetime(2026, 11, 2, 10, 10)) if d.startswith("link_suggestions")]
     assert one(conn, "SELECT summary FROM runs WHERE kind = 'link_suggestions'")["summary"] == "1 suggested: twin 1"
     assert not conn.in_transaction
@@ -164,3 +165,64 @@ def test_links_check_reads_and_sweep_links_writes(conn, cfg, tmp_path, monkeypat
     assert "twin    Task-2 → Task-1  same as" in out and "would write" in out and _sugg(c) == []
     cli.main(["sweep", "links"])
     assert [(s["a"], s["b"]) for s in _sugg(c)] == [(2, 1)]
+
+
+def _many(conn, n):
+    """n `any` suggestions on n separate pairs (100, 101), (102, 103), …; their ids, oldest first."""
+    ids = []
+    for i in range(n):
+        a, b = 100 + 2 * i, 101 + 2 * i
+        mk(conn, a); mk(conn, b)
+        ids.append(relations.suggest(conn, "any", a, b, "x", "thread"))
+    conn.commit()
+    return ids
+
+
+def test_a_day_offers_at_most_n_link_suggestions_and_keeps_the_rest(conn):
+    ids = _many(conn, 8)
+    d1 = date(2026, 11, 2)
+    assert suggestions.session(conn, d1, 5) == ids[:5] and relations.shown_ids(conn) == set(ids[:5])
+    batches.apply(conn, [{"task_id": 100, "op": "judge_evidence", "fields": {"evidence_id": ids[0], "verdict": "dismissed"}}], "review", d1)
+    assert suggestions.session(conn, d1, 5) == ids[1:5]                                      # the same day: no top-up
+    assert set(suggestions.session(conn, date(2026, 11, 3), 5)) == {ids[5], ids[6], ids[7], ids[1], ids[2]}
+    assert suggestions.session(conn, date(2026, 11, 4), 0) == []
+
+
+def test_an_ignored_suggestion_never_keeps_another_out_for_good(conn):
+    ids = _many(conn, 7)
+    seen = set()
+    for d in (2, 3):
+        seen |= set(suggestions.session(conn, date(2026, 11, d), 5))
+    assert seen == set(ids)
+
+
+def test_a_suggestion_whose_task_closed_gives_its_slot_up(conn):
+    ids = _many(conn, 2)
+    batches.apply(conn, [{"op": "done", "task_id": 100}], "ui", TODAY)
+    assert suggestions.session(conn, date(2026, 11, 2), 5) == [ids[1]]
+
+
+def test_review_the_badges_and_the_agent_see_the_same_days_suggestions(cfg, tmp_path):
+    from fastapi.testclient import TestClient
+    from factotum import api
+    path = tmp_path / "t.db"
+    conn = connect(path); init_db(conn)
+    ids = _many(conn, 6)
+    mk(conn, 300); mk(conn, 301)
+    fe = relations.suggest(conn, "part_of", 300, 301, "a piece of it", "filing"); conn.commit()
+    client = TestClient(api.create_app(cfg, db_path=str(path)))
+    items = client.get("/api/review").json()["items"]
+    shown = {s["evidence_id"] for i in items for s in i["link_suggestions"]}
+    assert shown == set(ids[:5]) | {fe}                                                      # five a day, filing ones besides
+    listed = {s["evidence_id"] for t in client.get("/api/tasks").json()["tasks"] for s in (t.get("rel") or {}).get("suggestions", [])}
+    assert listed == shown
+    assert not [i for i in items if i["task"]["id"] in (110, 111) and "link_suggested" in i["reasons"]]   # pair six waits for another day
+
+
+def test_the_suggestions_number_is_a_settings_key_with_one_default_everywhere():
+    import yaml
+    from factotum import config as C
+    from conftest import FIXTURE
+    assert "links.suggestions_per_review" in C.SETTINGS_KEYS and C.DEFAULTS["links.suggestions_per_review"] == 5
+    for p in (C.EXAMPLE_CONFIG, C.STARTER_CONFIG, FIXTURE):
+        assert C.get(yaml.safe_load(p.read_text()), "links.suggestions_per_review") == 5, p

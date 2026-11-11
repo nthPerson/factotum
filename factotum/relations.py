@@ -237,6 +237,21 @@ def pending_suggestions(db: Db, ids: set[int] | None = None) -> dict[int, list[d
     return out
 
 
+SESSION_KEY = "state.links.session"            # written by suggestions.session: today's offered suggestion ids
+
+
+def shown_ids(db: Db) -> set[int] | None:
+    """The evidence ids of the link suggestions offered today (`suggestions.session`'s choice), or None
+    when no session was ever recorded (everything pending shows). Read-only."""
+    r = db.execute("SELECT value_json FROM settings WHERE key = ?", (SESSION_KEY,)).fetchone()
+    if r is None:
+        return None
+    try:
+        return {int(e) for e in (json.loads(r[0]) or {}).get("ids") or []}
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
 def import_duplicate(db: Db, loser: int, owner: int) -> str:
     """A row the importer found sharing another row's source key (design §5.3). A closed row is a
     duplicate that is over: `same_as` the other, source `import` (the loser when both are closed, else
@@ -295,8 +310,8 @@ def _cause_from(cause_json: str | None) -> int | None:
 def annotate(db: Db, tasks: list[dict]) -> list[dict]:
     """Put every neighbour fact under `t["rel"]` (the plan's "task["rel"]" section), in place; returns
     `tasks`. A dict needs only `id`. Reads the active links once, the rows they reach once, the ripple
-    batches once and the pending suggestions once; the rest is Python. Never writes (the MCP server's
-    connection is query_only)."""
+    batches once and the pending suggestions once (only today's offered ones, `shown_ids`, once a
+    session was recorded); the rest is Python. Never writes (the MCP server's connection is query_only)."""
     if not tasks:
         return tasks
     ids = sorted({int(t["id"]) for t in tasks})
@@ -353,6 +368,9 @@ def annotate(db: Db, tasks: list[dict]) -> list[dict]:
             "AND (t.neighbours_seen_at IS NULL OR b.applied_at > t.neighbours_seen_at) ORDER BY b.id", (json.dumps(ids),)):
         changed[r["task_id"]] = {"by": _cause_from(r["cause_json"]), "at": r["applied_at"], "batch_id": r["id"]}
     sugg = pending_suggestions(db, set(ids))
+    shown = shown_ids(db)
+    if shown is not None:                      # today's few (the daily cap); a filing suggestion always shows
+        sugg = {tid: [s for s in lst if s["evidence_id"] in shown or s["signal"] == "filing"] for tid, lst in sugg.items()}
 
     for t in tasks:
         tid = int(t["id"])

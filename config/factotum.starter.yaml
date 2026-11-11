@@ -70,6 +70,8 @@ notify:
   snooze_presets: ["30m", "1h", "tomorrow 9am"]
   morning_brief: { enabled: false, time: "06:30", to: "" }
 
+links: { suggestions_per_review: 5 }
+
 claude:
   planner: { enabled: false }
   summary: { auto: false, auto_minutes: 10 }

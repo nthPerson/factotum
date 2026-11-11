@@ -4,7 +4,8 @@ waiting card is still worth showing (`live`), and the detectors (`twins`, `threa
 three in `detect`). It writes `link_suggestion` evidence through `relations.suggest` only and never
 writes `relations`: a suggestion becomes a link when the owner taps it, through `batches`. `relations.suggest` stays as it is for the import; every
 other writer goes through `suggest_pair`. Nothing here commits except `sweep_job` and `after_create`;
-everything else leaves that to the caller."""
+everything else leaves that to the caller. The daily cap (`session`) picks which waiting suggestions
+are offered today; `relations.annotate` reads its choice."""
 from __future__ import annotations
 
 import json
@@ -12,7 +13,8 @@ import re
 import sys
 from datetime import date, datetime
 
-from . import relations
+from . import config as C, relations
+from .db import get_settings, set_setting
 from .relations import Db
 
 KIND_ERROR = "kind must be one of same_as, part_of, waits_on, any"
@@ -280,8 +282,10 @@ def sweep(db: Db, today: date) -> dict:
 
 
 def sweep_job(conn, cfg: dict, now: datetime) -> str | None:
-    """`sweep`, commit, and a line like "3 suggested: twin 1, text 2", or None when nothing was written."""
+    """`sweep`, today's `session`, commit, and a line like "3 suggested: twin 1, text 2", or None when
+    nothing was written."""
     out = sweep(conn, now.date())
+    session(conn, now.date(), int(C.value(cfg, "links.suggestions_per_review") or 0))
     conn.commit()
     w = out["written"]
     if not w:
@@ -293,6 +297,62 @@ def at_create(db: Db, ids: list[int]) -> list[int]:
     """The detectors over the tasks just created, written through `suggest_pair`; returns the evidence
     ids. The caller commits."""
     return _write(db, detect(db, set(ids)))[1]
+
+
+def pending(db: Db) -> list[dict]:
+    """Every unjudged `link_suggestion` as its ref plus `evidence_id`, oldest first (a ref that does
+    not parse is left out)."""
+    out = []
+    for r in db.execute("SELECT id, ref FROM evidence WHERE kind = ? AND judged_at IS NULL ORDER BY id", (relations.EVIDENCE_KIND,)).fetchall():
+        try:
+            ref = json.loads(r[1] or "")
+        except (TypeError, ValueError):
+            continue
+        if isinstance(ref, dict):
+            out.append(dict(ref, evidence_id=int(r[0])))
+    return out
+
+
+# --- the daily cap (design §10.1: at most links.suggestions_per_review a day) ------------------------
+
+SESSION_KEY = relations.SESSION_KEY             # {"day": "YYYY-MM-DD", "ids": [offered that day, judged ones included]}
+OFFERED_KEY = "state.links.offered"             # {"<evidence id>": "YYYY-MM-DD"}: the last day each was offered
+
+
+def session(conn, today: date, n: int) -> list[int]:
+    """The ids of the link suggestions to show today, in selection order, at most `n` a day; writes
+    SESSION_KEY and OFFERED_KEY, the caller commits. A filing suggestion is never counted (it always
+    shows). On the stored session's day: its ids still pending and live, topped up with new ones only
+    while fewer than `n` were offered (a judged one is not replaced). On another day: up to `n` afresh.
+    Candidates are taken never offered first, then the longest unseen, then the oldest, so a card the
+    owner keeps skipping never keeps another out for good; one that is no longer `live` (a task closed)
+    is not shown, and from the next day takes no slot."""
+    st = get_settings(conn)
+    waiting = pending(conn)
+    pending_ids = {s["evidence_id"] for s in waiting}
+    offered = {k: v for k, v in (st.get(OFFERED_KEY) or {}).items() if str(k).isdigit() and int(k) in pending_ids}
+    day = today.isoformat()
+    shown: list[int] = []
+    stored: list[int] = []
+    if n > 0:
+        cands = sorted((s["evidence_id"] for s in waiting if s.get("signal") != "filing" and live(conn, s)),
+                       key=lambda e: (offered.get(str(e)) or "", e))
+        prev = st.get(SESSION_KEY) or {}
+        if prev.get("day") == day:
+            stored = [int(e) for e in prev.get("ids") or []]
+            still = set(cands)
+            shown = [e for e in stored if e in still]
+        for e in cands:
+            if len(stored) >= n:
+                break
+            if e not in stored:
+                stored.append(e)
+                shown.append(e)
+    for e in shown:
+        offered[str(e)] = day
+    set_setting(conn, SESSION_KEY, {"day": day, "ids": stored})
+    set_setting(conn, OFFERED_KEY, offered)
+    return shown
 
 
 def after_create(conn, created: list[int], source: str) -> None:

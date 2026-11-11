@@ -397,6 +397,8 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         st = get_settings(conn)
         last = parse_date(st.get("state.last_review_at"))
         skip = {int(x) for x in (exclude or "").split(",") if x.strip().lstrip("-").isdigit()}
+        suggestions.session(conn, today, int(C.value(ecfg, "links.suggestions_per_review") or 0))   # today's few link suggestions
+        conn.commit()
         open_tasks = decorate_all([t for t in rows(conn, "SELECT * FROM tasks WHERE status = 'open'") if t["id"] not in skip], today, ecfg)
         from .mail_sweep import review_flags
         flags = review_flags(conn)
@@ -423,8 +425,8 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
             i["evidence"] = by_task.get(i["task"]["id"], [])      # judged in the same batch as the decision; a proposal's change can be accepted
         # Planner creates with no task (an announcement, a hunch) and Slack mentions naming no task:
         # suggestion cards with Create / Dismiss.
-        suggestions = [{"id": e["id"], "kind": e["kind"], "label": e["label"], "reason": e["excerpt"], "at": e["at"], "fields": _suggestion_fields(ecfg, e), "mail": _suggestion_mail(e)}
-                       for e in pending if e["task_id"] is None and e["kind"] in SUGGESTION_KINDS]
+        cards = [{"id": e["id"], "kind": e["kind"], "label": e["label"], "reason": e["excerpt"], "at": e["at"], "fields": _suggestion_fields(ecfg, e), "mail": _suggestion_mail(e)}
+                 for e in pending if e["task_id"] is None and e["kind"] in SUGGESTION_KINDS]
         cap = int(C.get(ecfg, "lifecycle.review_cap", 15))
         page = full[:cap]
         if page:
@@ -435,7 +437,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
             for i in page:
                 i["task"]["last_offered_at"] = today.isoformat()
         return {"today": today.isoformat(), "last_review_at": st.get("state.last_review_at"),
-                "cap": cap, "total": len(full), "labels": lifecycle.REVIEW_LABELS, "items": page, "suggestions": suggestions}
+                "cap": cap, "total": len(full), "labels": lifecycle.REVIEW_LABELS, "items": page, "suggestions": cards}
 
     def _suggestion_mail(e: dict) -> dict | None:
         """For a card the mail triage made (SPEC §8.5): the thread it came from, as Mailbird reported it."""
