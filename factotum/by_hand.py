@@ -107,14 +107,16 @@ def _clean_fields(conn, cfg: dict, fields: dict) -> tuple[dict, list[dict]]:
     return out, refused
 
 
-def add(conn, cfg: dict, *, text: str | None = None, fields: dict | None = None, key: str | None = None, today: date) -> dict:
+def add(conn, cfg: dict, *, text: str | None = None, fields: dict | None = None, key: str | None = None, today: date, verb: bool = False) -> dict:
     """Make a task now, in one `ui` batch (Source Manual; its undo drops the row). `key` makes a repeat answer with the first task."""
     if (text is None) == (fields is None):
         raise ValueError("give text or fields")
     if key is not None and not KEY_RE.match(key):
         raise ValueError("key must be 6 to 64 letters, digits, - or _")
     if text is not None:
-        pv = preview(conn, cfg, text, today, verb=False)
+        pv = preview(conn, cfg, text, today, verb=verb)
+        if not pv["is_add"]:
+            raise ValueError("not an add line")
         create = dict(pv["change"]["fields"])
         parts, refused = pv["parts"], pv["refused"]
     else:

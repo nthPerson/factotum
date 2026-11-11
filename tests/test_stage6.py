@@ -30,7 +30,7 @@ def test_the_designs_example_line():
 def test_the_verbs_and_the_line_without_one():
     assert P("new Call mom")["name"] == P("+Call mom")["name"] == P("+ Call mom")["name"] == "Call mom"
     assert P("Call mom") is None and P("addition to the list") is None
-    assert P("Call mom", verb=False)["name"] == "Call mom" and P("add Call mom", verb=False)["name"] == "Call mom"
+    assert P("Call mom", verb=False)["name"] == "Call mom" and P("add Call mom", verb=False)["name"] == "add Call mom"
     r = P("add #personal ~S")
     assert r["name"] == "" and r["refused"] == [{"words": "", "why": "a task needs a name"}]
 
@@ -118,7 +118,7 @@ def test_the_preview_checks_the_tasks_it_names(cfg, tmp_path):
     assert r["is_add"] and r["name"] == "Draft the intro" and r["refused"] == []
     assert r["change"] == {"op": "create", "fields": {"name": "Draft the intro", "links": [{"kind": "part_of", "other": 30}, {"kind": "waits_on", "other": 12}]}}
     assert [p["other"]["name"] for p in r["parts"]] == ["Assemble the committee", "Ask the chair"]
-    assert pv("add Read")["name"] == "Read"                                         # a verb is allowed, not needed
+    assert pv("add Read")["name"] == "add Read"                                     # the New task box strips nothing
     assert pv("Pay the 12 invoices after 99")["refused"] == [{"words": "after 99", "why": "no Task-99" + K}]
     assert pv("Read after 7")["refused"][0]["why"] == "Task-7 is already done" + K
     assert pv("Read under 40")["refused"][0]["why"] == "Task-40 is a step of Task-30; a step cannot have steps" + K
@@ -285,3 +285,29 @@ def test_a_repeated_key_answers_with_the_first_task_and_no_parts(cfg, tmp_path):
     b = client.post("/api/add", json={"text": "Feed the cat mon ~S", "key": "keyrep01"}).json()
     assert a["parts"] and b["already"] and b["task_id"] == a["task_id"] and b["name"] == a["name"]
     assert b["parts"] == [] and b["refused"] == []
+
+
+# --- ruling: the New task box (verb=False) strips nothing from a longer line
+
+def test_the_new_task_box_keeps_every_typed_word():
+    for line in ("add Call mom", "Add Reza to the IRB protocol", "New laptop for the lab", "+1 for the proposal"):
+        assert P(line, verb=False)["name"] == line
+    for line in ("add", "new", "+", " NEW ", "Add  "):
+        r = P(line, verb=False)
+        assert r["name"] == "" and r["refused"] == [{"words": "", "why": "a task needs a name"}], line
+
+
+def test_the_api_says_which_box_a_line_came_from(cfg, tmp_path):
+    client, conn = _client(cfg, tmp_path)
+    r = client.post("/api/add", json={"text": "add Call mom fri", "verb": True, "key": "kverb0001"}).json()
+    t = one(conn, "SELECT name, due FROM tasks WHERE id = ?", (r["task_id"],))
+    assert (t["name"], t["due"]) == ("Call mom", commands.resolve_when("fri", date.today()).isoformat())      # the route runs on the real today
+    r = client.post("/api/add", json={"text": "Add Reza to the IRB protocol", "key": "kverb0002"}).json()
+    assert one(conn, "SELECT name FROM tasks WHERE id = ?", (r["task_id"],))["name"] == "Add Reza to the IRB protocol"
+    n = one(conn, "SELECT COUNT(*) AS n FROM tasks")["n"]
+    r = client.post("/api/add", json={"text": "Call mom", "verb": True, "key": "kverb0003"})
+    assert (r.status_code, r.json()["detail"]) == (400, "not an add line")
+    assert one(conn, "SELECT COUNT(*) AS n FROM tasks")["n"] == n
+    pv = lambda **q: client.get("/api/add/preview", params={"text": "add Call mom", **q}).json()      # noqa: E731
+    assert pv(verb=1)["name"] == "Call mom" and pv()["name"] == "add Call mom"
+    assert client.get("/api/add/preview", params={"text": "Call mom", "verb": 1}).json() == {"is_add": False}

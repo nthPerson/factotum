@@ -182,14 +182,17 @@ def _date_at(toks: list[str], j: int) -> dict | None:
 
 def parse_add(text: str, today: date, projects: list[str], efforts: list[str], *, verb: bool = True,
               task: Callable[[int], dict | None] | None = None) -> dict | None:
-    """Read an add line. None when `verb` is True and the line does not start with add / new / +.
+    """Read an add line. None when `verb` is True and the line does not start with add / new / + (that verb is stripped). With
+    `verb` False nothing is stripped from a line with words after the first; a bare verb alone is a missing name.
     `task(n)` looks a task up for link_refusal; without it the task numbers are not checked."""
     t = (text or "").strip()
-    m = ADD_RE.match(t)
-    if m:
+    if verb:                                  # the Today command box: the typed verb is required and stripped
+        m = ADD_RE.match(t)
+        if not m:
+            return None
         t = t[m.end():]
-    elif verb:
-        return None
+    elif re.fullmatch(r"(?:add|new|\+)", t, re.I):   # the New task box strips nothing, except a bare verb alone
+        t = ""
     toks = t.split()
 
     # anywhere: #project (not all digits), ~effort, a lone "!"
