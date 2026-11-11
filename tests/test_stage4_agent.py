@@ -194,3 +194,123 @@ def test_the_new_tools_are_read_only_named_for_the_chat_status_line_and_free_of_
     for t in M.TOOLS:
         if t["name"] in ("tasks_query", "task_get", "task_neighbours", "waiting_tasks", "twin_candidates", "goal_tree"):
             assert not {"blocked", "dependency", "dependencies"} & set(t["description"].lower().replace(",", " ").replace(".", " ").split())
+
+
+# --- Task 15: writing
+
+def _db(tmp_path, n: int = 0):
+    """The test's database with tasks 1..n, opened writable (the tools' own connections are read-only)."""
+    from factotum.db import init_db
+    c = connect(tmp_path / "t.db")
+    init_db(c)
+    for i in range(1, n + 1):
+        mk(c, i)
+    return c
+
+
+def _writer_ctx(cfg, tmp_path, **kw):
+    return _ctx(cfg, tmp_path, run_dir=tmp_path / "run", writer=lambda: connect(tmp_path / "t.db"), **kw)
+
+
+def _lk(a, kind, b, op="link"):
+    return {"op": op, "task_id": a, "fields": {"kind": kind, "other": b}}
+
+
+def test_two_staged_links_that_make_a_loop_skip_the_second_at_apply(cfg, tmp_path):
+    """Each proposal is fine when staged; applied hours apart, the second would close a loop."""
+    from fastapi.testclient import TestClient
+    from factotum.api import create_app
+    from stage4_helpers import active_rels
+    app = create_app(cfg, db_path=str(tmp_path / "t.db"))
+    client = TestClient(app)
+    mk(app.state.conn, 1); mk(app.state.conn, 2)
+    ctx = _writer_ctx(cfg, tmp_path)
+    p1 = _call(ctx, "stage_changes", changes=[_lk(1, "waits_on", 2)])
+    p2 = _call(ctx, "stage_changes", changes=[_lk(2, "waits_on", 1)])
+    assert (p1["staged"], p1["rejected"], p2["staged"], p2["rejected"]) == (1, [], 1, [])
+    assert client.post(f"/api/proposals/{p1['proposal_id']}/apply", json={}).json()["applied"] == 1
+    out = client.post(f"/api/proposals/{p2['proposal_id']}/apply", json={}).json()
+    assert out["applied"] == 0 and "that would make a loop" in out["skipped"][0]["why"]
+    assert active_rels(app.state.conn) == {(1, 2, "waits_on")}
+
+
+def test_merge_always_stages_and_link_may_apply_directly(cfg, tmp_path):
+    from stage4_helpers import active_rels
+    c = _db(tmp_path, 2)
+    ctx = _writer_ctx(cfg, tmp_path, apply_writes=True, source="connector")
+    merge = {"op": "merge", "task_id": 1, "fields": {"into": 2}}
+    err = _rpc(ctx, 1, "tools/call", {"name": "apply_changes", "arguments": {"changes": [merge]}})
+    assert err["result"]["isError"] and "always goes to the tray" in _text(err)
+    assert c.execute("SELECT status FROM tasks WHERE id = 1").fetchone()[0] == "open"
+    res = _call(ctx, "apply_changes", changes=[_lk(1, "waits_on", 2)])
+    assert res["applied"] == 1 and active_rels(c) == {(1, 2, "waits_on")}
+    assert [r[0] for r in c.execute("SELECT source FROM batches")] == ["connector"]
+    st = _call(ctx, "stage_changes", changes=[merge])
+    assert st["staged"] == 1 and not st["rejected"]
+    assert json.loads(c.execute("SELECT changes_json FROM proposals WHERE id = ?", (st["proposal_id"],)).fetchone()[0]) == [merge]
+    assert c.execute("SELECT status FROM tasks WHERE id = 1").fetchone()[0] == "open"        # staged, not applied
+
+
+def test_the_validator_checks_links_before_the_open_task_rule(cfg, tmp_path):
+    c = _db(tmp_path)
+    mk(c, 1, status="done", completed_at="2026-10-30")
+    for i in range(2, 6):
+        mk(c, i)
+    link(c, 4, 5, "waits_on")
+    v = lambda *chs, direct=False: M._validate_changes(_ctx(cfg, tmp_path), list(chs), direct=direct)   # noqa: E731
+    assert v(_lk(1, "part_of", 3)) == ([_lk(1, "part_of", 3)], [], [])                    # a closed task may still be linked
+    kept, rejected, _ = v(_lk(True, "waits_on", 2))
+    assert not kept and "integer" in rejected[0]
+    kept, rejected, _ = v(_lk(5, "waits_on", 4))
+    assert not kept and rejected == ["#0: Task-4 already waits on Task-5, directly or through other tasks; that would make a loop"]
+    assert v(_lk(4, "waits_on", 5))[1] == ["#0: Task-4 already waits on Task-5"]
+    assert v(_lk(2, "waits_on", 3, op="unlink"))[1] == ["#0: Task-2 has no waits on link to Task-3"]
+    assert v(_lk(2, "same_as", 3))[1] == ["#0: kind must be part_of or waits_on"]
+    assert v(_lk(2, "waits_on", 2))[1] == ["#0: a task cannot be linked to itself"]
+    assert "no task 99" in v(_lk(2, "waits_on", 99))[1][0]
+    # a create's ref, named by a later link in the same call; a ref is only good after its create
+    chs = [{"op": "create", "fields": {"name": "Step A", "ref": "a", "links": [{"kind": "part_of", "other": 3}]}}, {"op": "link", "task_id": "a", "fields": {"kind": "waits_on", "other": 4, "why": "  needs   it " + "w" * 200}}]
+    kept, rejected, ignored = v(*chs)
+    assert (rejected, ignored) == ([], []) and [k["op"] for k in kept] == ["create", "link"]
+    assert kept[0]["fields"] == {"name": "Step A", "ref": "a", "links": [{"kind": "part_of", "other": 3}]}
+    assert kept[1]["task_id"] == "a" and kept[1]["fields"]["why"] == ("needs it " + "w" * 200)[:relations.WHY_MAX]
+    assert "integer" in v(*reversed(chs))[1][0]                                           # the link comes before the create
+    kept, rejected, _ = v({"op": "create", "fields": {"name": "B", "ref": "b"}}, {"op": "create", "fields": {"name": "C", "ref": "b"}},
+                          {"op": "create", "fields": {"name": "D", "ref": "9x"}}, {"op": "create", "fields": {"name": "E", "links": [{"kind": "waits_on", "other": 1}]}},
+                          {"op": "create", "fields": {"name": "F", "links": [{"kind": "part_of", "other": "nope"}]}})
+    assert [k["fields"]["name"] for k in kept] == ["B"] and len(rejected) == 4
+    assert "used twice" in rejected[0] and "ref" in rejected[1] and "Task-1 is already done" in rejected[2] and "ref of an earlier create" in rejected[3]
+
+
+def test_a_link_counts_two_rows_against_the_hourly_cap(cfg, tmp_path):
+    c = _db(tmp_path, 4)
+    cfg["server"]["mcp_apply_hourly_cap"] = 3
+    ctx = _writer_ctx(cfg, tmp_path, apply_writes=True, source="connector")
+    over = _rpc(ctx, 1, "tools/call", {"name": "apply_changes", "arguments": {"changes": [_lk(1, "waits_on", 2), _lk(3, "waits_on", 4)]}})
+    assert over["result"]["isError"] and "capped at 3" in _text(over)
+    assert c.execute("SELECT COUNT(*) FROM relations").fetchone()[0] == 0
+    assert _call(ctx, "apply_changes", changes=[_lk(1, "waits_on", 2)])["applied"] == 1
+    assert _call(ctx, "apply_changes", changes=[{"op": "add_note", "task_id": 1, "fields": {"text": "asked the lab"}}])["applied"] == 1
+    assert c.execute("SELECT context FROM tasks WHERE id = 1").fetchone()[0].endswith("2026-11-01: asked the lab")
+    rw = M._rows_written
+    assert (rw(_lk(1, "waits_on", 2)), rw(_lk(1, "waits_on", 2, op="unlink")), rw({"op": "merge", "task_id": 1, "fields": {"into": 2}})) == (2, 2, 2)
+    assert rw({"op": "create", "fields": {"name": "x", "links": [{"kind": "part_of", "other": 3}] * 2}, "reminders": [{}]}) == 1 + 1 + 4
+    assert (rw({"op": "done", "fields": {}}), rw({"op": "drop", "fields": {"outcome": "gone"}}), rw({"op": "add_note", "fields": {"text": "x"}})) == (4, 5, 1)
+
+
+def test_outcome_note_and_expect_pass_the_validator(cfg, tmp_path):
+    _db(tmp_path, 1)
+    v = lambda *chs: M._validate_changes(_ctx(cfg, tmp_path), list(chs))                  # noqa: E731
+    assert v({"op": "done", "task_id": 1, "fields": {"outcome": "x" * 301}}) == ([], ["#0: outcome is over 300 characters"], [])
+    assert v({"op": "done", "task_id": 1, "fields": {"outcome": "x" * 300}})[0] == [{"task_id": 1, "op": "done", "fields": {"outcome": "x" * 300}}]
+    assert v({"op": "drop", "task_id": 1})[0] == [{"task_id": 1, "op": "drop", "fields": {}}]
+    for bad in ("", "   ", None, "x" * 1001):
+        kept, rejected, _ = v({"op": "add_note", "task_id": 1, "fields": {"text": bad}})
+        assert not kept and "text" in rejected[0]
+    assert v({"op": "add_note", "task_id": 1, "fields": {"text": "Called the lab"}})[0] == [{"task_id": 1, "op": "add_note", "fields": {"text": "Called the lab"}}]
+    assert v({"op": "set", "task_id": 1, "fields": {"context": "B"}, "expect": {"context": "A"}})[0] == [
+        {"task_id": 1, "op": "set", "fields": {"context": "B"}, "expect": {"context": "A"}}]
+    kept, rejected, _ = v({"op": "set", "task_id": 1, "fields": {"context": "B"}, "expect": {"score": 3}})
+    assert not kept and "expect" in rejected[0]
+    assert v({"op": "set", "task_id": 1, "fields": {"outcome": "y" * 301}})[1] == ["#0: outcome is over 300 characters"]
+    assert v({"op": "set", "task_id": 1, "fields": {"outcome": None}})[0] == [{"task_id": 1, "op": "set", "fields": {"outcome": None}}]

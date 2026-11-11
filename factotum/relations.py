@@ -91,6 +91,18 @@ def check(db: Db, src: int, dst: int, kind: str) -> str | None:
     return None
 
 
+def link_problem(db: Db, op: str, src: int, kind: str, dst: int) -> str | None:
+    """Why a `link` / `unlink` of `src kind dst` between two existing tasks would not go through, in
+    words for the model, or None. A pre-check for whoever proposes a link (the MCP validator, the chat
+    cleaner); `batches` decides again when the change is applied."""
+    rel = find(db, src, dst, kind)
+    if op == "unlink":
+        return None if rel else f"Task-{src} has no {WORDS[kind]} link to Task-{dst}"
+    if rel:
+        return f"Task-{src} already {WORDS[kind]} Task-{dst}"
+    return check(db, src, dst, kind)
+
+
 def add(db: Db, src: int, dst: int, kind: str, why: str | None, source: str, batch_id: int | None) -> int:
     """Insert an active row; returns its id. `why` is one line, cut to WHY_MAX."""
     if why is not None:

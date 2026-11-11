@@ -697,11 +697,12 @@ def plaud_summary(ctx: Context, args: dict) -> dict:
     return {"recording_id": rid, "summary": text[:cap], "truncated": len(text) > cap}
 
 
-STAGE_OPS = {"set", "done", "drop", "reopen", "pin_top", "longterm", "add_reminder", "create", "watch_sent", "unwatch_sent"}
+STAGE_OPS = {"set", "done", "drop", "reopen", "pin_top", "longterm", "add_reminder", "create", "watch_sent", "unwatch_sent", "link", "unlink", "merge", "add_note"}
 PRIORITIES = {"P0", "P1", "P2", "P3"}
 CHANGES_SCHEMA = {"type": "array", "items": {"type": "object", "properties": {
-    "op": {"type": "string", "enum": sorted(STAGE_OPS)}, "task_id": {"type": "integer", "description": "every op but create"},
+    "op": {"type": "string", "enum": sorted(STAGE_OPS)}, "task_id": {"type": ["integer", "string"], "description": "every op but create; link may name a create's ref"},
     "fields": {"type": "object"},
+    "expect": {"type": "object", "description": "set only: {field: the value the edit started from}; the change is skipped if the task no longer has it"},
     "reminders": {"type": "array", "description": "create only: reminders for the new task", "items": {"type": "object", "properties": {"fire_at": {"type": "string"}, "label": {"type": "string"}, "repeat": {"type": ["string", "null"]}}}},
     "watch_sent_to": {"type": "string", "description": "create only: an email address; the task closes when mail to it is sent"}}, "required": ["op"]}}
 OPS_HELP = ("ops: create (fields: name, project, due YYYY-MM-DD or YYYY-MM-DDTHH:MM, hard, effort, context, counterpart, waiting_on, manual_priority, longterm; "
@@ -709,12 +710,34 @@ OPS_HELP = ("ops: create (fields: name, project, due YYYY-MM-DD or YYYY-MM-DDTHH
             "removes a due date), done, drop, reopen (a closed task), pin_top, "
             "longterm, add_reminder (fields: fire_at ISO local, label, repeat daily|weekdays|weekly|monthly), watch_sent (fields: to = an email address; the task "
             "closes itself when the mail sweep sees a message sent to it from now on; without `to` the task's counterpart address is used), unwatch_sent. "
+            "link (fields: kind part_of = this task is one step toward `other`, or waits_on = this task cannot sensibly be done before `other`; other = a task id; "
+            "why = one line), unlink (fields: kind, other), merge (fields: into = the task to keep; this task is dropped as the same task, its mail threads, "
+            "recordings, reminders and links move over; always staged for the user), add_note (fields: text; appended dated to the task's text), done / drop "
+            "(fields: optional outcome = one line on how it turned out); a create may carry fields.ref (a short name) and fields.links [{kind, other}] where "
+            "other is a task id or an earlier create's ref, so splitting a task into steps is one call. Closing a task never closes the tasks linked to it. "
             "Look first (tasks_query) so you edit an existing task rather than create its twin.")
 
 
+OUTCOME_MAX, NOTE_MAX = 300, 1000
+
+
+def _outcome(v) -> str | None:
+    """A closed task's outcome as the validator takes it: a string of at most OUTCOME_MAX, or None. Raises ToolError."""
+    if v is None:
+        return None
+    if not isinstance(v, str):
+        raise ToolError(f"outcome must be a string, not {v!r}")
+    v = v.strip()
+    if len(v) > OUTCOME_MAX:
+        raise ToolError(f"outcome is over {OUTCOME_MAX} characters")
+    return v or None
+
+
 def _extra_fields(fields: dict) -> dict:
-    """The three settable fields sync_file's cleaner does not cover, each validated."""
+    """The settable fields sync_file's cleaner does not cover, each validated."""
     out = {}
+    if "outcome" in fields:
+        out["outcome"] = _outcome(fields["outcome"])
     if "snoozed_until" in fields:
         v = fields["snoozed_until"]
         if v is not None:
@@ -741,16 +764,19 @@ def _extra_fields(fields: dict) -> dict:
 
 
 MAX_CHANGES, MAX_REMINDERS, NAME_MAX = 40, 10, 80
-ROWS_PER_OP = {"done": 4, "drop": 4, "reopen": 3, "watch_sent": 2, "unwatch_sent": 2}     # status, completed_at, closed_by, top_rank …
+ROWS_PER_OP = {"done": 4, "drop": 4, "reopen": 3, "watch_sent": 2, "unwatch_sent": 2,     # status, completed_at, closed_by, top_rank …
+               "link": 2, "unlink": 2, "merge": 2, "add_note": 1}                         # a link writes one row on each task
 
 
 def _rows_written(ch: dict) -> int:
     """An upper bound on the `changes` rows one validated change writes (the hourly cap's unit)."""
+    f = ch.get("fields") or {}
     if ch["op"] == "create":
-        return 1 + len(ch.get("reminders") or [])
+        return 1 + len(ch.get("reminders") or []) + 2 * len(f.get("links") or [])
     if ch["op"] == "set":
-        f = ch.get("fields") or {}
         return max(1, len(f)) + (2 if "due" in f and not f["due"] else 0)     # removing a date clears hard and the time flag with it
+    if ch["op"] in ("done", "drop") and f.get("outcome"):
+        return ROWS_PER_OP[ch["op"]] + 1
     return ROWS_PER_OP.get(ch["op"], 1)
 
 
@@ -758,19 +784,38 @@ def _norm_name(v) -> str:
     return " ".join(str(v or "").split()).casefold()
 
 
-def _validate_changes(ctx: Context, changes) -> tuple[list[dict], list[str], list[str]]:
+def _validate_changes(ctx: Context, changes, direct: bool = False) -> tuple[list[dict], list[str], list[str]]:
     """What a skill or connector may ask for, cleaned: existing rows in the right state, settable
     fields, taxonomy projects, well-formed dates, efforts, reminders and addresses, no twin of an
-    open task. In apply mode nobody taps Apply, so nothing is dropped quietly: a value the cleaner
-    would lose rejects its change, and a key that is not settable is named in `ignored`. Returns
-    (changes batches.apply will take, reasons for the ones left out, keys ignored)."""
-    from . import batches
+    open task, links that pass the link rules (pre-checked here so the model gets a usable reason;
+    `batches` decides again at apply). In apply mode nobody taps Apply, so nothing is dropped quietly:
+    a value the cleaner would lose rejects its change, and a key that is not settable is named in
+    `ignored`; `direct` (apply_changes) also refuses a merge, which drops a task and so always goes to
+    the tray. Returns (changes batches.apply will take, reasons for the ones left out, keys ignored)."""
+    from . import batches, relations
     from .sync_file import _clean_task_fields
     if not isinstance(changes, list) or not changes:
         raise ToolError("changes must be a non-empty list")
     kept, rejected, ignored = [], [], []
     efforts = C.get(ctx.cfg, "taxonomy.efforts", []) or ["XS", "S", "M", "L"]
     names = {_norm_name(r["name"]) : r["id"] for r in rows(ctx.conn, "SELECT id, name FROM tasks WHERE status = 'open'")}
+    refs: set[str] = set()                                   # the refs of the creates kept so far in this call
+
+    def task_end(i, label: str, v, ref_ok: bool):
+        """One end of a link or merge: an existing task's id, or (`ref_ok`) the ref of a create kept
+        earlier in this call. None once the reason is in `rejected`."""
+        if ref_ok and isinstance(v, str) and v in refs:
+            return v
+        if type(v) is not int:                               # True is an int in Python, and Task-1 is somebody's task
+            rejected.append(f"#{i}: {label} must be an integer{' or the ref of an earlier create in this call' if ref_ok else ''}, not {v!r}")
+            return None
+        if not one(ctx.conn, "SELECT id FROM tasks WHERE id = ?", (v,)):
+            rejected.append(f"#{i}: no task {v}")
+            return None
+        return v
+
+    def why(fields: dict) -> str:
+        return " ".join(str(fields.get("why") or "").split())[:relations.WHY_MAX]
 
     def cleaned(i, fields):
         if len(str(fields.get("name") or "").strip()) > NAME_MAX:
@@ -803,7 +848,7 @@ def _validate_changes(ctx: Context, changes) -> tuple[list[dict], list[str], lis
         if not isinstance(fields, dict):
             rejected.append(f"#{i}: fields must be an object"); continue
         if op == "create":
-            f = cleaned(i, fields)
+            f = cleaned(i, {k: v for k, v in fields.items() if k not in ("ref", "links")})
             if f is None:
                 continue
             if not f.get("name"):
@@ -811,6 +856,37 @@ def _validate_changes(ctx: Context, changes) -> tuple[list[dict], list[str], lis
             twin = names.get(_norm_name(f["name"]))
             if twin is not None:
                 rejected.append(f"#{i}: {'Task-' + str(twin) if twin else 'an earlier create in this call'} already has this name; edit it instead"); continue
+            if "outcome" in f:                               # a closed task's line; batches does not take it on a create
+                f.pop("outcome")
+                ignored.append(f"#{i}: outcome is not settable on a create")
+            ref = fields.get("ref")
+            if ref is not None:
+                if not isinstance(ref, str) or not batches.REF_RE.match(ref):
+                    rejected.append(f"#{i}: ref must be a short word (a letter, then letters, digits, - or _; at most 24), not {ref!r}"); continue
+                if ref in refs:
+                    rejected.append(f"#{i}: ref {ref!r} is used twice in this call"); continue
+                f["ref"] = ref
+            lks = fields.get("links")
+            if lks is not None:
+                if not isinstance(lks, list) or len(lks) > batches.MAX_CREATE_LINKS:
+                    rejected.append(f"#{i}: links must be a list of at most {batches.MAX_CREATE_LINKS} {{kind, other}}"); continue
+                good = []
+                for j, e in enumerate(lks):
+                    e = e if isinstance(e, dict) else {}
+                    if e.get("kind") not in relations.LINK_KINDS:
+                        rejected.append(f"#{i}: links[{j}]: kind must be part_of or waits_on"); break
+                    o = task_end(i, f"links[{j}].other", e.get("other"), True)
+                    if o is None:
+                        break
+                    if e["kind"] == "waits_on" and type(o) is int:
+                        st = one(ctx.conn, "SELECT status FROM tasks WHERE id = ?", (o,))["status"]
+                        if st != "open":                     # relations.check's reason: nothing can wait on a closed task
+                            rejected.append(f"#{i}: links[{j}]: Task-{o} is already {st}"); break
+                    good.append(dict({"kind": e["kind"], "other": o}, **({"why": why(e)} if why(e) else {})))
+                if len(good) < len(lks):
+                    continue
+                if good:
+                    f["links"] = good
             out = {"op": "create", "fields": f}
             to = ch.get("watch_sent_to")
             if to:
@@ -831,7 +907,46 @@ def _validate_changes(ctx: Context, changes) -> tuple[list[dict], list[str], lis
             if rems:
                 out["reminders"] = rems
             names[_norm_name(f["name"])] = 0                  # a second create of the same name in this call is a twin too
+            if f.get("ref"):
+                refs.add(f["ref"])
             kept.append(out); continue
+        # Links and merges come before the rule that the task must be open: the other end of a
+        # `same_as` is often closed, and a closed task may still be a step of a goal.
+        if op in ("link", "unlink"):
+            kind = fields.get("kind")
+            if kind not in relations.LINK_KINDS:
+                rejected.append(f"#{i}: kind must be part_of or waits_on"); continue
+            a = task_end(i, "task_id", tid, op == "link")
+            b = None if a is None else task_end(i, "fields.other", fields.get("other"), op == "link")
+            if b is None:
+                continue
+            if a == b:
+                rejected.append(f"#{i}: a task cannot be linked to itself"); continue
+            if type(a) is int and type(b) is int:            # a ref's task does not exist yet; batches checks it at apply
+                reason = relations.link_problem(ctx.conn, op, a, kind, b)
+                if reason:
+                    rejected.append(f"#{i}: {reason}"); continue
+            out = {"kind": kind, "other": b}
+            if op == "link" and why(fields):
+                out["why"] = why(fields)
+            kept.append({"task_id": a, "op": op, "fields": out}); continue
+        if op == "merge":
+            if direct:
+                rejected.append(f"#{i}: merge always goes to the tray for the user to confirm; use stage_changes"); continue
+            if task_end(i, "task_id", tid, False) is None:
+                continue
+            st = one(ctx.conn, "SELECT status FROM tasks WHERE id = ?", (tid,))["status"]
+            if st != "open":
+                rejected.append(f"#{i}: Task-{tid} is not open ({st}); only an open task can be merged away"); continue
+            into = task_end(i, "fields.into", fields.get("into"), False)
+            if into is None:
+                continue
+            if into == tid:
+                rejected.append(f"#{i}: a task cannot be merged into itself"); continue
+            s = relations.survivor(ctx.conn, into)
+            if s != into:
+                rejected.append(f"#{i}: Task-{into} was itself merged into Task-{s}; merge into Task-{s}"); continue
+            kept.append({"task_id": tid, "op": "merge", "fields": {"into": into}}); continue
         if type(tid) is not int:                             # True is an int in Python, and Task-1 is somebody's task
             rejected.append(f"#{i}: task_id must be an integer, not {tid!r}"); continue
         row = one(ctx.conn, "SELECT * FROM tasks WHERE id = ?", (tid,))
@@ -849,7 +964,26 @@ def _validate_changes(ctx: Context, changes) -> tuple[list[dict], list[str], lis
                 continue
             if not f:
                 rejected.append(f"#{i}: nothing settable in {sorted(fields)}"); continue
-            kept.append({"task_id": tid, "op": "set", "fields": f})
+            out = {"task_id": tid, "op": "set", "fields": f}
+            expect = ch.get("expect")
+            if expect is not None:                           # what a text edit started from; batches skips the change if the task moved on
+                if not isinstance(expect, dict) or not set(expect) <= batches.SETTABLE:
+                    rejected.append(f"#{i}: expect must be an object whose keys are settable fields (the values the edit started from)"); continue
+                out["expect"] = expect
+            kept.append(out)
+        elif op in ("done", "drop"):
+            try:
+                outcome = _outcome(fields.get("outcome"))
+            except ToolError as e:
+                rejected.append(f"#{i}: {e}"); continue
+            kept.append({"task_id": tid, "op": op, "fields": {"outcome": outcome} if outcome else {}})
+        elif op == "add_note":
+            text = fields.get("text")
+            if not isinstance(text, str) or not text.strip():
+                rejected.append(f"#{i}: add_note needs fields.text, a non-empty string"); continue
+            if len(text.strip()) > NOTE_MAX:
+                rejected.append(f"#{i}: note text is over {NOTE_MAX} characters"); continue
+            kept.append({"task_id": tid, "op": "add_note", "fields": {"text": text.strip()}})
         elif op == "add_reminder":
             try:
                 kept.append({"task_id": tid, "op": "add_reminder", "fields": batches._reminder_fields({"fields": fields})})
@@ -905,7 +1039,7 @@ def apply_changes(ctx: Context, args: dict) -> dict:
     if not ctx.may_apply():
         raise ToolError("direct writes are off in this deployment; use stage_changes")
     from . import batches
-    kept, rejected, ignored = _validate_changes(ctx, args.get("changes"))
+    kept, rejected, ignored = _validate_changes(ctx, args.get("changes"), direct=True)
     if not kept:
         raise ToolError("nothing applicable: " + "; ".join(rejected)[:600])
     # One bad conversation must not rewrite the list: direct changes are capped per hour (tray-applied
