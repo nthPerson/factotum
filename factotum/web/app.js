@@ -187,7 +187,7 @@
   // this only shows it. Refresh asks the scheduler for the sweeps and the planner, then polls.
   const sumBusy = () => !!(summary && summary.refresh && summary.refresh.state !== 'idle');
   function summaryHtml() {
-    if (!summary) return '<section class="summary" id="summary" hidden></section>';
+    if (!summary || (!summary.summary && !openOnes().length)) return '<section class="summary" id="summary" hidden></section>';
     const s = summary.summary, rf = summary.refresh || {}, busy = sumBusy(), stale = s ? s.stale || [] : [];
     const when = s && s.at ? new Date(s.at).toLocaleString([], s.day === data.today ? { hour: 'numeric', minute: '2-digit' } : { weekday: 'short', hour: 'numeric', minute: '2-digit' }) : '';
     const btn = summary.can_refresh ? `<button class="btn small" id="sum-refresh" ${busy ? 'disabled' : ''} title="Sweeps mail, Canvas, the calendar and Slack now, then runs the planner on what they found. About a minute.">${busy ? '<span class="spin"></span>Refreshing…' : '↻ Refresh'}</button>` : '';
@@ -378,7 +378,8 @@
     document.querySelectorAll('#tabs button').forEach(b => { b.setAttribute('aria-selected', b.dataset.tab === ui.tab); if (b.dataset.tab === ui.tab && PHONE() && b.scrollIntoView) b.scrollIntoView({ block: 'nearest', inline: 'center' }); });
     document.getElementById('n-today').textContent = openOnes().filter(x => x.due && fmtDue(x.due).days <= 1).length || '';
     document.getElementById('n-review').textContent = review && (review.total || (review.suggestions || []).length) ? review.total + (review.suggestions || []).filter(x => !x.created).length : '';
-    document.getElementById('remind').innerHTML = settings && settings.effective['notify.review_time']
+    const eff = settings && settings.effective;
+    document.getElementById('remind').innerHTML = eff && eff['notify.review_time'] && eff['notify.ntfy.enabled'] && eff['notify.ntfy.topic']
       ? `<span>Review at</span><span class="pill">${esc(settings.effective['notify.review_time'])}</span>` : '';
     renderTray();
     wire();
@@ -583,6 +584,10 @@
   }
   function closeTask() { ui.page = null; render(); window.scrollTo(0, ui.pageScroll); }
   const dueDays = x => x.due ? fmtDue(x.due).days : null;
+  // Shown wherever a list of open tasks would be, when there are none. Only says how tasks arrive today.
+  function noTasksHtml() {
+    return '<div class="empty"><b>No open tasks.</b> Tasks arrive from the inputs you switch on in Settings (Plaud recordings, Canvas), from suggestions you accept in Review (mail, Slack), and from Chat, where Claude can propose a task for you to create. Coming from a Notion tasks database? Run <code>python -m factotum import-notion --dry-run</code>, then <code>--apply</code> (docs/SETUP.md §5).</div>';
+  }
   function todayGroups() {
     const o = openOnes().filter(x => !(x.snoozed_until && x.snoozed_until > data.today));   // Later = hidden until its date
     const by = f => o.filter(f);
@@ -597,7 +602,7 @@
   function renderToday() {
     const { open, groups } = todayGroups();
     return summaryHtml() + composer() + groups.map(group).join('') +
-      (open.length ? '' : '<div class="empty">No open tasks. Run <code>python -m factotum import-notion --apply</code> or add some.</div>') +
+      (!open.length ? noTasksHtml() : groups.some(g => g.rows.length) ? '' : '<div class="empty">Nothing is due today or this week. Every open task is on Timeline.</div>') +
       `<div class="note">Soft dates that slipped, new items, and fading backlog are not here. They wait in <b>Review</b> so this screen stays short.</div>`;
   }
   const RECENT_CAP = 30;
@@ -616,13 +621,14 @@
       { key: 'timeline:recent', title: 'Recently added · newest first', rows: o.slice().sort((a, b) => (b.created_at || '').localeCompare(a.created_at || '')).slice(0, RECENT_CAP),
         tag: x => `<span class="chip" title="Created ${esc(x.created_at || '')}">added ${x.created_at ? new Date(x.created_at).toLocaleDateString([], { month: 'short', day: 'numeric' }) : '?'}</span>` }];
   }
-  function renderTimeline() { return composer() + timelineGroups().map(group).join(''); }
+  function renderTimeline() { return composer() + (openOnes().length ? timelineGroups().map(group).join('') : noTasksHtml()); }
   function projectGroups() {
     const m = new Map();
     openOnes().forEach(x => { const k = x.project || '—'; if (!m.has(k)) m.set(k, []); m.get(k).push(x); });
     return [...m.entries()].sort((a, b) => b[1].length - a[1].length);
   }
   function renderProjects() {
+    if (!openOnes().length) return composer() + noTasksHtml();
     return composer() + projectGroups().map(([p, rows]) => {
       const fading = rows.filter(x => x.fade_at && daysTo(x.fade_at) <= 7).length;
       const due = rows.filter(x => x.due && fmtDue(x.due).days <= 7).length;
@@ -649,7 +655,8 @@
       const more = remaining > 0 ? `<p><button class="btn" id="review-more">Review another ${Math.min(review.cap, remaining)} of the remaining ${remaining}</button></p>` : '';
       const head = ui.reviewPaused ? (remaining ? 'Batch applied.' : 'Batch applied. Nothing left to review.') : total ? `${staged.size} decision${staged.size === 1 ? '' : 's'} staged.` : 'Nothing to review.';
       const body = ui.reviewPaused ? '' : total ? '<p>Apply them in the tray, or keep going.</p>' : '';
-      return `<div class="review"><div class="finish"><h2>${head}</h2>${body}${more}${review.last_review_at ? `<p class="hint">Last review: ${review.last_review_at}</p>` : ''}</div></div>`;
+      const what = !ui.reviewPaused && !total ? '<p class="hint">Review gathers what needs a decision: soft dates that slipped, new tasks, backlog about to fade, and suggestions from the inputs you switch on.</p>' : '';
+      return `<div class="review"><div class="finish"><h2>${head}</h2>${what}${body}${more}${review.last_review_at ? `<p class="hint">Last review: ${review.last_review_at}</p>` : ''}</div></div>`;
     }
     const { task: raw, reasons, primary, flags } = items[0];
     const x = view(raw);   // staged edits (a due date set on this card) show at once, not only after Apply
@@ -771,9 +778,14 @@
         ${chat.threads.length ? chat.threads.map(t => `<button class="thread ${t.id === chat.current ? 'cur' : ''}" data-thread="${t.id}"><span class="t">${esc(t.title || 'untitled')}</span><span class="d">${when(t)}</span></button>`).join('') : '<div class="hint">No threads yet.</div>'}
       </nav>`;
     const head = `<div class="chat-head"><button class="btn small" id="chat-threads-toggle" aria-label="Threads">☰ Threads</button><span class="cur">${cur ? esc(cur.title || 'untitled') : 'New thread'}</span>${cur ? `<span class="spacer"></span><button class="btn small" id="chat-delete" ${chat.busy ? 'disabled' : ''} title="Delete this thread and its messages. Nothing it applied is undone.">Delete thread</button>` : ''}</div>`;
-    const STARTERS = ['What should I work on next, and why?', 'What is overdue, and what could I drop?', 'Is there anything in my mail from this week that I have not dealt with?'];
+    const eff = settings && settings.effective;
+    const noMail = !!eff && !eff['sources.mail.enabled'];      // settings not loaded yet: today's text
+    const STARTERS = ['What should I work on next, and why?', 'What is overdue, and what could I drop?'].concat(noMail ? [] : ['Is there anything in my mail from this week that I have not dealt with?']);
+    const intro = noMail
+      ? `Ask about your tasks${eff['sources.calendar.enabled'] ? ', your calendar' : ''}. A prompt can carry tasks (＋ Attach a task below, or select rows on another tab) or none at all. Everything Claude proposes is staged into the tray; nothing changes until you Apply.`
+      : 'Ask about your tasks, your mail or your calendar. A prompt can carry tasks (＋ Attach a task below, or select rows on another tab) or none at all. Everything Claude proposes is staged into the tray; nothing changes until you Apply. Drafts it writes land in Mailbird and are never sent.';
     const body = chat.messages.length || chat.live ? chat.messages.map(messageHtml).join('') + liveHtml()
-      : `<div class="note">Ask about your tasks, your mail or your calendar. A prompt can carry tasks (＋ Attach a task below, or select rows on another tab) or none at all. Everything Claude proposes is staged into the tray; nothing changes until you Apply. Drafts it writes land in Mailbird and are never sent.</div>
+      : `<div class="note">${intro}</div>
          <div class="starters">${STARTERS.map((t, i) => `<button class="btn small" data-starter="${i}">${esc(t)}</button>`).join('')}</div>`;
     return `<div class="chat">${list}<div class="chat-main">${head}<div class="msgs" id="msgs">${body}</div>${composer()}</div><div class="backdrop ${ui.chatDrawer ? 'on' : ''}" id="chat-backdrop"></div></div>`;
   }
