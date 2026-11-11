@@ -22,7 +22,8 @@
   const draft = { cmd: '', ask: '', askFor: null, pick: '', outcome: '', askToday: '', askTask: '', askTaskFor: null,
                   newLine: '', newKey: newKey(), newName: '',      // newName: the phone sheet's "What needs doing" (stage 6)
                   findQ: '', picks: {},      // Find any task's box; the shared task picker's boxes by slot (stage 6)      // the New task line, and the key its next add carries (stage 6)
-                  edit: {} };      // the editor's typed text by task id: {name?, context?, who?} until it is staged (stage 6)
+                  edit: {},      // the editor's typed text by task id: {name?, context?, who?} until it is staged (stage 6)
+                  step: {} };    // an Add a step line's text by task id (stage 6)
   let asking = null;        // {id, name} of the task whose outcome the toast asks (ripples (stage 5): the outcome question)
   try { draft.cmd = sessionStorage.getItem('factotum.cmd') || ''; sessionStorage.removeItem('factotum.cmd'); } catch (_) {}   // kept by reloadKeepingDraft
   const TOUCH = () => window.matchMedia('(hover: none)').matches;
@@ -47,7 +48,10 @@
              newOpen: false,
              sheet: null,          // the phone's New task sheet when open: {due, pick, project, effort, links, hit, linking} (stage 6)
              findOpen: false,      // Find any task is open (stage 6)     // the New task line is open (stage 6; a desktop's list tabs)
-             edWho: {} };          // the editor's "is for" / "waiting on" choice by task id, kept only while its field is empty (stage 6)
+             edWho: {},            // the editor's "is for" / "waiting on" choice by task id, kept only while its field is empty (stage 6)
+             linkFor: null, linkHit: null,      // the opened task whose Link a task is open, and the task its picker found (stage 6)
+             moreFor: null, mergeFor: null,     // the opened task whose More is open, and whose Merge into another picker shows (stage 6)
+             bulkLink: false, bulkSwap: false }; // two selected rows: the Link line is open, and its two tasks are swapped (stage 6)
   try { ui.tab = parseAddress().tab; } catch (_) {}
   try { const r = localStorage.getItem('factotum.rail'); if (r === '0' || r === '1') ui.railOpen = r === '1'; } catch (_) {}
   try { const s = JSON.parse(localStorage.getItem('factotum.staged') || '[]'); staged = new Map(s); } catch (_) {}
@@ -365,6 +369,7 @@
   function typingNow() {
     if ([draft.cmd, draft.ask, draft.pick, draft.outcome, draft.askToday, draft.askTask, draft.newLine, draft.newName, ui.findOpen ? draft.findQ : '', ...Object.values(draft.picks), ui.rvNote.text].some(s => (s || '').trim())) return true;
     if (Object.keys(draft.edit).some(id => edTyped(+id))) return true;      // an editor field typed in and not staged yet
+    if (Object.values(draft.step).some(s => (s || '').trim())) return true;      // an Add a step line
     if (ui.remOpen !== null || ui.dueOpen !== null || chat.busy) return true;
     const a = document.activeElement;
     return !!(a && a.matches('input, textarea, select') && a.closest('#panel') && !isDraftBox(a.id));
@@ -1010,7 +1015,7 @@
     if (!gs.length) return '<div class="empty">No linked tasks.</div>';
     return gs.map(g => {
       if (g.kind === 'twin') return twinHtml(g);
-      if (g.kind === 'goal') return `<section class="lgroup"><div class="lhead"><span class="lt">Steps of one goal</span><span class="spacer"></span>${stepsBar(g.done, g.total)}<span class="cnt">${g.done} of ${g.total} done</span></div>
+      if (g.kind === 'goal') return `<section class="lgroup"><div class="lhead"><span class="lt">Steps of one goal</span><span class="spacer"></span>${stepsBar(g.done, g.total)}<span class="cnt">${g.done} of ${g.total} done</span>${listsSteps(g.rows[0].context) ? `<button class="btn small" data-make-steps="${g.rows[0].id}">Make them tasks</button>` : ''}</div>
         ${row(g.rows[0])}${g.closed.map(closedStepHtml).join('')}${g.rows.slice(1).map(x => row(under(x))).join('')}</section>`;
       const k = g.rows.length - 1, late = g.late && fmtDue(g.late.due);
       return `<section class="lgroup"><div class="lhead"><span class="lt">${k === 1 ? 'One task is holding up another' : `One task is holding up ${k} others`}</span><span class="spacer"></span>${late ? `<span class="late">the waiting task is ${esc(late.days === -1 ? '1d overdue' : late.label)}</span>` : ''}</div>
@@ -1132,20 +1137,29 @@
     return `<p class="rewritten">Rewritten ${esc(monDay(e.at))} after ${tref(from)}. Earlier versions are in History.</p>`;
   }
   const LINK_KIND = { part_of: { out: 'part of', in: 'step' }, waits_on: { out: 'waits on', in: 'frees' }, same_as: { out: 'merged into', in: 'merged from' } };
+  // An open task's step and waiting links each have Remove beside the entry (never inside its link), staging an
+  // unlink; a staged removal is drawn struck through. A merge is undone in History, not here (stage 6).
   function linkedListHtml(d) {
     const rs = d.relations || [];
     if (!rs.length) return '';
     return `<section class="dsec"><h4>Linked tasks</h4>${rs.map(r => {
-      const o = r.other || {}, closed = o.status !== 'open';
-      const kind = r.kind === 'waits_on' && r.dir === 'out' && closed ? 'waited on' : (LINK_KIND[r.kind] || {})[r.dir] || r.kind;
-      let state;
-      if (closed) state = `${o.status}${o.completed_at ? ' ' + monDay(o.completed_at) : ''}${o.outcome ? ': ' + o.outcome : ''}`;
-      else {
-        const g = byId(o.id), due = fmtDue(o.due), steps = g && g.rel && g.rel.steps_total > 0 ? g.rel : null;
-        state = 'open' + (steps ? `, ${steps.steps_total - (steps.steps_open || 0)} of ${steps.steps_total} steps done` : '') + (due ? `, due ${due.label}` : '');
-      }
-      return `<a class="lk${closed ? ' closed' : ''}" href="/t/${o.id}" data-open-task="${o.id}"><span class="k">${esc(kind)}</span><span class="b"><span><span class="code">Task-${o.id}</span> <span class="name">${esc(o.name)}</span></span><span class="s">${esc(state)}</span></span></a>`;
+      const entry = linkedEntryHtml(r);
+      if (d.status !== 'open' || !['part_of', 'waits_on'].includes(r.kind) || !(r.other || {}).id) return entry;
+      const src = r.dir === 'out' ? d.id : r.other.id, dst = r.dir === 'out' ? r.other.id : d.id, st = staged.get(relKey(src, r.kind, dst));
+      if (st && st.op === 'unlink') return `<div class="lkrow">${entry.replace('class="lk', 'class="lk removing')}<span class="chip staged">removal staged</span></div>`;
+      return `<div class="lkrow">${entry}<button class="btn small rm" data-unlink="${src}|${r.kind}|${dst}">Remove</button></div>`;
     }).join('')}</section>`;
+  }
+  function linkedEntryHtml(r) {
+    const o = r.other || {}, closed = o.status !== 'open';
+    const kind = r.kind === 'waits_on' && r.dir === 'out' && closed ? 'waited on' : (LINK_KIND[r.kind] || {})[r.dir] || r.kind;
+    let state;
+    if (closed) state = `${o.status}${o.completed_at ? ' ' + monDay(o.completed_at) : ''}${o.outcome ? ': ' + o.outcome : ''}`;
+    else {
+      const g = byId(o.id), due = fmtDue(o.due), steps = g && g.rel && g.rel.steps_total > 0 ? g.rel : null;
+      state = 'open' + (steps ? `, ${steps.steps_total - (steps.steps_open || 0)} of ${steps.steps_total} steps done` : '') + (due ? `, due ${due.label}` : '');
+    }
+    return `<a class="lk${closed ? ' closed' : ''}" href="/t/${o.id}" data-open-task="${o.id}"><span class="k">${esc(kind)}</span><span class="b"><span><span class="code">Task-${o.id}</span> <span class="name">${esc(o.name)}</span></span><span class="s">${esc(state)}</span></span></a>`;
   }
   // Provenance (design §4): tasks that share a recording or a mail thread, one line per place; never a link.
   function nearbyHtml(d) {
@@ -1245,6 +1259,11 @@
       await load();
     });
     root.querySelectorAll('[data-hist-more]').forEach(b => b.onclick = () => { const id = +b.dataset.histMore, d = detailCache.get(id); if (d && d.history) loadDetail(id, d.history.next_before); });
+    root.querySelectorAll('[data-unlink]').forEach(b => b.onclick = () => {      // Linked tasks' Remove (stage 6)
+      const [src, kind, dst] = b.dataset.unlink.split('|');
+      stageChange({ task_id: +src, op: 'unlink', fields: { kind, other: +dst } }, '');
+      toast('Removal staged · press Apply in the tray');
+    });
   }
 
   // ---------- rendering ----------
@@ -1384,16 +1403,16 @@
         <button class="btn small" data-bulk="done">Done</button><button class="btn small" data-bulk="drop">Drop</button>
         <button class="btn small" data-bulk="snooze">Snooze to tomorrow</button>
         <span class="remform"><input type="date" id="bulk-date" aria-label="Due date"><button class="btn small" data-bulk="setdue">Set due</button><button class="btn small" data-bulk="cleardue">Remove due date</button></span>
-        <button class="btn small" data-bulk="top">Pin to Top</button><button class="btn small" data-bulk="longterm">Long-term</button>
-        <span class="spacer"></span><button class="btn small" data-bulk="clear">Clear</button></div>`}`;
+        <button class="btn small" data-bulk="top">Pin to Top</button><button class="btn small" data-bulk="longterm">Long-term</button>${ui.sel.size === 2 ? `<button class="btn small" data-bulk="link" aria-expanded="${ui.bulkLink}">Link</button>` : ''}
+        <span class="spacer"></span><button class="btn small" data-bulk="clear">Clear</button>${bulkLinkHtml()}</div>`}`;
   }
   // The phone's bulk bar: one line (Done, Drop, Snooze, More, ✕) that takes the tray's place at the
   // bottom while rows are selected; More opens a second line with the rest of desktop's actions.
   function shortBar() {
     return `<div class="bulk short" id="bulk"><b id="bulk-n"></b>
         <button class="btn small" data-bulk="done">Done</button><button class="btn small" data-bulk="drop">Drop</button><button class="btn small" data-bulk="snooze">Snooze</button>
-        <button class="btn small" id="bulk-more" aria-expanded="${ui.bulkMore}">More</button>
-        <span class="spacer"></span><button class="btn small" data-bulk="clear" aria-label="Clear selection">✕</button>
+        ${ui.sel.size === 2 ? `<button class="btn small" data-bulk="link" aria-expanded="${ui.bulkLink}">Link</button>` : ''}<button class="btn small" id="bulk-more" aria-expanded="${ui.bulkMore}">More</button>
+        <span class="spacer"></span><button class="btn small" data-bulk="clear" aria-label="Clear selection">✕</button>${bulkLinkHtml()}
         ${ui.bulkMore ? `<div class="bulk-more">
           <span class="remform"><input type="date" id="bulk-date" aria-label="Due date"><button class="btn small" data-bulk="setdue">Set due</button><button class="btn small" data-bulk="cleardue">Remove due date</button></span>
           <button class="btn small" data-bulk="top">Pin to Top</button><button class="btn small" data-bulk="longterm">Long-term</button></div>` : ''}</div>`;
@@ -1442,8 +1461,9 @@
   // task, its actions. The task page lays out the same parts (taskPageHtml). The two [data-…] containers
   // fill when the task's own payload arrives (detailCache). An open task's left column starts with its editor (stage 6).
   function detailsHtml(x) {
-    return `<div class="dgrid"><div class="dcol">${isOpenRow(x.id) && !editorsDrawn.has(x.id) ? editorHtml(x) : whereHtml(x)}<div data-dlinks="${x.id}">${detailAsyncHtml(x.id)}</div>${factsHtml(x)}</div>
-        <div class="dcol" data-dhist="${x.id}">${historyHtml(x.id)}</div></div>${x.status !== 'open' ? '' : actionsHtml(x)}${taskPlaceHtml(x.id)}`;
+    const edit = isOpenRow(x.id) && !editorsDrawn.has(x.id);      // the one copy of a row listed twice that edits (and links by hand)
+    return `<div class="dgrid"><div class="dcol">${edit ? editorHtml(x) : whereHtml(x)}<div data-dlinks="${x.id}">${detailAsyncHtml(x.id)}</div>${edit ? linkByHandHtml(x) : ''}${factsHtml(x)}</div>
+        <div class="dcol" data-dhist="${x.id}">${historyHtml(x.id)}</div></div>${x.status !== 'open' ? '' : actionsHtml(x, edit)}${taskPlaceHtml(x.id)}`;
   }
   function factsHtml(x) {
     const links = (x.links || []).map(l => {
@@ -1462,7 +1482,8 @@
             <dt>Lifecycle</dt><dd>${x.tier}${x.fade_at ? ' · fades ' + x.fade_at : ''}${x.last_call_at ? ' · last call ' + x.last_call_at : ''}${x.snoozed_until ? ' · snoozed until ' + x.snoozed_until : ''}</dd>
             <dt>Reminders</dt><dd>${(x.reminders || []).map(r => `<span class="chip rem">${fmtWhen(r.fire_at)}${r.repeat ? ' · ' + esc(r.repeat) : ''} ${esc(r.label || '')}</span>`).join(' ') || '<span class="code">none</span>'}</dd></dl>`;
   }
-  function actionsHtml(x) {
+  // `more`: this copy draws More's line when it is open (one copy of a row listed twice; stage 6).
+  function actionsHtml(x, more = true) {
     return `<div class="actions">
           <button class="btn small" data-act="done" data-id="${x.id}">Done</button>
           <button class="btn small" data-act="drop" data-id="${x.id}">Drop</button>
@@ -1476,7 +1497,8 @@
           <button class="btn small" data-chat-canned="draft_reply" data-id="${x.id}" title="A chat turn: saves a reply draft in Mailbird, never sends">✉ Draft reply</button>
           <button class="btn small" data-chat-canned="related" data-id="${x.id}" title="A chat turn: finds the tasks this one belongs with and offers to link them">Ask Claude what else is related</button>
           <button class="btn small" data-ask-task="${x.id}">Ask Claude</button>
-        </div>`;
+          <button class="btn small" data-more="${x.id}" aria-expanded="${ui.moreFor === x.id}">More</button>
+        </div>${more ? moreHtml(x) : ''}`;
   }
   // ---------- the task page (stage 1, stage 4b) ----------
   // A task full-screen, rendered into #panel in place of the tab (render()): on a phone every task a tap
@@ -1501,7 +1523,7 @@
     const pagebar = closed || !phone ? '' : `<div class="pagebar">${later}<button data-page="done">Done</button><button data-page="later" aria-expanded="${ui.pageLater}">Later</button><button data-page="more" aria-expanded="${ui.pageMore}">More</button></div>`;
     return `<div class="taskpage${pagebar ? ' barred' : ''}" data-id="${id}">${bar}<h2>${esc(x.name)}</h2><div class="meta">${chipsHtml(x)}</div>
       ${closed ? `<div class="closedline"><p>This task is ${esc(srv.status)}.</p>${reopen}</div>` : ''}
-      <div class="details"><div class="dgrid"><div class="dcol">${isOpenRow(id) ? editorHtml(x) : whereHtml(x)}<div data-dlinks="${id}">${detailAsyncHtml(id)}</div>${factsHtml(x)}</div>
+      <div class="details"><div class="dgrid"><div class="dcol">${isOpenRow(id) ? editorHtml(x) : whereHtml(x)}<div data-dlinks="${id}">${detailAsyncHtml(id)}</div>${isOpenRow(id) ? linkByHandHtml(x) : ''}${factsHtml(x)}</div>
         <div class="dcol" data-dhist="${id}">${historyHtml(id)}</div></div>${acts}${taskPlaceHtml(id)}</div>${pagebar}</div>`;
   }
   // A Later on the page's pinned bar: the task leaves the lists until the day, like the Review card's Later.
@@ -2243,7 +2265,9 @@
     const t = e.target;
     setTimeout(() => { if (document.activeElement === t) showBox(t, !window.matchMedia('(prefers-reduced-motion: reduce)').matches); }, 300);
   });
-  document.addEventListener('focusout', () => document.body.classList.remove('kb-open'));
+  // A moment later, and only when no text box took the focus: a tap that blurs a box near the bottom (a picker's hit
+  // under a phone task page's More) must land on what was under the finger before the pinned bars come back (stage 6).
+  document.addEventListener('focusout', () => setTimeout(() => { if (!typesText(document.activeElement)) document.body.classList.remove('kb-open'); }, 300));
   let logData = null;
   async function loadLog() { logData = await api('/api/log?limit=' + logLimit); render(); }
   // The Log has four views of the same two lists (SPEC §9): Timeline merges changes and runs by time,
@@ -3030,6 +3054,126 @@
     });
   }
 
+  // ---------- by hand (stage 6): linking and More ----------
+  // Under Linked tasks an open task has Link a task (the shared picker, closed tasks included; then this task is a step
+  // of it, waits on it, or is the same task) and, when it is not itself a step, Add a step (made at once, already linked,
+  // in the goal's project). More, in the actions, has Split into steps (a `split` turn in the task's own conversation),
+  // Duplicate (made at once and opened) and Merge into another. Two selected rows offer Link in the bulk bar, and a goal
+  // in the Linked view whose text lists steps offers Make them tasks. Every link, removal and merge stages in the tray.
+  const STEP_LINE = /^\s*(?:[-*•]|\d+[.)])\s+\S/;
+  const listsSteps = text => String(text || '').split('\n').filter(l => STEP_LINE.test(l)).length >= 2;
+  function linkByHandHtml(x) {
+    const id = x.id, open = ui.linkFor === id;
+    let pick = '';
+    if (open) {
+      pick = pickerHtml('link', { placeholder: 'Link a task: a number, or a few words', closed: true, exclude: new Set([id]) });
+      if (ui.linkHit != null) {
+        const h = sheetHitInfo(ui.linkHit), closed = h.status !== 'open';
+        pick += `<div class="lkhit"><span class="code">Task-${h.id}</span> <span class="nm">${esc(h.name)}</span>${statusChip(h)}</div>
+          <div class="lkchoice"><span class="lkthis">This task…</span><button class="btn small" data-link-as="part_of">is a step of it</button><button class="btn small" data-link-as="waits_on" ${closed ? `disabled title="Task-${h.id} is ${esc(h.status)}; nothing to wait on"` : ''}>waits on it</button><button class="btn small" data-link-as="same_as">is the same task</button></div>`;
+      }
+    }
+    const step = x.rel && x.rel.goal_id != null ? '' : `<div class="stepline"><input id="step-line-${id}" type="text" autocomplete="off" enterkeyhint="done" placeholder="Add a step" aria-label="Add a step to Task-${id}" value="${esc(draft.step[id] || '')}"><button class="btn small primary" data-step-add="${id}">Add step</button></div>
+      <p class="hint stephint">The step is created already linked, in the goal's project.</p>`;
+    return `<section class="dsec byhand"><div><button class="btn small" data-link-open="${id}" aria-expanded="${open}">Link a task</button></div>${open ? `<div class="linkpick">${pick}</div>` : ''}${step}</section>`;
+  }
+  // More's line under an opened task's actions; Merge into another opens its picker there.
+  function moreHtml(x) {
+    if (ui.moreFor !== x.id) return '';
+    const id = x.id;
+    return `<div class="more-row"><button class="btn small" data-more-split="${id}" title="A chat turn: Claude drafts the steps; one Apply creates and links them">Split into steps</button><button class="btn small" data-more-dup="${id}">Duplicate</button><button class="btn small" data-more-merge="${id}" aria-expanded="${ui.mergeFor === id}">Merge into another</button>
+      ${ui.mergeFor === id ? pickerHtml('merge', { placeholder: 'Merge into: a number, or a few words', closed: true, exclude: new Set([id]) }) : ''}</div>`;
+  }
+  // The two selected rows in tick order, or swapped by ⇄.
+  function bulkPair() { const [a, b] = [...ui.sel]; return ui.bulkSwap ? [b, a] : [a, b]; }
+  function bulkLinkHtml() {
+    if (!ui.bulkLink || ui.sel.size !== 2) return '';
+    const [a, b] = bulkPair();
+    return `<div class="linkline"><span class="code">Task-${a}</span><button class="btn small" data-bulk-link="part_of">is a step of</button><button class="btn small" data-bulk-link="waits_on">waits on</button><button class="btn small" data-bulk-link="same_as">is the same task as</button><span class="code">Task-${b}</span><button class="btn small" data-bulk-swap aria-label="Swap the two tasks" title="Swap the two tasks">⇄</button></div>`;
+  }
+  // a is this task, b the other: a is a step of b, waits on b, or the two are one task (a closed b is the one kept).
+  function stageLinkChoice(a, b, kind, bClosed) {
+    let c;
+    if (kind === 'same_as') { const keep = bClosed ? b : defaultKeep(a, b); c = { task_id: keep === a ? b : a, op: 'merge', fields: { into: keep } }; }
+    else c = { task_id: a, op: 'link', fields: { kind, other: b } };
+    stageChange(c, '');
+    toast('Link staged · press Apply in the tray');
+  }
+  pickers.link = id => { ui.linkHit = id; render(); };
+  pickers.merge = id => {
+    const from = ui.mergeFor; if (from == null) return;
+    ui.mergeFor = ui.moreFor = null;
+    stageChange({ task_id: from, op: 'merge', fields: { into: id } }, '');
+    toast(`Merge staged: Task-${from} goes, Task-${id} stays`);
+  };
+  function addStep(id) {
+    const t = byId(id), sent = draft.step[id] || '', name = sent.trim();
+    if (!t) return;
+    if (!name) { const el = document.getElementById('step-line-' + id); if (el) el.focus(); return; }
+    addTask({ fields: { name, project: t.project, under: id } },
+      { clear: () => { if ((draft.step[id] || '') === sent) delete draft.step[id]; }, said: n => 'Added Task-' + n + ' as a step of Task-' + id });
+  }
+  // A copy of what the server holds (not what is staged), under the same goal; opened in its editor. `/api/add` takes a
+  // date, so a timed due is cut to its day (a refused one would take `hard` with it).
+  function duplicateTask(id) {
+    const t = byId(id); if (!t) return;
+    const due = t.due ? String(t.due).slice(0, 10) : null;
+    const f = { name: t.name, project: t.project, effort: t.effort, due, hard: due && t.hard ? 1 : null, context: t.context,
+      counterpart: t.counterpart, waiting_on: t.waiting_on, under: t.rel ? t.rel.goal_id : null };
+    ui.moreFor = null;
+    addTask({ fields: Object.fromEntries(Object.entries(f).filter(([, v]) => v != null && v !== '')) }, { open: true });
+  }
+  // The task's conversation, shown in it, with its earlier messages loaded (so a `split` answer lands under them).
+  async function taskConversation(id) {
+    const pl = placeOf('task', id);
+    if (!pl.loaded) await loadPlace(pl);
+    ui.askTask = id;
+    return pl;
+  }
+  function wireByHand(panel) {
+    panel.querySelectorAll('[data-link-open]').forEach(b => b.onclick = () => {
+      const id = +b.dataset.linkOpen, open = ui.linkFor !== id;
+      ui.linkFor = open ? id : null; ui.linkHit = null; draft.picks.link = '';
+      render();
+      const el = open && document.getElementById('pick-link'); if (el) el.focus({ preventScroll: true });
+    });
+    panel.querySelectorAll('[data-link-as]').forEach(b => b.onclick = () => {
+      const id = ui.linkFor, n = ui.linkHit; if (id == null || n == null) return;
+      const closed = sheetHitInfo(n).status !== 'open';
+      ui.linkFor = ui.linkHit = null;
+      stageLinkChoice(id, n, b.dataset.linkAs, closed);
+    });
+    panel.querySelectorAll('input[id^="step-line-"]').forEach(inp => {
+      const id = +inp.id.slice('step-line-'.length);
+      inp.oninput = () => { draft.step[id] = inp.value; };
+      inp.addEventListener('keydown', e => { if (enterKey(e)) { e.preventDefault(); addStep(id); } e.stopPropagation(); });
+    });
+    panel.querySelectorAll('[data-step-add]').forEach(b => b.onclick = () => addStep(+b.dataset.stepAdd));
+    panel.querySelectorAll('[data-more]').forEach(b => b.onclick = () => { const id = +b.dataset.more; ui.moreFor = ui.moreFor === id ? null : id; ui.mergeFor = null; draft.picks.merge = ''; render(); });
+    panel.querySelectorAll('[data-more-split]').forEach(b => b.onclick = async () => {
+      const id = +b.dataset.moreSplit; ui.moreFor = null;
+      sendTurn(await taskConversation(id), '', 'split', 'askTask');
+    });
+    panel.querySelectorAll('[data-more-dup]').forEach(b => b.onclick = () => duplicateTask(+b.dataset.moreDup));
+    panel.querySelectorAll('[data-more-merge]').forEach(b => b.onclick = () => {
+      const id = +b.dataset.moreMerge; ui.mergeFor = ui.mergeFor === id ? null : id; draft.picks.merge = '';
+      render();
+      const el = ui.mergeFor != null && document.getElementById('pick-merge'); if (el) el.focus({ preventScroll: true });
+    });
+    panel.querySelectorAll('[data-bulk-link]').forEach(b => b.onclick = () => {
+      const [a, z] = bulkPair();
+      ui.sel.clear(); ui.bulkLink = ui.bulkSwap = false;
+      stageLinkChoice(a, z, b.dataset.bulkLink, false);
+    });
+    panel.querySelectorAll('[data-bulk-swap]').forEach(b => b.onclick = () => { ui.bulkSwap = !ui.bulkSwap; render(); });
+    // The goal opens (its row on a desktop, its page on a phone) with its conversation, and the turn starts there.
+    panel.querySelectorAll('[data-make-steps]').forEach(b => b.onclick = async () => {
+      const goal = +b.dataset.makeSteps, pl = await taskConversation(goal);
+      openTask(goal);
+      sendTurn(pl, 'Make them tasks', 'split', 'askTask');
+    });
+  }
+
   // ---------- wiring ----------
   // A text box that grows: Enter sends (Shift+Enter is a new line); on a touch keyboard Enter is a new line and the button sends.
   function typing(el, key, send) {
@@ -3089,12 +3233,14 @@
     wireDueChips(panel);
     panel.querySelectorAll('[data-bulk]').forEach(b => b.addEventListener('click', () => {
       const k = b.dataset.bulk; if (k === 'clear') { ui.sel.clear(); render(); return; }
+      if (k === 'link') { ui.bulkLink = !ui.bulkLink; ui.bulkSwap = false; render(); return; }      // opens the Link line (stage 6)
       const d = k === 'setdue' ? (document.getElementById('bulk-date') || {}).value : null;
       if (k === 'setdue' && !d) { toast('Pick a date'); return; }
       [...ui.sel].forEach(id => act(id, k, d)); ui.sel.clear(); render();
     }));
     const bm = document.getElementById('bulk-more'); if (bm) bm.onclick = () => { ui.bulkMore = !ui.bulkMore; render(); };
     if (!ui.sel.size) ui.bulkMore = false;      // the next selection starts with the short bar on one line
+    if (ui.sel.size !== 2) ui.bulkLink = ui.bulkSwap = false;      // Link is for exactly two rows
     const bulk = document.getElementById('bulk');
     if (bulk) {
       bulk.classList.toggle('on', ui.sel.size > 0); const n = document.getElementById('bulk-n'); if (n) n.textContent = ui.sel.size;
@@ -3197,6 +3343,7 @@
     wireNew(panel);
     wireFind(panel);
     wireEditors(panel);
+    wireByHand(panel);
     placeReviewBar();
     const po = document.getElementById('chat-pick-open'); if (po) po.onclick = () => { ui.pickOpen = !ui.pickOpen; draft.pick = ''; render(); const el = document.getElementById('chat-pick'); if (el) el.focus(); };
     const pk = document.getElementById('chat-pick');
