@@ -442,7 +442,12 @@ def _write_fields(cur, task: dict, fields: dict, batch_id: int, undo: list) -> b
                     (batch_id, task["id"], k, json.dumps(task.get(k)), json.dumps(v)))
         undo.append({"task_id": task["id"], "field": k, "old": task.get(k), "new": v})
     sets = ", ".join(f"{k} = ?" for k in diffs) + ", edited_at = ?"
-    cur.execute(f"UPDATE tasks SET {sets} WHERE id = ?", tuple(diffs.values()) + (now_iso(), task["id"]))
+    now = now_iso()
+    args = tuple(diffs.values()) + (now,)
+    if "last_reviewed_at" in diffs:   # a Review decision: the owner has seen the neighbours (a stamp, no changes row)
+        sets += ", neighbours_seen_at = ?"
+        args += (now,)
+    cur.execute(f"UPDATE tasks SET {sets} WHERE id = ?", args + (task["id"],))
     return True
 
 

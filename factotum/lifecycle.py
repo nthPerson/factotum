@@ -11,12 +11,17 @@ from .dates import days_until, parse_date
 OPEN = "open"
 CLOSED = ("done", "dropped", "faded", "lapsed")
 
-REVIEW_ORDER = ["last_call", "thread_updated", "mentioned", "planner", "snooze_over", "new", "slipped", "fading", "back", "reminder_missed"]
+REVIEW_ORDER = ["last_call", "thread_updated", "mentioned", "planner", "freed", "blocker_gone", "steps_done", "linked_changed", "link_suggested", "snooze_over", "new", "slipped", "fading", "back", "reminder_missed"]
 REVIEW_LABELS = {
     "last_call": "Last call · hard deadline passed",
     "thread_updated": "Thread updated",
     "mentioned": "Mentioned in Slack",
     "planner": "Planner suggests",
+    "freed": "Free now",
+    "blocker_gone": "A task it waited on closed",
+    "steps_done": "All steps done",
+    "linked_changed": "A linked task changed",
+    "link_suggested": "Suggested link",
     "snooze_over": "Back from Later",
     "new": "New · not yet reviewed",
     "slipped": "Soft date slipped",
@@ -44,7 +49,12 @@ def fade_at(task: dict, cfg: dict) -> date | None:
         return None
     # A Review decision (Keep, Later) counts as attention: it restarts the quiet clock, so a kept
     # item comes back as Fading in fade_days instead of lingering open and unseen.
+    rel = task.get("rel") or {}
+    if rel.get("waits_on_open"):
+        return None   # a task waiting on another open task does not fade; its clock starts when it is freed
     anchors = [parse_date(task.get(k)) for k in ("last_mention_at", "last_reviewed_at")]
+    # freed, a step's activity (keeps its goal alive, not the reverse) and a merge also restart the clock
+    anchors += [parse_date(rel.get(k)) for k in ("freed_at", "neighbour_activity_at", "merged_at")]
     anchor = max((a for a in anchors if a), default=None) or parse_date(task.get("edited_at")) or parse_date(task.get("created_at"))
     if anchor is None:
         return None
@@ -79,6 +89,22 @@ def review_reasons(task: dict, today: date, cfg: dict, last_review_at: date | No
         out.append("mentioned")
     if flags.get("planner"):
         out.append("planner")
+    rel = task.get("rel") or {}
+    freed_at = parse_date(rel.get("freed_at"))
+    closed = rel.get("waits_on_closed") or []
+    if freed_at and closed:
+        latest = max(closed, key=lambda c: (c.get("at") or "", c.get("id") or 0))
+        if latest.get("status") == "done" and not (reviewed and reviewed >= freed_at):
+            out.append("freed")
+    if any(c.get("status") in ("dropped", "faded", "lapsed") and (not reviewed or (parse_date(c.get("at")) or date.min) > reviewed) for c in closed):
+        out.append("blocker_gone")
+    activity = parse_date(rel.get("neighbour_activity_at"))
+    if rel.get("steps_total", 0) > 0 and rel.get("steps_open", 0) == 0 and not (reviewed and activity and reviewed >= activity):
+        out.append("steps_done")
+    if rel.get("changed"):
+        out.append("linked_changed")
+    if rel.get("suggestions"):
+        out.append("link_suggested")
     # Later = "come back on <date>": once the snooze is over the item is asked about again, until
     # a decision made on or after that date suppresses it.
     if snoozed and snoozed <= today and not (reviewed and reviewed >= snoozed):
@@ -100,6 +126,44 @@ def review_reasons(task: dict, today: date, cfg: dict, last_review_at: date | No
     if flags.get("reminder_missed"):
         out.append("reminder_missed")
     return [r for r in REVIEW_ORDER if r in out]
+
+
+REASON_TEXTS = {
+    "freed": "Free now: Task-{freed_by} is done",
+    "blocker_gone": "Task-{id} was {status}. Is this still needed?",
+    "steps_done": "All steps are done. Close this, or is there more?",
+    "linked_changed": "A linked task changed{by}",
+    "link_suggested": "Suggested: {word} Task-{other}?",
+}
+
+
+def reason_texts(task: dict, reasons: list[str]) -> dict[str, str]:
+    """The card sentence for each link reason in `reasons` (others are left out)."""
+    from .relations import WORDS
+    rel = task.get("rel") or {}
+    out: dict[str, str] = {}
+    for r in reasons:
+        if r not in REASON_TEXTS:
+            continue
+        if r == "freed":
+            out[r] = REASON_TEXTS[r].format(freed_by=rel.get("freed_by"))
+        elif r == "blocker_gone":
+            gone = [c for c in rel.get("waits_on_closed") or [] if c.get("status") in ("dropped", "faded", "lapsed")]
+            if not gone:
+                continue
+            c = max(gone, key=lambda c: (c.get("at") or "", c.get("id") or 0))
+            out[r] = REASON_TEXTS[r].format(id=c["id"], status=c["status"])
+        elif r == "linked_changed":
+            by = (rel.get("changed") or {}).get("by")
+            out[r] = REASON_TEXTS[r].format(by=f" (Task-{by})" if by else "")
+        elif r == "link_suggested":
+            sug = (rel.get("suggestions") or [None])[0]
+            if not sug:
+                continue
+            out[r] = REASON_TEXTS[r].format(word=WORDS.get(sug.get("kind"), "linked to"), other=sug["other"])
+        else:
+            out[r] = REASON_TEXTS[r]
+    return out
 
 
 def build_review_queue(tasks: list[dict], today: date, cfg: dict, last_review_at: date | None, flags_by_id: dict[int, dict] | None = None,

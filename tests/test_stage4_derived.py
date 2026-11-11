@@ -212,3 +212,70 @@ def test_real_scores_agree_across_surfaces(conn, cfg, tmp_path):
     ctx = M.Context(connect(path), cfg, today=D)
     assert {t["id"]: t["score"] for t in M.tasks_query(ctx, {})["tasks"]} == want
     assert {r["id"]: r["score"] for r in chat.attached_rows(conn, cfg, [1, 2, 3, 4], D)} == want
+
+
+# --- Task 10: lifecycle and Review
+
+def _lrel(**kw):
+    return dict({"links": [], "waits_on_open": [], "waits_on_closed": [], "frees_open": [], "goal_id": None, "steps_open": 0, "steps_total": 0,
+                 "freed_at": None, "freed_by": None, "neighbour_activity_at": None, "merged_at": None, "changed": None, "suggestions": []}, **kw)
+
+
+def test_a_waiting_task_does_not_fade_and_its_clock_starts_when_freed(cfg):
+    t = task(project="FAMAIL", last_mention_at="2026-09-01", rel=_lrel(waits_on_open=[2]))
+    assert lifecycle.fade_at(t, cfg) is None and lifecycle.expire([dict(t, last_offered_at="2026-10-30")], TODAY, cfg) == []
+    freed = task(project="FAMAIL", last_mention_at="2026-09-01", rel=_lrel(freed_at="2026-10-30", freed_by=2, waits_on_closed=[{"id": 2, "status": "done", "at": "2026-10-30"}]))
+    assert lifecycle.fade_at(freed, cfg) == date(2026, 11, 20)
+
+
+def test_a_steps_activity_keeps_its_goal_alive_and_not_the_reverse(cfg):
+    goal = task(project="FAMAIL", last_mention_at="2026-09-01", rel=_lrel(steps_total=2, steps_open=1, neighbour_activity_at="2026-10-28"))
+    assert lifecycle.fade_at(goal, cfg) == date(2026, 11, 18)
+    step = task(project="FAMAIL", last_mention_at="2026-09-01", rel=_lrel(goal_id=5))
+    assert lifecycle.fade_at(step, cfg) == date(2026, 9, 22)
+
+
+def test_the_five_reasons_come_from_rel_without_flags(cfg):
+    def t(**rel):
+        return task(project="FAMAIL", last_mention_at=TODAY.isoformat(), last_reviewed_at="2026-10-01", rel=_lrel(**rel))
+    cases = {
+        "freed": t(freed_at="2026-10-30", freed_by=2, waits_on_closed=[{"id": 2, "status": "done", "at": "2026-10-30"}]),
+        "blocker_gone": t(waits_on_closed=[{"id": 2, "status": "dropped", "at": "2026-10-30"}]),
+        "steps_done": t(steps_total=2, steps_open=0, neighbour_activity_at="2026-10-30"),
+        "linked_changed": t(changed={"by": 5, "at": "2026-10-30T00:00:00+00:00", "batch_id": 1}),
+        "link_suggested": t(suggestions=[{"evidence_id": 1, "kind": "same_as", "other": 9, "keep": 9}]),
+    }
+    for reason, tk in cases.items():
+        assert lifecycle.review_reasons(tk, TODAY, cfg, None) == [reason], reason
+    texts = {r: lifecycle.reason_texts(tk, [r])[r] for r, tk in cases.items()}
+    assert texts == {"freed": "Free now: Task-2 is done", "blocker_gone": "Task-2 was dropped. Is this still needed?",
+                     "steps_done": "All steps are done. Close this, or is there more?", "linked_changed": "A linked task changed (Task-5)",
+                     "link_suggested": "Suggested: same as Task-9?"}
+    assert lifecycle.reason_texts(cases["linked_changed"], ["linked_changed", "new"]).keys() == {"linked_changed"}
+    # a Keep on or after the event suppresses it
+    kept = dict(cases["freed"], last_reviewed_at="2026-10-30")
+    assert lifecycle.review_reasons(kept, TODAY, cfg, None) == []
+    kept = dict(cases["steps_done"], last_reviewed_at="2026-10-30")
+    assert lifecycle.review_reasons(kept, TODAY, cfg, None) == []
+    # never reviewed: plus "new"
+    fresh = dict(cases["blocker_gone"], last_reviewed_at=None)
+    assert lifecycle.review_reasons(fresh, TODAY, cfg, None) == ["blocker_gone", "new"]
+    # a freed link to a task that was dropped is not "freed"
+    d = t(freed_at="2026-10-30", freed_by=2, waits_on_closed=[{"id": 2, "status": "dropped", "at": "2026-10-30"}])
+    assert "freed" not in lifecycle.review_reasons(d, TODAY, cfg, None)
+
+
+def test_review_order_puts_link_reasons_after_the_planner(cfg):
+    p = task(id=1, project="FAMAIL", last_mention_at=TODAY.isoformat(), last_reviewed_at="2026-10-01", rel=_lrel())
+    f = task(id=2, project="FAMAIL", last_mention_at=TODAY.isoformat(), last_reviewed_at="2026-10-01",
+             rel=_lrel(freed_at="2026-10-30", freed_by=3, waits_on_closed=[{"id": 3, "status": "done", "at": "2026-10-30"}]))
+    q = lifecycle.build_review_queue([f, p], TODAY, cfg, None, {1: {"planner": True}})
+    assert [i["task"]["id"] for i in q] == [1, 2] and [i["primary"] for i in q] == ["planner", "freed"]
+
+
+def test_a_review_decision_stamps_neighbours_seen_at(conn):
+    mk(conn, 1)
+    batches.apply(conn, [{"op": "set", "task_id": 1, "fields": {"due": "2026-11-09"}}], "ui", TODAY)
+    assert conn.execute("SELECT neighbours_seen_at FROM tasks WHERE id = 1").fetchone()[0] is None
+    batches.apply(conn, [{"op": "keep", "task_id": 1}], "ui", TODAY)
+    assert conn.execute("SELECT neighbours_seen_at FROM tasks WHERE id = 1").fetchone()[0]
