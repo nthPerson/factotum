@@ -21,3 +21,6 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+
+# isolated working copies for feature work
+.worktrees/
