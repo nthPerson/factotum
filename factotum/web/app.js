@@ -19,7 +19,7 @@
   let railTap = { id: null, timer: null };   // a Top tile waits a moment for a second tap before it acts
   // What is being typed, kept outside the DOM: every render() rebuilds the panel (a chat turn's status
   // line re-renders it every second), and a long prompt must survive that with its caret.
-  const draft = { cmd: '', ask: '', askFor: null, pick: '', outcome: '' };
+  const draft = { cmd: '', ask: '', askFor: null, pick: '', outcome: '', askToday: '', askTask: '', askTaskFor: null };
   let asking = null;        // {id, name} of the task whose outcome the toast asks (ripples (stage 5): the outcome question)
   try { draft.cmd = sessionStorage.getItem('factotum.cmd') || ''; sessionStorage.removeItem('factotum.cmd'); } catch (_) {}   // kept by reloadKeepingDraft
   const TOUCH = () => window.matchMedia('(hover: none)').matches;
@@ -39,7 +39,8 @@
   let ui = { tab: 'today', focus: null, sel: new Set(), open: new Set(), reviewIdx: 0, laterOpen: false, datePick: false, trayOpen: false, trayOff: new Set(), reviewPaused: false, rvNote: { id: null, text: '' }, remOpen: null, dueOpen: null, sinceOpen: null,
              railOpen: !window.matchMedia('(max-width: 860px)').matches, chatDrawer: false,
              page: null, pageScroll: 0, pageMore: false, pageLater: false,      // the task page: its id, the list's scroll, a phone's More and Later open
-             bulkMore: false };      // the phone's short bar shows its second line (back to false when nothing is selected)
+             bulkMore: false,      // the phone's short bar shows its second line (back to false when nothing is selected)
+             askTask: null };      // the opened task whose conversation shows (stage 6; one at a time)
   try { ui.tab = parseAddress().tab; } catch (_) {}
   try { const r = localStorage.getItem('factotum.rail'); if (r === '0' || r === '1') ui.railOpen = r === '1'; } catch (_) {}
   try { const s = JSON.parse(localStorage.getItem('factotum.staged') || '[]'); staged = new Map(s); } catch (_) {}
@@ -351,9 +352,9 @@
   // Focus in an empty draft-backed box does not count: its text lives in `draft` and render() puts the
   // focus and caret back, so a reload of the lists loses nothing (a box left focused and empty would
   // otherwise keep the lists stale on every return). render() uses the same list, through isDraftBox.
-  const DRAFT_BOXES = ['cmd', 'rv-ask', 'chat-pick', 'rv-note'];
+  const DRAFT_BOXES = ['cmd', 'rv-ask', 'chat-pick', 'rv-note', 'today-ask', 'task-ask'];
   function typingNow() {
-    if ([draft.cmd, draft.ask, draft.pick, draft.outcome, ui.rvNote.text].some(s => (s || '').trim())) return true;
+    if ([draft.cmd, draft.ask, draft.pick, draft.outcome, draft.askToday, draft.askTask, ui.rvNote.text].some(s => (s || '').trim())) return true;
     if (ui.remOpen !== null || ui.dueOpen !== null || chat.busy) return true;
     const a = document.activeElement;
     return !!(a && a.matches('input, textarea, select') && a.closest('#panel') && !isDraftBox(a.id));
@@ -1240,6 +1241,7 @@
     const p = document.getElementById('panel');
     const fns = { today: renderToday, timeline: renderTimeline, projects: renderProjects, review: renderReview, chat: renderChat, log: renderLog, settings: renderSettings };
     const held = heldDraftBox(p);
+    taskPlacesDrawn.clear();
     p.innerHTML = ui.page !== null ? taskPageHtml() : starterHtml() + pendingHtml() + fns[ui.tab]();
     restoreDraftBox(held);
     p.querySelectorAll('textarea.grow').forEach(grow);
@@ -1417,7 +1419,7 @@
   // fill when the task's own payload arrives (detailCache).
   function detailsHtml(x) {
     return `<div class="dgrid"><div class="dcol">${whereHtml(x)}<div data-dlinks="${x.id}">${detailAsyncHtml(x.id)}</div>${factsHtml(x)}</div>
-        <div class="dcol" data-dhist="${x.id}">${historyHtml(x.id)}</div></div>${x.status !== 'open' ? '' : actionsHtml(x)}`;
+        <div class="dcol" data-dhist="${x.id}">${historyHtml(x.id)}</div></div>${x.status !== 'open' ? '' : actionsHtml(x)}${taskPlaceHtml(x.id)}`;
   }
   function factsHtml(x) {
     const links = (x.links || []).map(l => {
@@ -1449,6 +1451,7 @@
           <button class="btn small" data-chat-canned="search_mail" data-id="${x.id}" title="A chat turn: finds the threads about this task and offers to link them">✉ Search related emails</button>
           <button class="btn small" data-chat-canned="draft_reply" data-id="${x.id}" title="A chat turn: saves a reply draft in Mailbird, never sends">✉ Draft reply</button>
           <button class="btn small" data-chat-canned="related" data-id="${x.id}" title="A chat turn: finds the tasks this one belongs with and offers to link them">Ask Claude what else is related</button>
+          <button class="btn small" data-ask-task="${x.id}">Ask Claude</button>
         </div>`;
   }
   // ---------- the task page (stage 1, stage 4b) ----------
@@ -1475,7 +1478,7 @@
     return `<div class="taskpage${pagebar ? ' barred' : ''}" data-id="${id}">${bar}<h2>${esc(x.name)}</h2><div class="meta">${chipsHtml(x)}</div>
       ${closed ? `<div class="closedline"><p>This task is ${esc(srv.status)}.</p>${reopen}</div>` : ''}
       <div class="details"><div class="dgrid"><div class="dcol">${whereHtml(x)}<div data-dlinks="${id}">${detailAsyncHtml(id)}</div>${factsHtml(x)}</div>
-        <div class="dcol" data-dhist="${id}">${historyHtml(id)}</div></div>${acts}</div>${pagebar}</div>`;
+        <div class="dcol" data-dhist="${id}">${historyHtml(id)}</div></div>${acts}${taskPlaceHtml(id)}</div>${pagebar}</div>`;
   }
   // A Later on the page's pinned bar: the task leaves the lists until the day, like the Review card's Later.
   function pageLater(kind) {
@@ -1526,7 +1529,7 @@
     const { groups } = todayGroups();      // snoozed rows are not in these groups but are open: Timeline lists them
     const lists = effectiveLinkView() === 'linked' ? linkedHtml() : groups.map(group).join('') +
       (!openOnes().length ? noTasksHtml() : groups.some(g => g.rows.length) ? '' : todayEmptyHtml());
-    return summaryHtml() + composer() + linkBarHtml() + lists + legendHtml() +
+    return summaryHtml() + composer() + todayPlaceHtml() + linkBarHtml() + lists + legendHtml() +
       `<div class="note">Soft dates that slipped, new items, and fading backlog are not here. They wait in <b>Review</b> so this screen stays short.</div>`;
   }
   // Today with no rows. Under Ready now the waiting tasks it hides may be due this week: say so, not "nothing is due".
@@ -1553,8 +1556,8 @@
         tag: x => `<span class="chip" title="Created ${esc(x.created_at || '')}">added ${x.created_at ? new Date(x.created_at).toLocaleDateString([], { month: 'short', day: 'numeric' }) : '?'}</span>` }];
   }
   function renderTimeline() {
-    if (!openOnes().length) return composer() + noTasksHtml();
-    return composer() + linkBarHtml() + (effectiveLinkView() === 'linked' ? linkedHtml() : timelineGroups().map(group).join('')) + legendHtml();
+    if (!openOnes().length) return composer() + todayPlaceHtml() + noTasksHtml();
+    return composer() + todayPlaceHtml() + linkBarHtml() + (effectiveLinkView() === 'linked' ? linkedHtml() : timelineGroups().map(group).join('')) + legendHtml();
   }
   function projectGroups() {
     const m = new Map();
@@ -1562,8 +1565,8 @@
     return [...m.entries()].sort((a, b) => b[1].length - a[1].length);
   }
   function renderProjects() {
-    if (!openOnes().length) return composer() + noTasksHtml();
-    return composer() + projectGroups().map(([p, rows]) => {
+    if (!openOnes().length) return composer() + todayPlaceHtml() + noTasksHtml();
+    return composer() + todayPlaceHtml() + projectGroups().map(([p, rows]) => {
       const fading = rows.filter(x => x.fade_at && daysTo(x.fade_at) <= 7).length;
       const due = rows.filter(x => x.due && fmtDue(x.due).days <= 7).length;
       const open = !folded('projects:' + p, true);         // a project starts folded; what was opened stays open next time
@@ -1852,7 +1855,7 @@
     const cur = chat.threads.find(t => t.id === chat.current);
     const list = `<nav class="threads ${ui.chatDrawer ? 'open' : ''}" id="chat-threads" aria-label="Threads">
         <div class="thead"><b>Threads</b><button class="btn small primary" id="chat-new">+ New</button><button class="btn small close" id="chat-threads-close" aria-label="Close">×</button></div>
-        ${chat.threads.length ? chat.threads.map(t => `<button class="thread ${t.id === chat.current ? 'cur' : ''}" data-thread="${t.id}"><span class="t">${esc(t.title || 'untitled')}</span><span class="d">${when(t)}</span></button>`).join('') : '<div class="hint">No threads yet.</div>'}
+        ${chat.threads.length ? chat.threads.map(t => `<button class="thread ${t.id === chat.current ? 'cur' : ''}" data-thread="${t.id}"><span class="t">${esc(t.title || 'untitled')}</span><span class="d">${threadTag(t)}${when(t)}</span></button>`).join('') : '<div class="hint">No threads yet.</div>'}
       </nav>`;
     const head = `<div class="chat-head"><button class="btn small" id="chat-threads-toggle" aria-label="Threads">☰ Threads</button><span class="cur">${cur ? esc(cur.title || 'untitled') : 'New thread'}</span>${cur ? `<span class="spacer"></span><button class="btn small" id="chat-delete" ${chat.busy ? 'disabled' : ''} title="Delete this thread and its messages. Nothing it applied is undone.">Delete thread</button>` : ''}</div>`;
     const eff = settings && settings.effective;
@@ -1865,6 +1868,11 @@
       : `<div class="note">${intro}</div>
          <div class="starters">${STARTERS.map((t, i) => `<button class="btn small" data-starter="${i}">${esc(t)}</button>`).join('')}</div>`;
     return `<div class="chat">${list}<div class="chat-main">${head}<div class="msgs" id="msgs">${body}</div>${composer()}</div><div class="backdrop ${ui.chatDrawer ? 'on' : ''}" id="chat-backdrop"></div></div>`;
+  }
+  // Where a thread was started (stage 6): a Review card, an opened task or the Today box; nothing for the Chat tab's own.
+  function threadTag(t) {
+    const tag = t.origin === 'review' && t.task_id != null ? 'Review · Task-' + t.task_id : t.origin === 'task' && t.task_id != null ? 'Task-' + t.task_id : t.origin === 'today' ? 'Today' : '';
+    return tag ? `<span class="otag">${tag}</span> · ` : '';
   }
   const CANNED_SAID = { search_mail: 'Search related emails', draft_reply: 'Draft a reply', related: 'What else is related?', split: 'Split into steps' };      // a canned turn's own bubble
   // A turn's server-sent events, one `onEvent(ev)` each, until the stream ends.
@@ -1887,13 +1895,18 @@
     // the threads first: go() renders, and a Chat render with no threads loads them and the current thread's messages over this turn's
     if (!chat.threads) { try { const r = await api('/api/chat/threads'); chat.threads = r.threads; } catch (_) { chat.threads = []; } }
     ui.page = null; go('chat');
-    const threadId = chat.current;
+    const threadId = chat.current, before = chat.messages;
     chat.messages = [...chat.messages, { role: 'user', text: text || CANNED_SAID[canned] || canned, attached }];
     render();
     let result = null, error = null;
     try {
       const resp = await fetch('/api/chat/turn', { method: 'POST', headers: { 'Content-Type': 'application/json' }, redirect: 'manual', body: JSON.stringify({ thread_id: threadId, text, attached, canned }) });
       if (expired(resp)) { signedOut(); throw new Error('signed out'); }
+      if (resp.status === 409) {      // this thread answers elsewhere (a place on another device): nothing was asked, the prompt goes back in the box
+        chat.busy = false; chat.live = null; chat.messages = before;
+        if (text) draft.cmd = draft.cmd.trim() ? text + '\n' + draft.cmd : text;
+        render(); toast('Claude is still answering in this thread'); return;
+      }
       if (!resp.ok) throw new Error('HTTP ' + resp.status);
       await readTurn(resp, ev => {
         if (ev.type === 'meta') chat.current = ev.thread_id;
@@ -1935,17 +1948,19 @@
     if (!places.has(key)) places.set(key, { key, origin, task_id: taskId ?? null, thread_id: null, messages: [], named: {}, live: null, loaded: false, off: new Set(), more: false, fresh: false });
     return places.get(key);
   }
-  async function loadPlace(pl) {
-    if (pl.loading) return;
-    pl.loading = true;
-    let r = null;
-    try { r = await api('/api/chat/place?origin=' + pl.origin + (pl.task_id != null ? '&task_id=' + pl.task_id : '')); }
-    catch (e) { if (!(e && (e.message === 'signed out' || e.network))) console.error('Loading a conversation failed:', e); }
-    pl.loading = false; pl.loaded = true;      // a failure shows the place empty rather than asking again on every redraw
-    if (r && !pl.live) {      // while a turn runs its own answer is appended when it ends
-      pl.thread_id = r.thread ? r.thread.id : null; pl.messages = r.messages || []; pl.named = r.named || {};
-    }
-    if (typingNow()) swapPlace(pl); else render();
+  // A second call while one loads gets the first's promise, so a sender can wait for the thread before its turn.
+  function loadPlace(pl) {
+    if (pl.loading) return pl.loading;
+    return (pl.loading = (async () => {
+      let r = null;
+      try { r = await api('/api/chat/place?origin=' + pl.origin + (pl.task_id != null ? '&task_id=' + pl.task_id : '')); }
+      catch (e) { if (!(e && (e.message === 'signed out' || e.network))) console.error('Loading a conversation failed:', e); }
+      pl.loading = null; pl.loaded = true;      // a failure shows the place empty rather than asking again on every redraw
+      if (r && !pl.live) {      // while a turn runs its own answer is appended when it ends
+        pl.thread_id = r.thread ? r.thread.id : null; pl.messages = r.messages || []; pl.named = r.named || {};
+      }
+      if (typingNow()) swapPlace(pl); else render();
+    })());
   }
   // The place's container alone, redrawn and wired, with the focus and caret of a box inside it kept.
   function swapPlace(pl) {
@@ -2045,7 +2060,8 @@
     } else if (REL_OPS.includes(p.op)) main = `${T} ${changeWords(p)}`;
     else if (p.op === 'set') main = `${T}: ${setWords(f)}`;
     else main = (p.task_id != null ? T + ': ' : '') + (changeWords(p) || p.label || p.op);
-    if (p.task_id != null && p.task_id !== pl.task_id) sub.push('a change to another task, staged from here');
+    // Only a place about a task has another task; a create's task_id, once made, is the new task itself.
+    if (pl.task_id != null && p.task_id != null && p.task_id !== pl.task_id && p.op !== 'create') sub.push('a change to another task, staged from here');
     return { main, sub: sub.join(', ') };
   }
   // The tray key stageProposal puts a proposal under: a link to a new task by its tray ref, the rest as propKey.
@@ -2150,6 +2166,28 @@
     if (!pl.loaded) loadPlace(pl);
     return placeHtml(pl, { decision: true, title: 'Ask Claude about this task', hint: 'the conversation stays on this card',
       box: { id: 'rv-ask', key: 'ask', first: 'Ask Claude about this task, e.g. “which steps are left?”; what it proposes stages with your decision', next: 'Ask a follow-up, or say what to change' } });
+  }
+  // Today, Timeline and Projects: the Today box's conversation, under the box, once it has a message or a turn
+  // runs. Loaded once per page load, so a conversation of the last 12 hours is there after a reload. Close
+  // empties it here; the next sentence starts a new thread (`fresh`), the closed one stays in Chat.
+  function todayPlaceHtml() {
+    const pl = placeOf('today', null);
+    if (!pl.loaded) loadPlace(pl);
+    if (!pl.messages.length && !pl.live) return '';
+    return `<div class="ptoday">${placeHtml(pl, { decision: false, title: 'Claude', hint: 'also kept as a thread in Chat',
+      box: { id: 'today-ask', key: 'askToday', first: 'Ask a follow-up', next: 'Ask a follow-up' } })}<button class="btn small pclose" data-place-close="today:" ${pl.live ? 'disabled' : ''}>Close</button></div>`;
+  }
+  // An opened task (its row, or the task page): the conversation about it, once Ask Claude or a canned button
+  // was pressed there. One task at a time; it shares the thread of the task's Review card.
+  const taskPlacesDrawn = new Set();      // a row Timeline lists twice (a section and Recently added) draws it once
+  function taskPlaceHtml(id) {
+    if (ui.askTask !== id || taskPlacesDrawn.has(id)) return '';
+    taskPlacesDrawn.add(id);
+    if (draft.askTaskFor !== id) { draft.askTask = ''; draft.askTaskFor = id; }
+    const pl = placeOf('task', id);
+    if (!pl.loaded) loadPlace(pl);
+    return placeHtml(pl, { decision: false, title: 'Ask Claude about Task-' + id, hint: 'the conversation stays on this task',
+      box: { id: 'task-ask', key: 'askTask', first: 'Ask about this task', next: 'Ask a follow-up' } });
   }
   // The phone's keyboard: --kb is its height (what the visual viewport lost at the bottom), so a sheet or the Review
   // card can pad for it; while a text box in the panel or the sheet has focus, nothing pinned covers it (kb-open).
@@ -2514,7 +2552,22 @@
       try { res = await undoBatch(+b.dataset.undo); } catch (e) { b.disabled = false; toast('Undo failed: ' + e.message); return; }
       await load(); logData = null; toast(undoSaid(res)); render();
     });
-    panel.querySelectorAll('[data-chat-canned]').forEach(b => b.onclick = () => sendChat('', b.dataset.chatCanned, [+b.dataset.id]));
+    // An opened task's canned buttons and Ask Claude: the conversation shows in that task (it used to switch to Chat).
+    panel.querySelectorAll('[data-chat-canned]').forEach(b => b.onclick = async () => {
+      const id = +b.dataset.id, pl = placeOf('task', id);
+      if (!pl.loaded) await loadPlace(pl);      // the thread's earlier messages first, so the answer lands under them
+      ui.askTask = id; sendTurn(pl, '', b.dataset.chatCanned, 'askTask');
+    });
+    panel.querySelectorAll('[data-ask-task]').forEach(b => b.onclick = () => {
+      ui.askTask = +b.dataset.askTask; render();
+      const el = document.getElementById('task-ask'); if (el) el.focus();
+    });
+    panel.querySelectorAll('[data-place-close]').forEach(b => b.onclick = () => {
+      const pl = places.get(b.dataset.placeClose); if (!pl || pl.live) return;
+      Object.assign(pl, { thread_id: null, messages: [], named: {}, fresh: true, more: false }); pl.off.clear();
+      if (pl.origin === 'today') draft.askToday = '';
+      render();
+    });
     wireDetail(panel);
     panel.querySelectorAll('[data-chat-stage]').forEach(b => b.onclick = () => {
       const mid = +b.dataset.chatStage; const m = chat.messages.find(x => x.id === mid); if (!m) return;
@@ -2687,6 +2740,10 @@
     if (res.is_command) {
       res.changes.forEach(c => stageChange(c, c.op === 'set' ? Object.entries(c.fields).map(([k, v]) => `${k} ${v || 'cleared'}`).join(', ') : c.op));
       toast(`Staged ${res.changes.length} change${res.changes.length === 1 ? '' : 's'}`);
+    } else if (ui.tab !== 'chat') {      // plain words under the box, on this tab (stage 6); sendTurn gives them back if a turn runs
+      const pl = placeOf('today', null);
+      if (!pl.loaded) await loadPlace(pl);
+      sendTurn(pl, text, null, 'cmd');
     } else if (chat.busy) {      // not a command, and a turn is running: give the text back instead of dropping it
       draft.cmd = text; toast('A chat turn is still running · your prompt is kept in the box'); render();
     } else {

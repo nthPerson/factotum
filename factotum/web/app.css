@@ -678,6 +678,15 @@ label.pprop { cursor: pointer; }
 .place .btn:disabled { opacity: .5; cursor: default; }      /* Ask while Claude answers, Stage with nothing ticked */
 .pchips { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
 .pchips .chip { font-family: var(--mono); background: var(--surface-2); }
+/* Under the Today box (Today, Timeline, Projects): the same component between two rules, Close at the head's end */
+.ptoday { position: relative; margin: 0 0 16px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
+.ptoday .place { margin-top: 0; }
+.ptoday .place .phead { min-height: 30px; padding-right: 72px; }
+.ptoday .pclose { position: absolute; top: 12px; right: 0; }
+.ptoday .place .preply textarea { background: var(--surface); }
+/* In an opened task: below its actions */
+.details .place, .taskpage .place { margin-top: 12px; }
+.threads .thread .d .otag { font-family: var(--sans); color: var(--accent); }
 @media (max-width: 700px) {
   .pprop .ps { display: block; font-size: 12px; }
   .pprop input[type=checkbox] { width: 20px; height: 20px; margin: 0; }
