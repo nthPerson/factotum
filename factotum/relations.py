@@ -502,6 +502,13 @@ def _twin_number(name) -> int | None:
     return int(runs[-1]) if runs else None
 
 
+def _twin_name(name) -> str:
+    """A name compared as an item's identity: the first 300 characters casefolded, every digit run as
+    its integer ("Quiz 05" is "quiz 5"), whitespace collapsed."""
+    s = _DIGITS.sub(lambda m: str(int(m.group())), str(name or "")[:300].casefold())
+    return " ".join(s.split())
+
+
 def _due_at(due) -> datetime | None:
     """A due value as a naive datetime; a date-only due is midnight."""
     try:
@@ -512,8 +519,10 @@ def _due_at(due) -> datetime | None:
 
 def twin_pairs(tasks: list[dict]) -> list[tuple[int, int, str]]:
     """Pairs that look like one task made twice (design §10.1), pure: both open, the same non-empty
-    project, both dated, the same number in the name, due within TWIN_HOURS, at least one from Canvas.
-    Name similarity alone is never a signal. Returns `(goes, keep, why)`, `keep` as `default_survivor`
+    project, both dated, the same number in the name, due within TWIN_HOURS, at least one from Canvas;
+    two Canvas rows pair only when their names are the same item's (`_twin_name`: Canvas posted one
+    item twice), since two Canvas items with two Canvas ids are two items. Name similarity alone is
+    never a signal. Returns `(goes, keep, why)`, `keep` as `default_survivor`
     picks it (the Canvas row, else the older); ordered by the two ids."""
     groups: dict[tuple, list[dict]] = {}
     for t in tasks:
@@ -526,6 +535,8 @@ def twin_pairs(tasks: list[dict]) -> list[tuple[int, int, str]]:
         for i, x in enumerate(ts):
             for y in ts[i + 1:]:
                 if "Canvas" not in (x.get("source"), y.get("source")):
+                    continue
+                if x.get("source") == y.get("source") == "Canvas" and _twin_name(x.get("name")) != _twin_name(y.get("name")):
                     continue
                 gap = abs(x["_at"] - y["_at"])
                 if gap > timedelta(hours=TWIN_HOURS):
