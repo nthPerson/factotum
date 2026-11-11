@@ -287,3 +287,83 @@ def test_a_second_keep_the_same_day_restamps_neighbours_seen_at(conn):
     conn.execute("UPDATE tasks SET neighbours_seen_at = '2000-01-01T00:00:00+00:00' WHERE id = 1"); conn.commit()
     batches.apply(conn, [{"op": "keep", "task_id": 1}], "ui", TODAY)
     assert conn.execute("SELECT neighbours_seen_at FROM tasks WHERE id = 1").fetchone()[0] > "2000-01-01"
+
+
+# --- Task 11: brief, reminders, summary, planner rows
+
+def test_the_brief_says_waits_on_and_lists_free_since_yesterday(conn, cfg):
+    from datetime import timedelta
+    from factotum import brief
+    mk(conn, 1, due=TODAY.isoformat()); mk(conn, 2); mk(conn, 3); mk(conn, 4); mk(conn, 5)
+    link(conn, 1, 2, "waits_on"); link(conn, 3, 4, "waits_on"); link(conn, 5, 4, "waits_on")
+    _done(conn, 4, TODAY - timedelta(days=1))
+    conn.execute("UPDATE tasks SET status = 'done' WHERE id = 5"); conn.commit()   # a closed task freed by 4 is not listed
+    text = brief.build(conn, cfg, TODAY)["text"]
+    line = next(ln for ln in text.splitlines() if "Task-1 " in ln)
+    assert "waits on Task-2" in line
+    after = text.split("Free since yesterday", 1)[1]
+    assert text.index("Closed since yesterday") < text.index("Free since yesterday")
+    assert "Task-3 Task 3  (Task-4 is done)" in after and "Task-5" not in after
+    assert "waits on" not in next(ln for ln in text.splitlines() if "Task-3 " in ln)
+
+
+def test_a_reminder_body_says_waits_on_and_frees(conn, cfg):
+    from datetime import datetime
+    from factotum import reminders
+    mk(conn, 1); mk(conn, 2); mk(conn, 3)
+    link(conn, 1, 2, "waits_on")
+    for tid in (1, 2, 3):
+        conn.execute("INSERT INTO reminders (task_id, fire_at, label, status, created_by, created_at) VALUES (?, '2026-11-01T08:00', 'Go', 'pending', 'ui', ?)", (tid, now_iso()))
+    conn.commit()
+    due = {r["task_id"]: r for r in reminders.due(conn, datetime(2026, 11, 1, 9, 0))}
+    assert set(due) == {1, 2, 3}                                                     # a waiting task's reminder still fires
+    assert reminders._body(due[1]) == "Go · waits on Task-2"
+    assert reminders._body(due[2]) == "Go · frees Task-1 when done"
+    assert reminders._body(due[3]) == "Go"
+    many = {"label": "Go", "task_due": "2026-11-05", "rel": {"waits_on_open": [2, 3, 4, 5, 6], "frees_open": [7]}}
+    assert reminders._body(many) == "Go · due Nov 5 · waits on Task-2, Task-3, Task-4 +2 · frees Task-7 when done"
+
+
+def test_the_summary_goes_stale_when_a_task_it_names_is_freed(conn):
+    from factotum import summary
+    mk(conn, 1); mk(conn, 2)
+    link(conn, 1, 2, "waits_on")
+    s = summary.store(conn, "Task-1 waits on Task-2", [1], TODAY, "planner")
+    conn.commit()
+    assert s["tasks"]["1"][-1] == [2] and summary.stale(conn, s, TODAY) == []
+    _done(conn, 2)
+    assert "Task-1 Task 1: free now" in summary.stale(conn, s, TODAY)
+    mk(conn, 3)
+    batches.apply(conn, [{"op": "reopen", "task_id": 2}], "ui", TODAY)
+    s = summary.store(conn, "Task-1 is free", [1], TODAY, "planner")
+    link(conn, 1, 3, "waits_on")
+    assert summary.stale(conn, s, TODAY) == ["Task-1 Task 1: now waits on Task-2, Task-3"]
+
+
+def test_a_fingerprint_stored_before_this_stage_does_not_read_as_changed(conn):
+    from factotum import summary
+    from factotum.db import set_setting
+    mk(conn, 1); mk(conn, 2)
+    link(conn, 1, 2, "waits_on")
+    set_setting(conn, "state.summary", {"text": "x", "day": TODAY.isoformat(), "tasks": {"1": ["open", None, 0, None, None]}, "focus": []})
+    conn.commit()
+    s = summary.get(conn, TODAY)
+    assert s["stale"] == []
+    conn.execute("UPDATE tasks SET hard = 1 WHERE id = 1"); conn.commit()
+    assert summary.get(conn, TODAY)["stale"] == ["Task-1 Task 1: now a hard deadline"]
+
+
+def test_planner_rows_carry_link_facts(conn, cfg):
+    from factotum import planner
+    mk(conn, 1, project="FAMAIL", context="the ctx"); mk(conn, 2, project="FAMAIL"); mk(conn, 3, project="FAMAIL")
+    link(conn, 1, 2, "waits_on")
+    lines = {ln.split(" | ")[0]: ln for ln in planner.sections(planner.bundle(conn, cfg, TODAY), TODAY)["rows"].splitlines()}
+    assert lines["Task-1"].endswith(" | waits on Task-2 | the ctx")
+    assert " | frees Task-1 | " in lines["Task-2"]
+    assert lines["Task-3"].count(" | ") == 5                                         # no link, no extra piece
+
+
+def test_words_says_each_link_fact():
+    assert relations.words({"id": 1}) == "" and relations.words({"rel": {}}) == ""
+    rel = {"waits_on_open": [9, 10], "frees_open": [12, 14], "goal_id": 380, "steps_open": 2, "steps_total": 5, "needed_by": "2026-11-06"}
+    assert relations.words({"rel": rel}) == "waits on Task-9, Task-10 · frees Task-12, 14 · part of Task-380 · 2 of 5 steps open · needed for Nov 6"

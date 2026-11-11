@@ -14,7 +14,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from . import batches, config as C
+from . import batches, config as C, relations
 from .dates import parse_date
 from .db import now_iso, rows
 
@@ -61,7 +61,14 @@ def due(conn: sqlite3.Connection, now_local: datetime) -> list[dict]:
                 out.append(r)
         except ValueError:
             continue   # a malformed fire_at never fires; it shows in the task's details for repair
+    rels = relations.annotate(conn, [{"id": r["task_id"]} for r in out])
+    for r, t in zip(out, rels):
+        r["rel"] = t["rel"]      # words only: a reminder fires whether or not its task waits
     return out
+
+
+def _ids(ids: list[int], cap: int = 3) -> str:
+    return "Task-" + ", Task-".join(str(i) for i in ids[:cap]) + (f" +{len(ids) - cap}" if len(ids) > cap else "")
 
 
 def _body(r: dict) -> str:
@@ -69,6 +76,11 @@ def _body(r: dict) -> str:
     d = parse_date(r.get("task_due"))
     if d:
         parts.append(f"due {d.strftime('%b')} {d.day}")
+    rel = r.get("rel") or {}
+    if rel.get("waits_on_open"):
+        parts.append(f"waits on {_ids(rel['waits_on_open'])}")
+    if rel.get("frees_open"):
+        parts.append(f"frees {_ids(rel['frees_open'])} when done")
     if r.get("task_status") and r["task_status"] != "open":
         parts.append(f"task is {r['task_status']}")
     return " · ".join(parts)

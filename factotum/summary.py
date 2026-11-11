@@ -20,7 +20,7 @@ import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from . import config as C
+from . import config as C, relations
 from .db import get_settings, log_run, rows, set_setting
 from .lifecycle import parse_date
 
@@ -31,7 +31,7 @@ TASKS_CAP = 8                       # rows the model may name as what the summar
 ABOUT_CAP = 40                      # those, the codes in its text and the urgent rows together
 CODE_RE = re.compile(r"\bTask-(\d{1,6})\b")
 STALE_CAP = 12
-FP = ("status", "due", "hard", "waiting_on", "snoozed_until")      # what a mentioned row is remembered by
+FP = ("status", "due", "hard", "waiting_on", "snoozed_until", "waits_on_open")      # what a mentioned row is remembered by (the last from `rel`: annotate first)
 STUCK_AFTER = timedelta(minutes=20)  # a request or a run older than this was lost to a restart
 
 
@@ -41,7 +41,8 @@ def _name(t: dict, n: int = 40) -> str:
 
 
 def _fp(t: dict) -> list:
-    return [t.get("status"), t.get("due"), 1 if t.get("hard") else 0, t.get("waiting_on"), t.get("snoozed_until")]
+    return [t.get("status"), t.get("due"), 1 if t.get("hard") else 0, t.get("waiting_on"), t.get("snoozed_until"),
+            sorted((t.get("rel") or {}).get("waits_on_open") or [])]
 
 
 def focus(tasks: list[dict], today: date) -> dict[int, str]:
@@ -81,7 +82,7 @@ def store(conn: sqlite3.Connection, text, task_ids, today: date, source: str, at
     for i in [i for i in (task_ids or []) if type(i) is int][:TASKS_CAP] + [int(m) for m in CODE_RE.findall(text)]:
         if i not in ids:
             ids.append(i)
-    now = snapshot(rows(conn, "SELECT * FROM tasks WHERE status = 'open'"), today)
+    now = snapshot(relations.annotate(conn, rows(conn, "SELECT * FROM tasks WHERE status = 'open'")), today)
     seen = snap or now
     fps = dict(seen["fp"])
     urgent = set(seen["focus"])
@@ -107,6 +108,8 @@ def _what(was: dict, now: dict) -> str:
         return f"put off until {str(now['snoozed_until'])[:10]}" if now["snoozed_until"] else "no longer put off"
     if now["waiting_on"] != was["waiting_on"]:
         return f"now waiting on {str(now['waiting_on'])[:40]}" if now["waiting_on"] else "no longer waiting on anyone"
+    if "waits_on_open" in was and now.get("waits_on_open") != was["waits_on_open"]:    # absent from a fingerprint stored before links
+        return "now waits on Task-" + ", Task-".join(str(i) for i in now["waits_on_open"]) if now["waits_on_open"] else "free now"
     return "now a hard deadline" if now["hard"] else "no longer a hard deadline"
 
 
@@ -118,10 +121,10 @@ def stale(conn: sqlite3.Connection, s: dict, today: date) -> list[str]:
     out: list[str] = []
     about = {int(k): v for k, v in (s.get("tasks") or {}).items() if str(k).isdigit()}
     if about:
-        cur = {t["id"]: t for t in rows(conn, f"SELECT * FROM tasks WHERE id IN ({','.join('?' * len(about))})", tuple(about))}
+        cur = {t["id"]: t for t in relations.annotate(conn, rows(conn, f"SELECT * FROM tasks WHERE id IN ({','.join('?' * len(about))})", tuple(about)))}
         for tid, was in about.items():
             t = cur.get(tid)
-            if t and _fp(t) != list(was):
+            if t and _fp(t)[:len(was)] != list(was):     # a fingerprint stored before a field was added is compared on the fields it has
                 out.append(f"Task-{tid} {_name(t)}: " + _what(dict(zip(FP, was)), dict(zip(FP, _fp(t)))))
     known = set(about) | {int(i) for i in (s.get("focus") or [])}
     open_tasks = rows(conn, "SELECT * FROM tasks WHERE status = 'open'")

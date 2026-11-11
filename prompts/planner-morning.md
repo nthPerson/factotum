@@ -18,6 +18,10 @@ most 8): Python uses them to tell the user when the verdict has gone out of date
 These are the only rows you may name. A row's score is Python's; "why now" is yours: one sentence
 for each of the rows the user should look at first (at most 15), saying why today, in terms of the
 deadline, the person expecting it, the evidence, or the effort. Skip rows with nothing to say.
+Rows may carry link facts: "waits on Task-9" (it cannot sensibly be done before Task-9),
+"frees Task-12" (doing it makes Task-12 possible), "part of Task-380", "2 of 5 steps open",
+"needed for Nov 6" (a hard deadline it holds up). When saying what matters today, name the task
+that frees the most before the ones that wait on it.
 {{rows}}
 
 # 3. Evidence the sweeps collected (evidence <id> | kind | account | task | excerpt)

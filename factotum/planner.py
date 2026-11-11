@@ -81,6 +81,8 @@ def sections(b: dict, today: date) -> dict[str, str]:
             bits.insert(2, f"top {t['top_rank']}")
         if t.get("waiting_on"):
             bits.insert(-1, f"waiting on {_esc(t['waiting_on'])[:60]}")
+        if w := relations.words(t):
+            bits.insert(-1, w)
         row_lines.append(" | ".join(bits))
     cand_lines = [f"evidence {c['id']} | {c['kind']} | {c.get('account') or '—'} | " + (f"Task-{c['task_id']} ({_esc(c.get('task_name'))[:60]})" if c.get("task_id") else "no task") + f" | {_esc(c.get('label'))[:120]} | {_esc(c.get('excerpt'))[:500]}" for c in b["candidates"]]
     ann_lines = [f"{a.get('when') or '?'} | {_esc(a.get('project'))} | {_esc(a.get('title'))[:120]} | {_esc(a.get('text'))[:400]}" for a in b["announcements"]]

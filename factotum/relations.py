@@ -346,3 +346,21 @@ def scored(db: Db, tasks: list[dict], today: date, cfg: dict, *, all_rows: bool 
 def score_one(task: dict, today: date, cfg: dict) -> tuple[int, str, list[str]]:
     """`scoring.score` for one row its caller already annotated (the Notion mirror's `properties`)."""
     return scoring.score(task, today, cfg)
+
+
+def words(t: dict) -> str:
+    """An annotated row's link facts for a prompt, `" · "`-joined; "" when it has none."""
+    rel = t.get("rel") or {}
+    out = []
+    if rel.get("waits_on_open"):
+        out.append("waits on Task-" + ", Task-".join(str(i) for i in rel["waits_on_open"]))
+    if rel.get("frees_open"):
+        out.append("frees Task-" + ", ".join(str(i) for i in rel["frees_open"]))
+    if rel.get("goal_id") is not None:
+        out.append(f"part of Task-{rel['goal_id']}")
+    if rel.get("steps_total"):
+        out.append(f"{rel.get('steps_open') or 0} of {rel['steps_total']} steps open")
+    if rel.get("needed_by"):
+        d = date.fromisoformat(str(rel["needed_by"])[:10])
+        out.append(f"needed for {d.strftime('%b')} {d.day}")
+    return " · ".join(out)

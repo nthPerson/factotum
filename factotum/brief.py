@@ -3,7 +3,8 @@ the planner run that writes the verdict and `why_now`; until then the brief is t
 
 Sections: Top · Overdue hard deadlines · Due today · Due tomorrow · Reminders today · Hard
 deadlines this week · Calendar (today and tomorrow, when the calendar is on) · Closed since
-yesterday (with who closed it) · Waiting on · how many items Review holds.
+yesterday (with who closed it) · Free since yesterday (open tasks whose last waited-on task closed) ·
+Waiting on · how many items Review holds. A row that waits on an open task says so.
 
 SMTP: SMTP_HOST / SMTP_PORT / SMTP_USER / SMTP_PASSWORD in .env, falling back to the IMAP account
 (a Gmail app password works for both). The sender is SMTP_USER; the recipient is
@@ -89,7 +90,19 @@ def build(conn: sqlite3.Connection, cfg: dict, today: date, events: list[dict] |
             H.append(f'<li style="margin:2px 0">{escape(main)}' + (f' <span style="color:#777;font-size:12px">{escape(meta)}</span>' if meta else '') + '</li>')
         H.append('</ul>')
 
-    row = lambda t, meta=None: (f"Task-{t['id']} {t['name']}", meta if meta is not None else " · ".join(x for x in (t.get("project"), _fmt_due(t, today), t.get("why_now")) if x))  # noqa: E731
+    def row(t: dict, meta: str | None = None) -> tuple[str, str]:
+        if meta is None:
+            meta = " · ".join(x for x in (t.get("project"), _fmt_due(t, today), t.get("why_now")) if x)
+        wo = (t.get("rel") or {}).get("waits_on_open") or []
+        if wo:   # the score reason's wording
+            meta = " · ".join(x for x in (meta, "waits on Task-" + ", Task-".join(str(i) for i in wo[:2]) + (f" and {len(wo) - 2} more" if len(wo) > 2 else "")) if x)
+        return (f"Task-{t['id']} {t['name']}", meta)
+
+    def freed_line(t: dict) -> tuple[str, str]:
+        rel = t["rel"]
+        st = next((c["status"] for c in rel["waits_on_closed"] if c["id"] == rel["freed_by"]), "done")
+        return (f"Task-{t['id']} {t['name']}", f"Task-{rel['freed_by']} is {st}")
+    freed = sorted((t for t in open_tasks if (t.get("rel") or {}).get("freed_at") and str(t["rel"]["freed_at"]) >= since), key=lambda t: t["id"])
     if planner:
         if planner.get("ok") and planner.get("verdict"):
             T.append(planner["verdict"])
@@ -111,6 +124,7 @@ def build(conn: sqlite3.Connection, cfg: dict, today: date, events: list[dict] |
             ev_lines.append((f"{when}  {e.get('summary') or '(no title)'}", "accepted" if e.get("self_status") == "accepted" else ""))
         section("Calendar · today and tomorrow", ev_lines, calendar_note or "Nothing on the calendar.")
     section("Closed since yesterday", [(f"Task-{c['id']} {c['name']}", f"{c['new'].strip(chr(34))} · by {c['closed_by'] or '?'}") for c in closed])
+    section("Free since yesterday", [freed_line(t) for t in freed])
     if planner and planner.get("ok"):
         section("Done by the planner", [(a, "") for a in planner.get("applied") or []])
         section("For Review · the planner suggests", [(a, "") for a in planner.get("staged") or []])

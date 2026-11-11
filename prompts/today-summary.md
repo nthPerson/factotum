@@ -11,6 +11,10 @@ warning if something is overdue, fading or about to collide with something else.
 closed today, start from what is left, not from what is done. Plain words, no lists, under 50 words.
 
 # 2. The open rows (Task-id | score priority | project | due | name | context), highest first
+Rows may carry link facts: "waits on Task-9" (it cannot sensibly be done before Task-9),
+"frees Task-12" (doing it makes Task-12 possible), "part of Task-380", "2 of 5 steps open",
+"needed for Nov 6" (a hard deadline it holds up). When saying what matters today, name the task
+that frees the most before the ones that wait on it.
 {{rows}}
 
 # 3. Closed today
