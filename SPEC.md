@@ -277,7 +277,12 @@ Message Content intent.
 
 **Commands.** The email command channel is retired. Voice stays (§8.1 applies spoken
 instructions, including reminder and tier verbs). The UI grammar handles
-`done|drop|snooze|push|defer|top|longterm <ids…> [to <when>]` with no Claude run.
+`done|drop|snooze|push|defer|top|longterm <ids…> [to <when>]` with no Claude run. A command whose
+verb takes no date (`done`, `drop`, `top`, `unpin`, `longterm`, `start`, `reopen`, `nodue`) with words
+left over after the task numbers (a `to <when>` tail included) is not a command and goes to Chat
+(2026-11-10): `done 12 duplicate of 14` must not close Task-12 and drop the rest. `and` and commas
+between numbers are separators (`done 12 and 14` is a command). `snooze` with words it cannot read
+as a date is not a command either; it no longer silently means "tomorrow".
 
 ## 7. Outputs (each with an `enabled` flag)
 
@@ -458,8 +463,9 @@ fade chips, next reminder, project, due, effort, staged-change chip; the chevron
 Claude buttons). Top rail with drag. Composer on every tab with attached chips; grammar commands
 stage instantly, anything else opens Chat (phase 5): the Chat tab is a thread picker, the messages,
 the live status of the run, and under each answer the proposals as checkboxes ("Stage selected"),
-"Create task" for a proposed row, and the drafts with "Open in Mailbird". A tap on a row or its checkbox selects it (no modifier,
-so it works on a phone); a double-tap opens its details; Esc clears the selection. The bulk bar
+"Create task" for a proposed row, and the drafts with "Open in Mailbird". On a desktop a tap on a row or its checkbox selects it (no modifier);
+a double-tap opens its details; Esc clears the selection. On a phone (stage 1, below) a tap opens
+the task and only the tick box selects. The bulk bar
 floats at the bottom of the screen with any selection (it never shifts the list, so the second
 tap of a double-tap lands on the same row) and offers Done, Drop, Snooze, a due date to set or
 clear, Top and Long-term. Due dates can also be set or cleared from a row's
@@ -478,6 +484,30 @@ deploy reaches the phone without a hard refresh. Tray with one Apply and
 one Undo. Review as a card stack. Settings: lifecycle values, inputs and outputs on/off, email
 accounts table, ntfy topic, brief time and recipient, with a note naming the config file.
 Keyboard: `j k d x s t l e`, Esc deselects; Review `d k s x`.
+
+**Stage 1 of the linked-tasks design (2026-11-10): the app shell** (design
+`docs/superpowers/specs/2026-11-10-linked-tasks-design.md` §13). The page is an installable app: a
+manifest (`manifest.webmanifest`, requested with `crossorigin="use-credentials"` so Cloudflare Access
+sends the cookie), icons made by `tools/make_icons.py`, and the iPhone touch icon inlined in
+`index.html` as a data URI (the iPhone fetches it without the cookie). Addresses are real paths: `/`
+is Today, every other tab is `/<tab>`, a task is `/t/<id>`; `/today` and old `/#<tab>` links are
+rewritten in place. History: a tab click pushes (nothing if it is the current tab); a jump to a row
+on another tab and a prompt sent to Chat push; expanding a row on a desktop changes nothing; on a
+desktop `/t/<id>` opens the tab that lists the task (Today, else Timeline) with the row unfolded and
+expanded, replacing the entry; on a phone a tapped row pushes `/t/<id>`, and an app opened at
+`/t/<id>` puts `/` beneath it (replace, then push) so Back lands on Today, not outside the app.
+On a phone (`max-width: 700px`) a tap opens a full-screen task page rendered into `#panel`
+(`ui.page`), and the tick box selects; ‹ Back, the phone's Back and Esc close it, the list is redrawn
+and its scroll restored. A task that is done or dropped is fetched from `GET /api/tasks/{id}` and
+shown read-only ("This task is done." / "This task is dropped."); an unknown id says "Task-N does
+not exist." One thing sits at the bottom of a phone screen: the tray, or the short bar while rows
+are selected (the tray hides and comes back when the selection is cleared). A redirect, 401 or 403
+from `/api` shows "Sign in again" (a restarting server or a dead network never does). When the
+app comes back to the front the lists are reloaded unless something is typed (`typingNow()`), and
+a new build is noticed by `X-Factotum-Build` on every `/api` response against
+`<meta name="factotum-build">` (the first 12 hex digits of SHA-1 over the mtimes of `index.html`,
+`app.js`, `app.css` and `manifest.webmanifest`): the page reloads itself, or shows "Update ready"
+while something is typed.
 
 Phone layout (2026-11-02): under 700 px a row is title first (code and name on one line, wrapping)
 with its chips on a second line and the chevron as a real tap target; the tab strip scrolls
@@ -562,7 +592,8 @@ Inputs has "Tasks from mail" with its minimum interval.
   Until then it stays open, stays in Review, and the push keeps asking. A Review decision (Keep,
   Later) restarts the quiet clock, so a kept backlog item returns as Fading in `fade_days`.
 - Action tokens live on the reminder row; Done and Snooze are single use (a second tap says what
-  already happened), Open only navigates; all three stop working 24 h after the push. Snooze is
+  already happened), Open only navigates (to `/t/<id>`, as does the optional tap; the page after Done or Snooze links the
+  task too); all three stop working 24 h after the push. Snooze is
   one hour from the tap. A repeating reminder's next occurrence is queued when it fires; a
   reminder with a malformed `fire_at` never fires and shows in the task's details for repair.
 - **Setting one.** "Set reminder" on a Review card and in a row's details: date-time, optional
@@ -573,7 +604,9 @@ Inputs has "Tasks from mail" with its minimum interval.
   scheduler marks it sent and inserts the next occurrence as a new pending row (phase 2). `fire_at`
   is naive local wall time (`YYYY-MM-DDTHH:MM`) in `owner.timezone`; the scheduler converts.
 - Voice: "add X due next week, remind me tomorrow afternoon" → a task plus one reminder.
-- The morning brief lists reminders firing today, so email and push agree.
+- The morning brief lists reminders firing today, so email and push agree. The planner runs at most
+  once per brief day: its result (or its failure) is kept in `state.brief.planner` before the mail
+  is sent, and a retried send reuses it (2026-11-10).
 
 ## 11. Deployment
 

@@ -228,7 +228,7 @@ your three addresses → Save. Then App settings → enable "Instant Auth" is op
 
 Check: open https://factotum.nthperson.dev on the phone; you get the Access login, then the UI.
 The ntfy reminder actions are `view` links into this hostname, so the phone's browser session
-with Access is what authorises them.
+with Access is what authorises them. The reminder's Open opens the task itself (`/t/<id>`).
 
 ## 8. Secrets and the service
 
@@ -505,3 +505,17 @@ Factotum is its own OAuth server for `/mcp` (SPEC §15). Four steps, each once.
    once, each call one batch with an Undo in the Log. The same setting governs the skills in
    Claude Code. After changing it, reconnect the connector in claude.ai (or start a new chat) so
    it reloads the tool list. Upload the skills (§14) so those chats know the recipes.
+
+## 17. Installing the app on a phone and a desktop
+
+- **iPhone:** Safari, Share, Add to Home Screen. It opens full-screen. Notifications come in stage 2.
+- **Android:** Chrome, menu, Install app (not tested yet).
+- **Desktop Edge or Chrome:** the install icon in the address bar, or menu, Apps, Install.
+
+What was learned behind Cloudflare Access (design §13.1): the installed app asks for no second
+sign-in; the manifest needs the cookie (the page requests it with `use-credentials`); the iPhone
+fetches its icon without the cookie, so the icon is inlined in the page. When the Access session ends
+the app shows "Sign in again", so the session duration (§7) is how often that happens. The new
+paths `/t/*` and `/<tab>` sit under the same Access application and must not get a bypass policy.
+
+Updating needs nothing: the app reloads itself when it is next brought to the front.

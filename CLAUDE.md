@@ -44,7 +44,10 @@ Python, a light rewrite run, Refresh = sweeps + planner through the scheduler), 
 (`due: null`, `nodue`), foldable sections, the Top rail's tiles and jump-to-task. Wave 10
 (2026-11-05): tasks suggested from mail (`mail_sweep.py` keeps `mail_new` evidence, `factotum/mail_triage.py`
 and `prompts/mail-triage.md` turn it into Review cards), growing prompt boxes, Chat attachments and
-Delete thread, the Log's Timeline / Changes / Runs / All views. Retiring the old Notion
+Delete thread, the Log's Timeline / Changes / Runs / All views. Stage 1 of the linked-tasks design (2026-11-10,
+`docs/superpowers/specs/2026-11-10-linked-tasks-design.md`): the installable app, task and tab
+addresses with Back, the phone task page, the short selection bar, Sign in again, fresh on return,
+self-update by build stamp; the command leftover fault and the brief retry fault. Retiring the old Notion
 pages and plaud-sync is the user's checklist (SETUP §15). Update this paragraph when something lands.
 
 ## Where things live
@@ -87,6 +90,8 @@ pages and plaud-sync is the user's checklist (SETUP §15). Update this paragraph
 | the Today summary: what it is about, when it is stale, the light rewrite, Refresh | SPEC §8.4 | `factotum/summary.py` (`store`, `stale`, `run`, `refresh_state`), `scheduler.py` (`_refresh`, `_auto_summary`), `api.py` (`/api/summary`), `prompts/today-summary.md`, `web/app.js` (`summaryHtml`, `pollSummary`) |
 | folded sections, the Top rail's tiles, jump to a task's row | SPEC §9 "Wave 9" | `web/app.js` (`folds`, `group`, `todayGroups`, `timelineGroups`, `renderRail`, `jumpTo`) |
 | the claude.ai connector: metadata, registration, consent gate, arming, tokens, `/mcp` auth | SPEC §15, SETUP §16 | `factotum/oauth.py` (`consent_identity`, `verify_access_jwt`, `armed`, `token`, `check_access`), `api.py` (`/oauth/*`, `/api/connectors`) |
+| the installable app: manifest, icons, the page head | design §13, SPEC §9 | `factotum/web/manifest.webmanifest`, `index.html`, `tools/make_icons.py` |
+| addresses, Back, the phone task page, the short bar, signed out, return and update | SPEC §9 | `web/app.js` (`parseAddress`, `setAddress`, `go`, `applyAddress`, `openTask`, `closeTask`, `taskPageHtml`, `signedOut`, `typingNow`, `onReturn`), `api.py` (`PAGE_TABS`, `STAMPED`, `build_stamp`, `BuildStamp`, `_index_html`) |
 
 ## Commands
 
@@ -253,6 +258,19 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
   `render()`, and anything that looks rows up in the DOM only sees unfolded sections.
 - **`expire` only touches rows Review has shown** (`last_offered_at`, stamped by `GET /api/review`).
   A row that was never on a Review page stays open however old it is; that is by design.
+- **The manifest must be requested with `crossorigin="use-credentials"`** (2026-11-10): otherwise Access
+  answers it with its login page. The iPhone fetches the touch icon without the cookie, so it is inlined
+  in `index.html` (a file behind Access drew a letter).
+- **`/api` must never answer 401, 403 or a redirect** (2026-11-10): the page reads each as an expired
+  sign-in and shows "Sign in again".
+- **The build stamp covers `api.STAMPED` only** (2026-11-10): a new file the page loads joins that list
+  and gets the `?v=` stamp; a Python-only change reloads no page.
+- **Tab and task addresses are real paths** (2026-11-10), because a fragment may not survive the sign-in
+  redirect: a new link into the app names `/t/<id>` or `/<tab>`, never `/#…`.
+- **On a phone the task page is rendered into `#panel` (`ui.page`)** (2026-11-10): anything `wire()`
+  installs on the panel works there too, and nothing may assume the panel holds a list.
+- **The test suite never reads `.env`** (2026-11-10, `tests/conftest.py::_no_real_env`): a new secret is
+  named in `.env.example`, and a test that needs one sets it with `monkeypatch.setenv`.
 
 ## Gotchas carried over from plaud-sync (dates are when they were learned)
 
