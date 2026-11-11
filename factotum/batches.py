@@ -14,13 +14,24 @@ from .db import get_task, now_iso, upsert_task
 SETTABLE = {
     "name", "project", "area", "due", "due_is_datetime", "hard", "effort", "context", "counterpart",
     "waiting_on", "manual_priority", "snoozed_until", "top_rank", "longterm", "legacy_status",
-    "last_reviewed_at", "why_now", "calendar_event",
+    "last_reviewed_at", "why_now", "calendar_event", "outcome",
 }
 OPS = {"set", "done", "drop", "reopen", "pin_top", "unpin", "keep", "longterm", "fade", "lapse", "add_reminder", "judge_evidence",
        "create", "watch_sent", "unwatch_sent", "link", "unlink", "add_note"}
 # What a `create` may carry; score, priority, status and mentions stay derived.
 CREATABLE = {"name", "project", "area", "due", "due_is_datetime", "hard", "effort", "context", "counterpart", "waiting_on", "manual_priority", "longterm", "snoozed_until"}
-CREATED_SOURCE = "Claude"          # the Source of a task a connector or skill created
+CREATED_SOURCE = "Claude"          # the Source of a task a connector or skill created (and the default)
+REF_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,23}$")
+MAX_CREATE_LINKS = 20
+
+
+def created_source(batch_source: str) -> str:
+    """The Source label of a task a batch creates: who made it, as the owner would say it."""
+    if batch_source in ("ui", "command", "review"):
+        return "Manual"
+    return {"chat": "Chat", "planner": "Planner"}.get(batch_source, CREATED_SOURCE)
+
+
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 REPEATS = {"daily", "weekdays", "weekly", "monthly"}
 VERDICTS = ("applied", "dismissed", "reviewed", "staged")
@@ -76,8 +87,8 @@ def _add_reminder(cur, task_id: int, rf: dict, batch_id: int, source: str, undo:
     undo.append({"task_id": task_id, "reminder_id": rid})
 
 
-def _create(conn, cur, ch: dict, batch_id: int, source: str, today: date, undo: list, skipped: list, created: list) -> int:
-    """A new open task (Source "Claude"), with its reminders and an optional sent-mail watch, as
+def _create(conn, cur, ch: dict, batch_id: int, source: str, today: date, undo: list, skipped: list, created: list, refs: dict) -> int:
+    """A new open task (Source by `created_source`), with its reminders and an optional sent-mail watch, as
     part of the batch: recorded as a `created` change, and undone by dropping the row (never
     deleting it: ids are forever and the mirror may already have a page). Returns what it wrote."""
     f = ch.get("fields")
@@ -85,6 +96,20 @@ def _create(conn, cur, ch: dict, batch_id: int, source: str, today: date, undo: 
     if not name:
         skipped.append({"task_id": None, "why": "a create needs fields with a name"})
         return 0
+    ref = f.get("ref")
+    if ref is not None:
+        if not isinstance(ref, str) or not REF_RE.match(ref):
+            skipped.append({"task_id": None, "why": f"{name[:40]}: ref must be a short word (letters, digits, - and _)"})
+            return 0
+        if ref in refs:
+            skipped.append({"task_id": None, "why": f"ref {ref!r} is used twice in this batch"})
+            return 0
+    source_key = ch.get("source_key")                         # Python callers only (the API strips it)
+    if source_key:
+        existing = conn.execute("SELECT id FROM tasks WHERE source_key = ?", (source_key,)).fetchone()
+        if existing:
+            skipped.append({"task_id": existing["id"], "why": f"already created as Task-{existing['id']}"})
+            return 0
     vals = {k: v for k, v in f.items() if k in CREATABLE}
     vals["name"] = name[:200]
     if vals.get("due"):
@@ -100,7 +125,7 @@ def _create(conn, cur, ch: dict, batch_id: int, source: str, today: date, undo: 
         except ValueError as e:
             skipped.append({"task_id": None, "why": f"{name[:40]}: watch not set: {e}"})
     now = now_iso()
-    tid = upsert_task(conn, dict(vals, status="open", source=CREATED_SOURCE, source_key=f"batch:{batch_id}:{len(created)}", hard=vals.get("hard", 0),
+    tid = upsert_task(conn, dict(vals, status="open", source=created_source(source), source_key=source_key or f"batch:{batch_id}:{len(created)}", hard=vals.get("hard", 0),
                                  mentions=1, last_mention_at=today.isoformat(), created_at=now, edited_at=now))
     # `new` keeps who the create named: an address a direct batch introduced is not a contact (mcp_server.known_recipients)
     cur.execute("INSERT INTO changes (batch_id, task_id, field, old, new) VALUES (?, ?, 'created', NULL, ?)",
@@ -108,6 +133,16 @@ def _create(conn, cur, ch: dict, batch_id: int, source: str, today: date, undo: 
     undo.append({"created_task_id": tid})
     created.append(tid)
     wrote = 1
+    if ref:
+        refs[ref] = tid
+    links = f.get("links")
+    if isinstance(links, list):
+        if len(links) > MAX_CREATE_LINKS:
+            skipped.append({"task_id": tid, "why": f"at most {MAX_CREATE_LINKS} links on a create; the rest were left out"})
+        for entry in links[:MAX_CREATE_LINKS]:
+            e = entry if isinstance(entry, dict) else {}
+            wrote += _link_op(conn, cur, {"op": "link", "task_id": tid, "fields": {"kind": e.get("kind"), "other": e.get("other"), "why": e.get("why")}},
+                              batch_id, source, undo, skipped, refs)
     for r in (ch.get("reminders") if isinstance(ch.get("reminders"), list) else []):
         try:
             _add_reminder(cur, tid, _reminder_fields({"fields": r if isinstance(r, dict) else {}}), batch_id, source, undo)
@@ -139,6 +174,8 @@ def _resolve(conn: sqlite3.Connection, change: dict, today: date, closed_by: str
         fields["last_reviewed_at"] = today.isoformat()
     elif op == "longterm":
         fields["longterm"] = 1
+    if "outcome" in fields:
+        fields["outcome"] = str(fields["outcome"] or "").strip()[:300] or None
     for k in list(fields):
         if k not in SETTABLE and k not in ("status", "completed_at", "closed_by"):
             raise ValueError(f"field {k} is not settable")
@@ -175,7 +212,7 @@ def apply(conn: sqlite3.Connection, changes: list[dict], source: str, today: dat
             op = ch.get("op") if isinstance(ch, dict) else None
             before = cur.execute("SELECT COALESCE(MAX(id), 0) FROM changes").fetchone()[0]
             if op == "create":
-                applied += _create(conn, cur, ch, batch_id, source, today, undo, skipped, created)
+                applied += _create(conn, cur, ch, batch_id, source, today, undo, skipped, created, refs)
             elif op in ("link", "unlink"):
                 applied += _link_op(conn, cur, ch, batch_id, source, undo, skipped, refs)
             elif _apply_one(conn, cur, ch, batch_id, source, today, closed_by, undo, skipped):

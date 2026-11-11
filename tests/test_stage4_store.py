@@ -266,3 +266,72 @@ def test_cause_is_stored_on_the_batch(conn):
     b = batches.apply(conn, [{"task_id": 1, "op": "set", "fields": {"effort": "M"}}], "ui", TODAY)
     assert json.loads(one(conn, "SELECT cause_json FROM batches WHERE id = ?", (a["batch_id"],))["cause_json"]) == cause
     assert one(conn, "SELECT cause_json FROM batches WHERE id = ?", (b["batch_id"],))["cause_json"] is None
+
+
+# --- Task 4: create with links, outcome, source
+
+def test_split_into_steps_is_one_batch_with_one_undo(conn):
+    mk(conn, 380, name="Thesis chapter 2")
+    res = batches.apply(conn, [
+        {"op": "create", "fields": {"name": "Outline", "project": "COMPE 510", "ref": "a", "links": [{"kind": "part_of", "other": 380}]}},
+        {"op": "create", "fields": {"name": "Draft", "project": "COMPE 510", "ref": "b", "links": [{"kind": "part_of", "other": 380}]}},
+        {"op": "link", "task_id": "b", "fields": {"kind": "waits_on", "other": "a"}}], "ui", TODAY)
+    a, b = res["refs"]["a"], res["refs"]["b"]
+    assert res["created"] == [a, b] and active_rels(conn) == {(a, 380, "part_of"), (b, 380, "part_of"), (b, a, "waits_on")}
+    batches.undo(conn, res["batch_id"])
+    assert active_rels(conn) == set() and {r["status"] for r in rows(conn, "SELECT status FROM tasks WHERE id IN (?, ?)", (a, b))} == {"dropped"}
+
+
+def test_a_link_to_a_skipped_create_is_skipped_with_a_reason(conn):
+    mk(conn, 1)
+    res = batches.apply(conn, [
+        {"op": "create", "fields": {"ref": "x"}},
+        {"op": "link", "task_id": 1, "fields": {"kind": "waits_on", "other": "x"}}], "ui", TODAY)
+    assert res["created"] == [] and any(s["why"] == "no task made in this batch has ref 'x'" for s in res["skipped"])
+    res = batches.apply(conn, [
+        {"op": "create", "fields": {"name": "A", "ref": "r"}},
+        {"op": "create", "fields": {"name": "B", "ref": "r"}}], "ui", TODAY)
+    assert len(res["created"]) == 1 and any("is used twice" in s["why"] for s in res["skipped"])
+    assert one(conn, "SELECT COUNT(*) AS n FROM tasks WHERE name = 'B'")["n"] == 0
+
+
+def test_a_bad_link_entry_is_skipped_and_the_task_is_still_created(conn):
+    mk(conn, 1)
+    res = batches.apply(conn, [{"op": "create", "fields": {"name": "Step", "links": [{"kind": "part_of", "other": 99999}, {"kind": "part_of", "other": 1}]}}], "ui", TODAY)
+    tid = res["created"][0]
+    assert active_rels(conn) == {(tid, 1, "part_of")} and len(res["skipped"]) == 1
+    assert res["applied"] == 2
+
+
+def test_done_and_drop_take_an_outcome_capped_at_300(conn):
+    mk(conn, 1); mk(conn, 2)
+    r = batches.apply(conn, [{"op": "done", "task_id": 1, "fields": {"outcome": "Sent"}}, {"op": "drop", "task_id": 2, "fields": {"outcome": "x" * 400}}], "ui", TODAY)
+    assert one(conn, "SELECT outcome FROM tasks WHERE id = 1")["outcome"] == "Sent"
+    assert len(one(conn, "SELECT outcome FROM tasks WHERE id = 2")["outcome"]) == 300
+    assert one(conn, "SELECT 1 AS n FROM changes WHERE batch_id = ? AND task_id = 1 AND field = 'outcome'", (r["batch_id"],))
+    batches.undo(conn, r["batch_id"])
+    assert one(conn, "SELECT outcome FROM tasks WHERE id = 1")["outcome"] is None
+
+
+def test_created_task_source_follows_the_batch_source(conn):
+    want = {"ui": "Manual", "command": "Manual", "review": "Manual", "chat": "Chat", "planner": "Planner", "connector": "Claude", "skill": "Claude"}
+    for src, label in want.items():
+        r = batches.apply(conn, [{"op": "create", "fields": {"name": f"from {src}"}}], src, TODAY)
+        assert one(conn, "SELECT source FROM tasks WHERE id = ?", (r["created"][0],))["source"] == label, src
+
+
+def test_a_python_caller_may_name_the_source_key_and_a_second_create_with_it_is_skipped(conn):
+    ch = {"op": "create", "fields": {"name": "Once"}, "source_key": "chat:7:0"}
+    r = batches.apply(conn, [ch], "chat", TODAY)
+    tid = r["created"][0]
+    assert one(conn, "SELECT source_key FROM tasks WHERE id = ?", (tid,))["source_key"] == "chat:7:0"
+    r2 = batches.apply(conn, [ch], "chat", TODAY)
+    assert r2["created"] == [] and r2["skipped"][0]["why"] == f"already created as Task-{tid}"
+
+
+def test_the_api_strips_source_key_from_a_change(cfg, tmp_path):
+    app = api.create_app(cfg, db_path=str(tmp_path / "t.db"))
+    client = TestClient(app)
+    r = client.post("/api/batches/apply", json={"source": "ui", "changes": [{"op": "create", "fields": {"name": "x"}, "source_key": "canvas:1"}]})
+    t = one(app.state.conn, "SELECT source_key, source FROM tasks WHERE id = ?", (r.json()["created"][0],))
+    assert t["source_key"].startswith("batch:") and t["source"] == "Manual"

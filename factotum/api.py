@@ -252,8 +252,9 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
 
     @app.post("/api/batches/apply")
     def apply_batch(body: ApplyBody):
+        changes = [{k: v for k, v in c.items() if k != "source_key"} for c in body.changes]   # the page never chooses one
         try:
-            return batches.apply(conn, body.changes, body.source, date.today())
+            return batches.apply(conn, changes, body.source, date.today())
         except ValueError as e:
             raise HTTPException(400, str(e))
 
