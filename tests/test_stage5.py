@@ -1,4 +1,5 @@
 """Stage 5, ripples (Part A)."""
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -9,7 +10,7 @@ from conftest import FIXTURE, TODAY
 from stage4_helpers import link, mk
 from stage5_helpers import entry, fake_runner, no_claude, on, queue  # noqa: F401  (no_claude is autouse: no test reaches a real run)
 
-from factotum import batches, ripple
+from factotum import batches, relations, ripple
 from factotum import config as C
 from factotum.api import create_app
 from factotum.claude import runner
@@ -182,3 +183,55 @@ def test_the_api_says_ripples_wait_for_a_scheduler(cfg, tmp_path):
     rb = batches.apply(c, [{"op": "set", "task_id": 2, "fields": {"context": "free"}}], "ripple", TODAY, cause={"kind": "ripple", "from": [1], "run": 0, "batches": [res["batch_id"]]})
     landed = client.get("/api/ripple", params={"after": res["batch_id"]}).json()["landed"]
     assert landed == [{"batch_id": rb["batch_id"], "at": landed[0]["at"], "from": [1], "tasks": [{"id": 2, "name": "Task 2"}], "undone": False}]
+
+
+# --- Task 7: undo follows the cause
+def _rippled(conn, cfg):
+    """Tasks 2 and 3 wait on 1; `b` closes 1 and `r` is the ripple it caused. Returns (b, r)."""
+    mk(conn, 1); mk(conn, 2, context="Old two"); mk(conn, 3, context="Old three")
+    link(conn, 2, 1, "waits_on"); link(conn, 3, 1, "waits_on")
+    b = batches.apply(conn, [{"op": "done", "task_id": 1}], "ui", TODAY)["batch_id"]
+    r = batches.apply(conn, [{"op": "set", "task_id": 2, "fields": {"context": "New two"}},
+                             {"op": "set", "task_id": 3, "fields": {"context": "New three"}}],
+                      "ripple", TODAY, cause={"kind": "ripple", "from": [1], "run": 0, "batches": [b]})["batch_id"]
+    return b, r
+
+
+def test_undoing_the_cause_undoes_its_ripple_when_the_text_is_in_place(conn, cfg):
+    b, r = _rippled(conn, cfg)
+    res = batches.undo(conn, b)
+    assert res["ripples_undone"] == [r] and res["ripples_kept"] == []
+    assert get_task(conn, 1)["status"] == "open" and get_task(conn, 2)["context"] == "Old two" and get_task(conn, 3)["context"] == "Old three"
+    assert conn.execute("SELECT undone_at FROM batches WHERE id = ?", (r,)).fetchone()[0]
+
+
+def test_undoing_the_cause_after_a_hand_edit_keeps_the_ripple_and_flags_it(conn, cfg):
+    b, r = _rippled(conn, cfg)
+    batches.apply(conn, [{"op": "set", "task_id": 2, "fields": {"context": "Mine now"}}], "ui", TODAY)
+    res = batches.undo(conn, b)
+    assert res["ripples_undone"] == [] and res["ripples_kept"] == [r]
+    assert get_task(conn, 2)["context"] == "Mine now" and get_task(conn, 3)["context"] == "New three"
+    cause = json.loads(conn.execute("SELECT cause_json, undone_at FROM batches WHERE id = ?", (r,)).fetchone()[0])
+    assert cause["cause_undone_batch"] == b and cause["cause_undone_at"]
+    alone = batches.undo(conn, r)
+    assert get_task(conn, 3)["context"] == "Old three" and get_task(conn, 2)["context"] == "Mine now"
+    assert alone["skipped"] == [{"task_id": 2, "why": "Task-2 context was changed after this batch; left as it is"}]
+
+
+def test_a_ripple_batch_undoes_on_its_own_and_leaves_its_cause(conn, cfg):
+    b, r = _rippled(conn, cfg)
+    assert batches.undo(conn, r)["restored"] == 2 and get_task(conn, 1)["status"] == "done"
+    assert batches.undo(conn, b)["ripples_undone"] == []
+
+
+def test_undoing_a_batch_that_caused_nothing_says_so(conn):
+    mk(conn, 1); b = batches.apply(conn, [{"op": "done", "task_id": 1}], "ui", TODAY)["batch_id"]
+    res = batches.undo(conn, b)
+    assert res["ripples_undone"] == [] and res["ripples_kept"] == [] and batches.undo(conn, b)["ripples_undone"] == []
+
+
+def test_the_changed_marker_goes_with_an_undone_ripple(conn, cfg):
+    b, r = _rippled(conn, cfg)
+    assert relations.annotate(conn, [{"id": 2}])[0]["rel"]["changed"]["batch_id"] == r
+    batches.undo(conn, b)
+    assert relations.annotate(conn, [{"id": 2}])[0]["rel"]["changed"] is None
