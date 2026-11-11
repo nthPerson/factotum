@@ -233,3 +233,34 @@ def test_an_install_that_already_has_accounts_is_marked_and_left_alone(conn):
     assert seed_accounts(conn, [{"address": "b@example.com"}]) == 0
     assert [r["address"] for r in rows(conn, "SELECT address FROM accounts")] == ["a@example.com"]
     assert get_settings(conn)["state.accounts_seeded"]
+
+
+# --- Task 6: the example
+
+def _dotted(d, prefix=""):
+    for k, v in d.items():
+        key = f"{prefix}{k}"
+        if isinstance(v, dict) and v and key != "sources.canvas.course_map":     # the course codes there are the user's own
+            yield from _dotted(v, key + ".")
+        elif not key.startswith("_"):
+            yield key
+
+def test_the_example_is_a_reference_with_placeholders_only():
+    from urllib.parse import urlparse
+    text = C.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+    ex, own = C.load(C.EXAMPLE_CONFIG), C.load(FIXTURE)
+    emails = re.findall(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", text)
+    assert emails and all(re.search(r"@(example\.(com|edu|org)|plaud\.ai)$", e) for e in emails), emails
+    assert not re.search(r"\b[0-9a-f]{32}\b|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-", text)
+    personal = [own["owner"]["name"], *own["owner"]["emails"], *(p["name"] for p in own["taxonomy"]["projects"] if p["name"] not in ("Personal", "Unknown")),
+                urlparse(own["sources"]["canvas"]["base_url"]).hostname, urlparse(own["server"]["public_url"]).hostname,
+                *own["sources"]["canvas"]["course_map"], *(w["name"] for w in own["sources"]["slack"]["workspaces"])]
+    assert [p for p in personal if p and p.lower() in text.lower()] == []
+    assert set(_dotted(own)) <= set(_dotted(ex))                                  # every key today's file sets is still documented
+    assert all(C.get(ex, k, "absent") != "absent" for k in C.SETTINGS_KEYS)
+    assert all(v is False for v in _flags(ex).values())
+    for k in C.PAID_SWITCHES + ("server.oauth.enabled",):
+        assert C.get(ex, k) is False, k
+    lines = [l.strip() for l in text.splitlines()]
+    for start in ("fade_days:", "fade_warn_days:", "last_call_days:", "top_cap:", "review_cap:", "scoring:", "review_time:", "time:"):
+        assert "taste" in next(l for l in lines if l.startswith(start)), start
