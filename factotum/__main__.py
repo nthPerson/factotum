@@ -13,6 +13,7 @@
     python -m factotum chat "text" [--attach 388 23] [--thread N] [--canned search_mail|draft_reply]   # one chat turn from the terminal
     python -m factotum effective [KEY ...] [--as-before]   # each switch's value and origin; read-only, no secrets
     python -m factotum chat-check       # the MCP server over a pipe, then one tiny Claude run that calls a tool through it
+    python -m factotum ripple <task_id> [--dry-run]   # one ripple now from a task (a real Claude run); --dry-run writes nothing
 """
 from __future__ import annotations
 
@@ -127,6 +128,9 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("planner", help="the morning planner now: one Claude run, then the brief's verdict and proposals")
     p.add_argument("--dry-run", action="store_true", help="run Claude and print the JSON; write nothing")
     p.add_argument("--send", action="store_true", help="also send the brief with the verdict")
+    p = sub.add_parser("ripple", help="one ripple now from a task (a real Claude run): --dry-run prints what it would do and writes nothing")
+    p.add_argument("task_id", type=int)
+    p.add_argument("--dry-run", action="store_true")
     p = sub.add_parser("sweep", help="run one sweep now")
     p.add_argument("which", choices=["mail", "canvas", "calendar", "slack"])
     sub.add_parser("slack-check", help="each configured Slack workspace: token present, auth.test, how many channels it sees")
@@ -393,6 +397,18 @@ def main(argv: list[str] | None = None) -> int:
                 print("  rejected:", r)
             if a.send:
                 print(brief.send(conn, ecfg, today, brief.smtp_mailer, gcal, planner=res))
+    elif a.cmd == "ripple":
+        from . import ripple
+        res = ripple.run(conn, ecfg, [a.task_id], today, dry_run=a.dry_run)     # whatever claude.ripple.enabled says: an explicit command
+        if not res["ok"]:
+            raise SystemExit(f"ripple failed: {res['error']}")
+        if res.get("dry_run"):
+            print(json.dumps(res["data"], indent=1, ensure_ascii=False))
+            for p in res["preview"]:
+                print(f"Task-{p['task_id']}: {p['effect']} · {p['verdict']}" if "effect" in p else f"  {p['proposal'] or '(no card)'} · {p['verdict']}")
+            print(f"(dry run · ${res['cost_usd']:.2f} · prompt under data/runs/ripple/{today}/)")
+        else:
+            print(res["line"])
     elif a.cmd == "sweep":
         from datetime import datetime as _dt
         from . import canvas, gcal, mail_sweep, slack_sweep

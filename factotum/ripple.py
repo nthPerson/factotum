@@ -10,13 +10,14 @@ import html
 import json
 import re
 import sqlite3
+import time
 from datetime import date, timedelta
 from typing import Any, Callable
 
 from . import batches
 from . import config as C
 from . import relations as R
-from .db import get_task, now_iso, rows
+from .db import get_task, log_run, now_iso, rows
 from .planner import _same_suggestion
 from .sync_file import _clean_task_fields
 
@@ -275,6 +276,7 @@ EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,255}\.[A-Za-z]{2,
 SET_FIELDS = ("name", "due", "hard", "effort", "project")     # what a ripple's `set` or `create` card may carry
 NEVER_FIELDS = ("counterpart", "waiting_on")                  # a ripple never copies an address or a person (design §8.6)
 LEFT_OUT = "[address left out]"
+SHAPE = 'the reply is not {"ripples": [...]}'
 
 
 def _short(v) -> str:
@@ -293,7 +295,7 @@ def parse(data, b: dict) -> list[dict]:
     normalised (`context` None unless the effect is `text`, `why` one line of at most `WHY_CAP`,
     `proposals` a list). Raises `ReplyError` naming the first thing wrong."""
     if not isinstance(data, dict) or not isinstance(data.get("ripples"), list):
-        raise ReplyError('the reply is not {"ripples": [...]}')
+        raise ReplyError(SHAPE)
     out: list[dict] = []
     seen: set[int] = set()
     for i, e in enumerate(data["ripples"]):
@@ -499,3 +501,126 @@ def apply(conn: sqlite3.Connection, cfg: dict, b: dict, entries: list[dict], run
             skipped.append(why if f"Task-{tid}" in why else f"Task-{tid}: {why}")
     conn.commit()
     return {"batch_id": batch_id, "rewritten": rewritten, "noted": noted, "staged": staged, "refused": refused, "skipped": skipped}
+
+
+# --- the run (design §8.1, §8.5) -----------------------------------------------------------------
+
+def _tasks(ids) -> str:
+    return ", ".join(f"Task-{i}" for i in ids)
+
+
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}" if n == 1 else f"{n} {word}s"
+
+
+def _drop_queued(conn: sqlite3.Connection, b: dict) -> None:
+    """Delete the group's queue rows that nothing queued again while the run was in flight."""
+    for tid, last in b["queue"].items():
+        conn.execute("DELETE FROM ripple_queue WHERE task_id = ? AND last_batch_id = ?", (tid, last))
+
+
+def _failed(conn: sqlite3.Connection, b: dict, err: str, ms: int, cost: float, dry_run: bool, run_id: int | None = None) -> dict:
+    """A run that failed: one more attempt on each of the group's rows still as the run read them, a
+    row reaching `MAX_ATTEMPTS` set aside; the run logged with its cost. Commits."""
+    if not dry_run:
+        aside = []
+        for tid, last in b["queue"].items():
+            conn.execute("UPDATE ripple_queue SET attempts = attempts + 1 WHERE task_id = ? AND last_batch_id = ?", (tid, last))
+            if conn.execute("DELETE FROM ripple_queue WHERE task_id = ? AND last_batch_id = ? AND attempts >= ?", (tid, last, MAX_ATTEMPTS)).rowcount:
+                aside.append(tid)
+        if aside:
+            err += f" · failed twice on {_tasks(aside)}: set aside"
+    # an "applying" row a batch already committed is this run's row: it says the failure, not a second row
+    if run_id is not None and conn.execute("SELECT 1 FROM runs WHERE id = ?", (run_id,)).fetchone():
+        conn.execute("UPDATE runs SET ok = 0, summary = 'ripple', error = ? WHERE id = ?", (err[:1000], run_id))
+    else:
+        log_run(conn, RUN_KIND, ms, ok=False, summary="ripple", error=err[:1000], cost_usd=cost)
+    conn.commit()
+    return {"ok": False, "error": err, "cost_usd": cost}
+
+
+def _preview(conn: sqlite3.Connection, cfg: dict, b: dict, entries: list[dict]) -> list[dict]:
+    """What `apply` would do with each entry and each proposal, writing nothing."""
+    out: list[dict] = []
+    for e in entries:
+        tid = e["task_id"]
+        verdict = "nothing"
+        if e["effect"] == "text":
+            why_not = guard(b["texts"][tid], e["context"])
+            verdict = "would rewrite" if why_not is None else f"would add a note: {why_not}"
+        out.append({"task_id": tid, "effect": e["effect"], "verdict": verdict})
+        for p in e["proposals"]:
+            ch, label = clean_proposal(conn, cfg, p, tid, b)
+            out.append({"task_id": tid, "proposal": label if ch else None, "verdict": "would stage" if ch else f"refused: {label}"})
+    return out
+
+
+def _line(b: dict, out: dict) -> str:
+    """The Log's line for an applied run."""
+    k = len(out["rewritten"])
+    line = f"Ripple from {_tasks(b['from'])}: {k} task{'' if k == 1 else 's'} updated" + (f" ({_tasks(out['rewritten'])})" if k else "")
+    if out["noted"]:
+        line += f", {_plural(len(out['noted']), 'note')} (" + "; ".join(f"Task-{n['task_id']}: {n['why']}" for n in out["noted"]) + ")"
+    if out["staged"]:
+        line += f", {_plural(len(out['staged']), 'card')} for Review"
+    if out["refused"]:
+        line += f", {len(out['refused'])} refused"
+    if out["skipped"]:
+        line += f", {len(out['skipped'])} skipped"
+    if out["batch_id"]:
+        line += f"; batch {out['batch_id']}"
+    return line
+
+
+def run(conn: sqlite3.Connection, cfg: dict, task_ids: list[int], today: date | None = None, *, runner=None,
+        dry_run: bool = False, at: str | None = None) -> dict:
+    """One ripple run from the changed tasks `task_ids` (a group from the queue, or one task asked
+    for from the CLI): the bundle, one `claude -p` with no tools on the Settings model and budget,
+    the whole reply checked, then `apply`. A queue row is deleted only when nothing queued it again
+    during the run; a failed run counts an attempt, and a group that fails `MAX_ATTEMPTS` times is
+    set aside. A dry run makes the real run and says what it would do, writing nothing but the Log row."""
+    from . import reminders
+    from .claude import runner as _runner
+    runner = runner or _runner.run
+    if today is None or at is None:
+        now = reminders.local_now(cfg)
+        today = today or now.date()
+        at = at or now.strftime("%Y-%m-%dT%H:%M")
+    b = bundle(conn, cfg, task_ids, today)
+    if not b["neighbours"]:
+        if not dry_run:
+            _drop_queued(conn, b)
+            conn.commit()
+        return {"ok": True, "line": "nothing linked is open", "cost_usd": 0.0}
+    started = time.monotonic()
+    prompt = build_prompt(cfg, b, today, at[11:16])
+    workdir = RUNS_DIR / today.isoformat() / f"{at[11:16].replace(':', '')}-{b['from'][0]}"
+    workdir.mkdir(parents=True, exist_ok=True)
+    (workdir / "prompt.md").write_text(prompt, encoding="utf-8")
+    # tools="": every task text in this prompt may hold a stranger's words, so the run gets no tool at all
+    res = runner(cfg, RUN_KIND, prompt, allowed_tools=[], tools="", workdir=workdir,
+                 model=C.value(cfg, "claude.ripple.model"), budget_usd=float(C.value(cfg, "claude.budgets_usd.ripple")))
+    (workdir / "result.txt").write_text(res.result_text or "", encoding="utf-8")
+    ms = int((time.monotonic() - started) * 1000)
+    if not res.ok:
+        return _failed(conn, b, res.error or "no JSON", ms, res.cost_usd, dry_run)
+    try:
+        entries = parse(res.data, b)
+    except ReplyError as e:
+        return _failed(conn, b, f"{SHAPE}: {'no list under ripples' if str(e) == SHAPE else e}", ms, res.cost_usd, dry_run)
+    if dry_run:
+        preview = _preview(conn, cfg, b, entries)
+        log_run(conn, RUN_KIND, ms, ok=True, summary=f"dry run: {_tasks(b['from'])}, {len(entries)} entries", cost_usd=res.cost_usd)
+        conn.commit()
+        return {"ok": True, "dry_run": True, "data": res.data, "entries": entries, "preview": preview, "prompt": prompt, "cost_usd": res.cost_usd}
+    run_id = log_run(conn, RUN_KIND, ms, ok=True, summary="applying", cost_usd=res.cost_usd)
+    try:
+        out = apply(conn, cfg, b, entries, run_id, today)
+    except Exception as e:                                   # the run is paid for: log it even when applying it fails
+        conn.rollback()
+        return _failed(conn, b, f"applying the reply failed: {type(e).__name__}: {e}", ms, res.cost_usd, dry_run, run_id)
+    line = _line(b, out)
+    conn.execute("UPDATE runs SET summary = ? WHERE id = ?", (line[:1000], run_id))
+    _drop_queued(conn, b)
+    conn.commit()
+    return dict(out, ok=True, line=line, cost_usd=res.cost_usd, run_id=run_id)

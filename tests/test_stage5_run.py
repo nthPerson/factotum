@@ -4,12 +4,13 @@ import re
 
 import pytest
 
-from conftest import TODAY
+import factotum.claude.runner as runner_mod
+from conftest import FIXTURE, TODAY
 from stage4_helpers import link, mk
-from stage5_helpers import entry, no_claude  # noqa: F401  (no_claude is autouse: no test reaches a real run)
+from stage5_helpers import entry, fake_runner, no_claude, queue  # noqa: F401  (no_claude is autouse: no test reaches a real run)
 
 from factotum import batches, ripple
-from factotum.db import get_task, rows
+from factotum.db import connect, get_task, init_db, rows
 
 
 # --- Task 3: the bundle and the prompt
@@ -142,3 +143,65 @@ def test_a_neighbour_closed_merged_or_edited_meanwhile_is_left_alone(conn, cfg):
     assert get_task(conn, 2)["context"].startswith("Edited by hand") and get_task(conn, 3)["context"] == "Book the room" and out["rewritten"] == []
     assert "Task-3 is done now" in out["skipped"] and "Task-4 is dropped now" in out["skipped"]
     assert any("Task-2 context changed since this edit was staged" in s for s in out["skipped"])
+
+
+# --- Task 5: the run
+def test_a_run_applies_logs_its_cost_and_empties_the_queue(conn, cfg, monkeypatch):
+    b = _done_with_two_waiting(conn, cfg)
+    calls = []
+    new2 = "Chair settled; send it. https://example.edu/form?id=3 Task-1"
+    monkeypatch.setattr(runner_mod, "run", fake_runner({"ripples": [entry(2, context=new2)]}, cost=0.12, calls=calls))
+    res = ripple.run(conn, cfg, [1], TODAY, at="2026-11-01T09:30")
+    assert res["ok"] and res["rewritten"] == [2] and queue(conn) == {}
+    assert calls[0]["kind"] == "ripple" and calls[0]["tools"] == "" and calls[0]["allowed_tools"] == [] and calls[0]["model"] == "sonnet" and calls[0]["budget_usd"] == 0.30
+    run_row = conn.execute("SELECT * FROM runs WHERE kind = 'ripple'").fetchone()
+    assert run_row["cost_usd"] == 0.12 and run_row["ok"] == 1 and run_row["summary"].startswith("Ripple from Task-1: 1 task updated")
+    assert json.loads(conn.execute("SELECT cause_json FROM batches WHERE id = ?", (res["batch_id"],)).fetchone()[0])["run"] == run_row["id"]
+
+
+def test_a_change_during_the_run_stays_queued(conn, cfg, monkeypatch):
+    _done_with_two_waiting(conn, cfg)
+    during = lambda: batches.apply(conn, [{"op": "set", "task_id": 1, "fields": {"outcome": "Actually: in person"}}], "ui", TODAY)    # noqa: E731
+    monkeypatch.setattr(runner_mod, "run", fake_runner({"ripples": [entry(3, effect="none")]}, during=during))
+    assert ripple.run(conn, cfg, [1], TODAY)["ok"]
+    assert queue(conn)[1]["what"] == ["closed", "outcome"] and queue(conn)[1]["now"] == 1
+
+
+def test_a_wrong_shaped_reply_writes_nothing_and_is_set_aside_after_two(conn, cfg, monkeypatch):
+    _done_with_two_waiting(conn, cfg)
+    monkeypatch.setattr(runner_mod, "run", fake_runner({"ripples": "no"}, cost=0.05))
+    before = conn.execute("SELECT COUNT(*) FROM batches").fetchone()[0]
+    first = ripple.run(conn, cfg, [1], TODAY)
+    assert not first["ok"] and first["error"].startswith('the reply is not {"ripples": [...]}') and queue(conn)[1]["attempts"] == 1
+    second = ripple.run(conn, cfg, [1], TODAY)
+    assert "set aside" in second["error"] and queue(conn) == {}
+    assert conn.execute("SELECT COUNT(*) FROM batches").fetchone()[0] == before
+    assert [r["ok"] for r in conn.execute("SELECT ok FROM runs WHERE kind = 'ripple'")] == [0, 0]
+
+
+def test_a_failed_runner_counts_as_an_attempt(conn, cfg, monkeypatch):
+    _done_with_two_waiting(conn, cfg)
+    monkeypatch.setattr(runner_mod, "run", fake_runner(None))
+    assert not ripple.run(conn, cfg, [1], TODAY)["ok"] and queue(conn)[1]["attempts"] == 1
+
+
+def test_a_dry_run_writes_no_task_and_keeps_the_queue(conn, cfg, monkeypatch):
+    _done_with_two_waiting(conn, cfg)
+    monkeypatch.setattr(runner_mod, "run", fake_runner({"ripples": [entry(2, context="dropped the link"), entry(3, effect="propose", proposals=[{"op": "set", "fields": {"waiting_on": "Eve"}, "reason": "r"}])]}))
+    snap = lambda: [tuple(r) for r in conn.execute("SELECT * FROM tasks ORDER BY id")] + [conn.execute("SELECT COUNT(*) FROM evidence").fetchone()[0], conn.execute("SELECT COUNT(*) FROM batches").fetchone()[0]]   # noqa: E731
+    was, q = snap(), queue(conn)
+    res = ripple.run(conn, cfg, [1], TODAY, dry_run=True)
+    assert res["dry_run"] and snap() == was and queue(conn) == q
+    assert {"task_id": 2, "effect": "text", "verdict": "would add a note: drops https://example.edu/form?id=3"} in res["preview"]
+    assert any(p.get("verdict", "").startswith("refused: ") and "waiting_on" in p["verdict"] for p in res["preview"])
+
+
+def test_the_cli_dry_run_prints_the_reply_and_its_cost(cfg, tmp_path, monkeypatch, capsys):
+    from factotum import __main__ as cli
+    path = tmp_path / "cli.db"
+    c = connect(path); init_db(c); _done_with_two_waiting(c, cfg); c.close()
+    monkeypatch.setenv("FACTOTUM_CONFIG", str(FIXTURE)); monkeypatch.setenv("FACTOTUM_DB", str(path))
+    monkeypatch.setattr(runner_mod, "run", fake_runner({"ripples": [entry(3, effect="none")]}, cost=0.07))
+    cli.main(["ripple", "1", "--dry-run"])
+    out = capsys.readouterr().out
+    assert '"ripples"' in out and "Task-3: none · nothing" in out and "(dry run · $0.07" in out
