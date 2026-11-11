@@ -141,6 +141,21 @@ def test_a_create_from_a_batch_canvas_or_a_recording_is_checked_at_once(conn, cf
     assert ("waits_on", r["created"][0], 1, "text") in [(s["kind"], s["a"], s["b"], s["signal"]) for s in _sugg(conn)]
 
 
+def test_a_detector_that_fails_at_create_fails_neither_the_sweep_nor_the_recording(conn, cfg, monkeypatch, capsys):
+    def boom(db, ids):
+        db.execute("INSERT INTO evidence (task_id, kind, ref, label, at) VALUES (NULL, 'link_suggestion', '{}', 'half-written', '2026-11-02')")
+        raise RuntimeError("detector broke")
+    monkeypatch.setattr(suggestions, "detect", boom)
+    assert canvas.sweep(conn, cfg, [_item("canvas:assignment:77", "Submit COMPE 510 Assignment 7", "2026-11-22T23:59")], TODAY).startswith("created 1")
+    data = {"tasks": [{"op": "create", "name": "Draft the dataset request", "project": "COMPE 510", "due": None, "context": "x",
+                       "source_key": "plaud:of_s7:1"}], "instructions": [], "reminders": [], "calendar": [], "unresolved": []}
+    r = sync_file.apply_result(conn, cfg, {"id": "of_s7", "name": "Lab sync", "start_utc": "2026-11-02T17:00:00Z"}, data, TODAY, calendar=None)
+    assert len(r["created"]) == 1 and not conn.in_transaction
+    assert one(conn, "SELECT COUNT(*) AS n FROM tasks WHERE source_key IN ('canvas:assignment:77', 'plaud:of_s7:1')")["n"] == 2
+    assert _sugg(conn) == []                                                                # the detector's own half-write is undone
+    assert capsys.readouterr().err.count("suggestions at create failed: RuntimeError: detector broke") == 2
+
+
 def test_the_scheduler_runs_the_detectors_after_the_sweeps_every_half_hour(conn, cfg):
     from factotum.scheduler import Scheduler
     mk(conn, 1, name="Take COMPE 510 Quiz 7", source="Canvas", due="2026-11-10T23:59"); mk(conn, 2, name="Quiz 7 prep", source="Plaud", due="2026-11-10")
@@ -200,6 +215,18 @@ def test_a_suggestion_whose_task_closed_gives_its_slot_up(conn):
     ids = _many(conn, 2)
     batches.apply(conn, [{"op": "done", "task_id": 100}], "ui", TODAY)
     assert suggestions.session(conn, date(2026, 11, 2), 5) == [ids[1]]
+
+
+def test_a_damaged_session_row_or_a_bad_number_never_breaks_the_day(conn, cfg):
+    from factotum.db import set_setting
+    ids = _many(conn, 3)
+    d = date(2026, 11, 2)
+    for session_v, offered_v in (([1, 2], "x"), ({"day": d.isoformat(), "ids": "12"}, {"5": 3}), ({"day": d.isoformat(), "ids": ["x", None]}, [])):
+        set_setting(conn, suggestions.SESSION_KEY, session_v); set_setting(conn, suggestions.OFFERED_KEY, offered_v); conn.commit()
+        assert suggestions.session(conn, d, 2) == ids[:2]
+    for v, n in (("7", 7), ("lots", 5), (True, 5), (-3, 0), (None, 0), ([], 5), (float("inf"), 5)):
+        assert suggestions.per_review({"links": {"suggestions_per_review": v}}) == n
+    assert suggestions.per_review({}) == 5
 
 
 def test_review_the_badges_and_the_agent_see_the_same_days_suggestions(cfg, tmp_path):

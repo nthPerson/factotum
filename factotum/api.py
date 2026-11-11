@@ -408,7 +408,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         st = get_settings(conn)
         last = parse_date(st.get("state.last_review_at"))
         skip = {int(x) for x in (exclude or "").split(",") if x.strip().lstrip("-").isdigit()}
-        suggestions.session(conn, today, int(C.value(ecfg, "links.suggestions_per_review") or 0))   # today's few link suggestions
+        suggestions.session(conn, today, suggestions.per_review(ecfg))   # today's few link suggestions
         conn.commit()
         open_tasks = decorate_all([t for t in rows(conn, "SELECT * FROM tasks WHERE status = 'open'") if t["id"] not in skip], today, ecfg)
         from .mail_sweep import review_flags
@@ -526,7 +526,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
             # seen up to the message the card was made from, or the next sweep would call that same message "Thread updated"
             conn.execute("UPDATE links SET last_seen_at = ? WHERE task_id = ? AND kind = 'mail_thread' AND ref = ? AND last_seen_at IS NULL", (mail.get("at"), tid, str(mail["ref"])))
         conn.execute("UPDATE evidence SET judged_at = ?, verdict = 'applied' WHERE id = ?", (now, evidence_id))
-        suggestions.at_create(conn, [tid])
+        suggestions.at_create_guarded(conn, [tid])
         conn.commit()
         links = _suggestion_links(e)
         if not links:

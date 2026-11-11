@@ -129,7 +129,7 @@ def sweep(conn: sqlite3.Connection, cfg: dict, items: list[dict], today: date) -
     if changes:
         batches.apply(conn, changes, "canvas", today, closed_by="canvas")
     if created:
-        suggestions.at_create(conn, created)
+        suggestions.at_create_guarded(conn, created)
     conn.commit()
     if not (created or changes):
         return None

@@ -2,10 +2,11 @@
 owner typing it. It owns one card per unordered pair, ever (`why_not`, `suggest_pair`), whether a
 waiting card is still worth showing (`live`), and the detectors (`twins`, `threads`, `text_refs`, all
 three in `detect`). It writes `link_suggestion` evidence through `relations.suggest` only and never
-writes `relations`: a suggestion becomes a link when the owner taps it, through `batches`. `relations.suggest` stays as it is for the import; every
-other writer goes through `suggest_pair`. Nothing here commits except `sweep_job` and `after_create`;
-everything else leaves that to the caller. The daily cap (`session`) picks which waiting suggestions
-are offered today; `relations.annotate` reads its choice."""
+writes `relations`: a suggestion becomes a link when the owner taps it, through `batches`.
+`relations.suggest` stays as it is for the import; every other writer goes through `suggest_pair`.
+Nothing here commits except `sweep_job` and `after_create`; everything else leaves that to the caller.
+The daily cap (`session`) picks which waiting suggestions are offered today; `relations.annotate`
+reads its choice."""
 from __future__ import annotations
 
 import json
@@ -285,7 +286,7 @@ def sweep_job(conn, cfg: dict, now: datetime) -> str | None:
     """`sweep`, today's `session`, commit, and a line like "3 suggested: twin 1, text 2", or None when
     nothing was written."""
     out = sweep(conn, now.date())
-    session(conn, now.date(), int(C.value(cfg, "links.suggestions_per_review") or 0))
+    session(conn, now.date(), per_review(cfg))
     conn.commit()
     w = out["written"]
     if not w:
@@ -297,6 +298,27 @@ def at_create(db: Db, ids: list[int]) -> list[int]:
     """The detectors over the tasks just created, written through `suggest_pair`; returns the evidence
     ids. The caller commits."""
     return _write(db, detect(db, set(ids)))[1]
+
+
+def at_create_guarded(conn, ids: list[int]) -> list[int]:
+    """`at_create` inside a savepoint, for a caller with its own writes still uncommitted (the Canvas
+    sweep, a recording, a Review card's Create): a detector failure undoes only the detectors' writes,
+    leaves one line on stderr and returns [], so it never fails the sweep, the recording or the card.
+    The caller commits."""
+    if not ids:
+        return []
+    if not conn.in_transaction:
+        conn.execute("BEGIN")                   # or RELEASE below would commit for the caller
+    conn.execute("SAVEPOINT suggestions_at_create")
+    try:
+        out = at_create(conn, ids)
+    except Exception as e:
+        conn.execute("ROLLBACK TO suggestions_at_create")
+        conn.execute("RELEASE suggestions_at_create")
+        print(f"factotum: suggestions at create failed: {type(e).__name__}: {e}", file=sys.stderr)
+        return []
+    conn.execute("RELEASE suggestions_at_create")
+    return out
 
 
 def pending(db: Db) -> list[dict]:
@@ -319,6 +341,20 @@ SESSION_KEY = relations.SESSION_KEY             # {"day": "YYYY-MM-DD", "ids": [
 OFFERED_KEY = "state.links.offered"             # {"<evidence id>": "YYYY-MM-DD"}: the last day each was offered
 
 
+def per_review(cfg: dict) -> int:
+    """`links.suggestions_per_review` as a whole number of at least 0; a value that is not one (a
+    hand-edited YAML or settings row) is the code default rather than an error on Review."""
+    v = C.value(cfg, "links.suggestions_per_review")
+    if v is None:
+        return 0
+    try:
+        if not isinstance(v, bool):
+            return max(0, int(v))
+    except (TypeError, ValueError, OverflowError):
+        pass
+    return int(C.DEFAULTS["links.suggestions_per_review"])
+
+
 def session(conn, today: date, n: int) -> list[int]:
     """The ids of the link suggestions to show today, in selection order, at most `n` a day; writes
     SESSION_KEY and OFFERED_KEY, the caller commits. A filing suggestion is never counted (it always
@@ -330,16 +366,19 @@ def session(conn, today: date, n: int) -> list[int]:
     st = get_settings(conn)
     waiting = pending(conn)
     pending_ids = {s["evidence_id"] for s in waiting}
-    offered = {k: v for k, v in (st.get(OFFERED_KEY) or {}).items() if str(k).isdigit() and int(k) in pending_ids}
+    raw = st.get(OFFERED_KEY)
+    offered = {k: v for k, v in (raw.items() if isinstance(raw, dict) else ())
+               if str(k).isdigit() and int(k) in pending_ids and isinstance(v, str)}
     day = today.isoformat()
     shown: list[int] = []
     stored: list[int] = []
     if n > 0:
         cands = sorted((s["evidence_id"] for s in waiting if s.get("signal") != "filing" and live(conn, s)),
                        key=lambda e: (offered.get(str(e)) or "", e))
-        prev = st.get(SESSION_KEY) or {}
-        if prev.get("day") == day:
-            stored = [int(e) for e in prev.get("ids") or []]
+        prev = st.get(SESSION_KEY)
+        prev = prev if isinstance(prev, dict) else {}       # a hand-edited or damaged row must not 500 Review
+        if prev.get("day") == day and isinstance(prev.get("ids"), list):
+            stored = [e for e in prev["ids"] if type(e) is int]
             still = set(cands)
             shown = [e for e in stored if e in still]
         for e in cands:
@@ -366,4 +405,3 @@ def after_create(conn, created: list[int], source: str) -> None:
     except Exception as e:
         conn.rollback()
         print(f"factotum: suggestions after create failed: {type(e).__name__}: {e}", file=sys.stderr)
-

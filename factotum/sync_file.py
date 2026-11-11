@@ -372,7 +372,7 @@ def apply_result(conn: sqlite3.Connection, cfg: dict, rec: dict, data: dict, tod
         add_mention(conn, tid, "plaud", rec_id, at)
         add_link(conn, tid, "plaud_note", rec_id, label=str(rec.get("name") or "")[:120])
     if created:
-        suggestions.at_create(conn, created)
+        suggestions.at_create_guarded(conn, created)
     conn.commit()
     return {"created": created, "updated": list(dict.fromkeys(updated)), "applied": applied, "reminders": reminders, "events": events,
             "links": links, "link_suggestions": link_suggestions,
