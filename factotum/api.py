@@ -183,7 +183,8 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
     cfg = cfg or C.load()
     conn = connect(db_path or C.db_path(), shared=True)      # one connection for every request thread: no statement cache (db.connect)
     init_db(conn)
-    seed_accounts(conn, C.get(cfg, "sources.mail.seed_accounts", []))
+    if not cfg.get("_starter"):
+        seed_accounts(conn, C.get(cfg, "sources.mail.seed_accounts", []))
     app = FastAPI(title="Factotum", version="0.1.0")
 
     def eff_cfg() -> dict:

@@ -207,3 +207,29 @@ def test_effective_never_creates_or_writes_the_database(tmp_path, monkeypatch, c
     _eff()
     out = capsys.readouterr().out
     assert not (tmp_path / "none.db").exists() and "(starter settings)" in out.splitlines()[0] and "(none yet)" in out.splitlines()[1]
+
+
+# --- Task 5: accounts seeded once
+
+def test_deleted_accounts_are_not_seeded_again(tmp_path, cfg):
+    db = str(tmp_path / "a.db")
+    c = TestClient(create_app(cfg, db_path=db))
+    assert len(c.get("/api/settings").json()["accounts"]) == len(cfg["sources"]["mail"]["seed_accounts"])
+    c.put("/api/settings", json={"accounts": []})
+    assert TestClient(create_app(cfg, db_path=db)).get("/api/settings").json()["accounts"] == []
+
+
+def test_the_starter_never_seeds_and_an_empty_seed_list_does_not_use_the_seeding_up(tmp_path, cfg, conn):
+    c = TestClient(create_app(dict(cfg, _starter=True), db_path=str(tmp_path / "s.db")))
+    assert c.get("/api/settings").json()["accounts"] == []
+    assert seed_accounts(conn, []) == 0 and "state.accounts_seeded" not in get_settings(conn)
+    n = len(cfg["sources"]["mail"]["seed_accounts"])
+    assert seed_accounts(conn, cfg["sources"]["mail"]["seed_accounts"]) == n and get_settings(conn)["state.accounts_seeded"]
+    assert seed_accounts(conn, [{"address": "z@example.com"}]) == 0
+
+
+def test_an_install_that_already_has_accounts_is_marked_and_left_alone(conn):
+    conn.execute("INSERT INTO accounts (address, display, enabled, roles_json) VALUES ('a@example.com', 'A', 1, '[]')"); conn.commit()
+    assert seed_accounts(conn, [{"address": "b@example.com"}]) == 0
+    assert [r["address"] for r in rows(conn, "SELECT address FROM accounts")] == ["a@example.com"]
+    assert get_settings(conn)["state.accounts_seeded"]
