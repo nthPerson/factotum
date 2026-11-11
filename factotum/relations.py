@@ -311,7 +311,8 @@ def annotate(db: Db, tasks: list[dict]) -> list[dict]:
     """Put every neighbour fact under `t["rel"]` (the plan's "task["rel"]" section), in place; returns
     `tasks`. A dict needs only `id`. Reads the active links once, the rows they reach once, the ripple
     batches once and the pending suggestions once (only today's offered ones, `shown_ids`, once a
-    session was recorded); the rest is Python. Never writes (the MCP server's connection is query_only)."""
+    session was recorded, and only those still `suggestions.live`: a card whose task closed today
+    leaves both ends at once); the rest is Python. Never writes (the MCP server's connection is query_only)."""
     if not tasks:
         return tasks
     ids = sorted({int(t["id"]) for t in tasks})
@@ -371,6 +372,19 @@ def annotate(db: Db, tasks: list[dict]) -> list[dict]:
     shown = shown_ids(db)
     if shown is not None:                      # today's few (the daily cap); a filing suggestion always shows
         sugg = {tid: [s for s in lst if s["evidence_id"] in shown or s["signal"] == "filing"] for tid, lst in sugg.items()}
+    eids = sorted({s["evidence_id"] for lst in sugg.values() for s in lst})
+    if eids:                                   # a card whose task closed (or was dropped) meanwhile leaves both ends now, not tomorrow
+        from . import suggestions              # lazy: it imports this module; `live` only reads
+        refs = {r[0]: r[1] for r in db.execute("SELECT id, ref FROM evidence WHERE id IN (SELECT value FROM json_each(?))", (json.dumps(eids),))}
+        alive = set()
+        for e in eids:
+            try:
+                ref = json.loads(refs.get(e) or "")
+            except (TypeError, ValueError):
+                continue
+            if isinstance(ref, dict) and suggestions.live(db, ref):
+                alive.add(e)
+        sugg = {tid: [s for s in lst if s["evidence_id"] in alive] for tid, lst in sugg.items()}
 
     for t in tasks:
         tid = int(t["id"])

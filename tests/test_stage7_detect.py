@@ -217,6 +217,21 @@ def test_a_suggestion_whose_task_closed_gives_its_slot_up(conn):
     assert suggestions.session(conn, date(2026, 11, 2), 5) == [ids[1]]
 
 
+def test_a_card_whose_task_closes_today_leaves_the_other_end_at_once(conn):
+    ids = _many(conn, 4)
+    mk(conn, 300); mk(conn, 301)
+    relations.suggest(conn, "part_of", 300, 301, "a piece of it", "filing"); conn.commit()
+    d = date(2026, 11, 2)
+    assert suggestions.session(conn, d, 3) == ids[:3]
+    batches.apply(conn, [{"op": "done", "task_id": 101}], "ui", TODAY)                      # one end of the first card closes
+    conn.execute("UPDATE tasks SET status = 'dropped' WHERE id IN (102, 300)"); conn.commit()  # an undone create is dropped
+    shown = lambda tid: [s["evidence_id"] for s in relations.annotate(conn, [{"id": tid}])[0]["rel"]["suggestions"]]  # noqa: E731
+    assert shown(100) == [] and shown(103) == [] and shown(301) == []                         # gone the same day, a filing one too
+    assert shown(104) == [ids[2]] and shown(105) == [ids[2]] and shown(106) == []
+    assert suggestions.session(conn, d, 3) == [ids[2]]                                        # the day's cap still counts them: no top-up
+    assert shown(100) == [] and shown(104) == [ids[2]] and shown(106) == []
+
+
 def test_a_damaged_session_row_or_a_bad_number_never_breaks_the_day(conn, cfg):
     from factotum.db import set_setting
     ids = _many(conn, 3)
