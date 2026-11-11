@@ -429,9 +429,12 @@
       <input type="text" data-f="label" placeholder="Label (optional)" aria-label="Label">
       <button class="btn small" data-rem-add="${id}">Add</button><button class="btn small" data-rem-cancel="${id}">Cancel</button></div>`;
   }
-  // An attribute edit (due date) is staged under "<id>:due", beside the task's decision if any.
-  function stageExtra(key, task_id, op, fields, label) {
-    staged.set(key, { task_id, op, fields, label });
+  // An attribute edit (due date) is staged under "<id>:due", beside the task's decision if any. `extra` may
+  // carry `expect` and `note` (both sent with the change) and `ev` (a suggestion's evidence id, never sent);
+  // a key whose value is undefined is left out.
+  function stageExtra(key, task_id, op, fields, label, extra = {}) {
+    const more = Object.fromEntries(Object.entries(extra || {}).filter(([, v]) => v !== undefined));
+    staged.set(key, { task_id, op, fields, label, ...more });
     try { localStorage.setItem('factotum.staged', JSON.stringify([...staged])); } catch (_) {}
     render();
   }
@@ -498,7 +501,12 @@
   // keys: the staged entries to apply (the tray's dropdown); undefined = every one
   async function applyAll(keys) {
     const picked = keys ? [...staged].filter(([k]) => keys.has(String(k))) : [...staged];
-    const changes = picked.map(([, s]) => ({ task_id: s.task_id, op: s.op, fields: s.fields }));
+    const changes = picked.map(([, s]) => {      // what the server takes: never the label or `ev`
+      const c = { task_id: s.task_id, op: s.op, fields: s.fields };
+      if (s.expect) c.expect = s.expect;
+      if (s.note) c.note = s.note;
+      return c;
+    });
     if (!changes.length) return;
     try {
       const res = await api('/api/batches/apply', { method: 'POST', body: JSON.stringify({ source: ui.tab === 'review' ? 'review' : 'ui', changes }) });
@@ -515,7 +523,7 @@
         await loadReview();
         ui.reviewPaused = true; render();
       }
-      toast(`${res.applied} change${res.applied === 1 ? '' : 's'} applied` + (res.skipped.length ? ` · ${res.skipped.length} skipped` : ''), true);
+      toast(`${res.applied} change${res.applied === 1 ? '' : 's'} applied` + (res.skipped.length ? ` · ${res.skipped.length} skipped: ${res.skipped[0].why}` : ''), true);
     } catch (e) { toast('Apply failed: ' + e.message); }
   }
   function toast(msg, undo) {
@@ -524,7 +532,7 @@
     el.classList.add('on');
     clearTimeout(toast.t); toast.t = setTimeout(() => el.classList.remove('on'), 8000);
     const u = document.getElementById('undo');
-    if (u) u.onclick = async () => { await api(`/api/batches/${lastBatch}/undo`, { method: 'POST' }); lastBatch = null; el.classList.remove('on'); await load(); };
+    if (u) u.onclick = async () => { const res = await undoBatch(lastBatch); lastBatch = null; await load(); toast(undoSaid(res)); };
   }
   // The sign-in has expired (see `expired`): a full-screen "Sign in again" over the whole app, whose
   // button reloads at the same address. The tray is in localStorage, so it survives the reload. The rest
@@ -543,6 +551,60 @@
     location.reload();
   }
   document.getElementById('signin').onclick = reloadKeepingDraft;
+
+  // ---------- links (stage 4b): words and staging keys ----------
+  // Where a staged change sits in the tray. A link is keyed by both ends and its kind, never by the bare id,
+  // so it stands beside the task's decision instead of replacing it; a note sits beside both.
+  function relKey(a, kind, b) { return `rel:${a}:${kind}:${b}`; }
+  function stageKey(c, suffix) {
+    const id = c.task_id, f = c.fields || {};
+    if (c.op === 'link' || c.op === 'unlink') return relKey(id, f.kind, f.other);
+    if (c.op === 'merge') return relKey(id, 'same_as', f.into);
+    if (c.op === 'add_note') return `${id}:${suffix || 'note'}`;
+    if (c.op === 'add_reminder') return id + ':r';
+    if (c.op === 'judge_evidence') return 'e:' + f.evidence_id;
+    return suffix ? `${id}:${suffix}` : id;
+  }
+  function cut60(s) { s = String(s == null ? '' : s); return s.length > 60 ? s.slice(0, 60) + '…' : s; }
+  // Read with the source task in front: "Task-12 now waits on Task-14".
+  function linkPredicate(kind, other, removed) {
+    const t = 'Task-' + other;
+    if (kind === 'waits_on') return removed ? `no longer waits on ${t}` : `now waits on ${t}`;
+    if (kind === 'part_of') return removed ? `is no longer part of ${t}` : `is now part of ${t}`;
+    if (kind === 'same_as') return removed ? `is no longer merged into ${t}` : `merged into ${t}`;
+    return '';
+  }
+  // A change in words, or '' when the caller's own label says it better.
+  function changeWords(c) {
+    const f = c.fields || {};
+    if (c.op === 'link') return linkPredicate(f.kind, f.other, false);
+    if (c.op === 'unlink') return linkPredicate(f.kind, f.other, true);
+    if (c.op === 'merge') return linkPredicate('same_as', f.into, false);
+    if (c.op === 'add_note') return `note “${cut60(f.text)}”`;
+    if ((c.op === 'done' || c.op === 'drop') && f.outcome) return `${c.op === 'done' ? 'done' : 'dropped'} · “${cut60(f.outcome)}”`;
+    return '';
+  }
+  function stageChange(c, label, extra, suffix) {
+    const key = stageKey(c, suffix);
+    stageExtra(key, c.task_id, c.op, c.fields || {}, changeWords(c) || label, extra);
+    return key;
+  }
+  // A staged edit of a text field carries the text it started from (the server's, never the staged view),
+  // so Apply skips it when the text changed meanwhile instead of writing over the newer one.
+  function textExpect(id, fields) {
+    const t = byId(id); if (!t || !fields) return undefined;
+    const out = {};
+    for (const k of ['context', 'name']) if (k in fields) out[k] = t[k] == null ? '' : t[k];
+    return Object.keys(out).length ? out : undefined;
+  }
+  function suggestionStaged(eid) { return staged.has('e:' + eid) || [...staged.values()].some(s => s.ev === eid); }
+  function undoBatch(id) { return api(`/api/batches/${id}/undo`, { method: 'POST' }); }
+  function undoSaid(res) {
+    if (res.already) return 'Already undone';
+    const k = (res.skipped || []).length;
+    if (!k) return 'Undone';
+    return `Undone · ${k} left as ${k === 1 ? 'it is' : 'they are'}: ${res.skipped[0].why}`;
+  }
 
   // ---------- rendering ----------
   function render() {
@@ -572,7 +634,7 @@
     return pending.map(p => `<div class="pending" data-pending="${p.id}"><div class="phead"><span class="chip top">${p.source === 'connector' ? 'Staged by Claude' : 'Staged by Claude Code'}</span><b>${esc(p.label || '')}</b><span class="hint" style="margin:0">${new Date(p.created_at).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</span></div>
       <div class="plist">${p.changes.map(c => { const t = byId(c.task_id);
         if (c.op === 'create') return `<span class="chip">new task: ${esc(String((c.fields || {}).name || '').slice(0, 60))}${(c.fields || {}).due ? ' · due ' + esc(String(c.fields.due)) : ''}${(c.reminders || []).length ? ` · ${c.reminders.length} reminder${c.reminders.length === 1 ? '' : 's'}` : ''}${c.watch_sent_to ? ' · closes when mail to ' + esc(c.watch_sent_to) + ' is sent' : ''}</span>`;
-        return `<span class="chip">Task-${c.task_id}${t ? ' ' + esc(t.name.slice(0, 40)) : ''} · ${esc(c.op === 'watch_sent' ? 'close when mail' + ((c.fields || {}).to ? ' to ' + c.fields.to : '') + ' is sent' : c.op === 'set' ? Object.entries(c.fields || {}).filter(([k]) => k !== 'due_is_datetime').map(([k, v]) => `${k} ${v === null ? 'cleared' : String(v).slice(0, 40)}`).join(', ') : c.op === 'add_reminder' ? 'remind ' + fmtWhen(c.fields.fire_at) : c.op)}</span>`; }).join('')}</div>
+        return `<span class="chip">Task-${c.task_id}${t ? ' ' + esc(t.name.slice(0, 40)) : ''} · ${esc(changeWords(c) || (c.op === 'watch_sent' ? 'close when mail' + ((c.fields || {}).to ? ' to ' + c.fields.to : '') + ' is sent' : c.op === 'set' ? Object.entries(c.fields || {}).filter(([k]) => k !== 'due_is_datetime').map(([k, v]) => `${k} ${v === null ? 'cleared' : String(v).slice(0, 40)}`).join(', ') : c.op === 'add_reminder' ? 'remind ' + fmtWhen(c.fields.fire_at) : c.op))}</span>`; }).join('')}</div>
       <div class="pact"><button class="btn small primary" data-pending-apply="${p.id}">Apply ${p.changes.length} change${p.changes.length === 1 ? '' : 's'}</button><button class="btn small" data-pending-dismiss="${p.id}">Dismiss</button></div></div>`).join('');
   }
   function renderRail() {
@@ -914,19 +976,23 @@
   }
   async function loadChatThreads() { const r = await api('/api/chat/threads'); chat.threads = r.threads; if (chat.current === null && chat.threads.length) chat.current = chat.threads[0].id; if (chat.current !== null) await loadChatThread(chat.current); else render(); }
   async function loadChatThread(id) { try { const r = await api(`/api/chat/threads/${id}`); chat.current = id; chat.messages = r.messages; chat.scroll = true; } catch (_) { chat.current = null; chat.messages = []; } render(); }
-  const propKey = (p, mid, i) => ['done', 'drop', 'pin_top', 'longterm'].includes(p.op) ? p.task_id : p.op === 'add_reminder' ? p.task_id + ':r' : `${p.task_id}:c${mid}-${i}`;
+  const propKey = (p, mid, i) => stageKey(p, ['done', 'drop', 'pin_top', 'longterm'].includes(p.op) ? undefined : 'c' + mid + '-' + i);
+  // An op the page cannot stage is left out (false), never turned into a `set`; the toast's count says so.
   function stageProposal(p, mid, i) {
     if (p.op === 'create' || p.op === 'link_thread') return false;
     const label = p.label || p.op;
-    if (['done', 'drop', 'pin_top', 'longterm'].includes(p.op)) stage(p.task_id, p.op, {}, label);
+    if (['done', 'drop'].includes(p.op)) stage(p.task_id, p.op, p.fields || {}, changeWords(p) || label);      // an outcome rides along
+    else if (['pin_top', 'longterm'].includes(p.op)) stage(p.task_id, p.op, {}, label);
     else if (p.op === 'add_reminder') stageExtra(p.task_id + ':r', p.task_id, 'add_reminder', p.fields, label);
-    else stageExtra(propKey(p, mid, i), p.task_id, 'set', p.fields, label);
+    else if (['link', 'unlink', 'merge', 'add_note'].includes(p.op)) stageChange(p, label, {}, 'c' + mid + '-' + i);
+    else if (p.op === 'set') stageExtra(propKey(p, mid, i), p.task_id, 'set', p.fields, label, { expect: textExpect(p.task_id, p.fields) });
+    else return false;
     return true;
   }
   function proposalsHtml(m) {
     if (!m.proposals || !m.proposals.length) return '';
     const items = m.proposals.map((p, i) => {
-      const key = propKey(p, m.id, i); const isStaged = p.task_id != null && staged.has(key) && staged.get(key).label === (p.label || p.op);
+      const key = propKey(p, m.id, i); const isStaged = staged.has(key);
       const ev = (p.evidence || []).map(e => `<span class="chip">${esc(e.label || e.kind)}</span>`).join('');
       const fields = p.fields && Object.keys(p.fields).length && p.op !== 'link_thread' ? `<span class="code">${esc(Object.entries(p.fields).filter(([k]) => k !== 'due_is_datetime').map(([k, v]) => `${k}: ${v === null ? 'cleared' : String(v).slice(0, 60)}`).join(' · '))}</span>` : '';
       let ctl;
@@ -1272,15 +1338,17 @@
     panel.querySelectorAll('[data-ctx-more]').forEach(b => b.onclick = () => { ui.ctxOpen = ui.ctxOpen === +b.dataset.ctxMore ? null : +b.dataset.ctxMore; render(); });
     panel.querySelectorAll('[data-rv-accept]').forEach(b => b.onclick = () => {
       const eid = +b.dataset.rvAccept; const item = review.items.find(i => (i.evidence || []).some(e => e.id === eid)); const e = item && item.evidence.find(e => e.id === eid); if (!e || !e.change) return;
-      const c = e.change, tid = item.task.id;
+      const tid = item.task.id, c = Object.assign({ task_id: tid }, e.change);
       if (['done', 'drop'].includes(c.op)) {   // this IS the decision: the card's other flags are judged with it
-        stage(tid, c.op, {}, e.label);
+        stage(tid, c.op, c.fields || {}, changeWords(c) || e.label);
         (item.evidence || []).forEach(o => { if (o.id !== eid && !staged.has('e:' + o.id)) stageJudge(o.id, tid, 'reviewed', o.kind === 'proposal' ? 'suggestion seen' : 'thread seen'); });
         ui.rvNote = { id: null, text: '' };
       }
       else if (['pin_top', 'longterm'].includes(c.op)) stageExtra(`${tid}:a${eid}`, tid, c.op, {}, e.label);   // an extra beside the decision, like the ★ button
       else if (c.op === 'add_reminder') stageExtra(tid + ':r', tid, 'add_reminder', c.fields, e.label);
-      else stageExtra(`${tid}:c${eid}`, tid, 'set', c.fields || {}, e.label);
+      else if (['link', 'unlink', 'merge', 'add_note'].includes(c.op)) stageChange(c, e.label, {}, 'a' + eid);
+      else if (c.op === 'set') stageExtra(`${tid}:c${eid}`, tid, 'set', c.fields || {}, e.label, { expect: textExpect(tid, c.fields) });
+      else { toast('This suggestion cannot be staged here'); return; }
       stageJudge(eid, tid, 'applied', 'suggestion accepted'); toast(['done', 'drop'].includes(c.op) ? 'Decision staged · Apply in the tray' : 'Suggestion staged · decide on the card, then Apply');
     });
     panel.querySelectorAll('[data-pending-apply]').forEach(b => b.onclick = async () => {
@@ -1303,7 +1371,7 @@
     const rn = document.getElementById('rv-note'); if (rn) rn.oninput = () => { ui.rvNote = { id: +rn.closest('.card').dataset.id, text: rn.value }; };
     const rm = document.getElementById('review-more'); if (rm) rm.onclick = () => loadReview();
     wireReminders(panel); wireDue(panel);
-    panel.querySelectorAll('[data-undo]').forEach(b => b.onclick = async () => { await api(`/api/batches/${b.dataset.undo}/undo`, { method: 'POST' }); await load(); logData = null; toast('Batch undone'); render(); });
+    panel.querySelectorAll('[data-undo]').forEach(b => b.onclick = async () => { const res = await undoBatch(+b.dataset.undo); await load(); logData = null; toast(undoSaid(res)); render(); });
     panel.querySelectorAll('[data-chat-canned]').forEach(b => b.onclick = () => sendChat('', b.dataset.chatCanned, [+b.dataset.id]));
     panel.querySelectorAll('[data-chat-stage]').forEach(b => b.onclick = () => {
       const mid = +b.dataset.chatStage; const m = chat.messages.find(x => x.id === mid); if (!m) return;
@@ -1432,20 +1500,20 @@
     if (kind === 'later') { ui.laterOpen = !ui.laterOpen; ui.datePick = false; render(); return; }
     if (kind === 'pickdate') { ui.datePick = !ui.datePick; render(); return; }
     if (kind === 'top' || kind === 'longterm') { act(id, kind); return; }   // extras, not decisions
-    // A decision is a review: it sets last_reviewed_at (Keep does so server-side). An optional note
-    // is appended to the task's context, dated, in the same change.
+    // A decision is a review: it sets last_reviewed_at (Keep does so server-side). An optional note is
+    // staged beside it as add_note under "<id>:note": the server appends it, dated, to the context as it
+    // is at Apply, so nothing typed here writes over a newer text.
     const text = ui.rvNote.id === id ? ui.rvNote.text.trim() : '';
-    const ctx = view(x).context;   // as staged: an accepted suggestion or a chat proposal may have edited it already
-    const extra = text ? { context: (ctx ? ctx + '\n' : '') + data.today + ': ' + text } : {};
-    const later = (day, label) => stage(id, 'set', { snoozed_until: day, last_reviewed_at: data.today, ...extra }, 'later · back ' + label);
-    if (kind === 'done') stage(id, 'done', extra, 'done');
-    else if (kind === 'drop') stage(id, 'drop', extra, 'dropped');
-    else if (kind === 'keep') stage(id, 'keep', extra, 'kept');
+    const later = (day, label) => stage(id, 'set', { snoozed_until: day, last_reviewed_at: data.today }, 'later · back ' + label);
+    if (kind === 'done') stage(id, 'done', {}, 'done');
+    else if (kind === 'drop') stage(id, 'drop', {}, 'dropped');
+    else if (kind === 'keep') stage(id, 'keep', {}, 'kept');
     else if (kind === 'tomorrow') later(isoPlus(1), 'tomorrow');
     else if (kind === 'fri') later(nextFri(), 'Friday');
     else if (kind === 'nextweek') later(isoPlus(7 - ((TODAY().getDay() + 6) % 7)), 'next week');
     else if (kind === 'date') { if (!dateStr) return; later(dateStr, dateStr); }
     else return;
+    if (text) stageChange({ task_id: id, op: 'add_note', fields: { text } }, '');
     // The flags that brought the card here (a thread update, a planner proposal) are judged in the
     // same batch, so the card does not come back tomorrow for the same reason.
     (items[0].evidence || []).forEach(e => { if (!staged.has('e:' + e.id)) stageJudge(e.id, id, 'reviewed', (e.kind === 'proposal' ? 'suggestion seen' : 'thread seen')); });
@@ -1464,7 +1532,7 @@
       return;
     }
     if (res.is_command) {
-      res.changes.forEach(c => stage(c.task_id, c.op, c.fields, c.op === 'set' ? Object.entries(c.fields).map(([k, v]) => `${k} ${v || 'cleared'}`).join(', ') : c.op));
+      res.changes.forEach(c => stageChange(c, c.op === 'set' ? Object.entries(c.fields).map(([k, v]) => `${k} ${v || 'cleared'}`).join(', ') : c.op));
       toast(`Staged ${res.changes.length} change${res.changes.length === 1 ? '' : 's'}`);
     } else if (chat.busy) {      // not a command, and a turn is running: give the text back instead of dropping it
       draft.cmd = text; toast('A chat turn is still running · your prompt is kept in the box'); render();
