@@ -66,6 +66,13 @@ DEFAULTS: dict[str, Any] = {
     "server.oauth.enabled": False, "server.mcp_writes": "stage",
 }
 PAID_SWITCHES = ("notify.morning_brief.enabled", "claude.planner.enabled", "claude.summary.auto", "sinks.notion_notes.enabled")
+# The code's defaults before 2026-11-10 (the four paid / mailing switches were on when absent), for
+# `factotum effective --as-before` only: diff it against the plain output when deploying.
+OLD_DEFAULTS: dict[str, Any] = {**DEFAULTS, **{k: True for k in PAID_SWITCHES}}
+# What `factotum effective` reports, and the values it never prints (shown as a fingerprint).
+REPORT_KEYS = ["owner.timezone", *SETTINGS_KEYS]
+MASKED = {"notify.ntfy.topic", "notify.morning_brief.to", "sources.calendar.calendar_id"}
+_MISSING = object()
 
 
 def machine_timezone() -> str:
@@ -136,6 +143,22 @@ def get(cfg: dict, dotted: str, default: Any = None) -> Any:
 def value(cfg: dict, key: str) -> Any:
     """A Settings key's value with its default from DEFAULTS; a key not in DEFAULTS raises KeyError on purpose."""
     return get(cfg, key, DEFAULTS[key])
+
+
+def explain(cfg: dict, overrides: dict, key: str, defaults: dict | None = None) -> tuple[Any, str]:
+    """(value, origin) for one key. Origin: settings (a Settings-tab override), machine (the time zone
+    taken from this machine), file, default (from `defaults`, DEFAULTS when None) or unset (value None)."""
+    if key in SETTINGS_KEYS and key in overrides:
+        return overrides[key], "settings"
+    if key == "owner.timezone" and cfg.get("_tz_from_machine"):
+        return get(cfg, key), "machine"
+    v = get(cfg, key, _MISSING)
+    if v is not _MISSING:
+        return v, "file"
+    table = DEFAULTS if defaults is None else defaults
+    if key in table:
+        return table[key], "default"
+    return None, "unset"
 
 
 def set_(cfg: dict, dotted: str, value: Any) -> None:

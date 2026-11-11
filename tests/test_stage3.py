@@ -168,3 +168,42 @@ def test_settings_report_the_value_the_code_will_use(cfg, tmp_path):
     assert client.get("/api/summary").json()["auto"] is False
     client.put("/api/settings", json={"values": {"sources.discord.enabled": True}})
     assert client.get("/api/settings").json()["overrides"] == {"sources.discord.enabled": True}
+
+
+# --- Task 4: the effective command
+
+def _eff(*argv):
+    from factotum.__main__ import main
+    assert main(["effective", *argv]) == 0
+
+def test_effective_prints_each_value_and_where_it_comes_from_and_no_secret(tmp_path, monkeypatch, capsys):
+    y = tmp_path / "mine.yaml"
+    y.write_text("owner: {timezone: Europe/Berlin}\nlifecycle: {fade_days: 30}\nnotify:\n  ntfy: {topic: secret-topic-123}\n  morning_brief: {to: me@example.com}\n")
+    monkeypatch.setattr(C, "DEFAULT_CONFIG_PATHS", [y])
+    db = tmp_path / "f.db"
+    c = connect(db); init_db(c); set_setting(c, "lifecycle.top_cap", 5); c.commit(); c.close()
+    monkeypatch.setenv("FACTOTUM_DB", str(db))
+    _eff()
+    out = capsys.readouterr().out
+    lines = out.splitlines()
+    assert lines[0].startswith("config file: ") and "mine.yaml" in lines[0] and lines[1].startswith("database: ")
+    f = {l.split()[0]: l.split() for l in lines[2:] if l.strip()}
+    assert set(f) == set(C.REPORT_KEYS)
+    assert f["lifecycle.top_cap"][1:] == ["5", "settings"] and f["lifecycle.fade_days"][1:] == ["30", "file"]
+    assert f["lifecycle.review_cap"][1:] == ["15", "default"] and f["claude.planner.enabled"][1:] == ["false", "default"]
+    assert f["owner.timezone"][1:] == ['"Europe/Berlin"', "file"]
+    assert "secret-topic-123" not in out and "me@example.com" not in out and f["notify.ntfy.topic"][1] == "set"
+    _eff("--as-before")
+    before = capsys.readouterr().out
+    changed = {l.split()[0] for l in set(before.splitlines()) ^ set(lines)}
+    assert changed == set(C.PAID_SWITCHES)                                       # the whole difference stage 3 makes
+    _eff("lifecycle.fade_days", "no.such.key")
+    tail = capsys.readouterr().out.splitlines()[2:]
+    assert [l.split()[0] for l in tail if l.strip()] == ["lifecycle.fade_days", "no.such.key"] and tail[-1].split()[-1] == "unset"
+
+def test_effective_never_creates_or_writes_the_database(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(C, "DEFAULT_CONFIG_PATHS", [C.STARTER_CONFIG])
+    monkeypatch.setenv("FACTOTUM_DB", str(tmp_path / "none.db"))
+    _eff()
+    out = capsys.readouterr().out
+    assert not (tmp_path / "none.db").exists() and "(starter settings)" in out.splitlines()[0] and "(none yet)" in out.splitlines()[1]

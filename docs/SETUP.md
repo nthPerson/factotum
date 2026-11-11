@@ -505,3 +505,33 @@ Factotum is its own OAuth server for `/mcp` (SPEC §15). Four steps, each once.
    once, each call one batch with an Undo in the Log. The same setting governs the skills in
    Claude Code. After changing it, reconnect the connector in claude.ai (or start a new chat) so
    it reloads the tool list. Upload the skills (§14) so those chats know the recipes.
+
+## 17. Deploying a change to defaults: `factotum effective`
+
+`.venv/bin/python -m factotum effective [KEY …] [--as-before]` prints two header lines (the config
+file in use, marked `(starter settings)` when it is the starter, and the database, `(none yet)` when
+there is none) and then one line per Settings key: the key, its value as JSON and where the value comes
+from: `settings` (the Settings tab froze it into the database; it wins over the file), `file`,
+`machine` (the time zone, taken from this computer), `default` (the code's) or `unset`. It only reads:
+the config file, and the database opened read-only (never created). `.env` is read only to find those
+two, and no `.env` value is printed. Three values (the ntfy topic, the brief's address, the calendar id)
+show as `set #<fingerprint>` or `empty`, so a diff still sees a change without the value on screen.
+`--as-before` reads absent keys the way the code did before 2026-11-10, when four switches (the
+morning brief, the planner, the automatic summary, the Notion notes) were on whenever the key was missing.
+
+The deploy check for stage 3, in the main checkout after the merge and BEFORE restarting the service
+(the running service is not affected by files changing, except `factotum/web/`):
+
+```bash
+cd /home/robert/factotum
+.venv/bin/python -m factotum effective --as-before > /tmp/effective-before.txt
+.venv/bin/python -m factotum effective > /tmp/effective-after.txt
+diff /tmp/effective-before.txt /tmp/effective-after.txt && echo identical
+```
+
+`identical` and a first line naming `config/factotum.yaml` (not `(starter settings)`) mean nothing
+changes for this install. Each line `diff` prints is a switch that was on only because its key was
+missing: add the key to `config/factotum.yaml` with the value from the before file (or switch it in
+Settings), run the two commands again, then restart (check `journalctl -u factotum -n 5` for a Claude
+run in flight first). Lines with origin `settings` are values the Settings tab froze into the database;
+they win over the file.
