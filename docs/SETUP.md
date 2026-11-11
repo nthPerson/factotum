@@ -630,3 +630,21 @@ the declarative display on an iPhone, the notification icon behind the sign-in, 
 8. The review nudge opens Review.
 9. The icon on the notification (it sits behind the sign-in and may show a generic one).
 10. Delete the app from the iPhone: after the next reminder its row is gone from the devices list.
+
+## 20. Ripples: linked tasks brought up to date
+
+When a task other tasks are linked to is closed, renamed, re-dated, given an outcome or merged, Factotum
+can run one light Claude run (no tools, about $0.03, measured 2026-11-11) that rewrites the text of the
+linked tasks so it says where things stand, and stages anything else (close, date, reminder, link) as
+cards on Review. Every rewrite is its own batch, shown in History and undone with one tap.
+
+- **Switch on:** Settings -> Claude -> Ripples. Absent means off. The numbers: the quiet period (seconds
+  to wait after the last change so a Done and its outcome line are one run, default 60), the hourly cap
+  (runs an hour, 10), the budget per run ($0.30) and the model (sonnet). The scheduler must be running
+  (`serve` without `--no-scheduler`); otherwise Settings says ripples wait.
+- **Try one:** `.venv/bin/python -m factotum ripple <task_id> --dry-run` is a real run from that task and
+  writes nothing; it prints what it would do. Without `--dry-run` it applies and stages.
+- **Where things are kept:** each run's prompt and result under `data/runs/ripple/`, its cost and one-line
+  summary in the Log.
+- **"Task-N is free now"** is sent to the chosen notification providers (§19) when the last task a
+  hard-dated task waits on is done. It needs no Claude run and no ripple switch.

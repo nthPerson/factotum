@@ -62,7 +62,10 @@ step, `relations.annotate`, in front of scoring, lifecycle, the brief, reminders
 and the agent's tools; `PRAGMA user_version` migrations with backups; `scoring.links` in config). Stage 4b
 (2026-11-11): links on the page (badges, the All / Linked / Ready now filter and the Linked view, Today's
 link-aware order, the opened task with History, the task page and its trail, Review's link reasons and
-suggestions, the Log in words, "Free now" after a reminder's Done). Retiring the old Notion
+suggestions, the Log in words, "Free now" after a reminder's Done). Stage 5 (2026-11-11): ripples (`factotum/ripple.py`,
+`prompts/ripple.md`: a closed, changed or merged task queues its linked tasks, one light run with no tools
+rewrites their text as an undoable `ripple` batch and stages everything else on Review), the outcome
+question on close, "Task-N is free now", the Review block and Settings controls. Retiring the old Notion
 pages and plaud-sync is the user's checklist (SETUP §15). Update this paragraph when something lands.
 
 ## Where things live
@@ -111,6 +114,8 @@ pages and plaud-sync is the user's checklist (SETUP §15). Update this paragraph
 | staging links, notes and outcomes; Undo that skips | design §11.2, §6 | `web/app.js` (`stageKey`, `stageChange`, `changeWords`, `textExpect`, `suggestionStaged`, `undoBatch`, `undoSaid`) |
 | the opened task: linked tasks, provenance, History, the task page and its trail | design §9, §12.3 | `web/app.js` (`detailCache`, `loadDetail`, `ensureDetails`, `swapDetail`, `historyHtml`, `historyWords`, `taskPageHtml`, `openPage`), `api.get_one` |
 | "Free now" after a reminder's Done | design §14 | `api._page`, `relations.freed_by` |
+| ripples: what queues, the run, what applies, the guard, undo following the cause | design §8, SPEC §8.6 | `factotum/ripple.py` (`enqueue`, `next_group`, `bundle`, `parse`, `guard`, `clean_proposal`, `apply`, `run`, `since`, `status`), `batches.py` (`apply`, `undo`), `scheduler.py` (`_ripples`), `prompts/ripple.md` |
+| the outcome question, Free now | design §8.5, §14 | `api._page`, `reminders.save_outcome`, `reminders.free_now`, `web/app.js` (`askOutcome`, `saveOutcome`, `watchRipple`, `sinceHtml`) |
 | the claude.ai connector: metadata, registration, consent gate, arming, tokens, `/mcp` auth | SPEC §15, SETUP §16 | `factotum/oauth.py` (`consent_identity`, `verify_access_jwt`, `armed`, `token`, `check_access`), `api.py` (`/oauth/*`, `/api/connectors`) |
 | the installable app: manifest, icons, the page head | design §13, SPEC §9 | `factotum/web/manifest.webmanifest`, `index.html`, `tools/make_icons.py` |
 | addresses, Back, the phone task page, the short bar, signed out, return and update | SPEC §9 | `web/app.js` (`parseAddress`, `setAddress`, `go`, `applyAddress`, `openTask`, `closeTask`, `taskPageHtml`, `signedOut`, `typingNow`, `onReturn`), `api.py` (`PAGE_TABS`, `STAMPED`, `build_stamp`, `BuildStamp`, `_index_html`) |
@@ -140,6 +145,7 @@ pages and plaud-sync is the user's checklist (SETUP §15). Update this paragraph
 .venv/bin/python -m factotum mcp                              # the stdio MCP server itself (the runner starts it; rarely by hand)
 .venv/bin/python -m factotum serve --port 8751 --no-scheduler   # a second instance for UI checks; never two schedulers on one DB
 .venv/bin/python -m factotum serve                 # http://127.0.0.1:8750
+.venv/bin/python -m factotum ripple <task_id> [--dry-run]   # one ripple now from a task (a real run, ~$0.03 measured 2026-11-11); --dry-run writes nothing
 .venv/bin/python -m factotum effective [KEY…] [--as-before]   # each switch's value and origin, read-only; diff the two before a deploy (SETUP §18)
 # every sweep and the planner at once: Refresh on the Today tab (the scheduler runs it; a `refresh` row in the Log)
 sudo systemctl restart factotum                    # after code changes; see the restart rule below
@@ -327,6 +333,26 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
 - **The phone trail is `history.state.from`** (2026-11-11): a page-to-page jump pushes `{page: true, from}`; nothing keeps a trail in memory.
 - **Badges are `<a class="lb" href="/t/N">`** (2026-11-11): the row's click handler ignores `a`; a new control inside `.main` must be an `a`, `button` or `input`, or it opens / selects the row.
 - **With no links nothing is drawn** (2026-11-11): the link bar, the legend and the Linked view appear only when `hasLinks()`.
+- **A ripple writes only `context`, through `batches.apply` with source `ripple`** (2026-11-11); anything
+  else it proposes is `proposal` evidence with `account = 'ripple'`. A new thing a ripple may do goes
+  through `clean_proposal`, never into the batch.
+- **`ripple_queue` rows are deleted only with their `last_batch_id`** (2026-11-11): a change made while a
+  run is in flight must stay queued.
+- **A ripple batch's `cause.batches` is how undo finds it** (2026-11-11); a new automatic batch that should
+  be undone with its cause needs the same key.
+- **`batches.apply` returns `ripple_queued` and wakes the scheduler for an outcome** (2026-11-11) through
+  `ripple.set_waker`; a second process (the stdio skill server) is picked up by the next tick.
+- **The ripple reply is `{"ripples": [...]}` and a wrong shape applies nothing** (2026-11-11).
+- **`claude.ripple.enabled` is not in `PAID_SWITCHES`** (2026-11-11): that tuple is also what
+  `effective --as-before` flips. It is off when missing like every paid run.
+- **A ripple may drop words the owner wrote** (2026-11-11): the first real dry-run removed "in person" from
+  a sibling's sentence while adding where things stand. The prompt says to keep the owner's sentences and
+  never soften a requirement (`test_the_prompt_says_to_keep_what_the_owner_wrote`); the guard checks only
+  links, `Task-N` and addresses, so History's Undo is the safety net.
+- **Never pipe the dev or service start script's output through `tail` / `head` when it leaves a server
+  running** (2026-11-11): the pipe never closes and the command hangs. And `GET /api/review` is loaded once
+  per page (the in-flight flag in `app.js`) because its `last_offered_at` stamp commits on the shared
+  connection; two at once answered 500.
 - **`expire` only touches rows Review has shown** (`last_offered_at`, stamped by `GET /api/review`).
   A row that was never on a Review page stays open however old it is; that is by design.
 - **The manifest must be requested with `crossorigin="use-credentials"`** (2026-11-10): otherwise Access

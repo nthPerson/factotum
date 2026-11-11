@@ -42,8 +42,10 @@ Four causes, none of them the user's discipline:
 - **Claude decides, Python writes.** Claude returns JSON proposals; the service validates and
   writes. Scoring is a formula and lives in Python.
 - **Claude proposes, the tray applies.** Every change from Claude, the UI or a command lands in a
-  pending batch that the user applies in one click, with one undo per batch. Evidence-based
-  automatic closes are the one exception and are logged as such.
+  pending batch that the user applies in one click, with one undo per batch. Two exceptions are
+  logged as such: evidence-based automatic closes, and a ripple's rewrite of a linked task's text (§8.6),
+  applied as its own batch with source `ripple` and its cause, shown in History, undone with one tap, and
+  undone with its cause while the text is untouched. Everything else a ripple proposes waits on Review.
 - **Links between tasks are task state, so they ride in batches** (stage 4a, 2026-11-10): `link`,
   `unlink`, `merge`, `add_note` and a create that carries links are ops of `batches.apply`, each undoable.
   Chat's Create is a batch too. A link proposed in a chat turn is never applied at once (it lands in the
@@ -477,6 +479,68 @@ A run is a `mail-triage` row with its cost and a line such as "15 mail: 1 sugges
 aside"; prompt and result under `data/runs/triage/<date>/`. Measured on real mail 2026-11-05: 15
 messages, $0.14, 7 s.
 
+### 8.6 `ripple`: bringing linked tasks up to date (`factotum/ripple.py`, added 2026-11-11)
+When a task that others are linked to is closed, materially changed or merged, one light run (no tools)
+brings the tasks linked to it up to date. It is off unless `claude.ripple.enabled` is on (§9 "Configuration").
+
+**What queues.** `batches.apply` calls `ripple.enqueue` for every source but `ripple` (a ripple never
+triggers a ripple), reading the batch's own `changes`: `status` open → done / dropped ("closed", unless the
+same batch merged it); `name`, `due`, `hard`, `outcome`; `context` when its normalised text differs
+("text"); a `same_as` link added with the survivor at its end ("merge"). Only for a task with at least one
+active link afterwards. Fade, lapse, reopen, `why_now`, effort and the rest never queue. The queue is the
+table `ripple_queue` (one row per changed task: `queued_at`, `now`, `last_batch_id`, the batches and what
+changed), not a setting: the API's threads add to it while the scheduler's thread runs a group that can
+take minutes, and a run deletes a row only `WHERE task_id = ? AND last_batch_id = ?`, so a change made
+during a run stays queued and ripples again. Undoing the only change that queued a task takes its row back.
+
+**Quiet period and groups.** Queued tasks are grouped when one is a neighbour of another or they share a
+neighbour (one link away, or steps of one goal). A group runs when any row has `now` (an outcome was just
+given) or its newest row is `claude.ripple.delay_seconds` old (60), so a Done followed by the outcome line
+is one run. One group per scheduler tick, at most 5 changed tasks per run (the rest stay queued). A row
+older than 24 h is set aside unrun; with ripples off the scheduler empties the queue every tick.
+
+**The input.** Per changed task: what changed as before → now, the outcome, any task merged into it. Per
+linked task (open only, at most 12: direct links first, then other steps of the same goal): its link, due
+date, who it waits on, name and text, each text cut to 1500 characters. Every value is one JSON string in
+the prompt and escaped (stranger text, §2).
+
+**The reply** is `{"ripples": [{"task_id", "effect": "none" | "text" | "propose", "context", "why",
+"proposals": [{"op", "fields", "reason"}]}]}`, one entry per linked task. A wrong shape anywhere (not that
+object, a `task_id` that is not a linked task of the run, a repeated one, an unknown effect, `text`
+without a string `context`) fails the whole run and nothing is applied.
+
+**What applies, and the guard.** Only a text rewrite (`context`, at most 2000 characters), as one batch
+with source `ripple`, through `batches.apply` with `expect` set to the text the run was shown, so a task
+edited by hand meanwhile is skipped with the usual reason; a task closed or merged meanwhile is left alone.
+The guard refuses a rewrite that is empty, too long, drops a web address or a `Task-N` the old text had, or
+adds an email address it did not have; a refused rewrite becomes an `add_note` ("Ripple from Task-N: why"),
+dated by the server, with any new address replaced by "[address left out]". The prompt also tells the model
+to keep the sentences the owner wrote, add where things stand after them, never remove or soften a
+requirement the owner wrote, and say when the news conflicts with one.
+
+**What stages, and what is refused.** Every other proposal is `proposal` evidence with `account = 'ripple'`
+(Review reason `ripple`, "Ripple suggests"): `done`, `drop`, `set` (name, due, hard, effort, project),
+`add_reminder`, `link` / `unlink` (part_of, waits_on, between tasks of the run), `create` (a card, no task).
+At most 6 per run, deduplicated against waiting cards, never applied and never proof of anything. Refused,
+and named in the log line: `counterpart` or `waiting_on` (a ripple never copies an address), `context`,
+`merge`, anything else.
+
+**The cause and undo.** A ripple batch's `cause_json` is `{"kind": "ripple", "from": [ids], "run": <runs.id>,
+"batches": [causing batch ids], "what": {id: [what]}, "noted": [ids whose rewrite became a note]}`. Undoing a
+causing batch also undoes each of its ripple batches when every field the ripple wrote is still as it wrote
+it; otherwise the ripple batch stays whole and its cause gains `cause_undone_at`, which History and Review
+show. The owner can still undo it alone.
+
+**Failure.** A failed run (no JSON, a wrong shape, the budget, the login) writes nothing; the group is tried
+twice, then set aside and logged; the job backs off an hour like every job; at most
+`claude.ripple.hourly_cap` (10) runs an hour. Settings → Claude holds `claude.ripple.enabled`, `.model`
+(sonnet), `.delay_seconds`, `.hourly_cap` and `claude.budgets_usd.ripple` ($0.30; `claude.timeouts_s.ripple`
+is a file key). `factotum ripple <task_id> [--dry-run]` runs one now from a task; `--dry-run` prints and
+writes nothing. Prompt and result are kept under `data/runs/ripple/`.
+
+Not yet: a recording or a mail that closes a task does not supply an outcome (design §8.5's last bullet),
+so a ripple from such a close works from the task's own text only. Left for a later stage.
+
 ### 8.3 `chat-turn` (Chat tab, "Search related emails", "Draft reply")
 Inputs: the prompt (`prompts/chat-turn.md` on a thread's first turn, a short continuation header
 after), the attached tasks as JSON, the thread continued through `--resume` (the session id is kept on
@@ -716,6 +780,17 @@ step or the waiting one). The tray keys a staged link `rel:<a>:<kind>:<b>`; a st
 or the planner carries `expect` (the server's current value); a Review note is staged as `add_note`.
 The Log says each change in words. The page after a reminder's Done lists what that frees now.
 
+**Ripples on the page (stage 5, 2026-11-11).** Closing a task that others hang on asks one optional line,
+"How did it turn out?" (the toast after Done offers "Say how it went"; on Review the note typed with a
+close is the outcome; the page after a reminder's Done has the same box, posted to `/r/<token>/outcome`).
+Done never waits on it. After an Apply that queued a ripple the page asks `GET /api/ripple` every 15 s,
+only while a scheduler runs, the page is visible and one is pending (at most 10 minutes), then says "N
+linked tasks brought up to date" with See changes and Undo. A Review card a ripple changed shows, under
+"Since you last looked", what the linked task did (with its outcome) and that its text was brought up to
+date, with See what changed and Undo; a ripple's proposal reads "Ripple suggests" with Accept and Dismiss.
+History and the Log say when a rewrite became a note and when a ripple's cause was undone. Settings →
+Claude has the Ripples controls and says when ripples wait because this instance runs no scheduler.
+
 ## 10. Reminders and push
 
 - The public ntfy.sh server caps delay at 3 days and 250 messages/day, so **the service owns the
@@ -724,6 +799,9 @@ The Log says each change in words. The page after a reminder's Done lists what t
   *Done*, *Open*) pointing at `/r/<token>?…`, since `http` actions cannot carry an Access session.
   No `Click` header (2026-11-02): with one, a tap on the phone bounced to the browser before the
   buttons could be used; `notify.ntfy.tap_opens_app: true` restores it. Tokens are single use, 24 h.
+- **"Task-N is free now"** (2026-11-11): `reminders.free_now`, from the scheduler tick, through the chosen
+  providers, for an open hard-dated task whose last open waits-on was done today; once per (task, blocker,
+  day), remembered in `state.free_now.sent`. No Claude run, independent of `claude.ripple.enabled`.
 - Review push: daily at `notify.review_time`; skipped when reviewed today or the queue is empty.
 - **The clock** is one thread in the service (`factotum/scheduler.py`): a tick every 30 s re-reads the
   effective config, fires due reminders, and runs each daily job once at or after its time (so a
@@ -876,6 +954,7 @@ The old Command Log relations are not imported; task history lives in `changes` 
 | planner-morning | $0.75 | $0.75 (measured ≈ $0.10 a run; each Refresh on the Today tab is one more) |
 | today-summary (§8.4) | $0.30 | ≈ $0.18 a rewrite measured on sonnet (2026-11-04), at most one per `claude.summary.auto_minutes` and only while the summary is stale; a busy day of edits is $1–3. `claude.models.today_summary: haiku` or a longer interval cuts it |
 | mail-triage (§8.5) | $0.40 | ≈ $0.14 per batch of 15 messages (measured 2026-11-05); runs only when there is new mail, at most every `sources.mail.suggest.minutes` |
+| ripple (§8.6) | $0.30 | one light run per group of changes, no tools; measured cost: about $0.03 a run (one real run on 2026-11-11: Sonnet, no tools, a 4.5 KB prompt, 9 s, three linked tasks; preflight ruling P11) |
 | chat-turn / search / draft | $0.60 | on demand |
 | sweeps, UI, reminders, brief | $0 | $0 |
 
