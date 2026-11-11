@@ -167,6 +167,23 @@ def test_undo_restore_is_skipped_when_it_would_loop_or_duplicate(conn):
     assert active_rels(conn) == {(2, 1, "waits_on"), (3, 4, "part_of")}
 
 
+def test_undo_of_an_unlink_restores_a_wait_on_a_task_closed_since(conn):
+    # Design §6: a restore is skipped only for a duplicate or a loop. A new link may not wait on a
+    # closed task, but putting back one the owner removed must (A was "Free now"; Undo brings that back).
+    mk(conn, 1); mk(conn, 2); mk(conn, 3)
+    link(conn, 1, 2, "waits_on")
+    batches.apply(conn, [{"op": "done", "task_id": 2}], "ui", TODAY)
+    b = _unlink(conn, 1, 2, "waits_on")
+    u = batches.undo(conn, b["batch_id"])
+    assert u["restored"] == 1 and u["skipped"] == [] and active_rels(conn) == {(1, 2, "waits_on")}
+    link(conn, 3, 1, "part_of")                                 # the structure rules still hold on a restore
+    b = _unlink(conn, 3, 1, "part_of")
+    link(conn, 3, 2, "part_of")
+    u = batches.undo(conn, b["batch_id"])
+    assert u["restored"] == 0 and "already part of Task-2" in u["skipped"][0]["why"]
+    assert batches.apply(conn, [{"op": "link", "task_id": 3, "fields": {"kind": "waits_on", "other": 2}}], "ui", TODAY)["applied"] == 0   # a new wait on a closed task is still refused
+
+
 def test_undo_skips_an_entry_it_does_not_recognise_and_reports_it(conn):
     conn.execute("INSERT INTO batches (created_at, applied_at, source, undo_json) VALUES ('now', 'now', 'ui', ?)", (json.dumps([{"nonsense": 1}]),))
     conn.commit()

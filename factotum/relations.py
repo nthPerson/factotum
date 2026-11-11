@@ -52,9 +52,12 @@ def waits_cycle(db: Db, src: int, dst: int) -> bool:
     return r is not None
 
 
-def check(db: Db, src: int, dst: int, kind: str) -> str | None:
+def check(db: Db, src: int, dst: int, kind: str, *, restoring: bool = False) -> str | None:
     """Why a NEW active link `src kind dst` is refused, or None. An identical active link is not an
-    error here: callers `find` it first (that is a no-op, not a refusal)."""
+    error here: callers `find` it first (that is a no-op, not a refusal). `restoring` is an undo
+    putting back a link a batch removed (design §6): only the structure rules apply (loops, goals and
+    steps, the cap), never "waits on a closed task" — the wait was real, and its other end closing
+    since is what made the task free."""
     if kind not in KINDS:
         return f"kind must be one of part_of, waits_on, same_as, not {kind!r}"
     status = {}
@@ -78,7 +81,7 @@ def check(db: Db, src: int, dst: int, kind: str) -> str | None:
         if find(db, src, dst, "waits_on"):
             return f"Task-{src} waits on Task-{dst}; a task cannot wait on its own goal"
     elif kind == "waits_on":
-        if status[dst] != "open":
+        if status[dst] != "open" and not restoring:
             return f"Task-{dst} is already {status[dst]}"
         if find(db, src, dst, "part_of"):
             return f"Task-{dst} is the goal of Task-{src}; a task cannot wait on its own goal"

@@ -580,7 +580,7 @@ def _undo_relation(conn: sqlite3.Connection, u: dict) -> dict | None:
     else:
         if R.find(conn, rel["src"], rel["dst"], rel["kind"]):
             return {"task_id": rel["src"], "why": f"{what} was not restored: an identical link exists"}
-        reason = R.check(conn, rel["src"], rel["dst"], rel["kind"])
+        reason = R.check(conn, rel["src"], rel["dst"], rel["kind"], restoring=True)   # no closed-task rule on a restore
         if reason:
             return {"task_id": rel["src"], "why": f"{what} was not restored: {reason}"}
         R.restore(conn, rel["id"])
