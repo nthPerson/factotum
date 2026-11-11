@@ -1,19 +1,32 @@
 """Configuration: config/factotum.yaml (structure) + .env (secrets) + settings table (overrides).
 
 Precedence for a key read through `effective()`: database override > yaml > built-in default.
+
+2026-11-10: with no config/factotum.yaml the fallback is config/factotum.starter.yaml (neutral, everything
+off), not the example, which was the owner's own setup and so quietly ran a stranger's install as theirs.
 """
 from __future__ import annotations
 
 import copy
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
 import yaml
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_CONFIG_PATHS = [ROOT / "config" / "factotum.yaml", ROOT / "config" / "factotum.example.yaml"]
+USER_CONFIG = ROOT / "config" / "factotum.yaml"
+STARTER_CONFIG = ROOT / "config" / "factotum.starter.yaml"
+EXAMPLE_CONFIG = ROOT / "config" / "factotum.example.yaml"
+DEFAULT_CONFIG_PATHS = [USER_CONFIG, STARTER_CONFIG]
+
+STARTER_NOTE = ("factotum: no config/factotum.yaml, so starter settings in use (config/factotum.starter.yaml, which "
+                "switches every input, output and paid Claude run off; a Settings override in the database still wins). "
+                "Copy config/factotum.example.yaml to config/factotum.yaml to make it your own.")
+_starter_told = False
 
 # Keys the Settings tab may override (stored in the `settings` table as dotted keys).
 SETTINGS_KEYS = [
@@ -33,6 +46,24 @@ SETTINGS_KEYS = [
 ]
 
 
+def machine_timezone() -> str:
+    """This machine's IANA zone: TZ, /etc/timezone, the /etc/localtime link, else UTC. Always a name ZoneInfo accepts."""
+    guesses = (
+        lambda: (os.environ.get("TZ") or "").lstrip(":"),
+        lambda: Path("/etc/timezone").read_text(encoding="utf-8").splitlines()[0].strip(),
+        lambda: os.path.realpath("/etc/localtime").split("zoneinfo/", 1)[1],
+    )
+    for guess in guesses:
+        try:
+            name = guess()
+            if name:
+                ZoneInfo(name)
+                return name
+        except Exception:               # any failure means "not this one"
+            continue
+    return "UTC"
+
+
 def load(path: str | os.PathLike | None = None) -> dict:
     """Load .env, then the YAML config. Returns a plain dict with `_path` recording the file used."""
     load_dotenv(ROOT / ".env")
@@ -45,7 +76,28 @@ def load(path: str | os.PathLike | None = None) -> dict:
         if p and p.exists():
             with open(p, encoding="utf-8") as f:
                 cfg = yaml.safe_load(f) or {}
+            global _starter_told
             cfg["_path"] = str(p)
+            cfg["_starter"] = p.resolve() == STARTER_CONFIG.resolve()
+            if cfg["_starter"] and not _starter_told:
+                print(STARTER_NOTE, file=sys.stderr, flush=True)
+                _starter_told = True
+            if not isinstance(cfg.get("owner"), dict):
+                cfg["owner"] = {}
+            name = cfg["owner"].get("timezone")
+            ok = False
+            if name:
+                try:
+                    ZoneInfo(str(name))
+                    ok = True
+                except Exception:
+                    pass
+            if not ok:
+                tz = machine_timezone()
+                if name:
+                    print(f"factotum: owner.timezone {name!r} is not a time zone; using {tz}", file=sys.stderr, flush=True)
+                cfg["owner"]["timezone"] = tz
+                cfg["_tz_from_machine"] = True
             return cfg
     raise FileNotFoundError("no config found; copy config/factotum.example.yaml to config/factotum.yaml")
 

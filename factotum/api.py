@@ -427,6 +427,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         ecfg = C.effective(cfg, st)
         return {
             "config_file": cfg.get("_path"),
+            "starter": bool(cfg.get("_starter")),
             "keys": C.SETTINGS_KEYS,
             "overrides": {k: v for k, v in st.items() if k in C.SETTINGS_KEYS},
             "effective": {k: C.get(ecfg, k) for k in C.SETTINGS_KEYS},
@@ -440,6 +441,9 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
     def put_settings(body: SettingsBody):
         for k, v in body.values.items():
             if k not in C.SETTINGS_KEYS:
+                if cfg.get("_starter"):
+                    raise HTTPException(400, f"{k} is not a Settings key; it belongs in config/factotum.yaml, which does not exist yet: "
+                                             "copy config/factotum.example.yaml to config/factotum.yaml, edit it and restart")
                 raise HTTPException(400, f"{k} is not a Settings key; edit {cfg.get('_path')} instead")
             set_setting(conn, k, v)
         if body.accounts is not None:
