@@ -3,6 +3,7 @@
   GET  /api/tasks?status=open|all        tasks with computed score/priority/tier/fade/last-call
   GET  /api/tasks/{id}?before=&limit=    one task, any status: links, reminders, its task links, where it came from, a page of History (stamps neighbours_seen_at)
   POST /api/commands  {text}             parse the grammar → changes (nothing applied)
+  GET  /api/add/preview?text=            how an add line will be filed, the tasks it names checked (writes nothing)
   POST /api/batches/apply {source, changes}   the one write path
   POST /api/batches/{id}/undo
   GET  /api/review?exclude=1,2           one page of the review queue + total, each card's pending evidence, planner suggestions
@@ -39,7 +40,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
-from . import app_push, batches, commands, config as C, lifecycle, oauth, relations, reminders, summary
+from . import app_push, batches, by_hand, commands, config as C, lifecycle, oauth, relations, reminders, summary
 from .db import connect, get_settings, get_task, init_db, now_iso, rows, seed_accounts, set_setting
 from .dates import parse_date
 
@@ -344,6 +345,10 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         if ch is None:
             return JSONResponse({"is_command": False, "changes": []})
         return {"is_command": True, "changes": ch}
+
+    @app.get("/api/add/preview")
+    def add_preview(text: str = ""):
+        return by_hand.preview(conn, eff_cfg(), text, date.today())
 
     @app.post("/api/batches/apply")
     def apply_batch(body: ApplyBody):

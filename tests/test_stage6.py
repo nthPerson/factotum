@@ -93,3 +93,31 @@ def test_task_numbers_are_checked_when_a_lookup_is_given():
     assert r["under"] == 30 and r["after"] is None and r["refused"] == [{"words": "after 30", "why": "Task-30 is its goal; a task cannot wait on its own goal" + K}]
     r = Q("add Read under 30")
     assert r["parts"][0]["other"] == {"id": 30, "name": "Goal", "status": "open"}
+
+
+# --- Task 2: the preview, checked against the database
+
+def _client(cfg, tmp_path):
+    path = tmp_path / "t.db"
+    conn = connect(path)
+    init_db(conn)
+    return TestClient(api.create_app(cfg, db_path=str(path))), conn
+
+
+def test_the_preview_checks_the_tasks_it_names(cfg, tmp_path):
+    client, conn = _client(cfg, tmp_path)
+    mk(conn, 30, name="Assemble the committee"); mk(conn, 12, name="Ask the chair"); mk(conn, 7, name="Old", status="done"); mk(conn, 40)
+    link(conn, 40, 30, "part_of")
+    n_batches = one(conn, "SELECT COUNT(*) AS n FROM batches")["n"]
+    pv = lambda t: client.get("/api/add/preview", params={"text": t}).json()       # noqa: E731
+    r = pv("Draft the intro under 30 after 12")
+    assert r["is_add"] and r["name"] == "Draft the intro" and r["refused"] == []
+    assert r["change"] == {"op": "create", "fields": {"name": "Draft the intro", "links": [{"kind": "part_of", "other": 30}, {"kind": "waits_on", "other": 12}]}}
+    assert [p["other"]["name"] for p in r["parts"]] == ["Assemble the committee", "Ask the chair"]
+    assert pv("add Read")["name"] == "Read"                                         # a verb is allowed, not needed
+    assert pv("Pay the 12 invoices after 99")["refused"] == [{"words": "after 99", "why": "no Task-99" + K}]
+    assert pv("Read after 7")["refused"][0]["why"] == "Task-7 is already done" + K
+    assert pv("Read under 40")["refused"][0]["why"] == "Task-40 is a step of Task-30; a step cannot have steps" + K
+    assert pv("Read #nosuch")["refused"][0]["why"] == "no project matches #nosuch" + K
+    assert pv("")["refused"] == [{"words": "", "why": "a task needs a name"}]
+    assert one(conn, "SELECT COUNT(*) AS n FROM batches")["n"] == n_batches        # a preview writes nothing
