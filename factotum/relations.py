@@ -233,7 +233,7 @@ def pending_suggestions(db: Db, ids: set[int] | None = None) -> dict[int, list[d
         for tid, other in ((a, b), (b, a)):
             if ids is None or tid in ids:
                 out.setdefault(tid, []).append({"evidence_id": r["id"], "kind": kind, "other": other, "keep": b if kind == "same_as" else None,
-                                                "why": ref.get("why"), "signal": ref.get("signal")})
+                                                "why": ref.get("why"), "signal": ref.get("signal"), "dir": "out" if tid == a else "in"})
     return out
 
 

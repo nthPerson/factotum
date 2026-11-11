@@ -243,8 +243,8 @@ def test_pending_suggestions_list_both_ends(conn):
     mk(conn, 1); mk(conn, 2); mk(conn, 3)
     e1 = relations.suggest(conn, "same_as", 1, 2, "twin", "twin"); e2 = relations.suggest(conn, "waits_on", 3, 1, "after", "text")
     p = relations.pending_suggestions(conn)
-    assert p[1] == [{"evidence_id": e1, "kind": "same_as", "other": 2, "keep": 2, "why": "twin", "signal": "twin"},
-                    {"evidence_id": e2, "kind": "waits_on", "other": 3, "keep": None, "why": "after", "signal": "text"}]
+    assert p[1] == [{"evidence_id": e1, "kind": "same_as", "other": 2, "keep": 2, "why": "twin", "signal": "twin", "dir": "out"},
+                    {"evidence_id": e2, "kind": "waits_on", "other": 3, "keep": None, "why": "after", "signal": "text", "dir": "in"}]
     assert [s["other"] for s in p[2]] == [1] and [s["other"] for s in p[3]] == [1]
     assert set(relations.pending_suggestions(conn, {2})) == {2}
 

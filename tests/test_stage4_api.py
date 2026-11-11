@@ -82,7 +82,7 @@ def test_review_items_carry_texts_and_link_suggestions(cfg, tmp_path):
     assert "freed" in items[1]["reasons"] and items[1]["texts"] == {"freed": "Free now: Task-2 is done"}
     assert items[1]["task"]["rel"]["waits_on_open"] == [] and "waits_on_closed" not in items[1]["task"]["rel"]
     assert items[3]["link_suggestions"] == [{"evidence_id": unittest.mock.ANY, "kind": "same_as", "other": 4, "keep": 4, "why": "same number 3",
-                                             "signal": "twin", "other_name": "Task 4"}]
+                                             "signal": "twin", "dir": "out", "other_name": "Task 4"}]
     assert [(s["other"], s["other_name"]) for s in items[4]["link_suggestions"]] == [(3, "Task 3")]
     assert items[4]["texts"] == {"link_suggested": "Suggested: same as Task-3?"} and items[1]["link_suggestions"] == []
     assert not [e for i in body["items"] for e in i["evidence"] if e["kind"] == "link_suggestion"]
