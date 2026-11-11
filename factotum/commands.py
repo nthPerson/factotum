@@ -7,6 +7,7 @@
     defer 388 to next week
     nodue 364             -> the due date removed (also: undate)
     top 23                -> pin to Top
+    drop 12 duplicate of 14 -> not a command (words left over)
     longterm 38           -> mark long-term
 
 parse(text, today) -> list of change dicts, or None when the text is not a command.
@@ -29,6 +30,9 @@ VERBS = {
     "start": "start", "reopen": "reopen",
 }
 
+# Verbs that take no date: any word left after the task numbers makes the text not a command.
+DATELESS = {"done", "drop", "top", "unpin", "longterm", "start", "reopen", "nodue"}
+
 _ID = re.compile(r"(?:task[-\s]?|#)?(\d{1,6})\b", re.I)
 
 
@@ -50,7 +54,9 @@ def parse(text: str, today: date) -> list[dict] | None:
     ids = [int(x) for x in _ID.findall(rest)]
     if not ids:
         return None
-    leftover = _ID.sub("", rest).replace(",", " ").strip()
+    leftover = re.sub(r"\band\b", " ", _ID.sub("", rest), flags=re.I).replace(",", " ").strip()
+    if op in DATELESS and (leftover or when_text):
+        return None  # words (or a date) this verb cannot use → not a command
     if leftover and when_text is None:
         when_text = leftover
     elif leftover:
@@ -62,7 +68,9 @@ def parse(text: str, today: date) -> list[dict] | None:
         elif op == "drop":
             changes.append({"task_id": tid, "op": "drop", "fields": {}})
         elif op == "snooze":
-            until = resolve_when(when_text or "tomorrow", today) or (today + timedelta(days=1))
+            until = resolve_when(when_text, today) if when_text else today + timedelta(days=1)
+            if until is None:
+                return None
             changes.append({"task_id": tid, "op": "set", "fields": {"snoozed_until": until.isoformat()}})
         elif op == "push":
             if when_text:
