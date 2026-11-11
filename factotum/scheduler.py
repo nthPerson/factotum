@@ -163,14 +163,25 @@ class Scheduler:
         return f"{n} items"
 
     def _brief(self, ecfg: dict, today: date) -> str | None:
+        """The planner is a paid run and a failed send retries hourly, so its result is kept for the day."""
         from . import brief
         pres = None
         if self.planner is not None and C.get(ecfg, "claude.planner.enabled", True):
-            try:
-                pres = self.planner.run(self.conn, ecfg, today, calendar=self.calendar)
-            except Exception as e:   # the brief still goes out, plain, saying why
-                self.conn.rollback()
-                pres = {"ok": False, "error": f"{type(e).__name__}: {e}"[:300]}
+            kept = get_settings(self.conn).get("state.brief.planner")
+            if isinstance(kept, dict) and kept.get("day") == today.isoformat() and isinstance(kept.get("result"), dict):
+                pres = kept["result"]
+            else:
+                try:
+                    pres = self.planner.run(self.conn, ecfg, today, calendar=self.calendar)
+                except Exception as e:   # the brief still goes out, plain, saying why
+                    self.conn.rollback()
+                    pres = {"ok": False, "error": f"{type(e).__name__}: {e}"[:300]}
+                keep = {k: pres.get(k) for k in ("ok", "verdict", "applied", "staged", "error", "line")}
+                keep["ok"] = bool(keep["ok"])
+                keep["applied"] = list(keep["applied"] or [])
+                keep["staged"] = list(keep["staged"] or [])
+                set_setting(self.conn, "state.brief.planner", {"day": today.isoformat(), "result": keep})
+                self.conn.commit()   # before the send: _run rolls back on a failed send
         out = brief.send(self.conn, ecfg, today, self.mailer, self.calendar, planner=pres)
         if pres and pres.get("ok"):
             out += f" · planner: {pres.get('line') or pres.get('verdict')}"

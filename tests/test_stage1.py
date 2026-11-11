@@ -34,3 +34,47 @@ def test_a_dateless_command_with_words_left_over_is_not_a_command():
     assert [c["task_id"] for c in P("done 12 and 14")] == [12, 14]
     assert [c["task_id"] for c in P("drop Task-12, Task-14")] == [12, 14]
     assert P("snooze 23 fri")[0]["fields"]["snoozed_until"] == "2026-11-06"
+
+
+# --- Task 3: the brief retry
+
+def _brief_sched(cfg, conn, mailer, planner):
+    from factotum.scheduler import Scheduler
+    cfg["notify"]["ntfy"]["topic"] = "t"
+    upsert_task(conn, task(id=1, name="x", top_rank=1)); conn.commit()
+    return Scheduler(cfg, conn, push=lambda *a, **k: None, mailer=mailer, planner=planner)
+
+
+def _flaky_mailer(sent):
+    """The first send fails (SMTP down); later ones are recorded in `sent`."""
+    fail = [True]
+    def mailer(cfg, to, subject, text, html):
+        if fail[0]:
+            fail[0] = False
+            raise OSError("smtp down")
+        sent.append(text)
+    return mailer
+
+
+def test_a_failed_brief_send_does_not_run_the_planner_again(conn, cfg):
+    runs, sent = [], []
+    mailer = _flaky_mailer(sent)
+    pl = SimpleNamespace(run=lambda conn, cfg, today, calendar=None: runs.append(today) or {"ok": True, "verdict": "Verdict here.", "applied": [], "staged": [], "cost_usd": 0.3})
+    s = _brief_sched(cfg, conn, mailer, pl)
+    s.tick(datetime(2026, 11, 2, 6, 31))
+    assert len(runs) == 1 and sent == [] and get_settings(conn).get("state.last_fail.morning_brief")
+    s.tick(datetime(2026, 11, 2, 7, 40))          # the hourly retry
+    assert len(runs) == 1 and len(sent) == 1 and "Verdict here." in sent[0]
+    s.tick(datetime(2026, 11, 3, 6, 31))          # a new day plans again
+    assert len(runs) == 2 and len(sent) == 2
+
+
+def test_a_planner_that_failed_is_not_retried_with_the_brief(conn, cfg):
+    runs, sent = [], []
+    mailer = _flaky_mailer(sent)
+    def boom(conn, cfg, today, calendar=None):
+        runs.append(today)
+        raise RuntimeError("claude down")
+    s = _brief_sched(cfg, conn, mailer, SimpleNamespace(run=boom))
+    s.tick(datetime(2026, 11, 2, 6, 31)); s.tick(datetime(2026, 11, 2, 7, 40))
+    assert len(runs) == 1 and len(sent) == 1 and "claude down" in sent[0]
