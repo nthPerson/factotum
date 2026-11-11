@@ -49,6 +49,10 @@ def test_hard_deadlines_and_date_phrases():
     r = P("add Submit the form fri!")
     assert r["fields"]["due"] == "2026-11-06" and r["fields"]["hard"] == 1 and [p["kind"] for p in r["parts"]] == ["due", "hard"]
     assert P("add Submit the form tomorrow !")["fields"] == {"name": "Submit the form", "due": "2026-11-02", "hard": 1}
+    for line in ("add Submit fri! !", "add Submit ! fri !"):                               # a second ! is refused and kept
+        r = P(line)
+        assert (r["name"], r["fields"]) == ("Submit !", {"name": "Submit !", "due": "2026-11-06", "hard": 1}), line
+        assert r["refused"] == [{"words": "!", "why": "a second !" + K}], line
     r = P("add Fix it !")
     assert r["name"] == "Fix it !" and "hard" not in r["fields"] and r["refused"] == [{"words": "!", "why": "! needs a due date" + K}]
     r = P("add Send the form by nov 13")
@@ -180,6 +184,13 @@ def test_add_with_fields_for_the_phone_sheet_add_a_step_and_duplicate(cfg, tmp_p
     assert r["refused"] == [{"words": "after", "why": "Task-30 is its goal; a task cannot wait on its own goal"}] and r["skipped"] == []
     assert (r["task_id"], 30, "part_of") in active_rels(conn) and (r["task_id"], 30, "waits_on") not in active_rels(conn)
     assert client.post("/api/add", json={"fields": {"name": " "}}).status_code == 400
+    n = one(conn, "SELECT COUNT(*) AS n FROM tasks")["n"]
+    long = "Long " * 41                                                               # 205 characters: a 400, never cut at 200 (ruling R5)
+    for body in ({"text": long, "key": "klongtxt"}, {"fields": {"name": long}, "key": "klongfld"}):
+        r = client.post("/api/add", json=body)
+        assert (r.status_code, r.json()["detail"]) == (400, "a name is at most 200 characters"), body
+    assert client.post("/api/add", json={"text": "x" * 200, "key": "kexact200"}).status_code == 200
+    assert one(conn, "SELECT COUNT(*) AS n FROM tasks")["n"] == n + 1
     assert client.post("/api/add", json={"text": "x", "key": "bad key!"}).status_code == 400
     assert client.post("/api/add", json={}).status_code == 400
 
