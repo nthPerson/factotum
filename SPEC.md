@@ -512,9 +512,15 @@ without a string `context`) fails the whole run and nothing is applied.
 **What applies, and the guard.** Only a text rewrite (`context`, at most 2000 characters), as one batch
 with source `ripple`, through `batches.apply` with `expect` set to the text the run was shown, so a task
 edited by hand meanwhile is skipped with the usual reason; a task closed or merged meanwhile is left alone.
-The guard refuses a rewrite that is empty, too long, drops a web address or a `Task-N` the old text had, or
-adds an email address it did not have; a refused rewrite becomes an `add_note` ("Ripple from Task-N: why"),
-dated by the server, with any new address replaced by "[address left out]". The prompt also tells the model
+A rewrite that loses something (empty, too long, or it drops a web address or a `Task-N` the old text had)
+is refused and becomes an `add_note` ("Ripple from Task-N: why"), dated by the server, in the same batch;
+when the reason names an address the old text lacked, the note says fixed words instead, and History's line
+for the change has that address replaced by "[address left out]". A rewrite that loses nothing but adds an
+email or web address the old text did not have is not applied on its own (a ripple never brings an address
+to a task, design §8.6) and is not a note either: it waits on Review as a card ("Ripple suggests", with the
+text before and after); Accept stages it with `expect` set to the text the run was shown, and when the task's
+text has changed since, the card says so and offers only Dismiss. Only when no card can be staged (the same
+one already waits, or the run's 6 cards are used) does such a rewrite become a note instead. The prompt also tells the model
 to keep the sentences the owner wrote, add where things stand after them, never remove or soften a
 requirement the owner wrote, and say when the news conflicts with one.
 
