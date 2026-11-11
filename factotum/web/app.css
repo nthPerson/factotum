@@ -202,6 +202,7 @@ section.group h3.crit { color: var(--crit); } section.group h3.warn { color: var
 .lb .bar { display: inline-flex; width: 28px; height: 5px; border-radius: 3px; background: var(--surface); overflow: hidden; flex: none; }
 .lb .bar > span { display: block; height: 100%; background: var(--accent); }
 .lb:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.lbs { display: contents; }      /* a row's link badges in one box swapDetail redraws; the badges stay items of .meta */
 span.lb { cursor: default; }      /* stepsChip: the same look, not a link */
 .chip.need { background: var(--crit-soft); color: var(--crit); font-family: var(--mono); }
 .chip.morelinks { color: var(--muted); }
@@ -312,6 +313,8 @@ span.lb { cursor: default; }      /* stepsChip: the same look, not a link */
 .hitem .hdiff .bv, .since .hdiff .bv, .rsug .hdiff .bv { color: var(--muted); }
 .hitem .hdiff .al, .since .hdiff .al, .rsug .hdiff .al { color: var(--ok); font-weight: 600; }
 .hitem.undone .hl, .hitem.undone .hdiff, .hitem.undone .who { opacity: .6; }
+.hitem .causechip { background: var(--warn-soft); color: var(--warn); }      /* a ripple whose cause was undone, kept (stage 5) */
+.hitem .hl.kept { color: var(--warn); font-size: 12px; }
 .details [data-hist-more] { align-self: flex-start; }
 /* The task page (app.js taskPageHtml): a task in place of the tab. On a desktop (a task no list shows) the
    opened row's two columns, on a card no wider than 980px. */
@@ -382,7 +385,7 @@ body.tray-open main { padding-bottom: 60vh; }
 .card .datepick input[type=date] { font: inherit; font-size: 16px; min-height: 40px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-2); color: var(--fg); }
 .toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(70px + env(safe-area-inset-bottom, 0px)); z-index: 7; background: var(--fg); color: var(--bg); padding: 8px 14px; border-radius: 999px; font-size: 13px; display: none; align-items: center; gap: 12px; }
 .toast.on { display: flex; }
-.toast button { font: inherit; background: none; border: 0; color: var(--accent-soft); cursor: pointer; text-decoration: underline; }
+.toast button { font: inherit; background: none; border: 0; color: var(--accent-soft); cursor: pointer; text-decoration: underline; white-space: nowrap; }      /* the message wraps, never "See | changes" */
 /* On a phone a toast that names a skipped change runs to three lines: the full width, and corners that do not cut the text. */
 @media (max-width: 700px) { .toast { width: max-content; max-width: calc(100vw - 32px); border-radius: 18px; } }
 /* The outcome question (ripples, stage 5) is drawn in the toast: a panel, not a pill. It sits over the bottom of

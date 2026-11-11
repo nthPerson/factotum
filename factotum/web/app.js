@@ -549,6 +549,7 @@
       closed.forEach(x => sayable.set(x.id, x));
       if (closed.length) toast(msg, true, { buttons: [{ text: 'Say how it went', attrs: `data-say="${closed[0].id}"`, run: () => askOutcome(closed[0].id) }], holdMs: 20000 });
       else toast(msg, true);
+      if ((res.ripple_queued || []).length) watchRipple(res.batch_id);
     } catch (e) { toast('Apply failed: ' + e.message); }
   }
   // opts: {buttons: [{text, attrs, run}], holdMs}: buttons after Undo, and how long the toast stays (8 s otherwise).
@@ -646,6 +647,50 @@
     lastBatch = res.batch_id; logData = null;
     await load();
     toast('Saved', true);
+    if ((res.ripple_queued || []).length) watchRipple(res.batch_id);
+  }
+
+  // ---------- ripples (stage 5): landing ----------
+  // After an Apply that queued a ripple, the page asks GET /api/ripple?after=<that batch> at once, then every
+  // 15 s while something is still pending and the page is visible, for at most 10 minutes; with ripples off or
+  // no scheduler here it asks once and stops. What landed is read first: an answer can
+  // carry a landed ripple and an empty queue together. One watcher at a time; a newer Apply replaces it.
+  const RIPPLE_EVERY = 15000, RIPPLE_FOR = 600000;
+  let rippleWatch = null;          // {after, until, timer, paused}
+  function watchRipple(batchId) {
+    if (rippleWatch) clearTimeout(rippleWatch.timer);
+    rippleWatch = { after: batchId, until: Date.now() + RIPPLE_FOR, timer: null, paused: false };
+    pollRipple(rippleWatch);
+  }
+  async function pollRipple(w) {
+    if (rippleWatch !== w) return;
+    if (document.hidden) { w.paused = true; return; }      // picked up again when the page is visible
+    let r = null;
+    try { r = await api('/api/ripple?after=' + w.after); } catch (_) {}      // no answer: asked again in 15 s
+    if (rippleWatch !== w) return;
+    if (r && (!r.enabled || !r.scheduler)) { rippleWatch = null; return; }
+    const landed = r ? (r.landed || []).filter(l => !l.undone && (l.tasks || []).length) : [];
+    if (landed.length) {
+      w.after = Math.max(...landed.map(l => l.batch_id));
+      await rippleLanded(landed);
+      if (rippleWatch !== w) return;
+    }
+    if ((r && !(r.pending || []).length) || Date.now() >= w.until) { rippleWatch = null; return; }
+    w.timer = setTimeout(() => pollRipple(w), RIPPLE_EVERY);
+  }
+  document.addEventListener('visibilitychange', () => {
+    const w = rippleWatch;
+    if (!document.hidden && w && w.paused) { w.paused = false; if (Date.now() < w.until) pollRipple(w); else rippleWatch = null; }
+  });
+  // The lists are read again (unless something is being typed: then on the next return), and the toast says
+  // how many linked tasks changed, with See changes (the first one, opened with its History) and Undo.
+  async function rippleLanded(landed) {
+    const ids = new Set(landed.flatMap(l => l.tasks.map(t => t.id))), n = ids.size;
+    const first = landed[0].tasks[0].id, batch = landed[0].batch_id;
+    if (!typingNow()) { logData = null; try { await load(); } catch (_) {} }
+    toast(`${n} linked task${n === 1 ? '' : 's'} brought up to date`, false, { holdMs: 15000, buttons: [
+      { text: 'See changes', attrs: `data-ripple-see="${first}"`, run: () => jumpTo(first, true) },
+      { text: 'Undo', attrs: `data-ripple-undo="${batch}"`, run: () => undoAndSay(batch) }] });
   }
   // The sign-in has expired (see `expired`): a full-screen "Sign in again" over the whole app, whose
   // button reloads at the same address. The tray is in localStorage, so it survives the reload. The rest
@@ -712,11 +757,15 @@
   }
   function suggestionStaged(eid) { return staged.has('e:' + eid) || [...staged.values()].some(s => s.ev === eid); }
   function undoBatch(id) { return api(`/api/batches/${id}/undo`, { method: 'POST' }); }
+  // The ripples the batch set off follow it: undone with it, or kept when a linked task's text changed after.
   function undoSaid(res) {
     if (res.already) return 'Already undone';
-    const k = (res.skipped || []).length;
-    if (!k) return 'Undone';
-    return `Undone · ${k} left as ${k === 1 ? 'it is' : 'they are'}: ${res.skipped[0].why}`;
+    const k = (res.skipped || []).length, u = (res.ripples_undone || []).length, kept = (res.ripples_kept || []).length;
+    const said = ['Undone'];
+    if (k) said.push(`${k} left as ${k === 1 ? 'it is' : 'they are'}: ${res.skipped[0].why}`);
+    if (u) said.push(u === 1 ? 'the ripple it set off was undone too' : `the ${u} ripples it set off were undone too`);
+    if (kept) said.push(`${kept === 1 ? 'a ripple it set off was' : kept + ' ripples it set off were'} kept, since the text changed after (undo in History if it no longer fits)`);
+    return said.join(' · ');
   }
 
   // ---------- links (stage 4b): badges ----------
@@ -832,6 +881,10 @@
     if (!PHONE()) return bs.map(badgeHtml).join('') + (need ? `<span class="chip need">needed for ${need}</span>` : '');
     const k = bs.length - 1;
     return (bs.length ? badgeHtml(bs[0]) : '') + (k > 0 ? `<span class="chip morelinks">${k === 1 ? '1 more link' : k + ' more links'}</span>` : '') + (need ? `<span class="chip need">for ${need}</span>` : '');
+  }
+  function wireBadges(root) {
+    root.querySelectorAll('[data-lb]').forEach(a => a.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); goFromPage(+a.dataset.lb); }));
+    root.querySelectorAll('[data-lb-open]').forEach(a => a.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); openTask(+a.dataset.lbOpen); }));
   }
   // A badge's tap: the named task's row on a desktop, its page on a phone.
   function goTask(id) { if (PHONE()) openTask(id); else jumpTo(id, false); }
@@ -1024,7 +1077,7 @@
   // When the text was last rewritten by a run another task set off. An undone rewrite is not the text any more.
   function rewrittenHtml(d) {
     const e = ((d.history || {}).entries || []).find(e => e.field === 'context' && !e.undone);
-    const from = e && e.cause && Array.isArray(e.cause.from) ? e.cause.from[0] : null;
+    const from = e && !rippleNoted(e, d.id) && e.cause && Array.isArray(e.cause.from) ? e.cause.from[0] : null;      // a note is not a rewrite
     if (!Number.isInteger(from)) return '';
     return `<p class="rewritten">Rewritten ${esc(monDay(e.at))} after ${tref(from)}. Earlier versions are in History.</p>`;
   }
@@ -1068,19 +1121,26 @@
   const HIST_QUIET = new Set(['completed_at', 'closed_by', 'due_is_datetime', 'last_reviewed_at', 'close_on_sent_to']);
   const textOf = v => v == null ? '' : String(v);
   const isAppend = e => textOf(e.new) !== '' && textOf(e.new).startsWith(textOf(e.old));
+  // A ripple only rewrites a text, and a rewrite its guard refused became a note (cause.noted): it says which
+  // itself, so a rewrite of an empty text is not read as a note.
+  const rippleNoted = (e, selfId) => e.source === 'ripple' && !!(e.cause && Array.isArray(e.cause.noted) && e.cause.noted.includes(selfId));
+  const isNote = (e, selfId) => e.source === 'ripple' ? rippleNoted(e, selfId) : isAppend(e);
   // One History line, as HTML (task numbers are links). A link entry names the other task, seen from this one.
   const LINK_SAID = {
     'out waits_on': ['Now waits on {T}.', 'No longer waits on {T}.'], 'in waits_on': ['Now frees {T}.', 'No longer frees {T}.'],
     'out part_of': ['Linked as part of {T}.', 'No longer part of {T}.'], 'in part_of': ['{T} linked as a step.', '{T} is no longer a step.'],
     'out same_as': ['Merged into {T}.', 'No longer merged into {T}.'], 'in same_as': ['{T} merged into this task.', '{T} is no longer merged into this task.'] };
   const VERDICT_SAID = { applied: 'Suggestion accepted.', dismissed: 'Suggestion dismissed.', reviewed: 'Suggestion seen.', staged: 'Suggestion staged.' };
+  // A ripple's rewrite that the guard refused (design §8.3) became a dated note; History says why.
+  const NOTED_SAID = ' (the ripple\'s rewrite was not applied — it was empty, too long, or would have lost a link or a task reference — so its reason was added as a note)';
   function historyWords(e, selfId) {
     const v = e.new, o = e.old;
     if (e.field === 'link') {
       const l = (v != null ? v : o) || {}, said = LINK_SAID[`${l.dir} ${l.kind}`];
       if (said && Number.isInteger(l.other) && l.other !== selfId) return said[v != null ? 0 : 1].replace('{T}', tref(l.other));
     }
-    if (e.field === 'context') return isAppend(e) ? `Note added: “${esc(textOf(v).slice(textOf(o).length).trim())}”` : 'Text rewritten.';
+    if (e.field === 'context' && isNote(e, selfId)) return `Note added: “${esc(textOf(v).slice(textOf(o).length).trim())}”` + (rippleNoted(e, selfId) ? NOTED_SAID : '');
+    if (e.field === 'context') return 'Text rewritten.';
     if (e.field === 'name') return 'Renamed.';
     if (e.field === 'outcome') return `Outcome: “${esc(textOf(v))}”`;
     if (e.field === 'evidence' && VERDICT_SAID[(v || {}).verdict]) return VERDICT_SAID[v.verdict];
@@ -1088,8 +1148,8 @@
     const s = fieldSaid(e);
     return esc(s.charAt(0).toUpperCase() + s.slice(1) + '.');
   }
-  function diffHtml(e) {
-    if (!['context', 'name', 'why_now'].includes(e.field) || isAppend(e)) return '';
+  function diffHtml(e, selfId) {
+    if (!['context', 'name', 'why_now'].includes(e.field) || (e.field === 'context' ? isNote(e, selfId) : isAppend(e))) return '';
     return beforeAfter(e.old, e.new);
   }
   // The content of [data-dhist]: one entry per batch, newest first, with its Undo.
@@ -1104,16 +1164,23 @@
       const e0 = g[0], who = whoText(e0), shown = g.filter(e => !HIST_QUIET.has(e.field));
       const undo = e0.undone ? '<span class="chip">undone</span>'
         : `<button class="btn small" data-hist-undo="${e0.batch_id}">${e0.batch_tasks > 1 ? `Undo all ${e0.batch_changes} changes made together` : 'Undo'}</button>`;
-      const lines = shown.length ? shown.map(e => `<div class="hl">${historyWords(e, id)}${e.note ? ` <span class="why">Why: ${linkTasks(e.note)}</span>` : ''}</div>${diffHtml(e)}`).join('')
+      const lines = shown.length ? shown.map(e => `<div class="hl">${historyWords(e, id)}${e.note ? ` <span class="why">Why: ${linkTasks(e.note)}</span>` : ''}</div>${diffHtml(e, id)}`).join('')
         : '<div class="hl">Reviewed, kept as it is.</div>';
-      return `<div class="hitem${e0.undone ? ' undone' : ''}"><div class="hh"><span class="when">${esc(histWhen(e0.at))}</span><span class="who ${who.cls}">${esc(who.text)}</span><span class="spacer"></span>${undo}</div>${lines}</div>`;
+      // A ripple whose cause was undone after its text was edited stays (batches.undo): said, with this Undo.
+      const causeUndone = e0.source === 'ripple' && !!(e0.cause && e0.cause.cause_undone_at);
+      const kept = causeUndone && !e0.undone ? '<div class="hl kept">Its cause was undone; this was kept because the text changed after. Undo it here if it no longer fits.</div>' : '';
+      return `<div class="hitem${e0.undone ? ' undone' : ''}"><div class="hh"><span class="when">${esc(histWhen(e0.at))}</span><span class="who ${who.cls}">${esc(who.text)}</span>${causeUndone ? '<span class="chip causechip">cause undone</span>' : ''}<span class="spacer"></span>${undo}</div>${lines}${kept}</div>`;
     }).join('');
     return head + (items ? `<div class="hlist">${items}</div>` : '<p class="hint">Nothing has changed since it was created.</p>')
       + (h.more ? `<button class="btn small" data-hist-more="${id}">Earlier</button>` : '');
   }
+  // In place, while something is typed: the two containers, and the task's link badges (its "updated by"
+  // badge goes once the answer has stamped it; a phone's "N more links" counts one fewer).
   function swapDetail(id) {
     document.querySelectorAll(`#panel [data-dlinks="${id}"]`).forEach(el => { el.innerHTML = detailAsyncHtml(id); wireDetail(el); });
     document.querySelectorAll(`#panel [data-dhist="${id}"]`).forEach(el => { el.innerHTML = historyHtml(id); wireDetail(el); });
+    const t = byId(id);
+    if (t) document.querySelectorAll(`#panel [data-lbs="${id}"]`).forEach(el => { el.innerHTML = linkChipsHtml(view(t)); wireBadges(el); });
   }
   function wireDetail(root) {
     root.querySelectorAll('[data-open-task]').forEach(a => a.onclick = e => { e.preventDefault(); goFromPage(+a.dataset.openTask); });
@@ -1296,7 +1363,7 @@
     const dueCls = d ? (d.days < 0 ? 'crit' : d.days <= 1 ? 'warn' : '') : '';
     const fadeDays = x.fade_at ? daysTo(x.fade_at) : null;
     return [
-      linkChipsHtml(x),
+      `<span class="lbs" data-lbs="${x.id}">${linkChipsHtml(x)}</span>`,      // one box (display: contents) swapDetail redraws
       x.top_rank ? `<span class="chip top">Top ${topPos.get(x.id) || x.top_rank}</span>` : '',
       x.longterm_effective ? `<span class="chip lt">Long-term</span>` : '',
       x.close_on_sent_since ? `<span class="chip" title="Closes itself when a message to ${esc(x.close_on_sent_to || 'the watched address')} is sent">✉ closes on send</span>` : '',
@@ -1841,7 +1908,7 @@
     const cause = b.cause || {}, from = Array.isArray(cause.from) && cause.from.length ? cause.from[0] : null;
     if (cause.kind === 'ripple' && from != null) {
       const k = new Set(b.changes.filter(c => c.task_id && !NOISE.has(c.field)).map(c => c.task_id)).size;
-      return `Ripple from Task-${from}: ${k} task${k === 1 ? '' : 's'} updated`;
+      return `Ripple from Task-${from}: ${k} task${k === 1 ? '' : 's'} updated` + (cause.cause_undone_at && !b.undone_at ? ' · cause undone, kept' : '');
     }
     const per = new Map();
     for (const c of b.changes) {
@@ -2049,8 +2116,7 @@
     });
     panel.querySelectorAll('[data-page-later]').forEach(b => b.onclick = () => pageLater(b.dataset.pageLater));
     placePageBar();
-    panel.querySelectorAll('[data-lb]').forEach(a => a.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); goFromPage(+a.dataset.lb); }));
-    panel.querySelectorAll('[data-lb-open]').forEach(a => a.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); openTask(+a.dataset.lbOpen); }));
+    wireBadges(panel);
     panel.querySelectorAll('[data-act]').forEach(b => b.addEventListener('click', () => act(+b.dataset.id, b.dataset.act)));
     panel.querySelectorAll('[data-due]').forEach(c => c.addEventListener('click', () => {
       const id = +c.dataset.due; if (!byId(id)) return;      // a closed task's page: its date is not for changing
