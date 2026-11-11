@@ -169,14 +169,19 @@ def _form(body: bytes) -> dict:
     return {k: v[0] for k, v in parse_qs(body.decode("utf-8", "replace"), keep_blank_values=True).items()}
 
 
-def _page(title: str, text: str, base: str, undo: bool = False, task_id: int | None = None) -> str:
+def _page(title: str, text: str, base: str, undo: bool = False, task_id: int | None = None,
+          free: list[dict] | None = None) -> str:
     """Tiny phone-sized confirmation page for a reminder action."""
     back = f"{base}/t/{task_id}" if task_id is not None else f"{base}/"
     label = f"Open Task-{task_id}" if task_id is not None else "Open Factotum"
     hint = ' Undo is in the Log tab.' if undo else ''
+    freed = ""
+    if free:
+        items = "".join(f'<li><a href="{escape(base)}/t/{f["id"]}" style="color:#2a6">Task-{f["id"]}</a> {escape(f["name"])}</li>' for f in free)
+        freed = f'<p style="margin:16px 0 4px;font-weight:600">Free now:</p><ul style="margin:0;padding-left:20px">{items}</ul>'
     return (f'<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Factotum</title>'
             f'<body style="font:16px system-ui;margin:0;padding:24px;background:#fafaf7;color:#1a1a1a"><h2 style="margin:0 0 8px">{escape(title)}</h2>'
-            f'<p style="color:#555">{escape(text)}{hint}</p><p><a href="{escape(back)}" style="color:#2a6">{escape(label)}</a></p></body>')
+            f'<p style="color:#555">{escape(text)}{hint}</p>{freed}<p><a href="{escape(back)}" style="color:#2a6">{escape(label)}</a></p></body>')
 
 
 class JsonOnlyMutations:
@@ -1016,7 +1021,8 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         if res["action"] == "open":
             return RedirectResponse(f"{base}/t/{res['task_id']}")
         what = {"done": "marked done", "snooze": f"snoozed; it fires again at {res.get('fire_at', '')[11:16]}"}[res["action"]]
-        return HTMLResponse(_page(f"Task-{res['task_id']} {what}", res["task_name"], base, undo=res["action"] == "done", task_id=res["task_id"]))
+        return HTMLResponse(_page(f"Task-{res['task_id']} {what}", res["task_name"], base, undo=res["action"] == "done", task_id=res["task_id"],
+                                    free=relations.freed_by(conn, res["task_id"]) if res["action"] == "done" else None))
 
     def index():
         return HTMLResponse(_index_html(), headers={"Cache-Control": "no-cache, must-revalidate"})

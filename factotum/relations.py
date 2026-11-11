@@ -376,6 +376,20 @@ def annotate(db: Db, tasks: list[dict]) -> list[dict]:
     return tasks
 
 
+def freed_by(db: Db, task_id: int) -> list[dict]:
+    """The open tasks with an active `waits_on` link to `task_id` that now wait on no open task, as
+    `[{"id", "name"}]` by id. Read through `annotate`; never writes."""
+    ids = [r[0] for r in db.execute(
+        "SELECT DISTINCT r.src FROM relations r JOIN tasks t ON t.id = r.src "
+        "WHERE r.removed_at IS NULL AND r.kind = 'waits_on' AND r.dst = ? AND t.status = 'open' ORDER BY r.src",
+        (task_id,))]
+    if not ids:
+        return []
+    rows_ = annotate(db, [dict(r) for r in db.execute(
+        f"SELECT id, name FROM tasks WHERE id IN ({','.join('?' * len(ids))}) ORDER BY id", ids)])
+    return [{"id": t["id"], "name": t["name"]} for t in rows_ if not t["rel"]["waits_on_open"]]
+
+
 def scored(db: Db, tasks: list[dict], today: date, cfg: dict, *, all_rows: bool = False) -> list[dict]:
     """`annotate`, then score every open row (every row with `all_rows`) in place; returns `tasks`.
     Every reader that ranks goes through here, so no surface scores without links (design §7.1)."""
