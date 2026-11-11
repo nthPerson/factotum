@@ -59,8 +59,10 @@ ntfy, the app or both). Stage 4a (2026-11-10): links between
 tasks (`part_of`, `waits_on`, `same_as` in the `relations` table; `link` / `unlink` / `merge` / `add_note` as
 batch ops; undo that skips what changed since; suggestions as `link_suggestion` evidence; one derived-facts
 step, `relations.annotate`, in front of scoring, lifecycle, the brief, reminders and the summary; payloads
-and the agent's tools; `PRAGMA user_version` migrations with backups; `scoring.links` in config) — the UI is
-stage 4b. Retiring the old Notion
+and the agent's tools; `PRAGMA user_version` migrations with backups; `scoring.links` in config). Stage 4b
+(2026-11-11): links on the page (badges, the All / Linked / Ready now filter and the Linked view, Today's
+link-aware order, the opened task with History, the task page and its trail, Review's link reasons and
+suggestions, the Log in words, "Free now" after a reminder's Done). Retiring the old Notion
 pages and plaud-sync is the user's checklist (SETUP §15). Update this paragraph when something lands.
 
 ## Where things live
@@ -105,6 +107,10 @@ pages and plaud-sync is the user's checklist (SETUP §15). Update this paragraph
 | links between tasks, merge, suggestions, migrations | SPEC §2, §4, §5, §15; design `docs/superpowers/specs/2026-11-10-linked-tasks-design.md` | `factotum/relations.py`, `batches.py` (`_link_op`, `_merge`), `db.py` (`VERSIONED`, `migrate`) |
 | derived neighbour facts, the scoring wrapper | SPEC §5 | `relations.annotate`, `relations.scored`, `relations.score_one` |
 | a task's History, relations, nearby | SPEC §9 | `api.get_one` |
+| link badges, the link filter and the Linked view, Today's order | design §12.1, §12.2, §7.4 | `web/app.js` (`badgesFor`, `linkChipsHtml`, `overlayRel`, `linkView`, `readyRow`, `linkedGroups`, `arrangeToday`) |
+| staging links, notes and outcomes; Undo that skips | design §11.2, §6 | `web/app.js` (`stageKey`, `stageChange`, `changeWords`, `textExpect`, `suggestionStaged`, `undoBatch`, `undoSaid`) |
+| the opened task: linked tasks, provenance, History, the task page and its trail | design §9, §12.3 | `web/app.js` (`detailCache`, `loadDetail`, `ensureDetails`, `swapDetail`, `historyHtml`, `historyWords`, `taskPageHtml`, `openPage`), `api.get_one` |
+| "Free now" after a reminder's Done | design §14 | `api._page`, `relations.freed_by` |
 | the claude.ai connector: metadata, registration, consent gate, arming, tokens, `/mcp` auth | SPEC §15, SETUP §16 | `factotum/oauth.py` (`consent_identity`, `verify_access_jwt`, `armed`, `token`, `check_access`), `api.py` (`/oauth/*`, `/api/connectors`) |
 | the installable app: manifest, icons, the page head | design §13, SPEC §9 | `factotum/web/manifest.webmanifest`, `index.html`, `tools/make_icons.py` |
 | addresses, Back, the phone task page, the short bar, signed out, return and update | SPEC §9 | `web/app.js` (`parseAddress`, `setAddress`, `go`, `applyAddress`, `openTask`, `closeTask`, `taskPageHtml`, `signedOut`, `typingNow`, `onReturn`), `api.py` (`PAGE_TABS`, `STAMPED`, `build_stamp`, `BuildStamp`, `_index_html`) |
@@ -313,6 +319,14 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
 - **The words "blocked" and "dependency" appear in nothing a user or the agent reads** (2026-11-10):
   say part of, steps, waits on, frees, same as
   (`test_nothing_the_user_or_the_agent_reads_says_blocked_or_dependency`).
+- **A staged change's tray key is `stageKey`** (2026-11-11): a link is `rel:<a>:<kind>:<b>`, never the bare id (that is the task's decision and would be overwritten); a new op needs a branch in `stageKey`, `changeWords` and `stageProposal`, or the tray drops or mislabels it.
+- **Opening a task stamps `neighbours_seen_at`** (2026-11-11; `GET /api/tasks/{id}`, every call, paging included): the page fetches it only for an opened row or the task page (`ensureDetails`), never for every row, and clears the row's "updated by" marker itself when it arrives.
+- **History arrives while things are typed** (2026-11-11): `loadDetail` swaps the two async containers in place (`swapDetail`) when `typingNow()`; a new async part of the opened task goes in `[data-dlinks]` / `[data-dhist]` or it is lost on arrival.
+- **`.details` is built only for open rows** (2026-11-11): code that reads a row's details from the DOM sees only opened rows.
+- **Today may draw a task in a group it has no date for** (2026-11-11; `arrangeToday` pulls a task that frees a hard-dated one into that group) and a filter may hide a row: `jumpTo` resets the link filter to All before giving up, and opens the task page when no list holds the id.
+- **The phone trail is `history.state.from`** (2026-11-11): a page-to-page jump pushes `{page: true, from}`; nothing keeps a trail in memory.
+- **Badges are `<a class="lb" href="/t/N">`** (2026-11-11): the row's click handler ignores `a`; a new control inside `.main` must be an `a`, `button` or `input`, or it opens / selects the row.
+- **With no links nothing is drawn** (2026-11-11): the link bar, the legend and the Linked view appear only when `hasLinks()`.
 - **`expire` only touches rows Review has shown** (`last_offered_at`, stamped by `GET /api/review`).
   A row that was never on a Review page stays open however old it is; that is by design.
 - **The manifest must be requested with `crossorigin="use-credentials"`** (2026-11-10): otherwise Access

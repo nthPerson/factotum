@@ -680,7 +680,7 @@ app with a device, as the provider allows). "This device" is in one of these sta
 The devices table lists each row (label, "(this device)", added, last sent, the last failure when it
 is newer than the last success) with Remove on every other device.
 
-**Links in the API (stage 4a; the page follows in stage 4b).** `GET /api/tasks` carries a compact `rel`
+**Links in the API (stage 4a; the page is stage 4b, below).** `GET /api/tasks` carries a compact `rel`
 per task (links, `waits_on_open`, `frees_open`, `goal_id`, steps open / total, `needed_by`, `changed`,
 `suggestions`; omitted when empty) and a `neighbours` map naming every other task they mention. `GET
 /api/tasks/{id}` also carries `rel`, `relations` (active, with the other task's state), `nearby`
@@ -689,8 +689,31 @@ first, 30 a page, `before=<change id>`, each with source, cause, undone, note an
 task); opening a task stamps `neighbours_seen_at`. Review items carry `texts` for the link reasons and
 `link_suggestions`. `POST /api/batches/{id}/undo` returns `restored` and `skipped` (a field the owner
 changed since, a link whose restore would loop or duplicate, each with a reason) and 404 only for a batch
-that does not exist. The Log carries each batch's `cause` and each change's `note`. The UI for all of this
-follows in stage 4b.
+that does not exist. The Log carries each batch's `cause` and each change's `note`. The page is described next.
+
+**Links on the page (stage 4b, 2026-11-11).** A row carries one badge per kind, in this order and look:
+"waits on" (amber), "do first / frees", "steps" and "part of" (teal), "updated by" (purple), a suggestion
+(dashed amber), a link staged in the tray (the staged look); several tasks of one kind read "waits on
+Task-12 +1". On a phone the badges sit one per row. A badge is a link to `/t/N` and jumps to that task.
+A bar over Today and Timeline chooses All / Linked / Ready now (one remembered choice for both); Ready now
+hides waiting tasks but keeps a hard-dated waiting task, dimmed, with its badge. The Linked view regroups
+every open task that has a link or a suggestion into three kinds of group: a goal with its steps, a chain
+of waiting tasks from the first one they wait on, and a card for a pair suggested as the same. With no
+links, suggestions or markers nothing is drawn: no bar, no badges, no legend. Today's order: a task that
+frees a hard-dated task in an earlier group is pulled forward into that group, a waiting task is drawn
+under the task it waits on, and a hard-dated task never moves.
+
+The opened task has Linked tasks, provenance and History, fetched only when the task is opened (opening
+stamps `neighbours_seen_at`). History is one entry per batch: who, what, why, before and after, an Undo
+for the batch ("Undo all N changes made together" when it holds more than one), and Earlier for the next
+page. The task page (the phone's, and on a desktop for a task no list holds) pins Done / Later / More and
+keeps a trail back to the task you came from. A closed task is read-only with Reopen, on both devices.
+
+Review shows the link reasons in words, a steps chip for progress, and link suggestions (a suggestion
+carries `dir`: "out" when the listed task is the suggestion's first end, so the page knows which end is the
+step or the waiting one). The tray keys a staged link `rel:<a>:<kind>:<b>`; a staged text edit from Chat
+or the planner carries `expect` (the server's current value); a Review note is staged as `add_note`.
+The Log says each change in words. The page after a reminder's Done lists what that frees now.
 
 ## 10. Reminders and push
 
