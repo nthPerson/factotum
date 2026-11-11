@@ -11,7 +11,7 @@ import json
 import re
 import sqlite3
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable
 
 from . import batches
@@ -624,3 +624,113 @@ def run(conn: sqlite3.Connection, cfg: dict, task_ids: list[int], today: date | 
     _drop_queued(conn, b)
     conn.commit()
     return dict(out, ok=True, line=line, cost_usd=res.cost_usd, run_id=run_id)
+
+
+# --- when (design §8.1): the scheduler's side of the queue ---------------------------------------
+
+def _utc(stamp) -> datetime | None:
+    """A stored timestamp as an aware UTC datetime (a naive one is taken as UTC), or None."""
+    try:
+        d = datetime.fromisoformat(str(stamp))
+    except (TypeError, ValueError):
+        return None
+    return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+
+
+def _int(cfg: dict, key: str) -> int:
+    """A numeric Settings key, its code default when the value is not a number."""
+    try:
+        return int(C.value(cfg, key))
+    except (TypeError, ValueError):
+        return int(C.DEFAULTS[key])
+
+
+def clear(conn: sqlite3.Connection) -> int:
+    """Empty the queue (ripples are off, so switching them on later starts clean). The caller commits."""
+    return conn.execute("DELETE FROM ripple_queue").rowcount
+
+
+def drop_stale(conn: sqlite3.Connection, now_utc: datetime | None = None) -> list[int]:
+    """Delete the rows queued longer ago than `MAX_AGE` and those whose task has no active link any
+    more (nothing left to ripple to); returns their task ids. The caller commits."""
+    now_utc = now_utc or datetime.now(timezone.utc)
+    out: list[int] = []
+    for r in pending(conn):
+        at = _utc(r["queued_at"])
+        linked = conn.execute("SELECT 1 FROM relations WHERE (src = ? OR dst = ?) AND removed_at IS NULL LIMIT 1",
+                              (r["task_id"], r["task_id"])).fetchone()
+        if at is None or now_utc - at > MAX_AGE or not linked:
+            conn.execute("DELETE FROM ripple_queue WHERE task_id = ?", (r["task_id"],))
+            out.append(r["task_id"])
+    return out
+
+
+def _capped(conn: sqlite3.Connection, cfg: dict, now_utc: datetime) -> bool:
+    """True when `claude.ripple.hourly_cap` runs of kind `ripple` started in the last hour."""
+    cap = _int(cfg, "claude.ripple.hourly_cap")
+    recent = conn.execute("SELECT started_at FROM runs WHERE kind = ? ORDER BY id DESC LIMIT ?", (RUN_KIND, max(cap, 0))).fetchall()
+    return sum(1 for r in recent if (at := _utc(r["started_at"])) is not None and now_utc - at < timedelta(hours=1)) >= cap
+
+
+def _groups(conn: sqlite3.Connection, rows_: list[dict]) -> list[list[dict]]:
+    """The queued rows in connected groups: two rows go together when one task is linked to the
+    other or both are linked to the same task (one link away, or steps of one goal)."""
+    near = {r["task_id"]: {nid for nid, _ in _neighbour_links(conn, [r["task_id"]])} for r in rows_}
+    parent = {tid: tid for tid in near}
+
+    def root(t: int) -> int:
+        while parent[t] != t:
+            t = parent[t]
+        return t
+    ids = list(near)
+    for i, a in enumerate(ids):
+        for b in ids[i + 1:]:
+            if b in near[a] or a in near[b] or near[a] & near[b]:
+                parent[root(b)] = root(a)
+    out: dict[int, list[dict]] = {}
+    for r in rows_:
+        out.setdefault(root(r["task_id"]), []).append(r)
+    return list(out.values())
+
+
+def next_group(conn: sqlite3.Connection, cfg: dict, now_utc: datetime | None = None) -> list[int]:
+    """The changed task ids of the one group a tick runs, or [] (the hourly cap reached, or nothing
+    due). A group is due at once when an outcome arrived (`now`), otherwise when its newest row is
+    `claude.ripple.delay_seconds` old; of the due groups the one waiting longest goes first, its ids
+    in queue order and cut to `CHANGED_CAP` (the rest stay queued)."""
+    now_utc = now_utc or datetime.now(timezone.utc)
+    queued = pending(conn)
+    if not queued or _capped(conn, cfg, now_utc):
+        return []
+    quiet = timedelta(seconds=_int(cfg, "claude.ripple.delay_seconds"))
+    at = {r["task_id"]: _utc(r["queued_at"]) or now_utc for r in queued}      # an unreadable stamp counts as just queued
+    due: list[tuple[datetime, list[dict]]] = []
+    for g in _groups(conn, queued):
+        stamps = [at[r["task_id"]] for r in g]
+        if any(r["now"] for r in g) or now_utc - max(stamps) >= quiet:
+            due.append((min(stamps), sorted(g, key=lambda r: (at[r["task_id"]], r["task_id"]))))
+    if not due:
+        return []
+    due.sort(key=lambda d: (d[0], d[1][0]["task_id"]))
+    return [r["task_id"] for r in due[0][1][:CHANGED_CAP]]
+
+
+def status(conn: sqlite3.Connection, cfg: dict, *, scheduler: bool, after: int | None = None) -> dict:
+    """What `GET /api/ripple` answers: whether ripples are on, whether a scheduler runs them here, what
+    waits, and the ripple batches that landed after batch `after` (newest first, at most 10)."""
+    enabled = bool(C.value(cfg, "claude.ripple.enabled"))
+    names = {r["id"]: r["name"] for r in conn.execute("SELECT t.id, t.name FROM tasks t JOIN ripple_queue q ON q.task_id = t.id")}
+    waiting = [{"task_id": r["task_id"], "name": names.get(r["task_id"]), "queued_at": r["queued_at"], "now": bool(r["now"])}
+               for r in pending(conn)]
+    landed = []
+    if after is not None:
+        for b in conn.execute("SELECT id, applied_at, created_at, cause_json, undone_at FROM batches WHERE source = ? AND id > ? "
+                              "ORDER BY id DESC LIMIT 10", (RUN_KIND, after)).fetchall():
+            cause = _load(b["cause_json"])
+            tasks = [{"id": r["id"], "name": r["name"]} for r in conn.execute(
+                "SELECT t.id, t.name FROM (SELECT task_id, MIN(id) AS first FROM changes WHERE batch_id = ? GROUP BY task_id) c "
+                "JOIN tasks t ON t.id = c.task_id ORDER BY c.first", (b["id"],))]
+            landed.append({"batch_id": b["id"], "at": b["applied_at"] or b["created_at"],
+                           "from": cause.get("from", []) if isinstance(cause, dict) else [], "tasks": tasks, "undone": b["undone_at"] is not None})
+    return {"enabled": enabled, "scheduler": scheduler, "pending": waiting,
+            "waiting_for_scheduler": bool(enabled and waiting and not scheduler), "landed": landed}

@@ -39,7 +39,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
-from . import app_push, batches, commands, config as C, lifecycle, oauth, relations, reminders, summary
+from . import app_push, batches, commands, config as C, lifecycle, oauth, relations, reminders, ripple, summary
 from .db import connect, get_settings, get_task, init_db, now_iso, rows, seed_accounts, set_setting
 from .dates import parse_date
 
@@ -386,6 +386,12 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
             conn.commit()
             sch.wake()
         return today_summary()
+
+    @app.get("/api/ripple")
+    def ripple_status(after: int | None = None):
+        """What ripples wait, whether a scheduler here will run them (with --no-scheduler they wait),
+        and the ripple batches that landed after batch `after` (the page polls this after an Apply)."""
+        return ripple.status(conn, eff_cfg(), scheduler=getattr(app.state, "scheduler", None) is not None, after=after)
 
     @app.get("/api/review")
     def review(exclude: str | None = None):

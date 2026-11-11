@@ -1,13 +1,21 @@
 """Stage 5, ripples (Part A)."""
+from datetime import datetime, timedelta, timezone
+
 import pytest
+from fastapi.testclient import TestClient
+
+import factotum.claude.runner as runner_mod
 from conftest import FIXTURE, TODAY
 from stage4_helpers import link, mk
-from stage5_helpers import no_claude, queue  # noqa: F401  (no_claude is autouse: no test reaches a real run)
+from stage5_helpers import entry, fake_runner, no_claude, on, queue  # noqa: F401  (no_claude is autouse: no test reaches a real run)
 
 from factotum import batches, ripple
 from factotum import config as C
+from factotum.api import create_app
 from factotum.claude import runner
 from factotum.claude.runner import run as real_run
+from factotum.db import get_settings, get_task, log_run
+from factotum.scheduler import Scheduler
 
 # --- Task 1: the ripple keys and the runner's per-run model and budget
 RIPPLE_DEFAULTS = {"claude.ripple.enabled": False, "claude.ripple.model": "sonnet", "claude.ripple.delay_seconds": 60,
@@ -92,3 +100,85 @@ def test_a_merge_queues_the_survivor_not_the_duplicate(conn):
     mk(conn, 1); mk(conn, 2); mk(conn, 3); link(conn, 3, 1, "waits_on")
     batches.apply(conn, [{"op": "merge", "task_id": 1, "fields": {"into": 2}}], "ui", TODAY)
     assert set(queue(conn)) == {2} and queue(conn)[2]["what"] == ["merge"]
+
+
+# --- Task 6: the scheduler
+def _age(conn, tid, seconds):
+    """Make a queue row look `seconds` old."""
+    at = (datetime.now(timezone.utc) - timedelta(seconds=seconds)).replace(microsecond=0).isoformat()
+    conn.execute("UPDATE ripple_queue SET queued_at = ? WHERE task_id = ?", (at, tid))
+    conn.commit()
+
+
+def test_ripples_off_run_nothing_and_empty_the_queue(conn, cfg):
+    mk(conn, 1); mk(conn, 2); link(conn, 2, 1, "waits_on"); batches.apply(conn, [{"op": "done", "task_id": 1}], "ui", TODAY)
+    Scheduler(cfg, conn, push=lambda *a, **k: None, ripple=ripple).tick(datetime(2026, 11, 1, 12, 0))      # the fixture has ripples off; no_claude would raise
+    assert queue(conn) == {}
+
+
+def test_the_quiet_period_then_one_run_per_group(conn, cfg):
+    for i in range(1, 7):
+        mk(conn, i)
+    link(conn, 2, 1, "waits_on"); link(conn, 3, 2, "waits_on"); link(conn, 5, 4, "waits_on"); link(conn, 6, 5, "waits_on")
+    batches.apply(conn, [{"op": "done", "task_id": 1}], "ui", TODAY); batches.apply(conn, [{"op": "set", "task_id": 3, "fields": {"name": "N"}}], "ui", TODAY)
+    batches.apply(conn, [{"op": "set", "task_id": 4, "fields": {"name": "M"}}], "ui", TODAY)
+    for t in (1, 3, 4):
+        _age(conn, t, 30)
+    assert ripple.next_group(conn, on(cfg)) == []
+    _age(conn, 1, 90); _age(conn, 3, 61); _age(conn, 4, 70)
+    assert ripple.next_group(conn, on(cfg)) == [1, 3]                    # 1 and 3 share Task-2; 4 is another group
+
+
+def test_an_outcome_runs_at_once(conn, cfg):
+    mk(conn, 1); mk(conn, 2); link(conn, 2, 1, "waits_on")
+    batches.apply(conn, [{"op": "done", "task_id": 1, "fields": {"outcome": "ok"}}], "ui", TODAY)
+    assert ripple.next_group(conn, on(cfg)) == [1]
+
+
+def test_the_hourly_cap_holds_the_queue(conn, cfg):
+    mk(conn, 1); mk(conn, 2); link(conn, 2, 1, "waits_on"); batches.apply(conn, [{"op": "done", "task_id": 1}], "ui", TODAY); _age(conn, 1, 120)
+    for _ in range(10):
+        log_run(conn, "ripple", 1, ok=True, cost_usd=0.1)
+    conn.commit()
+    assert ripple.next_group(conn, on(cfg)) == [] and 1 in queue(conn)
+
+
+def test_a_failed_run_backs_off_an_hour(conn, cfg, monkeypatch):
+    calls = []
+    monkeypatch.setattr(runner_mod, "run", fake_runner(None, calls=calls))
+    mk(conn, 1); mk(conn, 2); link(conn, 2, 1, "waits_on"); batches.apply(conn, [{"op": "done", "task_id": 1}], "ui", TODAY); _age(conn, 1, 120)
+    s = Scheduler(on(cfg), conn, push=lambda *a, **k: None, ripple=ripple)
+    s.tick(datetime(2026, 11, 1, 12, 0)); s.tick(datetime(2026, 11, 1, 12, 10))
+    assert len(calls) == 1 and get_settings(conn)["state.last_fail.ripples"] == "2026-11-01T12:00"
+
+
+def test_a_tick_runs_the_due_group(conn, cfg, monkeypatch):
+    monkeypatch.setattr(runner_mod, "run", fake_runner({"ripples": [entry(2, context="Now free to go.")]}))
+    mk(conn, 1); mk(conn, 2); link(conn, 2, 1, "waits_on"); batches.apply(conn, [{"op": "done", "task_id": 1}], "ui", TODAY); _age(conn, 1, 120)
+    did = Scheduler(on(cfg), conn, push=lambda *a, **k: None, ripple=ripple).tick(datetime(2026, 11, 1, 12, 0))
+    assert any(d.startswith("ripples: Ripple from Task-1") for d in did) and get_task(conn, 2)["context"] == "Now free to go." and queue(conn) == {}
+
+
+def test_start_sets_the_waker_and_stop_clears_it(conn, cfg, monkeypatch):
+    monkeypatch.setattr(Scheduler, "tick", lambda self, now_local=None: [])        # the thread must not tick on the test's connection
+    s = Scheduler(cfg, conn, push=lambda *a, **k: None, ripple=ripple)
+    s.start(interval_s=3600)
+    try:
+        assert ripple._WAKER == s.wake
+    finally:
+        s.stop()
+    assert ripple._WAKER is None
+
+
+def test_the_api_says_ripples_wait_for_a_scheduler(cfg, tmp_path):
+    client = TestClient(create_app(cfg, db_path=str(tmp_path / "a.db")))
+    c = client.app.state.conn
+    mk(c, 1); mk(c, 2); link(c, 2, 1, "waits_on")
+    client.put("/api/settings", json={"values": {"claude.ripple.enabled": True}})
+    res = client.post("/api/batches/apply", json={"source": "ui", "changes": [{"op": "done", "task_id": 1}]}).json()
+    assert res["ripple_queued"] == [1]
+    st = client.get("/api/ripple").json()
+    assert st["enabled"] and not st["scheduler"] and st["waiting_for_scheduler"] and st["pending"][0]["task_id"] == 1 and st["landed"] == []
+    rb = batches.apply(c, [{"op": "set", "task_id": 2, "fields": {"context": "free"}}], "ripple", TODAY, cause={"kind": "ripple", "from": [1], "run": 0, "batches": [res["batch_id"]]})
+    landed = client.get("/api/ripple", params={"after": res["batch_id"]}).json()["landed"]
+    assert landed == [{"batch_id": rb["batch_id"], "at": landed[0]["at"], "from": [1], "tasks": [{"id": 2, "name": "Task 2"}], "undone": False}]

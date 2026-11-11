@@ -58,18 +58,24 @@ def test_the_starter_is_neutral_and_switches_everything_off():
     assert C.get(s, "server.public_url") == "" and C.get(s, "server.mcp_writes") == "stage"
     assert not C.get(s, "notify.ntfy.topic") and not C.get(s, "notify.morning_brief.to") and s["_tz_from_machine"] is True
 
-def test_a_day_on_the_starter_spends_nothing_and_sends_nothing(conn):
+def test_a_day_on_the_starter_spends_nothing_and_sends_nothing(conn, monkeypatch):
+    import factotum.claude.runner
+    from factotum import batches, ripple
     from factotum.scheduler import Scheduler
     upsert_task(conn, task(id=1, name="x", project="Work", due="2026-11-02", hard=1)); conn.commit()
+    upsert_task(conn, task(id=2, name="y")); upsert_task(conn, task(id=3, name="z")); conn.commit()
+    batches.apply(conn, [{"op": "link", "task_id": 3, "fields": {"kind": "waits_on", "other": 2}}], "ui", TODAY)
+    batches.apply(conn, [{"op": "done", "task_id": 2}], "ui", TODAY)                   # a ripple queued
     calls = []
     rec = lambda name: (lambda *a, **k: calls.append(name) or {"ok": True})            # noqa: E731
+    monkeypatch.setattr(factotum.claude.runner, "run", rec("claude"))                  # a mistake here must never start a real run
     mod = lambda name: SimpleNamespace(sweep_job=rec(name), run=rec(name), pending=lambda *a, **k: True, get=lambda *a, **k: None)   # noqa: E731
     s = Scheduler(C.load(C.STARTER_CONFIG), conn, push=lambda cfg, *a, **k: calls.append("push") if notify.enabled(cfg) else None,
                   mailer=rec("mail"), calendar=mod("calendar"), canvas=mod("canvas"), mail=mod("mail_sweep"), planner=mod("planner"),
-                  mirror=mod("mirror"), slack=mod("slack"), summary=mod("summary"), triage=mod("triage"))
+                  mirror=mod("mirror"), slack=mod("slack"), summary=mod("summary"), triage=mod("triage"), ripple=ripple)
     for h, m in ((6, 0), (7, 0), (12, 0), (19, 45)):
         s.tick(datetime(2026, 11, 2, h, m))
-    assert calls == []
+    assert calls == [] and conn.execute("SELECT COUNT(*) FROM ripple_queue").fetchone()[0] == 0
 
 def test_a_missing_or_wrong_time_zone_becomes_the_machines(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("TZ", "Asia/Tokyo")
