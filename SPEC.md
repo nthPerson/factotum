@@ -502,7 +502,9 @@ and its scroll restored. A task that is done or dropped is fetched from `GET /ap
 shown read-only ("This task is done." / "This task is dropped."); an unknown id says "Task-N does
 not exist." One thing sits at the bottom of a phone screen: the tray, or the short bar while rows
 are selected (the tray hides and comes back when the selection is cleared). A redirect, 401 or 403
-from `/api` shows "Sign in again" (a restarting server or a dead network never does). When the
+from `/api` shows "Sign in again" (a restarting server or a dead network never does). A prompt or
+command that could not be sent goes back in the box ("Not sent: the server did not answer"), and a
+reload the app asks for (Sign in again, Update ready) keeps the command box's text. When the
 app comes back to the front the lists are reloaded unless something is typed (`typingNow()`: text
 in a box, an open reminder or due-date form, a chat turn running, or focus in a box whose text a
 redraw would lose; focus in an empty command, Review or picker box does not count), and

@@ -17,6 +17,7 @@
   // What is being typed, kept outside the DOM: every render() rebuilds the panel (a chat turn's status
   // line re-renders it every second), and a long prompt must survive that with its caret.
   const draft = { cmd: '', ask: '', askFor: null, pick: '' };
+  try { draft.cmd = sessionStorage.getItem('factotum.cmd') || ''; sessionStorage.removeItem('factotum.cmd'); } catch (_) {}   // kept by reloadKeepingDraft
   const TOUCH = () => window.matchMedia('(hover: none)').matches;
   let logView = 'all', logQuiet = false, logLimit = 60, logOpen = new Set();
   try { const v = localStorage.getItem('factotum.logview'); if (['timeline', 'changes', 'runs', 'all'].includes(v)) logView = v; logQuiet = localStorage.getItem('factotum.logquiet') === '1'; } catch (_) {}
@@ -176,7 +177,7 @@
     // fault. Anything else (a server error, a bug in a redraw) is logged rather than lost.
     load().catch(e => { if (!(e && (e.message === 'signed out' || e.network))) console.error('Reloading on return failed:', e); });
   }
-  document.getElementById('update').onclick = () => location.reload();      // the tray is in localStorage: it survives
+  document.getElementById('update').onclick = () => reloadKeepingDraft();      // the tray is in localStorage: it survives
 
   // ---------- the Today summary (SPEC §8.4) ----------
   // The planner's verdict, kept by the server with what has changed since. Python decides "stale";
@@ -351,7 +352,13 @@
     for (const c of document.querySelector('.app').children) if (c !== el) c.inert = true;
     document.getElementById('signin').focus();
   }
-  document.getElementById('signin').onclick = () => location.reload();
+  // A reload the app asks for (Sign in again, Update) keeps what is in the command box: it is put in
+  // sessionStorage, which survives the sign-in's round trip in this tab, and read back once on load.
+  function reloadKeepingDraft() {
+    try { if (draft.cmd.trim()) sessionStorage.setItem('factotum.cmd', draft.cmd); } catch (_) {}
+    location.reload();
+  }
+  document.getElementById('signin').onclick = reloadKeepingDraft;
 
   // ---------- rendering ----------
   function render() {
@@ -1217,7 +1224,16 @@
   }
   async function sendPrompt(text) {
     if (!text) return;
-    const res = await api('/api/commands', { method: 'POST', body: JSON.stringify({ text }) });
+    let res;
+    try { res = await api('/api/commands', { method: 'POST', body: JSON.stringify({ text }) }); }
+    catch (e) {
+      // Not sent (a restarting server, no network, a sign-out): the text goes back in the box, ahead of
+      // anything typed since, so nothing is lost. A sign-out has its own screen; its reload keeps the box.
+      draft.cmd = draft.cmd.trim() ? text + '\n' + draft.cmd : text;
+      render();
+      if (!(e && e.message === 'signed out')) toast('Not sent: the server did not answer');
+      return;
+    }
     if (res.is_command) {
       res.changes.forEach(c => stage(c.task_id, c.op, c.fields, c.op === 'set' ? Object.entries(c.fields).map(([k, v]) => `${k} ${v || 'cleared'}`).join(', ') : c.op));
       toast(`Staged ${res.changes.length} change${res.changes.length === 1 ? '' : 's'}`);
