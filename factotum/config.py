@@ -45,6 +45,28 @@ SETTINGS_KEYS = [
     "server.oauth.enabled", "server.mcp_writes",
 ]
 
+# One default for every Settings key. Absent means off for anything that costs money or sends mail
+# (PAID_SWITCHES, the mail suggestions); read these with value(). The AST test in tests/test_stage3.py
+# holds every literal default for one of these keys elsewhere in the code to this table.
+DEFAULTS: dict[str, Any] = {
+    "lifecycle.fade_days": 21, "lifecycle.fade_warn_days": 3, "lifecycle.last_call_days": 7,
+    "lifecycle.top_cap": 7, "lifecycle.review_cap": 15,
+    "notify.review_time": "19:30", "notify.snooze_presets": [], "notify.ntfy.enabled": True, "notify.ntfy.topic": "",
+    "notify.morning_brief.enabled": False, "notify.morning_brief.time": "06:30", "notify.morning_brief.to": "",
+    "sources.plaud.enabled": False, "sources.canvas.enabled": False, "sources.mail.enabled": False,
+    "sources.calendar.enabled": False, "sources.calendar.calendar_id": "primary",
+    "sources.canvas.sweep_minutes": 60, "sources.mail.sweep_minutes": 20, "sources.calendar.sweep_minutes": 30,
+    "sources.slack.enabled": False, "sources.slack.sweep_minutes": 20, "sources.discord.enabled": False,
+    "sources.mail.suggest.enabled": False, "sources.mail.suggest.minutes": 30,
+    "sinks.notion_notes.enabled": False, "sinks.notion_tasks_mirror.enabled": False,
+    "sinks.notion_tasks_mirror.sweep_minutes": 10,
+    "scoring.project_weights": {},
+    "claude.models": {}, "claude.planner.enabled": False, "claude.budgets_usd.chat_turn": 1.0,
+    "claude.summary.auto": False, "claude.summary.auto_minutes": 10,
+    "server.oauth.enabled": False, "server.mcp_writes": "stage",
+}
+PAID_SWITCHES = ("notify.morning_brief.enabled", "claude.planner.enabled", "claude.summary.auto", "sinks.notion_notes.enabled")
+
 
 def machine_timezone() -> str:
     """This machine's IANA zone: TZ, /etc/timezone, the /etc/localtime link, else UTC. Always a name ZoneInfo accepts."""
@@ -109,6 +131,11 @@ def get(cfg: dict, dotted: str, default: Any = None) -> Any:
             return default
         cur = cur[part]
     return cur
+
+
+def value(cfg: dict, key: str) -> Any:
+    """A Settings key's value with its default from DEFAULTS; a key not in DEFAULTS raises KeyError on purpose."""
+    return get(cfg, key, DEFAULTS[key])
 
 
 def set_(cfg: dict, dotted: str, value: Any) -> None:

@@ -93,3 +93,78 @@ def test_settings_say_when_the_starter_is_in_use(tmp_path, cfg):
     assert TestClient(create_app(cfg, db_path=str(tmp_path / "o.db"))).get("/api/settings").json()["starter"] is False
     r = starter.put("/api/settings", json={"values": {"owner.name": "x"}})
     assert r.status_code == 400 and "copy config/factotum.example.yaml to config/factotum.yaml" in r.json()["detail"]
+
+
+# --- Task 3: absent means off
+
+def _drop(cfg, *dotted):
+    for k in dotted:
+        *head, last = k.split(".")
+        d = cfg
+        for h in head:
+            d = d[h]
+        d.pop(last, None)
+
+def _code_defaults():
+    """Every `C.get(x, "<a DEFAULTS key>", <literal>)` in factotum/, as (file, line, key, default); None when no default is given."""
+    import ast
+    out = []
+    for path in (C.ROOT / "factotum").rglob("*.py"):
+        for n in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "get" and isinstance(n.func.value, ast.Name)
+                    and n.func.value.id == "C" and len(n.args) >= 2 and isinstance(n.args[1], ast.Constant) and n.args[1].value in C.DEFAULTS):
+                if len(n.args) == 2:
+                    out.append((path.name, n.lineno, n.args[1].value, None))
+                elif isinstance(n.args[2], (ast.Constant, ast.List, ast.Dict, ast.Tuple)):
+                    out.append((path.name, n.lineno, n.args[1].value, ast.literal_eval(n.args[2])))
+    return out
+
+def test_every_settings_key_has_one_default_and_the_paid_ones_are_off():
+    assert set(C.DEFAULTS) == set(C.SETTINGS_KEYS)
+    for k in C.PAID_SWITCHES + ("sources.mail.suggest.enabled",):
+        assert C.DEFAULTS[k] is False and C.value({}, k) is False, k
+
+def test_every_default_in_the_code_is_the_one_settings_shows():
+    found = _code_defaults()
+    assert len(found) > 20
+    bad = [f for f in found if not (f[3] == C.DEFAULTS[f[2]] or (not f[3] and not C.DEFAULTS[f[2]]))]
+    assert bad == []
+    assert not [f for f in found if f[2] in C.PAID_SWITCHES]                    # those are read through C.value only
+
+def test_a_config_without_the_paid_switches_runs_no_brief_planner_or_summary(cfg, conn, tmp_path):
+    from factotum.scheduler import Scheduler
+    def day(c, conf):
+        upsert_task(c, task(id=1, name="x")); c.commit()
+        calls = []
+        s = Scheduler(conf, c, push=lambda *a, **k: None, mailer=lambda *a, **k: calls.append("mail"),
+                      planner=SimpleNamespace(run=lambda *a, **k: calls.append("planner") or {"ok": True, "verdict": "V."}),
+                      summary=SimpleNamespace(get=lambda *a, **k: None, run=lambda *a, **k: calls.append("summary") or {"ok": True}))
+        s.tick(datetime(2026, 11, 2, 7, 0)); s.tick(datetime(2026, 11, 2, 12, 0))
+        return set(calls)
+    assert day(conn, cfg) >= {"mail", "planner", "summary"}                      # the fixture switches them on
+    _drop(cfg, *C.PAID_SWITCHES)
+    c2 = connect(tmp_path / "t2.db"); init_db(c2)
+    assert day(c2, cfg) == set()
+
+def test_a_recording_writes_no_notion_note_when_the_notes_switch_is_absent(cfg, conn, tmp_path, monkeypatch):
+    from factotum import sync_file
+    from test_phase3 import GOOD, _fake_plaud, _runner_seq
+    _drop(cfg, "sinks.notion_notes.enabled")
+    plaud_run, _ = _fake_plaud(tmp_path)
+    runner, _ = _runner_seq(GOOD)
+    monkeypatch.setattr(sync_file, "RUNS_DIR", tmp_path / "runs")
+    res = sync_file.run(conn, cfg, subject="[Plaud-AutoFlow] 11-01 Action Plan: Molina Healthcare Duplicate Payment and Auto-Pay Alignment",
+                        received="2026-11-02T05:42:09+00:00", today=TODAY, runner=runner, plaud_run=plaud_run,
+                        notes=lambda *a, **k: pytest.fail("a note was written"), calendar=None)
+    assert res["ok"] and not res.get("note_url")
+
+def test_settings_report_the_value_the_code_will_use(cfg, tmp_path):
+    _drop(cfg, "lifecycle.fade_days", "claude.planner.enabled", "notify.morning_brief.enabled", "claude.summary.auto")
+    client = TestClient(create_app(cfg, db_path=str(tmp_path / "api.db")))
+    e = client.get("/api/settings").json()["effective"]
+    assert set(e) == set(C.SETTINGS_KEYS)
+    assert e["lifecycle.fade_days"] == 21 and e["claude.planner.enabled"] is False and e["notify.morning_brief.enabled"] is False
+    assert e["lifecycle.review_cap"] == cfg["lifecycle"]["review_cap"]
+    assert client.get("/api/summary").json()["auto"] is False
+    client.put("/api/settings", json={"values": {"sources.discord.enabled": True}})
+    assert client.get("/api/settings").json()["overrides"] == {"sources.discord.enabled": True}

@@ -270,7 +270,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         ecfg = eff_cfg()
         now = reminders.local_now(ecfg)
         return {"summary": summary.get(conn, now.date()), "refresh": summary.refresh_state(conn, now),
-                "auto": bool(C.get(ecfg, "claude.summary.auto", True)), "can_refresh": getattr(app.state, "scheduler", None) is not None}
+                "auto": bool(C.value(ecfg, "claude.summary.auto")), "can_refresh": getattr(app.state, "scheduler", None) is not None}
 
     @app.post("/api/summary/refresh")
     def refresh_summary():
@@ -430,11 +430,11 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
             "starter": bool(cfg.get("_starter")),
             "keys": C.SETTINGS_KEYS,
             "overrides": {k: v for k, v in st.items() if k in C.SETTINGS_KEYS},
-            "effective": {k: C.get(ecfg, k) for k in C.SETTINGS_KEYS},
+            "effective": {k: C.value(ecfg, k) for k in C.SETTINGS_KEYS},
             "projects": C.get(ecfg, "taxonomy.projects", []),
             "accounts": [dict(a, roles=json.loads(a["roles_json"])) for a in rows(conn, "SELECT * FROM accounts ORDER BY id")],
-            "sources": {k: {"enabled": C.get(ecfg, f"sources.{k}.enabled")} for k in ("plaud", "canvas", "mail", "calendar")},
-            "sinks": {k: {"enabled": C.get(ecfg, f"sinks.{k}.enabled")} for k in ("notion_notes", "notion_tasks_mirror")},
+            "sources": {k: {"enabled": C.value(ecfg, f"sources.{k}.enabled")} for k in ("plaud", "canvas", "mail", "calendar")},
+            "sinks": {k: {"enabled": C.value(ecfg, f"sinks.{k}.enabled")} for k in ("notion_notes", "notion_tasks_mirror")},
         }
 
     @app.put("/api/settings")
