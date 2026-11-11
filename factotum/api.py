@@ -183,7 +183,8 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
     cfg = cfg or C.load()
     conn = connect(db_path or C.db_path(), shared=True)      # one connection for every request thread: no statement cache (db.connect)
     init_db(conn)
-    seed_accounts(conn, C.get(cfg, "sources.mail.seed_accounts", []))
+    if not cfg.get("_starter"):
+        seed_accounts(conn, C.get(cfg, "sources.mail.seed_accounts", []))
     app = FastAPI(title="Factotum", version="0.1.0")
 
     def eff_cfg() -> dict:
@@ -270,7 +271,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         ecfg = eff_cfg()
         now = reminders.local_now(ecfg)
         return {"summary": summary.get(conn, now.date()), "refresh": summary.refresh_state(conn, now),
-                "auto": bool(C.get(ecfg, "claude.summary.auto", True)), "can_refresh": getattr(app.state, "scheduler", None) is not None}
+                "auto": bool(C.value(ecfg, "claude.summary.auto")), "can_refresh": getattr(app.state, "scheduler", None) is not None}
 
     @app.post("/api/summary/refresh")
     def refresh_summary():
@@ -427,19 +428,23 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         ecfg = C.effective(cfg, st)
         return {
             "config_file": cfg.get("_path"),
+            "starter": bool(cfg.get("_starter")),
             "keys": C.SETTINGS_KEYS,
             "overrides": {k: v for k, v in st.items() if k in C.SETTINGS_KEYS},
-            "effective": {k: C.get(ecfg, k) for k in C.SETTINGS_KEYS},
+            "effective": {k: C.value(ecfg, k) for k in C.SETTINGS_KEYS},
             "projects": C.get(ecfg, "taxonomy.projects", []),
             "accounts": [dict(a, roles=json.loads(a["roles_json"])) for a in rows(conn, "SELECT * FROM accounts ORDER BY id")],
-            "sources": {k: {"enabled": C.get(ecfg, f"sources.{k}.enabled")} for k in ("plaud", "canvas", "mail", "calendar")},
-            "sinks": {k: {"enabled": C.get(ecfg, f"sinks.{k}.enabled")} for k in ("notion_notes", "notion_tasks_mirror")},
+            "sources": {k: {"enabled": C.value(ecfg, f"sources.{k}.enabled")} for k in ("plaud", "canvas", "mail", "calendar")},
+            "sinks": {k: {"enabled": C.value(ecfg, f"sinks.{k}.enabled")} for k in ("notion_notes", "notion_tasks_mirror")},
         }
 
     @app.put("/api/settings")
     def put_settings(body: SettingsBody):
         for k, v in body.values.items():
             if k not in C.SETTINGS_KEYS:
+                if cfg.get("_starter"):
+                    raise HTTPException(400, f"{k} is not a Settings key; it belongs in config/factotum.yaml, which does not exist yet: "
+                                             "copy config/factotum.example.yaml to config/factotum.yaml, edit it and restart")
                 raise HTTPException(400, f"{k} is not a Settings key; edit {cfg.get('_path')} instead")
             set_setting(conn, k, v)
         if body.accounts is not None:

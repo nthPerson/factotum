@@ -225,10 +225,21 @@ def set_setting(conn: sqlite3.Connection, key: str, value: Any) -> None:
     conn.execute("INSERT INTO settings (key, value_json) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json", (key, json.dumps(value)))
 
 
-def seed_accounts(conn: sqlite3.Connection, seed: list[dict]) -> None:
+def seed_accounts(conn: sqlite3.Connection, seed: list[dict]) -> int:
+    """Insert the user's file's accounts once per database (`state.accounts_seeded`), so a table
+    emptied on purpose stays empty. A table that already has rows is marked and left alone; an
+    empty seed list does not use the seeding up. Returns the rows inserted."""
+    if get_settings(conn).get("state.accounts_seeded"):
+        return 0
+    mark = lambda: set_setting(conn, "state.accounts_seeded", datetime.now(timezone.utc).isoformat(timespec="seconds"))
     if conn.execute("SELECT COUNT(*) FROM accounts").fetchone()[0]:
-        return
+        mark(); conn.commit()
+        return 0
+    n = 0
     for a in seed or []:
-        conn.execute("INSERT OR IGNORE INTO accounts (address, display, enabled, roles_json) VALUES (?, ?, 1, ?)",
-                     (a["address"], a.get("display"), json.dumps(a.get("roles", []))))
+        n += conn.execute("INSERT OR IGNORE INTO accounts (address, display, enabled, roles_json) VALUES (?, ?, 1, ?)",
+                          (a["address"], a.get("display"), json.dumps(a.get("roles", [])))).rowcount
+    if n:
+        mark()
     conn.commit()
+    return n
