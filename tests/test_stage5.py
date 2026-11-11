@@ -235,3 +235,50 @@ def test_the_changed_marker_goes_with_an_undone_ripple(conn, cfg):
     assert relations.annotate(conn, [{"id": 2}])[0]["rel"]["changed"]["batch_id"] == r
     batches.undo(conn, b)
     assert relations.annotate(conn, [{"id": 2}])[0]["rel"]["changed"] is None
+
+
+# --- Task 8: the outcome after a reminder's Done
+def _reminded(cfg, tmp_path, linked=True):
+    from test_core import _rem
+    app = create_app(cfg, db_path=str(tmp_path / "r.db"))
+    c = app.state.conn
+    mk(c, 1, name="Ask the chair")
+    if linked:
+        mk(c, 2); link(c, 2, 1, "waits_on")
+    batches.apply(c, [{"task_id": 1, "op": "add_reminder", "fields": {"fire_at": "2026-11-03T09:00"}}], "ui", TODAY)
+    from factotum import reminders
+    reminders.fire(c, cfg, datetime(2026, 11, 3, 9, 0, 30), lambda *a, **k: "m1")
+    tok = [r["token"] for r in _rem(c, 1) if r["status"] == "sent"][0]
+    return TestClient(app), c, tok
+
+
+def test_the_page_after_done_asks_how_it_turned_out_for_a_linked_task(cfg, tmp_path):
+    client, c, tok = _reminded(cfg, tmp_path)
+    r = client.get(f"/r/{tok}", params={"a": "done"})
+    assert r.status_code == 200 and "How did it turn out?" in r.text and f'/r/{tok}/outcome"' in r.text and 'method="post"' in r.text
+    assert "One task hangs on this one." in r.text and "kept with this task" in r.text      # ripples are off in the fixture
+
+
+def test_an_unlinked_task_is_not_asked(cfg, tmp_path):
+    client, c, tok = _reminded(cfg, tmp_path, linked=False)
+    assert "How did it turn out?" not in client.get(f"/r/{tok}", params={"a": "done"}).text
+
+
+def test_saving_the_outcome_goes_through_the_write_path_and_ripples_at_once(cfg, tmp_path):
+    client, c, tok = _reminded(cfg, tmp_path)
+    client.get(f"/r/{tok}", params={"a": "done"})
+    r = client.post(f"/r/{tok}/outcome", data={"outcome": "  The chair can serve remotely "})
+    assert r.status_code == 200 and "outcome saved" in r.text and "The chair can serve remotely" in r.text
+    assert get_task(c, 1)["outcome"] == "The chair can serve remotely"
+    assert c.execute("SELECT source FROM batches ORDER BY id DESC LIMIT 1").fetchone()[0] == "ntfy" and queue(c)[1]["now"] == 1
+
+
+def test_an_outcome_needs_a_token_closed_from_this_reminder(cfg, tmp_path):
+    client, c, tok = _reminded(cfg, tmp_path)
+    assert client.post(f"/r/{tok}/outcome", data={"outcome": "x"}).status_code == 409          # not done from here yet
+    assert client.post("/r/nope/outcome", data={"outcome": "x"}).status_code == 404
+    client.get(f"/r/{tok}", params={"a": "done"})
+    n = c.execute("SELECT COUNT(*) FROM batches").fetchone()[0]
+    assert "nothing saved" in client.post(f"/r/{tok}/outcome", data={"outcome": "   "}).text and c.execute("SELECT COUNT(*) FROM batches").fetchone()[0] == n
+    c.execute("UPDATE reminders SET sent_at = '2026-01-01T00:00:00+00:00'"); c.commit()
+    assert client.post(f"/r/{tok}/outcome", data={"outcome": "x"}).status_code == 410

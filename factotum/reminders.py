@@ -168,3 +168,31 @@ def act(conn: sqlite3.Connection, cfg: dict, token: str, action: str, now_local:
         conn.commit()
         return {"action": "snooze", "task_id": r["task_id"], "task_name": r["task_name"], "fire_at": at}
     raise TokenError(400, f"unknown action {action!r}")
+
+
+def hanging_on(conn: sqlite3.Connection, task_id: int) -> int:
+    """How many distinct OPEN tasks have an active relation to this one (either direction, any kind)."""
+    return conn.execute(
+        "SELECT COUNT(DISTINCT t.id) FROM relations r JOIN tasks t ON t.id = CASE WHEN r.src = ? THEN r.dst ELSE r.src END "
+        "WHERE r.removed_at IS NULL AND (r.src = ? OR r.dst = ?) AND t.status = 'open'", (task_id, task_id, task_id)).fetchone()[0]
+
+
+def save_outcome(conn: sqlite3.Connection, cfg: dict, token: str, text: str) -> dict:
+    """The one optional line after a reminder's Done: only for a token that closed its task from the link."""
+    r = conn.execute("SELECT r.*, t.name AS task_name, t.status AS task_status FROM reminders r JOIN tasks t ON t.id = r.task_id WHERE r.token = ?", (token,)).fetchone()
+    if not r:
+        raise TokenError(404, "This link is unknown or was already used.")
+    r = dict(r)
+    if r["status"] != "done":
+        raise TokenError(409, "Only a task closed from this reminder takes its outcome here; open the task to add one.")
+    sent_at = datetime.fromisoformat(r["sent_at"]) if r.get("sent_at") else None
+    if sent_at is None or datetime.now(timezone.utc) - sent_at > TOKEN_TTL:
+        raise TokenError(410, "This link has expired (reminder actions are good for 24 hours).")
+    tid = r["task_id"]
+    if r["task_status"] not in ("done", "dropped"):
+        raise TokenError(409, f"Task-{tid} is open again; add its outcome when you close it.")
+    text = (text or "").strip()[:300]
+    if not text:
+        return {"saved": False, "task_id": tid, "task_name": r["task_name"]}
+    res = batches.apply(conn, [{"task_id": tid, "op": "set", "fields": {"outcome": text}}], "ntfy")
+    return {"saved": True, "task_id": tid, "task_name": r["task_name"], "batch_id": res["batch_id"], "outcome": text}
