@@ -1636,35 +1636,52 @@
     'mail-triage': 'mail triage', 'mail_triage': 'mail triage', 'mail_sweep': 'mail sweep', 'canvas_sweep': 'canvas sweep', 'slack_sweep': 'slack sweep', 'calendar_sweep': 'calendar sweep',
     'morning_brief': 'brief', 'review_push': 'review nudge', 'reminder': 'reminder', 'refresh': 'refresh', 'expire': 'expire' };
   const ROUTINE = new Set(['notion_mirror', 'mail_sweep', 'canvas_sweep', 'slack_sweep', 'calendar_sweep', 'reminder', 'review_push', 'expire']);
-  const SOURCE_NAMES = { ui: 'you', review: 'review', plaud: 'recording', planner: 'planner', canvas: 'canvas', mail: 'mail', connector: 'Claude', skill: 'Claude Code', chat: 'chat', automation: 'automation' };
+  const SOURCE_NAMES = { ui: 'you', review: 'review', plaud: 'recording', planner: 'planner', canvas: 'canvas', mail: 'mail', connector: 'Claude', skill: 'Claude Code', chat: 'chat', automation: 'automation', ripple: 'ripple', ntfy: 'reminder', command: 'you', import: 'import' };
   const logWhen = iso => iso ? new Date(iso).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '';
   const logVal = v => v === null || v === undefined ? '—' : typeof v === 'object' ? esc(JSON.stringify(v)) : esc(String(v));
   const routine = r => r.ok && !Number(r.cost_usd) && ROUTINE.has(r.kind);
   const shownRuns = () => logData.runs.filter(r => !(logQuiet && routine(r)));
+  // A link change in words, without the task code every Log surface prints first; null for the `in` row
+  // (the other task's row of the same relation says it).
+  function logLinkWords(c) {
+    if (!c || c.field !== 'link') return null;
+    const v = c.new != null ? c.new : c.old;
+    if (!v || v.dir === 'in') return null;
+    return linkPredicate(v.kind, v.other, c.new == null);
+  }
+  const noteAfter = c => c.note ? ` <span class="f">— ${esc(c.note)}</span>` : '';
   function changeLines(b) {
-    return b.changes.map(c => c.field === 'evidence' ? `<div class="logc">${c.task_id ? `<span class="code">Task-${c.task_id}</span> <span class="name">${esc(c.task_name || '')}</span>` : '<span class="code">suggestion</span>'} <span class="f">evidence #${c.new && c.new.evidence_id}</span> ${esc((c.new || {}).verdict || '')}</div>`
+    return b.changes.filter(c => c.field !== 'link' || logLinkWords(c)).map(c => c.field === 'link' ? `<div class="logc"><span class="code">Task-${c.task_id}</span> <span class="name">${esc(c.task_name || '')}</span> <span class="f">${esc(logLinkWords(c))}</span>${noteAfter(c)}</div>`
+      : c.field === 'evidence' ? `<div class="logc">${c.task_id ? `<span class="code">Task-${c.task_id}</span> <span class="name">${esc(c.task_name || '')}</span>` : '<span class="code">suggestion</span>'} <span class="f">evidence #${c.new && c.new.evidence_id}</span> ${esc((c.new || {}).verdict || '')}</div>`
       : c.field === 'created' ? `<div class="logc"><span class="code">Task-${c.task_id}</span> <span class="name">${esc(c.task_name || '')}</span> <span class="f">created</span></div>`
-      : `<div class="logc"><span class="code">Task-${c.task_id}</span> <span class="name">${esc(c.task_name || '')}</span> <span class="f">${esc(c.field)}</span> ${logVal(c.old)} → ${logVal(c.new)}</div>`).join('');
+      : `<div class="logc"><span class="code">Task-${c.task_id}</span> <span class="name">${esc(c.task_name || '')}</span> <span class="f">${esc(c.field)}</span> ${logVal(c.old)} → ${logVal(c.new)}${noteAfter(c)}</div>`).join('');
   }
   // One line for a batch: per task, the change that matters most (a status over a date over a note).
   function batchLine(b) {
     const NOISE = new Set(['completed_at', 'closed_by', 'due_is_datetime', 'last_reviewed_at', 'close_on_sent_to']);
     const RANK = { status: 5, created: 5, due: 4, snoozed_until: 3, reminder: 3, close_on_sent_since: 3 };
+    const cause = b.cause || {}, from = Array.isArray(cause.from) && cause.from.length ? cause.from[0] : null;
+    if (cause.kind === 'ripple' && from != null) {
+      const k = new Set(b.changes.filter(c => c.task_id && !NOISE.has(c.field)).map(c => c.task_id)).size;
+      return `Ripple from Task-${from}: ${k} task${k === 1 ? '' : 's'} updated`;
+    }
     const per = new Map();
     for (const c of b.changes) {
       if (NOISE.has(c.field)) continue;
       const v = c.new;
-      const label = c.field === 'status' ? (v === 'open' ? 'reopened' : String(v)) : c.field === 'created' ? 'created' : c.field === 'due' ? (v ? 'due ' + String(v).slice(0, 10) : 'due date removed')
+      if (c.field === 'link' && !logLinkWords(c)) continue;
+      const label = c.field === 'link' ? logLinkWords(c) : c.field === 'status' ? (v === 'open' ? 'reopened' : String(v)) : c.field === 'created' ? 'created' : c.field === 'due' ? (v ? 'due ' + String(v).slice(0, 10) : 'due date removed')
         : c.field === 'snoozed_until' ? (v ? 'later, back ' + String(v).slice(0, 10) : 'back from later') : c.field === 'reminder' ? 'reminder set' : c.field === 'top_rank' ? (v ? 'Top' : 'unpinned')
         : c.field === 'evidence' ? ((v || {}).verdict === 'dismissed' ? 'dismissed' : 'seen') : c.field === 'close_on_sent_since' ? (v ? 'closes on send' : 'watch ended') : c.field.replace(/_/g, ' ');
       const key = c.task_id || 'e' + ((v || {}).evidence_id || '');
-      const r = RANK[c.field] || 1, cur = per.get(key);
+      const r = c.field === 'link' ? ((v || c.old || {}).kind === 'same_as' ? 6 : 4) : RANK[c.field] || 1, cur = per.get(key);
       if (!cur || r > cur.r) per.set(key, { r, label, id: c.task_id });
     }
     const items = [...per.values()];
     if (!items.length) return 'no changes';
-    if (items.length > 2 && items.every(i => i.label === items[0].label)) return `${items.length} tasks · ${items[0].label}`;
-    return items.slice(0, 3).map(i => (i.id ? `Task-${i.id} ` : 'suggestion ') + i.label).join(' · ') + (items.length > 3 ? ` · +${items.length - 3} more` : '');
+    const after = from != null ? `after Task-${from} · ` : '';
+    if (items.length > 2 && items.every(i => i.label === items[0].label)) return `${after}${items.length} tasks · ${items[0].label}`;
+    return after + items.slice(0, 3).map(i => (i.id ? `Task-${i.id} ` : 'suggestion ') + i.label).join(' · ') + (items.length > 3 ? ` · +${items.length - 3} more` : '');
   }
   // One changed field in words, lower case ("due Nov 3 → Nov 5", "note added: “…”"): the Log's digest and History.
   function fieldSaid(c) {
@@ -1683,7 +1700,7 @@
     if (c.field === 'close_on_sent_since') return v ? 'closes when the mail is sent' : 'sent-mail watch ended';
     if (c.field === 'evidence') return 'evidence #' + ((v || {}).evidence_id || '?') + ' ' + ((v || {}).verdict || '');
     if (c.field === 'context' || c.field === 'why_now') { const added = o && v && String(v).startsWith(String(o)) ? String(v).slice(String(o).length) : v;
-      return (c.field === 'context' ? (o ? 'note added: ' : 'context: ') : 'why now: ') + '“' + cut(added == null ? '' : added, 180) + '”'; }
+      return (c.field === 'context' ? (o && v && String(v).startsWith(String(o)) ? 'note added: ' : 'context: ') : 'why now: ') + '“' + cut(added == null ? '' : added, 180) + '”'; }
     return c.field.replace(/_/g, ' ') + ' ' + (v === null || v === undefined ? 'cleared' : '→ ' + cut(typeof v === 'object' ? JSON.stringify(v) : v, 60));
   }
   // An opened batch in the Timeline: one line per task saying what happened to it, in words. The
@@ -1691,8 +1708,12 @@
   function batchDigest(b) {
     const QUIET = new Set(['completed_at', 'closed_by', 'due_is_datetime', 'last_reviewed_at', 'close_on_sent_to']);
     const per = new Map();
-    for (const c of b.changes) { const k = c.task_id || 'e'; if (!per.has(k)) per.set(k, { id: c.task_id, name: c.task_name, said: [], quiet: 0 }); const g = per.get(k); QUIET.has(c.field) ? g.quiet++ : g.said.push(fieldSaid(c)); }
-    return [...per.values()].map(g => `<div class="logc dg">${g.id ? `<span class="code">Task-${g.id}</span> <span class="name">${esc(g.name || '')}</span>` : '<span class="code">suggestion</span>'}
+    for (const c of b.changes) {
+      const k = c.task_id || 'e'; if (!per.has(k)) per.set(k, { id: c.task_id, name: c.task_name, said: [], quiet: 0, skipped: 0 }); const g = per.get(k);
+      if (c.field === 'link') { const w = logLinkWords(c); w ? g.said.push(w + (c.note ? ' — ' + c.note : '')) : g.skipped++; continue; }
+      QUIET.has(c.field) ? g.quiet++ : g.said.push(fieldSaid(c) + (c.note ? ' — ' + c.note : ''));
+    }
+    return [...per.values()].filter(g => g.said.length || g.quiet || !g.skipped).map(g => `<div class="logc dg">${g.id ? `<span class="code">Task-${g.id}</span> <span class="name">${esc(g.name || '')}</span>` : '<span class="code">suggestion</span>'}
       <span class="what">${g.said.length ? g.said.map(esc).join(' · ') : 'reviewed, kept as it is'}</span></div>`).join('') || '<div class="hint">No field changed.</div>';
   }
   function changesHtml() {
