@@ -436,6 +436,8 @@ def _write_fields(cur, task: dict, fields: dict, batch_id: int, undo: list) -> b
     the value written, so undo can tell a later edit) per field, edited_at bumped. False when nothing differs."""
     diffs = {k: v for k, v in fields.items() if task.get(k) != v}
     if not diffs:
+        if "last_reviewed_at" in fields:   # a repeat Keep the same day: no diff, but the owner has seen the neighbours again
+            cur.execute("UPDATE tasks SET neighbours_seen_at = ? WHERE id = ?", (now_iso(), task["id"]))
         return False
     for k, v in diffs.items():
         cur.execute("INSERT INTO changes (batch_id, task_id, field, old, new) VALUES (?, ?, ?, ?, ?)",
@@ -444,7 +446,7 @@ def _write_fields(cur, task: dict, fields: dict, batch_id: int, undo: list) -> b
     sets = ", ".join(f"{k} = ?" for k in diffs) + ", edited_at = ?"
     now = now_iso()
     args = tuple(diffs.values()) + (now,)
-    if "last_reviewed_at" in diffs:   # a Review decision: the owner has seen the neighbours (a stamp, no changes row)
+    if "last_reviewed_at" in fields:   # a Review decision: the owner has seen the neighbours (a stamp, no changes row)
         sets += ", neighbours_seen_at = ?"
         args += (now,)
     cur.execute(f"UPDATE tasks SET {sets} WHERE id = ?", args + (task["id"],))

@@ -279,3 +279,11 @@ def test_a_review_decision_stamps_neighbours_seen_at(conn):
     assert conn.execute("SELECT neighbours_seen_at FROM tasks WHERE id = 1").fetchone()[0] is None
     batches.apply(conn, [{"op": "keep", "task_id": 1}], "ui", TODAY)
     assert conn.execute("SELECT neighbours_seen_at FROM tasks WHERE id = 1").fetchone()[0]
+
+
+def test_a_second_keep_the_same_day_restamps_neighbours_seen_at(conn):
+    mk(conn, 1)
+    batches.apply(conn, [{"op": "keep", "task_id": 1}], "ui", TODAY)
+    conn.execute("UPDATE tasks SET neighbours_seen_at = '2000-01-01T00:00:00+00:00' WHERE id = 1"); conn.commit()
+    batches.apply(conn, [{"op": "keep", "task_id": 1}], "ui", TODAY)
+    assert conn.execute("SELECT neighbours_seen_at FROM tasks WHERE id = 1").fetchone()[0] > "2000-01-01"
