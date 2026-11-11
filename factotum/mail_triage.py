@@ -65,7 +65,7 @@ def sender(e: dict) -> tuple[str, str]:
 
 
 def build_prompt(cfg: dict, conn: sqlite3.Connection, cands: list[dict], today: date, clock: str = "") -> str:
-    from .sync_file import open_rows_text, taxonomy_text
+    from .sync_file import flat, open_rows_text, taxonomy_text
     blocks = []
     for c in cands:
         head, _, body = str(c.get("excerpt") or "").partition("\n")
@@ -74,7 +74,7 @@ def build_prompt(cfg: dict, conn: sqlite3.Connection, cands: list[dict], today: 
     waiting = rows(conn, "SELECT label FROM evidence WHERE kind = 'proposal' AND judged_at IS NULL ORDER BY id DESC LIMIT 20")
     fill = {"today": today.strftime("%A %Y-%m-%d") + (f" · it is {clock}" if clock else ""),
             "taxonomy": taxonomy_text(cfg), "efforts": ", ".join(C.get(cfg, "taxonomy.efforts", []) or ["XS", "S", "M", "L"]),
-            "rows": open_rows_text(conn), "pending": "\n".join("- " + _esc(w["label"])[:160] for w in waiting) or "(nothing)",
+            "rows": open_rows_text(conn), "pending": "\n".join("- " + _esc(flat(w["label"]))[:160] for w in waiting) or "(nothing)",
             "mail": "\n\n".join(blocks)}
     tpl = PROMPT.read_text(encoding="utf-8")
     for k, v in fill.items():

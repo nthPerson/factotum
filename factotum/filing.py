@@ -20,7 +20,7 @@ from . import config as C
 from . import relations, suggestions
 from .db import get_settings, log_run, now_iso, one, rows, set_setting
 from .relations import LINK_KINDS, WORDS
-from .sync_file import slice_rows, taxonomy_text
+from .sync_file import flat, slice_rows, taxonomy_text
 
 KIND = "filing"
 PROMPT = C.ROOT / "prompts" / "filing.md"
@@ -41,11 +41,11 @@ def _unset(task: dict, field: str) -> bool:
 
 
 def build_prompt(cfg: dict, conn, task: dict, rows_: list[dict]) -> str:
-    lines = [f"Task-{r['id']} | {r['project'] or '—'} | {str(r['due'])[:16] if r['due'] else 'undated'} | {(r['name'] or '')[:90]}"
+    lines = [f"Task-{r['id']} | {flat(r['project']) or '—'} | {flat(str(r['due'])[:16]) if r['due'] else 'undated'} | {flat(r['name'])[:90]}"
              for r in rows_ if r["id"] != task["id"]]
     vals = {"task_id": str(task["id"]), "made": str(task.get("created_at") or "")[:10],
             "due": f"due {task['due']}" if task.get("due") else "undated",
-            "name": html.escape(task.get("name") or ""), "taxonomy": taxonomy_text(cfg),
+            "name": html.escape(flat(task.get("name"))), "taxonomy": taxonomy_text(cfg),
             "efforts": ", ".join(_efforts(cfg)), "rows": "\n".join(lines) or "(no other open tasks)"}
     tpl = PROMPT.read_text(encoding="utf-8")
     for k, v in vals.items():

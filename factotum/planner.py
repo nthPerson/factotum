@@ -200,6 +200,9 @@ def apply(conn: sqlite3.Connection, cfg: dict, data: dict, b: dict, today: date)
                 rejected.append(f"{label}: not a listed row"); continue
             if op != "merge" and kind not in relations.LINK_KINDS:
                 rejected.append(f"{label}: unknown kind"); continue
+            if any(e.get("task_id") not in (None, tid, other) for e in cited):
+                # Judging it "staged" below would take it off Review for good, with no card holding it.
+                rejected.append(f"{label}: cites evidence about another task"); continue
             if n_link >= LINK_CAP:
                 rejected.append(f"{label}: more than {LINK_CAP} link proposals"); continue
             if op == "unlink":

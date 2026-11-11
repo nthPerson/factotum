@@ -50,19 +50,25 @@ def slice_rows(conn: sqlite3.Connection, cap: int = SLICE_CAP) -> list[dict]:
                       "ORDER BY status = 'open' DESC, top_rank IS NULL, top_rank, score DESC, id DESC LIMIT ?", (cap,))
 
 
+def flat(v) -> str:
+    """One line of a row list: every run of whitespace (a newline in a name included) becomes one
+    space, so a name cannot start a record of its own. Names are written by many people."""
+    return " ".join(str(v if v is not None else "").split())
+
+
 def open_rows_text(conn: sqlite3.Connection, cap: int = SLICE_CAP) -> str:
     lines = []
     for r in slice_rows(conn, cap):
-        bits = [f"Task-{r['id']}", r["project"] or "—"]
+        bits = [f"Task-{r['id']}", flat(r["project"]) or "—"]
         if r["status"] != "open":
-            bits.append(r["status"])
+            bits.append(flat(r["status"]))
         if r["due"]:
-            bits.append(f"due {str(r['due'])[:16]}" + (" hard" if r["hard"] else ""))
+            bits.append(f"due {flat(str(r['due'])[:16])}" + (" hard" if r["hard"] else ""))
         if r["waiting_on"]:
-            bits.append(f"waiting on {r['waiting_on']}")
+            bits.append(f"waiting on {flat(r['waiting_on'])}")
         if r["top_rank"]:
-            bits.append(f"top {r['top_rank']}")
-        bits.append((r["name"] or "")[:90])
+            bits.append(f"top {flat(r['top_rank'])}")
+        bits.append(flat(r["name"])[:90])
         lines.append(" | ".join(bits))
     return "\n".join(lines) or "(no open tasks)"
 
@@ -77,7 +83,7 @@ def closed_rows(conn: sqlite3.Connection, today: date, cap: int = CLOSED_CAP) ->
 
 
 def closed_rows_text(conn: sqlite3.Connection, today: date) -> str:
-    lines = [f"Task-{r['id']} | {r['project'] or '—'} | {r['status']} {str(r['completed_at'])[:10]} | {(r['name'] or '')[:90]}"
+    lines = [f"Task-{r['id']} | {flat(r['project']) or '—'} | {flat(r['status'])} {flat(str(r['completed_at'])[:10])} | {flat(r['name'])[:90]}"
              for r in closed_rows(conn, today)]
     return "\n".join(lines) or "(nothing finished lately)"
 
