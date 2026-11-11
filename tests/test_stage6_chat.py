@@ -134,6 +134,26 @@ def test_a_staged_create_already_made_by_its_create_button_is_not_made_twice(cfg
     assert c.post("/api/batches/apply", json={"changes": [{"op": "create", "fields": {}, "from_chat": {"message_id": 999999, "index": 0}}]}).status_code == 400
 
 
+def test_a_staged_create_is_linked_to_the_mail_threads_it_cites_like_create(cfg, tmp_path, monkeypatch):
+    app = api.create_app(cfg, db_path=str(tmp_path / "t.db"))
+    c, conn = TestClient(app), app.state.conn
+    monkeypatch.setattr(chat, "RUNS_DIR", tmp_path / "runs")
+    mk(conn, 5, name="Goal")
+    data = {"reply_md": "One step.", "proposals": [
+        {"op": "create", "fields": {"name": "Answer Max", "project": "Personal"}, "label": "New: Answer Max",
+         "evidence": [{"kind": "mail_thread", "ref": "c1", "label": "Oct 29 from Max"}, {"kind": "mail_thread", "ref": "zz", "label": "never fetched"}]}]}
+
+    def run(cfg_, kind, prompt, **kw):
+        (Path(kw["workdir"]) / "seen.jsonl").write_text(json.dumps({"conversation_id": "c1", "subject": "PD session"}) + "\n")
+        return RunResult(True, data, json.dumps(data), 0.21, 2400, session_id="S1")
+
+    res = chat.turn(conn, cfg, chat.new_thread(conn, None, "review", 5), "steps?", [], today=TODAY, runner=run)
+    out = c.post("/api/batches/apply", json={"changes": [
+        {"op": "create", "fields": {}, "from_chat": {"message_id": res["message_id"], "index": 0}}]}).json()
+    new = out["created"][0]
+    assert rows(conn, "SELECT ref, label FROM links WHERE task_id = ? AND kind = 'mail_thread'", (new,)) == [{"ref": "c1", "label": "Oct 29 from Max"}]
+
+
 def test_the_page_cannot_choose_a_created_source(cfg, tmp_path):
     app = api.create_app(cfg, db_path=str(tmp_path / "t.db"))
     out = TestClient(app).post("/api/batches/apply", json={"changes": [{"op": "create", "fields": {"name": "Mine"}, "created_source": "Chat", "source_key": "x"}]}).json()

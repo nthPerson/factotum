@@ -560,7 +560,8 @@ def resolve_staged(conn: sqlite3.Connection, cfg: dict, changes: list[dict]) -> 
 
 
 def mark_staged(conn: sqlite3.Connection, changes: list[dict], res: dict) -> None:
-    """After the batch: each chat create it made marks its stored proposal applied, with the task and the batch (its Undo)."""
+    """After the batch: each chat create it made marks its stored proposal applied, with the task and the batch (its Undo),
+    and is linked to every mail thread the proposal cites, as Create does (so the mail sweep follows that thread)."""
     for ch in changes:
         fc = ch.get("from_chat") if isinstance(ch, dict) and ch.get("op") == "create" else None
         if not fc:
@@ -571,6 +572,9 @@ def mark_staged(conn: sqlite3.Connection, changes: list[dict], res: dict) -> Non
         m = one(conn, "SELECT proposals_json FROM chat_messages WHERE id = ?", (fc["message_id"],))
         props = _loads((m or {}).get("proposals_json"), [])
         i = fc["index"]
+        for e in props[i].get("evidence") or []:
+            if isinstance(e, dict) and e.get("kind") == "mail_thread" and e.get("ref"):
+                add_link(conn, ex["id"], "mail_thread", e["ref"], label=e.get("label"))
         props[i] = dict(props[i], applied=True, task_id=ex["id"], batch_id=res["batch_id"])
         conn.execute("UPDATE chat_messages SET proposals_json = ? WHERE id = ?", (json.dumps(props, default=str), fc["message_id"]))
     conn.commit()
