@@ -12,6 +12,8 @@
     python -m factotum calendar-check   # print the next 7 days of events
     python -m factotum chat "text" [--attach 388 23] [--thread N] [--canned search_mail|draft_reply]   # one chat turn from the terminal
     python -m factotum effective [KEY ...] [--as-before]   # each switch's value and origin; read-only, no secrets
+    python -m factotum sweep mail|canvas|calendar|slack|links   # one sweep now
+    python -m factotum links-check      # what the link detectors would suggest now; read-only
     python -m factotum chat-check       # the MCP server over a pipe, then one tiny Claude run that calls a tool through it
 """
 from __future__ import annotations
@@ -128,7 +130,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dry-run", action="store_true", help="run Claude and print the JSON; write nothing")
     p.add_argument("--send", action="store_true", help="also send the brief with the verdict")
     p = sub.add_parser("sweep", help="run one sweep now")
-    p.add_argument("which", choices=["mail", "canvas", "calendar", "slack"])
+    p.add_argument("which", choices=["mail", "canvas", "calendar", "slack", "links"])
+    sub.add_parser("links-check", help="what the link detectors would suggest now; read-only")
     sub.add_parser("slack-check", help="each configured Slack workspace: token present, auth.test, how many channels it sees")
     sub.add_parser("discord-check", help="the Discord bot: who it is, the servers it is in vs the config, text channels per configured server")
     p = sub.add_parser("mirror", help="push task rows to the Notion Tasks database (one-way); default: rows edited since the last pass")
@@ -395,10 +398,21 @@ def main(argv: list[str] | None = None) -> int:
                 print(brief.send(conn, ecfg, today, brief.smtp_mailer, gcal, planner=res))
     elif a.cmd == "sweep":
         from datetime import datetime as _dt
-        from . import canvas, gcal, mail_sweep, slack_sweep
+        from . import canvas, gcal, mail_sweep, slack_sweep, suggestions
         now = _dt.now()
-        mod = {"mail": mail_sweep, "canvas": canvas, "calendar": gcal, "slack": slack_sweep}[a.which]
+        mod = {"mail": mail_sweep, "canvas": canvas, "calendar": gcal, "slack": slack_sweep, "links": suggestions}[a.which]
         print(mod.sweep_job(conn, ecfg, now) or "nothing to do")
+    elif a.cmd == "links-check":
+        from . import suggestions
+        words = {"same_as": "same as", "part_of": "part of", "waits_on": "waits on", "any": "linked to"}
+        total = {"twin": [0, 0], "text": [0, 0], "thread": [0, 0]}
+        for c in suggestions.detect(conn):
+            why_not = suggestions.why_not(conn, c["kind"], c["a"], c["b"])
+            t = total.setdefault(c["signal"], [0, 0])
+            t[0] += 1
+            t[1] += why_not is None
+            print(f"{c['signal']:<7} Task-{c['a']} → Task-{c['b']}  {words[c['kind']]}  {c['why']}  {why_not or 'would write'}")
+        print(" · ".join(f"{s} {n} ({w} would write)" for s, (n, w) in total.items()))
     elif a.cmd == "calendar-check":
         from datetime import datetime, timedelta
         from . import gcal

@@ -227,6 +227,9 @@ def apply(conn: sqlite3.Connection, changes: list[dict], source: str, today: dat
         raise
     cur.execute("UPDATE batches SET undo_json = ? WHERE id = ?", (json.dumps(undo), batch_id))
     conn.commit()
+    if created:
+        from . import suggestions          # lazy: suggestions must not be imported at the top of batches
+        suggestions.after_create(conn, created, source)
     return {"batch_id": batch_id, "applied": applied, "skipped": skipped, "created": created, "refs": refs}
 
 

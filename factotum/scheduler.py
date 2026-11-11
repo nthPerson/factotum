@@ -27,7 +27,7 @@ import time
 import traceback
 from datetime import date, datetime, timedelta
 
-from . import app_push, batches, config as C, lifecycle, notify, relations, reminders
+from . import app_push, batches, config as C, lifecycle, notify, relations, reminders, suggestions
 from .db import get_settings, log_run, rows, set_setting
 
 RETRY_AFTER = timedelta(hours=1)
@@ -69,6 +69,7 @@ class Scheduler:
             self._mail_triage(ecfg, now, st, did)
         if C.get(ecfg, "sources.slack.enabled") and self.slack:
             self._every("slack_sweep", int(C.get(ecfg, "sources.slack.sweep_minutes", 20)), now, st, did, lambda: self.slack.sweep_job(self.conn, ecfg, now))
+        self._suggestions(ecfg, now, st, did)
         if C.get(ecfg, "sinks.notion_tasks_mirror.enabled") and self.mirror:
             self._every("notion_mirror", int(C.get(ecfg, "sinks.notion_tasks_mirror.sweep_minutes", 10)), now, st, did, lambda: self.mirror.sweep_job(self.conn, ecfg, now))
         asked = st.get("state.refresh.requested")
@@ -102,6 +103,10 @@ class Scheduler:
             log_run(self.conn, "reminder", int((time.monotonic() - started) * 1000), ok=True, summary=summary)
             self.conn.commit()   # the Log tab reads through another connection; a row left in this transaction is invisible
             did.append(f"reminders: {summary}")
+
+    def _suggestions(self, ecfg: dict, now: datetime, st: dict, did: list[str]) -> None:
+        """stage 7: the link detectors after the sweeps (free); filing runs join in Task 9."""
+        self._every("link_suggestions", suggestions.SWEEP_MINUTES, now, st, did, lambda: suggestions.sweep_job(self.conn, ecfg, now))
 
     def _daily(self, name: str, hhmm: str | None, now: datetime, st: dict, did: list[str], fn) -> None:
         if not hhmm or now.strftime("%H:%M") < str(hhmm):

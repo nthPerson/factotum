@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import re
+import sys
+from datetime import date, datetime
 
 from . import relations
 from .relations import Db
@@ -251,3 +253,53 @@ def detect(db: Db, ids: set[int] | None = None) -> list[dict]:
     """Every detector's suggestions: twins, then "Task-N" in text, then (over the whole list only, not
     for `ids`) a shared thread or event."""
     return twins(db, ids) + text_refs(db, ids) + (threads(db) if ids is None else [])
+
+
+# --- writing (the caller commits, except sweep_job and after_create) ---------------------------------
+
+SWEEP_MINUTES = 30                              # every half hour: the pass is free, not a matter of taste
+_SIGNALS = ("twin", "text", "thread")
+
+
+def _write(db: Db, found: list[dict]) -> tuple[dict, list[int]]:
+    written: dict[str, int] = {}
+    ids: list[int] = []
+    for c in found:
+        e = suggest_pair(db, c["kind"], c["a"], c["b"], c["why"], c["signal"])
+        if e is not None:
+            written[c["signal"]] = written.get(c["signal"], 0) + 1
+            ids.append(e)
+    return written, ids
+
+
+def sweep(db: Db, today: date) -> dict:
+    """Write every `detect` candidate through `suggest_pair`: {"written": {signal: n}, "ids": [evidence ids]}.
+    The caller commits."""
+    written, ids = _write(db, detect(db))
+    return {"written": written, "ids": ids}
+
+
+def sweep_job(conn, cfg: dict, now: datetime) -> str | None:
+    """`sweep`, commit, and a line like "3 suggested: twin 1, text 2", or None when nothing was written."""
+    out = sweep(conn, now.date())
+    conn.commit()
+    w = out["written"]
+    if not w:
+        return None
+    return f"{sum(w.values())} suggested: " + ", ".join(f"{s} {w[s]}" for s in _SIGNALS if w.get(s))
+
+
+def at_create(db: Db, ids: list[int]) -> list[int]:
+    """The detectors over the tasks just created, written through `suggest_pair`; returns the evidence
+    ids. The caller commits."""
+    return _write(db, detect(db, set(ids)))[1]
+
+
+def after_create(conn, created: list[int], source: str) -> None:
+    """`at_create`, then commit; never raises (a failure rolls back and leaves one line on stderr)."""
+    try:
+        at_create(conn, created)
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        print(f"factotum: suggestions after create failed: {type(e).__name__}: {e}", file=sys.stderr)

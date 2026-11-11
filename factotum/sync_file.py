@@ -15,7 +15,7 @@ import sqlite3
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from . import batches, config as C, relations
+from . import batches, config as C, relations, suggestions
 from .db import now_iso, rows
 
 PROMPT = C.ROOT / "prompts" / "sync-file.md"
@@ -341,6 +341,8 @@ def apply_result(conn: sqlite3.Connection, cfg: dict, rec: dict, data: dict, tod
     for tid in dict.fromkeys(touched):
         add_mention(conn, tid, "plaud", rec_id, at)
         add_link(conn, tid, "plaud_note", rec_id, label=str(rec.get("name") or "")[:120])
+    if created:
+        suggestions.at_create(conn, created)
     conn.commit()
     return {"created": created, "updated": list(dict.fromkeys(updated)), "applied": applied, "reminders": reminders, "events": events,
             "unresolved": unresolved, "batch_id": res["batch_id"], "task_ids": list(dict.fromkeys(created + touched))}

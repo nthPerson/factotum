@@ -39,7 +39,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
-from . import app_push, batches, commands, config as C, lifecycle, oauth, relations, reminders, summary
+from . import app_push, batches, commands, config as C, lifecycle, oauth, relations, reminders, suggestions, summary
 from .db import connect, get_settings, get_task, init_db, now_iso, rows, seed_accounts, set_setting
 from .dates import parse_date
 
@@ -499,6 +499,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
             # seen up to the message the card was made from, or the next sweep would call that same message "Thread updated"
             conn.execute("UPDATE links SET last_seen_at = ? WHERE task_id = ? AND kind = 'mail_thread' AND ref = ? AND last_seen_at IS NULL", (mail.get("at"), tid, str(mail["ref"])))
         conn.execute("UPDATE evidence SET judged_at = ?, verdict = 'applied' WHERE id = ?", (now, evidence_id))
+        suggestions.at_create(conn, [tid])
         conn.commit()
         return {"task_id": tid}
 

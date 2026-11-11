@@ -110,3 +110,57 @@ def test_hostile_text_is_read_within_bounds():
     t0 = time.monotonic()
     refs = suggestions.refs_in(huge, 10)
     assert time.monotonic() - t0 < 1.0 and len(refs) <= suggestions.MAX_REFS
+
+
+def _item(key, name, due):
+    return {"key": key, "type": "assignment", "name": name, "title": name, "project": "COMPE 510", "area": "Academics", "context": "",
+            "due": due, "effort": "M", "state": None, "dismissed": False, "url": None, "points": None}
+
+
+def test_the_sweep_writes_each_pair_once_and_a_second_pass_writes_nothing(conn):
+    mk(conn, 1, name="Take COMPE 510 Quiz 7", source="Canvas", due="2026-11-10T23:59")
+    mk(conn, 2, name="Quiz 7 prep", source="Plaud", due="2026-11-10", context="Same as Task-1, the Canvas one.")
+    mk(conn, 3); mk(conn, 4); add_link(conn, 3, "mail_thread", "c"); add_link(conn, 4, "mail_thread", "c"); conn.commit()
+    out = suggestions.sweep(conn, TODAY)
+    assert out["written"] == {"twin": 1, "thread": 1}
+    assert [(s["a"], s["b"], s["signal"]) for s in _sugg(conn)] == [(2, 1, "twin"), (3, 4, "thread")]
+    assert suggestions.sweep(conn, TODAY)["written"] == {} and active_rels(conn) == set()          # cards only, never a link
+
+
+def test_a_create_from_a_batch_canvas_or_a_recording_is_checked_at_once(conn, cfg):
+    mk(conn, 1, name="Submit COMPE 510 Assignment 5", source="Canvas", due="2026-11-08T23:59")
+    res = batches.apply(conn, [{"op": "create", "fields": {"name": "Assignment 5 report", "project": "COMPE 510", "due": "2026-11-08"}}], "chat", TODAY)
+    assert [(s["a"], s["b"], s["signal"]) for s in _sugg(conn)] == [(res["created"][0], 1, "twin")]
+    mk(conn, 50, name="Assignment 6 notes", source="Plaud", due="2026-11-15")
+    canvas.sweep(conn, cfg, [_item("canvas:assignment:66", "Submit COMPE 510 Assignment 6", "2026-11-15T23:59")], TODAY)
+    new = one(conn, "SELECT id FROM tasks WHERE source_key = 'canvas:assignment:66'")["id"]
+    assert (50, new, "twin") in [(s["a"], s["b"], s["signal"]) for s in _sugg(conn)]
+    data = {"tasks": [{"op": "create", "name": "Draft the dataset request", "project": "COMPE 510", "due": None, "context": "Do this after Task-1.",
+                       "source_key": "plaud:of_s7:1"}], "instructions": [], "reminders": [], "calendar": [], "unresolved": []}
+    r = sync_file.apply_result(conn, cfg, {"id": "of_s7", "name": "Lab sync", "start_utc": "2026-11-02T17:00:00Z"}, data, TODAY, calendar=None)
+    assert ("waits_on", r["created"][0], 1, "text") in [(s["kind"], s["a"], s["b"], s["signal"]) for s in _sugg(conn)]
+
+
+def test_the_scheduler_runs_the_detectors_after_the_sweeps_every_half_hour(conn, cfg):
+    from factotum.scheduler import Scheduler
+    mk(conn, 1, name="Take COMPE 510 Quiz 7", source="Canvas", due="2026-11-10T23:59"); mk(conn, 2, name="Quiz 7 prep", source="Plaud", due="2026-11-10")
+    s = Scheduler(cfg, conn, push=lambda *a, **k: None, mailer=None)
+    assert "link_suggestions: 1 suggested: twin 1" in s.tick(datetime(2026, 11, 2, 10, 0))
+    assert not [d for d in s.tick(datetime(2026, 11, 2, 10, 10)) if d.startswith("link_suggestions")]
+    assert one(conn, "SELECT summary FROM runs WHERE kind = 'link_suggestions'")["summary"] == "1 suggested: twin 1"
+    assert not conn.in_transaction
+
+
+def test_links_check_reads_and_sweep_links_writes(conn, cfg, tmp_path, monkeypatch, capsys):
+    from conftest import FIXTURE
+    from factotum import __main__ as cli
+    path = tmp_path / "cli.db"
+    c = connect(path); init_db(c)
+    mk(c, 1, name="Take COMPE 510 Quiz 7", source="Canvas", due="2026-11-10T23:59"); mk(c, 2, name="Quiz 7 prep", source="Plaud", due="2026-11-10")
+    monkeypatch.setenv("FACTOTUM_CONFIG", str(FIXTURE)); monkeypatch.setenv("FACTOTUM_DB", str(path))
+    capsys.readouterr()
+    cli.main(["links-check"])
+    out = capsys.readouterr().out
+    assert "twin    Task-2 → Task-1  same as" in out and "would write" in out and _sugg(c) == []
+    cli.main(["sweep", "links"])
+    assert [(s["a"], s["b"]) for s in _sugg(c)] == [(2, 1)]
