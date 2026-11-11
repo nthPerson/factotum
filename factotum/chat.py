@@ -12,8 +12,10 @@ What Python enforces: ops in CHAT_OPS only; task ops name an existing row; `set`
 cleaner as a voice note (SETTABLE, taxonomy, ISO dates); a reminder validates like the tray's;
 `link_thread` is applied at once but only for a conversation the run actually fetched (`seen.jsonl`),
 since a link is metadata the sweep then watches, not task state; `create` waits for a click; drafts
-are read from `drafts.jsonl`, written by the server as it made them. Everything rejected is kept on
-the message so the UI can show it.
+are read from `drafts.jsonl`, written by the server as it made them. A task link (`link`, `unlink`,
+`merge`, a create's `links`) may only name tasks the turn attached or a reading tool showed
+(`tasks_seen.jsonl`), and is never applied at once; Create runs one `batches.apply`, so a proposed
+task and its links undo together. Everything rejected is kept on the message so the UI can show it.
 """
 from __future__ import annotations
 
@@ -26,13 +28,15 @@ from pathlib import Path
 
 from . import batches, config as C, mcp_server, relations
 from .claude import runner as R
-from .db import add_link, add_mention, get_task, log_run, now_iso, one, rows, upsert_task
+from .db import add_link, add_mention, get_task, log_run, now_iso, one, rows
 from .sync_file import _clean_task_fields
 
 PROMPTS = C.ROOT / "prompts"
 RUNS_DIR = C.ROOT / "data" / "runs" / "chat"
-CANNED = {"search_mail": ("chat-search-mail.md", "Search related emails"), "draft_reply": ("chat-draft-reply.md", "Draft a reply")}
-CHAT_OPS = {"set", "done", "drop", "pin_top", "longterm", "add_reminder", "create", "link_thread"}
+CANNED = {"search_mail": ("chat-search-mail.md", "Search related emails"), "draft_reply": ("chat-draft-reply.md", "Draft a reply"),
+          "related": ("chat-related.md", "What else is related?")}
+CHAT_OPS = {"set", "done", "drop", "pin_top", "longterm", "add_reminder", "add_note", "create", "link_thread", "link", "unlink", "merge"}
+LINKED_CAP = 10
 PROPOSAL_CAP = 12
 TITLE_CAP = 60
 FRIENDLY = {"tasks_query": "Looking at tasks", "task_get": "Reading a task", "reminders_list": "Checking reminders", "mail_search": "Searching mail",
@@ -91,6 +95,9 @@ def attached_rows(conn: sqlite3.Connection, cfg: dict, ids: list[int], today: da
                "context": (t.get("context") or "")[:1500] or None, "created_at": (t.get("created_at") or "")[:10]}
         if t.get("status") == "open":
             row["score"] = t["score"]
+        row["rel"] = relations.words(t)
+        row["linked"] = [{"kind": relations.side_word(r["kind"], r["dir"]), "id": r["other"]["id"], "name": r["other"]["name"], "status": r["other"]["status"]}
+                         for r in relations.detail(conn, tid)[:LINKED_CAP]]
         row["links"] = rows(conn, "SELECT kind, ref, label, account FROM links WHERE task_id = ? ORDER BY id DESC LIMIT 10", (tid,))
         row["reminders"] = rows(conn, "SELECT fire_at, label, repeat FROM reminders WHERE task_id = ? AND status IN ('pending', 'snoozed') ORDER BY fire_at LIMIT 5", (tid,))
         out.append(row)
@@ -128,10 +135,46 @@ def build_prompt(cfg: dict, conn: sqlite3.Connection, text: str, attached_ids: l
 
 # ---- validation ---------------------------------------------------------------------------------
 
-def _clean_proposals(conn: sqlite3.Connection, cfg: dict, data: dict, seen: dict) -> tuple[list[dict], list[str]]:
+def _why(v) -> str | None:
+    return " ".join(str(v or "").split())[:relations.WHY_MAX] or None
+
+
+def _create_links(conn: sqlite3.Connection, label: str, lks, idx: int, ref_owner: dict[str, int], known: set[int], rejected: list[str]) -> list[dict]:
+    """A proposed create's `links`, kept only where the other end is a task the turn attached or read,
+    or the ref of another create in the same reply (Create resolves it once that task exists)."""
+    good = []
+    for e in (lks if isinstance(lks, list) else [])[:batches.MAX_CREATE_LINKS]:
+        e = e if isinstance(e, dict) else {}
+        kind, o = e.get("kind"), e.get("other")
+        if kind not in relations.LINK_KINDS:
+            rejected.append(f"{label}: a link left out: kind must be part_of or waits_on, not {kind!r}"); continue
+        if isinstance(o, str):
+            if ref_owner.get(o, idx) == idx:
+                rejected.append(f"{label}: a link left out: no other create in this reply has ref {o!r}"); continue
+        elif type(o) is not int:
+            rejected.append(f"{label}: a link left out: other must be a task id or a ref, not {o!r}"); continue
+        elif o not in known:
+            rejected.append(f"{label}: a link left out: Task-{o} was not attached or read in this turn"); continue
+        elif not get_task(conn, o):
+            rejected.append(f"{label}: a link left out: no Task-{o}"); continue
+        why = _why(e.get("why"))
+        good.append(dict({"kind": kind, "other": o}, **({"why": why} if why else {})))
+    return good
+
+
+def _clean_proposals(conn: sqlite3.Connection, cfg: dict, data: dict, seen: dict, tasks_seen: set[int] | None = None,
+                     attached: list[int] | None = None) -> tuple[list[dict], list[str]]:
     kept: list[dict] = []
     rejected: list[str] = []
-    for p in (data.get("proposals") or [])[:PROPOSAL_CAP]:
+    known = set(attached or []) | set(tasks_seen or [])      # the only tasks a proposed link may name
+    proposals = (data.get("proposals") or [])[:PROPOSAL_CAP]
+    ref_owner: dict[str, int] = {}                           # a create's ref → its place in the reply (the first one wins)
+    for i, p in enumerate(proposals):
+        f = p.get("fields") if isinstance(p, dict) and isinstance(p.get("fields"), dict) else {}
+        ref = f.get("ref")
+        if f and p.get("op") == "create" and isinstance(ref, str) and batches.REF_RE.match(ref) and str(f.get("name") or "").strip():
+            ref_owner.setdefault(ref, i)
+    for idx, p in enumerate(proposals):
         if not isinstance(p, dict):
             continue
         op, tid = p.get("op"), p.get("task_id")
@@ -151,6 +194,15 @@ def _clean_proposals(conn: sqlite3.Connection, cfg: dict, data: dict, seen: dict
             f = _clean_task_fields(cfg, fields)
             if not f.get("name"):
                 rejected.append(f"{label}: a create needs a name"); continue
+            ref = fields.get("ref")
+            if ref is not None:
+                if isinstance(ref, str) and ref_owner.get(ref) == idx:
+                    f["ref"] = ref
+                else:
+                    rejected.append(f"{label}: ref {ref!r} left out: it must be a short word (letters, digits, - and _) used by one create only")
+            links = _create_links(conn, label, fields.get("links"), idx, ref_owner, known, rejected)
+            if links:
+                f["links"] = links
             kept.append({"op": "create", "task_id": None, "fields": f, "label": label, "evidence": evidence, "applied": False}); continue
         if not isinstance(tid, int) or not get_task(conn, tid):
             rejected.append(f"{label}: no Task-{tid}"); continue
@@ -177,6 +229,35 @@ def _clean_proposals(conn: sqlite3.Connection, cfg: dict, data: dict, seen: dict
             add_link(conn, tid, "mail_thread", ref, label=s.get("subject"), account=s.get("account"))
             kept.append({"op": "link_thread", "task_id": tid, "fields": {"conversation_id": ref, "subject": s.get("subject"), "account": s.get("account")}, "label": label, "evidence": evidence, "applied": True})
             continue
+        elif op in ("link", "unlink", "merge"):
+            other = fields.get("into") if op == "merge" else fields.get("other")
+            if type(tid) is not int or type(other) is not int:            # True is an int in Python, and Task-1 is somebody's task
+                rejected.append(f"{label}: both tasks must be named by their integer ids"); continue
+            x = next((i for i in (tid, other) if i not in known), None)
+            if x is not None:
+                rejected.append(f"{label}: Task-{x} was not attached or read in this turn"); continue
+            if op == "merge":
+                if tid == other or not get_task(conn, other):
+                    rejected.append(f"{label}: Task-{tid} cannot be merged into Task-{other}"); continue
+                if get_task(conn, tid)["status"] != "open":
+                    rejected.append(f"{label}: Task-{tid} is not open; only an open task can be merged away"); continue
+                f = {"into": other}
+            else:
+                kind = fields.get("kind")
+                if kind not in relations.LINK_KINDS:
+                    rejected.append(f"{label}: kind must be part_of or waits_on, not {kind!r}"); continue
+                problem = relations.link_problem(conn, op, tid, kind, other)
+                if problem:
+                    rejected.append(f"{label}: {problem}"); continue
+                f = {"kind": kind, "other": other, "why": _why(fields.get("why"))} if op == "link" else {"kind": kind, "other": other}
+        elif op in ("done", "drop"):
+            out = fields.get("outcome")
+            f = {"outcome": out.strip()[:300]} if isinstance(out, str) and out.strip() else {}
+        elif op == "add_note":
+            text = fields.get("text").strip()[:1000] if isinstance(fields.get("text"), str) else ""
+            if not text:
+                rejected.append(f"{label}: a note needs text"); continue
+            f = {"text": text}
         else:
             f = {}
         kept.append({"op": op, "task_id": tid, "fields": f, "label": label, "evidence": evidence, "applied": False})
@@ -261,7 +342,7 @@ def turn(conn: sqlite3.Connection, cfg: dict, thread_id: int, text: str, attache
     reply = str(data.get("reply_md") or "").strip()[:20000]
     seen = mcp_server.seen_threads(run_dir)
     drafts = mcp_server.drafts_made(run_dir)
-    kept, rejected = _clean_proposals(conn, cfg, data, seen)
+    kept, rejected = _clean_proposals(conn, cfg, data, seen, tasks_seen=mcp_server.tasks_seen(run_dir), attached=attached)
     cur = conn.execute("INSERT INTO chat_messages (thread_id, role, text, proposals_json, drafts_json, rejected_json, cost_usd, duration_ms, created_at) VALUES (?, 'assistant', ?, ?, ?, ?, ?, ?, ?)",
                        (thread_id, reply, json.dumps(kept, default=str), json.dumps(drafts, default=str), json.dumps(rejected), res.cost_usd, ms, now_iso()))
     amid = int(cur.lastrowid)
@@ -275,8 +356,9 @@ def turn(conn: sqlite3.Connection, cfg: dict, thread_id: int, text: str, attache
 
 
 def create_from_proposal(conn: sqlite3.Connection, cfg: dict, message_id: int, index: int, today: date) -> int:
-    """The user clicked Create on a stored proposal: an upsert by `chat:<message>:<index>`, so a
-    second click changes nothing. Cited mail threads become links."""
+    """The user clicked Create on a stored proposal: one batch keyed `chat:<message>:<index>`, so a
+    second click changes nothing and one Undo takes back the task and its links. A link to another
+    proposal's ref is made only once that task exists (create it first). Cited mail threads become links."""
     m = one(conn, "SELECT * FROM chat_messages WHERE id = ?", (message_id,))
     props = _loads((m or {}).get("proposals_json"), [])
     if not m or not (0 <= int(index) < len(props)) or props[index].get("op") != "create":
@@ -285,14 +367,30 @@ def create_from_proposal(conn: sqlite3.Connection, cfg: dict, message_id: int, i
     key = f"chat:{message_id}:{index}"
     ex = one(conn, "SELECT id FROM tasks WHERE source_key = ?", (key,))
     if ex:
-        return int(ex["id"])                         # already created; upsert_task's UPDATE would blank the other columns
-    f = _clean_task_fields(cfg, p.get("fields") or {})
-    now = now_iso()
-    tid = upsert_task(conn, dict(f, status="open", source="Chat", source_key=key, mentions=1, last_mention_at=today.isoformat(), created_at=now, edited_at=now))
+        return int(ex["id"])                         # already created
+    pf = p.get("fields") or {}
+    f = _clean_task_fields(cfg, pf)
+    skipped: list[dict] = []
+    links = []
+    for ln in pf.get("links") or []:
+        other = ln.get("other")
+        if isinstance(other, str):                   # the ref of a sibling proposal: its task, once created
+            sib = next((q for q in props if q.get("op") == "create" and (q.get("fields") or {}).get("ref") == other), None)
+            if not (sib and sib.get("task_id")):
+                skipped.append({"task_id": None, "why": f"Task for ref {other!r} is not created yet; create it first"}); continue
+            other = sib["task_id"]
+        links.append(dict(ln, other=other))
+    if links:
+        f["links"] = links
+    res = batches.apply(conn, [{"op": "create", "fields": f, "source_key": key}], "chat", today)
+    skipped += res["skipped"]
+    if not res["created"]:
+        raise ValueError("; ".join(s["why"] for s in res["skipped"]) or "nothing was created")
+    tid = res["created"][0]
     for e in p.get("evidence") or []:
         if e.get("kind") == "mail_thread" and e.get("ref"):
             add_link(conn, tid, "mail_thread", e["ref"], label=e.get("label"))
-    props[index] = dict(p, applied=True, task_id=tid)
+    props[index] = dict(p, applied=True, task_id=tid, batch_id=res["batch_id"], skipped=skipped)
     conn.execute("UPDATE chat_messages SET proposals_json = ? WHERE id = ?", (json.dumps(props, default=str), message_id))
     conn.commit()
     return tid

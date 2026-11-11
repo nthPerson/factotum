@@ -636,9 +636,12 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
     @app.post("/api/chat/create")
     def chat_create(body: CreateBody):
         try:
-            return {"task_id": chat.create_from_proposal(conn, eff_cfg(), body.message_id, body.index, date.today())}
+            tid = chat.create_from_proposal(conn, eff_cfg(), body.message_id, body.index, date.today())
         except ValueError as e:
             raise HTTPException(400, str(e))
+        (m,) = rows(conn, "SELECT proposals_json FROM chat_messages WHERE id = ?", (body.message_id,))
+        props = chat._loads(m["proposals_json"], [])
+        return {"task_id": tid, "skipped": props[body.index].get("skipped") or []}
 
     @app.post("/api/chat/drafts/open")
     def chat_draft_open(body: DraftOpenBody):

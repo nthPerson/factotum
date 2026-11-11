@@ -314,3 +314,126 @@ def test_outcome_note_and_expect_pass_the_validator(cfg, tmp_path):
     assert not kept and "expect" in rejected[0]
     assert v({"op": "set", "task_id": 1, "fields": {"outcome": "y" * 301}})[1] == ["#0: outcome is over 300 characters"]
     assert v({"op": "set", "task_id": 1, "fields": {"outcome": None}})[0] == [{"task_id": 1, "op": "set", "fields": {"outcome": None}}]
+
+
+# --- Task 16: chat
+
+def _chat_msg(conn, proposals) -> int:
+    """A stored assistant message carrying `proposals` (as a turn would have kept them)."""
+    from factotum import chat
+    tid = chat.new_thread(conn, "t")
+    cur = conn.execute("INSERT INTO chat_messages (thread_id, role, text, proposals_json, created_at) VALUES (?, 'assistant', 'ok', ?, ?)",
+                       (tid, json.dumps(proposals), now_iso()))
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def test_a_chat_link_must_name_tasks_the_turn_attached_or_read(conn, cfg):
+    from factotum import chat
+    from factotum.db import rows
+    for i in range(1, 5):
+        mk(conn, i)
+    data = {"proposals": [{"op": "link", "task_id": 1, "fields": {"kind": "waits_on", "other": 2}},
+                          {"op": "link", "task_id": 1, "fields": {"kind": "waits_on", "other": 3}},
+                          {"op": "merge", "task_id": 4, "fields": {"into": 2}}]}
+    kept, rejected = chat._clean_proposals(conn, cfg, data, {}, tasks_seen={2}, attached=[1, 4])
+    assert [p["op"] for p in kept] == ["link", "merge"] and all(not p["applied"] for p in kept)
+    assert kept[0]["fields"] == {"kind": "waits_on", "other": 2, "why": None} and kept[1]["fields"] == {"into": 2}
+    assert "Task-3 was not attached or read in this turn" in rejected[0]
+    assert not rows(conn, "SELECT 1 FROM relations")                      # nothing applied
+    kept, rejected = chat._clean_proposals(conn, cfg, {"proposals": [{"op": "link", "task_id": True, "fields": {"kind": "waits_on", "other": 2}}]}, {},
+                                           tasks_seen={2}, attached=[1])
+    assert not kept and rejected                                          # True is not Task-1
+
+
+def test_chat_rejects_a_link_that_breaks_a_rule_and_keeps_outcome_and_notes(conn, cfg):
+    from factotum import chat
+    for i in range(1, 4):
+        mk(conn, i)
+    mk(conn, 5, status="done", completed_at="2026-10-30")
+    link(conn, 1, 2, "waits_on")
+    data = {"proposals": [{"op": "link", "task_id": 2, "fields": {"kind": "waits_on", "other": 1}},
+                          {"op": "link", "task_id": 1, "fields": {"kind": "same_as", "other": 3}},
+                          {"op": "unlink", "task_id": 1, "fields": {"kind": "waits_on", "other": 3}},
+                          {"op": "unlink", "task_id": 1, "fields": {"kind": "waits_on", "other": 2, "why": "dropped"}},
+                          {"op": "merge", "task_id": 5, "fields": {"into": 3}},
+                          {"op": "done", "task_id": 3, "fields": {"outcome": "  Sent " + "x" * 400}},
+                          {"op": "drop", "task_id": 3, "fields": {}},
+                          {"op": "add_note", "task_id": 1, "fields": {"text": "Asked the lab " + "y" * 1200}},
+                          {"op": "add_note", "task_id": 1, "fields": {"text": "   "}}]}
+    kept, rejected = chat._clean_proposals(conn, cfg, data, {}, tasks_seen={2, 3}, attached=[1, 5])
+    assert [p["op"] for p in kept] == ["unlink", "done", "drop", "add_note"] and all(not p["applied"] for p in kept)
+    assert kept[0]["fields"] == {"kind": "waits_on", "other": 2}
+    assert kept[1]["fields"] == {"outcome": ("Sent " + "x" * 400)[:300]} and kept[2]["fields"] == {}
+    assert kept[3]["fields"] == {"text": ("Asked the lab " + "y" * 1200)[:1000]}
+    assert len(rejected) == 5
+    assert "that would make a loop" in rejected[0] and "part_of or waits_on" in rejected[1] and "has no waits on link to Task-3" in rejected[2]
+    assert "Task-5 is not open" in rejected[3] and "text" in rejected[4]
+
+
+def test_chat_create_keeps_refs_and_links_it_can_vouch_for(conn, cfg):
+    from factotum import chat
+    for i in range(1, 4):
+        mk(conn, i)
+    data = {"proposals": [{"op": "create", "fields": {"name": "Goal", "ref": "g"}},
+                          {"op": "create", "fields": {"name": "Step", "links": [{"kind": "part_of", "other": "g"}, {"kind": "waits_on", "other": 2, "why": " needs  it "},
+                                                                              {"kind": "waits_on", "other": 3}, {"kind": "part_of", "other": "nope"}]}},
+                          {"op": "create", "fields": {"name": "Bad ref", "ref": "9x", "links": [{"kind": "same_as", "other": 2}]}}]}
+    kept, rejected = chat._clean_proposals(conn, cfg, data, {}, tasks_seen={2}, attached=[])
+    assert [p["fields"]["name"] for p in kept] == ["Goal", "Step", "Bad ref"]
+    assert kept[0]["fields"]["ref"] == "g" and "ref" not in kept[2]["fields"] and "links" not in kept[2]["fields"]
+    assert kept[1]["fields"]["links"] == [{"kind": "part_of", "other": "g"}, {"kind": "waits_on", "other": 2, "why": "needs it"}]
+    assert any("Task-3 was not attached or read in this turn" in r for r in rejected) and any("'nope'" in r for r in rejected)
+
+
+def test_chat_create_rides_in_a_batch_with_its_links_and_one_undo(conn, cfg):
+    from factotum import chat
+    from factotum.db import one
+    from stage4_helpers import active_rels
+    props = [{"op": "create", "task_id": None, "fields": {"name": "Goal", "ref": "g"}, "label": "create Goal", "evidence": [], "applied": False},
+             {"op": "create", "task_id": None, "fields": {"name": "Step", "links": [{"kind": "part_of", "other": "g"}]}, "label": "create Step",
+              "evidence": [{"kind": "mail_thread", "ref": "c1", "label": "From Max"}], "applied": False}]
+    mid = _chat_msg(conn, props)
+    goal = chat.create_from_proposal(conn, cfg, mid, 0, TODAY)
+    step = chat.create_from_proposal(conn, cfg, mid, 1, TODAY)
+    assert active_rels(conn) == {(step, goal, "part_of")}
+    t = one(conn, "SELECT * FROM tasks WHERE id = ?", (step,))
+    assert (t["source"], t["source_key"], t["mentions"], t["last_mention_at"], t["status"]) == ("Chat", f"chat:{mid}:1", 1, TODAY.isoformat(), "open")
+    assert one(conn, "SELECT ref FROM links WHERE task_id = ? AND kind = 'mail_thread'", (step,))["ref"] == "c1"
+    assert chat.create_from_proposal(conn, cfg, mid, 1, TODAY) == step
+    stored = chat.messages(conn, one(conn, "SELECT thread_id FROM chat_messages WHERE id = ?", (mid,))["thread_id"])[0]["proposals"][1]
+    assert stored["applied"] is True and stored["task_id"] == step and stored["skipped"] == [] and stored["batch_id"]
+    assert batches.undo(conn, stored["batch_id"])["restored"] >= 1
+    assert one(conn, "SELECT status FROM tasks WHERE id = ?", (step,))["status"] == "dropped" and active_rels(conn) == set()
+
+    mid2 = _chat_msg(conn, props)
+    step2 = chat.create_from_proposal(conn, cfg, mid2, 1, TODAY)
+    assert one(conn, "SELECT name FROM tasks WHERE id = ?", (step2,))["name"] == "Step" and active_rels(conn) == set()
+    stored = json.loads(one(conn, "SELECT proposals_json FROM chat_messages WHERE id = ?", (mid2,))["proposals_json"])[1]
+    assert stored["skipped"] == [{"task_id": None, "why": "Task for ref 'g' is not created yet; create it first"}]
+
+
+def test_chat_create_route_returns_what_was_skipped(cfg, tmp_path):
+    from fastapi.testclient import TestClient
+    from factotum.api import create_app
+    app = create_app(cfg, db_path=str(tmp_path / "t.db"))
+    mid = _chat_msg(app.state.conn, [{"op": "create", "task_id": None, "fields": {"name": "Step", "links": [{"kind": "part_of", "other": "g"}]}},
+                                     {"op": "create", "task_id": None, "fields": {"name": "Goal", "ref": "g"}}])
+    r = TestClient(app).post("/api/chat/create", json={"message_id": mid, "index": 0}).json()
+    assert r["task_id"] and "is not created yet" in r["skipped"][0]["why"]
+
+
+def test_attached_rows_carry_link_facts(conn, cfg):
+    from factotum import chat
+    for i in range(1, 4):
+        mk(conn, i)
+    link(conn, 1, 2, "waits_on")
+    a, b = chat.attached_rows(conn, cfg, [1, 3], TODAY)
+    assert a["rel"] == "waits on Task-2" and a["linked"] == [{"kind": "waits on", "id": 2, "name": "Task 2", "status": "open"}]
+    assert (b["rel"], b["linked"]) == ("", [])
+
+
+def test_what_else_is_related_is_a_canned_prompt(conn, cfg):
+    from factotum import chat
+    mk(conn, 1)
+    assert chat.CANNED["related"][1] == "What else is related?" and "task_neighbours" in chat.build_prompt(cfg, conn, "", [1], TODAY, canned="related")
