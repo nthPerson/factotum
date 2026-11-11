@@ -42,6 +42,11 @@ Four causes, none of them the user's discipline:
 - **Claude proposes, the tray applies.** Every change from Claude, the UI or a command lands in a
   pending batch that the user applies in one click, with one undo per batch. Evidence-based
   automatic closes are the one exception and are logged as such.
+- **Links between tasks are task state, so they ride in batches** (stage 4a, 2026-11-10): `link`,
+  `unlink`, `merge`, `add_note` and a create that carries links are ops of `batches.apply`, each undoable.
+  Chat's Create is a batch too. A link proposed in a chat turn is never applied at once (it lands in the
+  tray), and a merge always waits for a tap: it drops a task, so no direct write path (a connector's
+  `apply_changes` included) may make one. Closing never cascades along a link.
 - **Outflow must not depend on the user.** Every task has a close signal or an expiry.
 - **The evidence rule**: delete or close on good evidence, never on a hunch. Headless runs can
   never send, delete, move or archive mail.
@@ -110,19 +115,36 @@ tasks(id, name, project, area, status,            -- open|done|dropped|faded|lap
       source, source_key UNIQUE, source_link, account, counterpart, waiting_on, waiting_since,
       context, why_now, score, priority, manual_priority, mentions, last_mention_at,
       created_at, edited_at, completed_at, closed_by,     -- user|canvas|mail-evidence|fade|lapse|voice|chat|import
-      snoozed_until, last_reviewed_at, calendar_event, notion_page_id, canvas_id)
+      snoozed_until, last_reviewed_at, calendar_event, notion_page_id, canvas_id,
+      outcome,                     -- one line, what came of it (done / drop may carry it; ≤ 300)
+      neighbours_seen_at)          -- stamped when the task is opened or a Review decision is made; "a linked task changed" is measured from it
 reminders(id, task_id, fire_at, label, repeat, status, ntfy_seq, token, created_by)
           -- repeat: NULL|daily|weekdays|weekly|monthly; status: pending|sent|snoozed|done|cancelled
 links(id, task_id, kind, ref, label, account, created_at, last_seen_at)
-          -- kind: plaud_note|notion_page|canvas|mail_thread|mail_message|calendar|task
+          -- kind: plaud_note|notion_page|canvas|mail_thread|mail_message|calendar|slack_message|...
+          -- (outside things only: `task` is no longer a kind; migration 1 converted those rows)
+relations(id, src, dst, kind, why, source, batch_id, created_at, removed_at, removed_batch_id)
+          -- kind: part_of|waits_on|same_as. Direction: `src part_of dst` (dst is the goal), `src waits_on dst`,
+          -- `src same_as dst` (src was merged into dst). Soft-deleted (removed_at), never DELETE: History and
+          -- undo need the row. A partial unique index allows one ACTIVE row per (src, dst, kind).
 mentions(id, task_id, source_kind, source_ref, at)       -- append-only; resets the fade clock
-batches(id, created_at, applied_at, undone_at, source, undo_json)
-changes(id, batch_id, task_id, field, old, new)
+batches(id, created_at, applied_at, undone_at, source, undo_json,
+        cause_json)                -- why the batch exists, e.g. {"kind": "ripple", "from": [428], "run": 77}, or NULL
+changes(id, batch_id, task_id, field, old, new,
+        note)                      -- an optional one-line reason (≤ 300), on every row the change wrote
+          -- a link is two changes rows (field `link`, one per end); `evidence.kind` gains `link_suggestion`
+          -- (a suggested pair, `ref` {a, b, kind, why, signal}; judged through the batch that makes the link or merge)
 chat_threads / chat_messages / runs / accounts / settings
 ```
 
 Task ids continue the Notion numbering (next id after import: 395), so `Task-<n>` stays the
 code the user types and says.
+
+**Migrations.** The schema version is `PRAGMA user_version`; `db.VERSIONED` lists the migrations in
+order and `db.migrate` runs those above it. A migration that changes data declares `needs_backup(conn)`
+and gets a copy made with the SQLite backup API in `data/backups/` (next to the database,
+`<stem>-<UTC stamp>-before-v<N>.db`) before it runs. Migration 1 turns the importer's old `links` rows of
+kind `task` into `same_as` rows or merge suggestions and deletes them.
 
 ## 5. Task lifecycle
 
@@ -153,7 +175,22 @@ deliverables.
 (70 − 5/day, floor 25) instead of clamping. Claude writes `why_now` for the rows the morning
 brief shows (≤ 15); it never writes scores.
 
-**Review queue** (`lifecycle.build_review_queue`), ordered: last call · thread updated · back from
+**Links** (stage 4a; rules in `factotum/relations.py`, enforced again when a batch applies). Kinds:
+*part of* (a step and its goal), *waits on*, *same as* (made only by merge). Rules: no link to itself; both
+tasks exist; a step has one goal, a step cannot have steps, a goal cannot be a step; a task cannot wait on
+its own goal; a task waits only on an open task and a `waits_on` loop is refused (checked again at apply,
+so two staged links that make a loop together skip the second); at most 20 links of a kind per task.
+**Closing never cascades**: closing a goal does not close its steps, closing the last step does not close
+the goal, closing a task does not close what waits on it; the effect is on Review and on scores.
+*Scoring* (`scoring.links`, `enabled` false is exactly the old arithmetic): a task that waits on an open
+task is capped at `waiting_cap` unless its own hard due date is within `waiting_exempt_days` or past; a
+task that frees a hard-dated task, or is a step of a hard-dated goal, is scored as if due then (never
+written to `due`); freeing others earns `frees_bonus` each up to `frees_bonus_cap`. *Fading*: a waiting
+task does not fade, and its clock starts when it is freed; a step's activity (a mention, a close) keeps its
+goal alive. All of it reads `task["rel"]`, derived once by `relations.annotate`.
+**Review queue** (`lifecycle.build_review_queue`), ordered: last call · thread updated · mentioned in
+Slack · planner · freed (a task it waited on is closed or done and it waits on nothing open) · waited-on
+task gone (closed without being done) · all steps done · a linked task changed · link suggested · back from
 Later · new · soft slipped · fading soon · back · reminder missed. *New* means never decided on
 (`last_reviewed_at` is null), not "created since the last session": an item the user did not get to
 stays in the queue. The queue is served in pages of `review_cap` (15); ids already staged in the tray
@@ -542,6 +579,18 @@ timeline stops at the older list's last entry so its tail never shows one kind o
 for the timeline was tried and dropped: one batch's field changes filled the screen. Settings →
 Inputs has "Tasks from mail" with its minimum interval.
 
+**Links in the API (stage 4a; the page follows in stage 4b).** `GET /api/tasks` carries a compact `rel`
+per task (links, `waits_on_open`, `frees_open`, `goal_id`, steps open / total, `needed_by`, `changed`,
+`suggestions`; omitted when empty) and a `neighbours` map naming every other task they mention. `GET
+/api/tasks/{id}` also carries `rel`, `relations` (active, with the other task's state), `nearby`
+(tasks sharing a recording or mail thread, never stored), and `history` (this task's `changes`, newest
+first, 30 a page, `before=<change id>`, each with source, cause, undone, note and, for a link, the other
+task); opening a task stamps `neighbours_seen_at`. Review items carry `texts` for the link reasons and
+`link_suggestions`. `POST /api/batches/{id}/undo` returns `restored` and `skipped` (a field the owner
+changed since, a link whose restore would loop or duplicate, each with a reason) and 404 only for a batch
+that does not exist. The Log carries each batch's `cause` and each change's `note`. The UI for all of this
+follows in stage 4b.
+
 ## 10. Reminders and push
 
 - The public ntfy.sh server caps delay at 3 days and 250 messages/day, so **the service owns the
@@ -736,6 +785,16 @@ and its live tokens, with Revoke (every token at once). The Access bypass is for
 connector's servers call — `/mcp`, `/oauth/register`, `/oauth/token`, the three `/.well-known`
 documents — and never `/oauth/authorize` (SETUP §16). For Claude Code on another machine the bearer
 route remains the simpler path.
+
+**Links from Claude (stage 4a).** Four read tools: `task_neighbours` (what a task is linked to, steps
+and what it waits on), `waiting_tasks`, `twin_candidates` (pairs that look like the same task) and
+`goal_tree`; `tasks_query` gains link facts and the filters `ready`, `linked_to`, `goal`, and fits its JSON
+into `TOOL_BUDGET` by dropping whole rows from the end and reporting the count cut, so a result is never
+cut mid-JSON; `task_get` shows `linked` (task links; `links` stays outside things). New ops for
+`stage_changes`: `link`, `unlink`, `merge`, `add_note`, `done` / `drop` with `outcome`, and a `set` that
+carries `expect`. `apply_changes` accepts `link` and `unlink` but never `merge`: a merge drops a task and
+always waits for a tap. A link counts as two rows against the hourly cap. The validator checks a link with
+the same rules as `batches.apply` before the open-task rule.
 
 ## 16. Open questions
 

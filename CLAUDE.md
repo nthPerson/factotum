@@ -44,7 +44,11 @@ Python, a light rewrite run, Refresh = sweeps + planner through the scheduler), 
 (`due: null`, `nodue`), foldable sections, the Top rail's tiles and jump-to-task. Wave 10
 (2026-11-05): tasks suggested from mail (`mail_sweep.py` keeps `mail_new` evidence, `factotum/mail_triage.py`
 and `prompts/mail-triage.md` turn it into Review cards), growing prompt boxes, Chat attachments and
-Delete thread, the Log's Timeline / Changes / Runs / All views. Retiring the old Notion
+Delete thread, the Log's Timeline / Changes / Runs / All views. Stage 4a (2026-11-10): links between
+tasks (`part_of`, `waits_on`, `same_as` in the `relations` table; `link` / `unlink` / `merge` / `add_note` as
+batch ops; undo that skips what changed since; suggestions as `link_suggestion` evidence; one derived-facts
+step, `relations.annotate`, in front of scoring, lifecycle, the brief, reminders and the summary; payloads
+and the agent's tools; `PRAGMA user_version` migrations with backups) — the UI is stage 4b. Retiring the old Notion
 pages and plaud-sync is the user's checklist (SETUP §15). Update this paragraph when something lands.
 
 ## Where things live
@@ -86,6 +90,9 @@ pages and plaud-sync is the user's checklist (SETUP §15). Update this paragraph
 | prompt boxes, Chat attachments and the task picker, the Log's views | SPEC §9 "Wave 10" | `web/app.js` (`draft`, `typing`, `grow`, `chatAttach`, `pickMatches`, `renderLog`, `timelineHtml`, `batchLine`, `batchDigest`) |
 | the Today summary: what it is about, when it is stale, the light rewrite, Refresh | SPEC §8.4 | `factotum/summary.py` (`store`, `stale`, `run`, `refresh_state`), `scheduler.py` (`_refresh`, `_auto_summary`), `api.py` (`/api/summary`), `prompts/today-summary.md`, `web/app.js` (`summaryHtml`, `pollSummary`) |
 | folded sections, the Top rail's tiles, jump to a task's row | SPEC §9 "Wave 9" | `web/app.js` (`folds`, `group`, `todayGroups`, `timelineGroups`, `renderRail`, `jumpTo`) |
+| links between tasks, merge, suggestions, migrations | SPEC §2, §4, §5, §15; design `docs/superpowers/specs/2026-11-10-linked-tasks-design.md` | `factotum/relations.py`, `batches.py` (`_link_op`, `_merge`), `db.py` (`VERSIONED`, `migrate`) |
+| derived neighbour facts, the scoring wrapper | SPEC §5 | `relations.annotate`, `relations.scored`, `relations.score_one` |
+| a task's History, relations, nearby | SPEC §9 | `api.get_one` |
 | the claude.ai connector: metadata, registration, consent gate, arming, tokens, `/mcp` auth | SPEC §15, SETUP §16 | `factotum/oauth.py` (`consent_identity`, `verify_access_jwt`, `armed`, `token`, `check_access`), `api.py` (`/oauth/*`, `/api/connectors`) |
 
 ## Commands
@@ -175,8 +182,9 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
   `slack_message`, never `mail_thread` (the mail sweep polls those through Mailbird).
 - **`create` is a batch op and its undo drops the row** (2026-11-04): never a DELETE — task ids are
   forever and the mirror may already have a Notion page. Imports, sync-file, Canvas and the Review
-  suggestion cards still create outside a batch (upsert by `source_key`); only connector / skill
-  creates ride in one.
+  suggestion cards still create outside a batch (upsert by `source_key`); connector / skill creates
+  ride in one, and since 2026-11-10 so does Chat's Create (`chat.create_from_proposal`, source `Chat`);
+  a batch create's Source follows the batch source (`batches.created_source`).
 - **`apply_changes` exists only when `server.mcp_writes` is `apply`** (2026-11-04): hidden from
   `tools/list` and refused on call otherwise, on both the HTTP route and the stdio skill server
   (which re-reads the setting on every call). A chat turn never has it (no writer). Whatever the
@@ -251,6 +259,28 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
   and `""` means `None`. The connector's hourly cap counts those rows (`mcp_server._rows_written`).
 - **A folded section renders no rows** (2026-11-04): `jumpTo` must unfold (`setFold`) before
   `render()`, and anything that looks rows up in the DOM only sees unfolded sections.
+- **`scoring.score` is called only by `relations.scored` / `relations.score_one`** (2026-11-10), and
+  lifecycle callers pass `relations.annotate`d rows (`test_only_relations_calls_scoring_score`,
+  `test_every_surface_reads_annotated_rows`). A new reader that skips it ranks and fades without links,
+  silently.
+- **Undo skips any field whose current value is not what that batch wrote and says so** (2026-11-10);
+  undo entries written before 2026-11-10 carry no `new` and are restored unchecked.
+- **A staged text edit carries `expect`; a note is `add_note`** (2026-11-10), appended at apply time.
+  Never send a whole new `context` built from an old read.
+- **`relations` direction** (2026-11-10): `src part_of dst` (dst is the goal), `src waits_on dst`,
+  `src same_as dst` (src was merged into dst). Soft-deleted, never DELETE.
+- **What lands on a merged duplicate goes to its survivor in three ways only** (2026-11-10): a
+  sync-file mention, a sync-file instruction, a Canvas close or due move. Fields are never copied, and a
+  merge writes no mention.
+- **`link_suggestion` evidence is not the planner's** (2026-11-10): excluded like `mail_new`, and not a
+  card's `evidence`. A judged pair is never suggested again.
+- **The summary fingerprint grew a sixth field** (2026-11-10, `waits_on_open`); `stale` compares a
+  stored fingerprint on its own length, so old summaries are not all stale at once.
+- **Migrations are `db.VERSIONED`, keyed by `PRAGMA user_version`** (2026-11-10); one that changes data
+  declares `needs_backup` and gets a backup-API copy in `data/backups/` first.
+- **The words "blocked" and "dependency" appear in nothing a user or the agent reads** (2026-11-10):
+  say part of, steps, waits on, frees, same as
+  (`test_nothing_the_user_or_the_agent_reads_says_blocked_or_dependency`).
 - **`expire` only touches rows Review has shown** (`last_offered_at`, stamped by `GET /api/review`).
   A row that was never on a Review page stays open however old it is; that is by design.
 
