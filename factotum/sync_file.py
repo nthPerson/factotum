@@ -15,7 +15,7 @@ import sqlite3
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from . import batches, config as C
+from . import batches, config as C, relations
 from .db import now_iso, rows
 
 PROMPT = C.ROOT / "prompts" / "sync-file.md"
@@ -176,10 +176,24 @@ def apply_result(conn: sqlite3.Connection, cfg: dict, rec: dict, data: dict, tod
     n = 0
 
     def _target(tid):
-        row = get_task(conn, int(tid)) if isinstance(tid, (int, float, str)) and str(tid).isdigit() else None
-        if row and allowed_ids is not None and row["id"] not in allowed_ids:
+        """The row an id names, or the survivor it was merged into (design §6): an instruction, an
+        update, a reminder or an event naming a merged duplicate acts on the survivor."""
+        if not (isinstance(tid, (int, float, str)) and str(tid).isdigit()):
             return None
-        return row
+        named = int(tid)
+        s = relations.survivor(conn, named)
+        if allowed_ids is not None and named not in allowed_ids and s not in allowed_ids:
+            return None
+        return get_task(conn, s)
+
+    def _dest(tid) -> int | None:
+        """The id a reminder or an event lands on: a row this run created, else `_target`'s."""
+        if not tid:
+            return None
+        if tid in created:
+            return int(tid)
+        row = _target(tid)
+        return row["id"] if row else None
     for i, t in enumerate(data.get("tasks") or []):
         if not isinstance(t, dict):
             continue
@@ -212,7 +226,13 @@ def apply_result(conn: sqlite3.Connection, cfg: dict, rec: dict, data: dict, tod
         key = str(t.get("source_key") or "")
         if not key.startswith(f"plaud:{rec_id}:"):     # only this recording's keys; anything else is the model wandering
             key = f"plaud:{rec_id}:{n}"
-        existing = conn.execute("SELECT id, status FROM tasks WHERE source_key = ?", (key,)).fetchone()
+        existing = conn.execute("SELECT id, status, closed_by FROM tasks WHERE source_key = ?", (key,)).fetchone()
+        if existing and existing[1] == "dropped" and existing[2] == "merge":
+            # Merged away since: the mention, the recording link and its reminders go to the survivor,
+            # and nothing else does (the run's guesses never overwrite the survivor's name or date).
+            tid = relations.survivor(conn, int(existing[0]))
+            touched.append(tid); by_index[i] = tid
+            continue
         if existing:   # the same recording synced twice: update, never a twin
             tid = int(existing[0])
             if existing[1] in ("faded", "lapsed"):
@@ -285,10 +305,11 @@ def apply_result(conn: sqlite3.Connection, cfg: dict, rec: dict, data: dict, tod
         if not isinstance(r, dict):
             continue
         tid = by_index.get(_ref_index(r.get("task_ref"))) if r.get("task_ref") else r.get("task_id")
-        if not tid or not (tid in created or _target(tid)):
+        dest = _dest(tid)
+        if not dest:
             unresolved.append(f"reminder {r.get('label') or r.get('fire_at')}: no task to attach to" + (f" (Task-{tid} is not one this run may touch)" if tid else ""))
             continue
-        changes.append({"task_id": int(tid), "op": "add_reminder", "fields": {"fire_at": r.get("fire_at"), "label": r.get("label"), "repeat": r.get("repeat")}})
+        changes.append({"task_id": dest, "op": "add_reminder", "fields": {"fire_at": r.get("fire_at"), "label": r.get("label"), "repeat": r.get("repeat")}})
         reminders += 1
     events = 0
     for ev in data.get("calendar") or []:
@@ -306,10 +327,11 @@ def apply_result(conn: sqlite3.Connection, cfg: dict, rec: dict, data: dict, tod
             continue
         events += 1
         tid = by_index.get(_ref_index(ev.get("task_ref"))) if ev.get("task_ref") else ev.get("task_id")
-        if tid and (tid in created or _target(tid)):
-            add_link(conn, int(tid), "calendar", str(made.get("id")), label=str(ev["title"])[:120])
+        dest = _dest(tid)
+        if dest:
+            add_link(conn, dest, "calendar", str(made.get("id")), label=str(ev["title"])[:120])
             if made.get("link"):
-                changes.append({"task_id": int(tid), "op": "set", "fields": {"calendar_event": made["link"]}})
+                changes.append({"task_id": dest, "op": "set", "fields": {"calendar_event": made["link"]}})
     res = batches.apply(conn, changes, source, today, closed_by="voice") if changes else {"batch_id": None, "applied": 0, "skipped": []}
     for s in res["skipped"]:
         unresolved.append(f"change on Task-{s.get('task_id')} skipped: {s.get('why')}")

@@ -14,6 +14,7 @@ MAX_PER_KIND = 20
 WHY_MAX = 160
 WORDS = {"part_of": "part of", "waits_on": "waits on", "same_as": "same as"}
 CYCLE_DEPTH = 50
+SURVIVOR_HOPS = 5
 
 Db = sqlite3.Connection | sqlite3.Cursor
 
@@ -106,6 +107,20 @@ def default_survivor(db: Db, a: int, b: int) -> tuple[int, int]:
         return (a, b) if ca else (b, a)
     first = min((ra, rb), key=lambda r: (r.get("created_at") or "", r["id"]))
     return (a, b) if first is ra else (b, a)
+
+
+def survivor(db: Db, task_id: int) -> int:
+    """Where a merged duplicate went: follows active `same_as` rows from `src` to `dst`, up to
+    SURVIVOR_HOPS, stopping on a repeat; `task_id` itself when it was never merged away (design §6
+    "From then on…")."""
+    seen, cur = {task_id}, task_id
+    for _ in range(SURVIVOR_HOPS):
+        r = db.execute("SELECT dst FROM relations WHERE src = ? AND kind = 'same_as' AND removed_at IS NULL ORDER BY id DESC LIMIT 1", (cur,)).fetchone()
+        if not r or r[0] in seen:
+            break
+        cur = r[0]
+        seen.add(cur)
+    return cur
 
 
 def change_value(rel: dict, task_id: int, other_name: str | None) -> dict:

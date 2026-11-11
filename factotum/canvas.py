@@ -21,7 +21,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from . import batches, config as C
+from . import batches, config as C, relations
 from .db import add_mention, now_iso, set_setting, upsert_task
 
 CLOSED_STATES = {"submitted", "graded", "excused", "marked_complete"}
@@ -103,9 +103,14 @@ def sweep(conn: sqlite3.Connection, cfg: dict, items: list[dict], today: date) -
     created, changes = [], []
     closed = moved = 0
     for it in items:
-        row = conn.execute("SELECT id, status, due FROM tasks WHERE source_key = ?", (it["key"],)).fetchone()
+        row = conn.execute("SELECT id, status, due, closed_by FROM tasks WHERE source_key = ?", (it["key"],)).fetchone()
         if row:
-            tid, status, due = row
+            tid, status, due, closed_by = row
+            if status == "dropped" and closed_by == "merge":   # merged away: the close or the moved date goes to the survivor (design §6)
+                s = relations.survivor(conn, tid)
+                srow = conn.execute("SELECT status, due FROM tasks WHERE id = ?", (s,)).fetchone() if s != tid else None
+                if srow:
+                    tid, (status, due) = s, srow
             if status != "open":
                 continue
             if it["state"] in CLOSED_STATES:

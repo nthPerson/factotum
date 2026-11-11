@@ -1,8 +1,8 @@
 import json
 
-from factotum import batches, db, relations
-from factotum.db import one, rows
-from stage4_helpers import TODAY, active_rels, link, mk
+from factotum import batches, canvas, db, relations, sync_file
+from factotum.db import one, rows, upsert_task
+from stage4_helpers import TODAY, active_rels, link, mk, task
 
 
 # --- Task 5: merge
@@ -143,3 +143,66 @@ def test_default_survivor_is_the_canvas_row_else_the_older(conn):
     assert relations.default_survivor(conn, 3, 4) == (4, 3)
     mk(conn, 5); mk(conn, 6)
     assert relations.default_survivor(conn, 6, 5) == (5, 6)
+
+
+# --- Task 6: redirects
+
+REC = {"id": "of_aa", "name": "Lab sync", "start_utc": "2026-11-02T17:00:00Z"}
+
+
+def test_a_recording_synced_again_mentions_the_survivor_and_copies_nothing(conn, cfg):
+    upsert_task(conn, task(id=1, name="Email Max the slides", source="Plaud", source_key="plaud:of_aa:1", mentions=1)); mk(conn, 2, name="Send Max the deck", due="2026-11-07")
+    batches.apply(conn, [{"op": "merge", "task_id": 1, "fields": {"into": 2}}], "ui", TODAY)
+    before = one(conn, "SELECT mentions FROM tasks WHERE id = 2")["mentions"]
+    data = {"tasks": [{"op": "create", "name": "Email Max the new slides", "due": "2026-12-01", "source_key": "plaud:of_aa:1"}],
+            "instructions": [], "reminders": [{"task_ref": "tasks[0]", "fire_at": "2026-11-04T09:00", "label": "slides"}], "calendar": [], "unresolved": []}
+    res = sync_file.apply_result(conn, cfg, {"id": "of_aa", "name": "Lab sync", "start_utc": "2026-11-02T17:00:00Z"}, data, TODAY)
+    s = one(conn, "SELECT name, due, mentions FROM tasks WHERE id = 2"); d = one(conn, "SELECT status, name FROM tasks WHERE id = 1")
+    assert (s["name"], s["due"], s["mentions"]) == ("Send Max the deck", "2026-11-07", before + 1)
+    assert (d["status"], d["name"]) == ("dropped", "Email Max the slides")
+    assert one(conn, "SELECT 1 AS x FROM links WHERE task_id = 2 AND kind = 'plaud_note' AND ref = 'of_aa'")
+    assert one(conn, "SELECT task_id FROM reminders WHERE label = 'slides'")["task_id"] == 2
+    assert 2 in res["task_ids"] and not rows(conn, "SELECT 1 FROM changes WHERE task_id = 2 AND field IN ('name', 'due')")
+
+
+def test_an_instruction_naming_the_duplicate_acts_on_the_survivor(conn, cfg):
+    mk(conn, 1); mk(conn, 2)
+    _merge(conn, 1, 2)
+    res = sync_file.apply_result(conn, cfg, REC, {"tasks": [], "instructions": [{"op": "done", "task_id": 1, "evidence": "it is done"}],
+                                                  "reminders": [{"task_id": 1, "fire_at": "2026-11-04T09:00", "label": "check"}], "calendar": [], "unresolved": []},
+                                 TODAY, allowed_ids={2})                   # the prompt lists the survivor; the model named the duplicate
+    assert res["unresolved"] == [] and res["applied"] == 1
+    assert one(conn, "SELECT status FROM tasks WHERE id = 2")["status"] == "done"
+    d = one(conn, "SELECT status, closed_by FROM tasks WHERE id = 1")
+    assert (d["status"], d["closed_by"]) == ("dropped", "merge")
+    assert one(conn, "SELECT task_id FROM reminders WHERE label = 'check'")["task_id"] == 2
+    assert not rows(conn, "SELECT 1 FROM mentions WHERE task_id = 1")
+
+
+def _canvas_item(**kw):
+    it = {"key": "canvas:assignment:9", "type": "assignment", "name": "Submit Assignment 3", "title": "Assignment 3", "project": "COMPE 510",
+          "area": "Academics", "context": "", "due": "2026-11-05T23:59", "effort": "M", "state": "open", "dismissed": False, "url": "", "points": None}
+    it.update(kw)
+    return it
+
+
+def test_a_canvas_close_and_due_move_for_a_merged_item_reach_the_survivor(conn, cfg):
+    mk(conn, 1, name="Submit Assignment 3", source="Canvas", source_key="canvas:assignment:9", due="2026-11-05T23:59", hard=1)
+    mk(conn, 2, name="Assignment 3 from the lab meeting", due="2026-11-06")
+    _merge(conn, 1, 2)                                                     # the owner kept the non-Canvas row
+    canvas.sweep(conn, cfg, [_canvas_item(due="2026-11-09T23:59")], TODAY)
+    assert one(conn, "SELECT due FROM tasks WHERE id = 2")["due"] == "2026-11-09T23:59"
+    assert canvas.sweep(conn, cfg, [_canvas_item(due="2026-11-09T23:59")], TODAY) is None     # the survivor's due is what is compared
+    canvas.sweep(conn, cfg, [_canvas_item(due="2026-11-09T23:59", state="submitted")], TODAY)
+    s = one(conn, "SELECT status, closed_by FROM tasks WHERE id = 2"); d = one(conn, "SELECT status, closed_by, due FROM tasks WHERE id = 1")
+    assert (s["status"], s["closed_by"]) == ("done", "canvas")
+    assert (d["status"], d["closed_by"], d["due"]) == ("dropped", "merge", "2026-11-05T23:59")
+
+
+def test_survivor_follows_a_chain_and_stops_on_a_repeat(conn):
+    for i in (1, 2, 3, 4):
+        mk(conn, i)
+    _merge(conn, 1, 2); _merge(conn, 2, 3)
+    assert (relations.survivor(conn, 1), relations.survivor(conn, 2), relations.survivor(conn, 3), relations.survivor(conn, 4)) == (3, 3, 3, 4)
+    relations.add(conn, 3, 1, "same_as", None, "test", None)              # a loop in old data must not spin
+    assert relations.survivor(conn, 1) == 3
