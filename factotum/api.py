@@ -682,7 +682,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
 
     # ---- Chat (SPEC.md §8.3) -------------------------------------------------------------------
     from . import chat
-    turn_lock = threading.Lock()                     # the turn route finds a place's thread and marks it busy under this
+    turn_lock = app.state.chat_turn_lock = threading.Lock()   # the turn route finds a place's thread and marks it busy under this; a delete checks under it
 
     @app.get("/api/chat/threads")
     def chat_threads():
@@ -702,9 +702,10 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         if origin not in chat.ORIGINS:
             raise HTTPException(400, "unknown origin")
         tid = chat.place_thread(conn, origin, None if origin == "today" else task_id)
-        if tid is None:
+        found = rows(conn, "SELECT id, title, origin, task_id, created_at FROM chat_threads WHERE id = ?", (tid,)) if tid is not None else []
+        if not found:                                        # none yet, or deleted between the two reads
             return {"thread": None, "messages": [], "named": {}, "busy": False}
-        (th,) = rows(conn, "SELECT id, title, origin, task_id, created_at FROM chat_threads WHERE id = ?", (tid,))
+        th = found[0]
         msgs = chat.messages(conn, tid)
         ids: set[int] = set()
         for m in msgs:
@@ -715,13 +716,14 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
     def chat_thread_delete(thread_id: int):
         """Remove a thread and its messages (chat history only: nothing a turn applied is undone, and
         the run rows with their cost stay in the Log)."""
-        if not rows(conn, "SELECT 1 FROM chat_threads WHERE id = ?", (thread_id,)):
-            raise HTTPException(404, "no such thread")
-        if thread_id in app.state.chat_busy:                 # the turn would end by writing into a thread that is gone
-            raise HTTPException(409, "a turn is still running in this thread; delete it when it has answered")
-        conn.execute("DELETE FROM chat_messages WHERE thread_id = ?", (thread_id,))
-        conn.execute("DELETE FROM chat_threads WHERE id = ?", (thread_id,))
-        conn.commit()
+        with turn_lock:                                      # a turn that has just found this thread marks it busy under the same lock
+            if not rows(conn, "SELECT 1 FROM chat_threads WHERE id = ?", (thread_id,)):
+                raise HTTPException(404, "no such thread")
+            if thread_id in app.state.chat_busy:             # the turn would end by writing into a thread that is gone
+                raise HTTPException(409, "a turn is still running in this thread; delete it when it has answered")
+            conn.execute("DELETE FROM chat_messages WHERE thread_id = ?", (thread_id,))
+            conn.execute("DELETE FROM chat_threads WHERE id = ?", (thread_id,))
+            conn.commit()
         return {"deleted": thread_id}
 
     @app.post("/api/chat/turn")
