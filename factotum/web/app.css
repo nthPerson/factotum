@@ -438,6 +438,7 @@ body.tray-on .chat-main .composer { bottom: 84px; }
 
 /* A batch a skill staged (phase 6): above every tab until Apply or Dismiss */
 .pending { background: var(--top-soft); border: 1px solid var(--top); border-radius: 10px; padding: 10px 12px; margin-bottom: 14px; }
+.starter { background: var(--warn-soft); border: 1px solid var(--warn); border-radius: 10px; padding: 10px 12px; margin-bottom: 14px; display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: center; }
 .pending .phead { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 6px; }
 .pending .plist { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
 .pending .plist .chip { background: var(--surface); color: var(--fg); white-space: normal; }
