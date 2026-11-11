@@ -109,3 +109,42 @@ def test_the_prompt_lists_recently_finished_tasks_for_reference_only(conn, cfg):
     p = sync_file.build_prompt(cfg, conn, {"id": "of_s7", "name": "x", "start_at": None, "date": "2026-11-01"}, "", files, TODAY)
     assert "Task-5 | BDA M.S. | done 2026-10-25 | Old form" in p and "Ancient form" not in p and "Merged away" not in p
     assert "# 4b. Links between tasks" in p and '"links": [' in p and "{{" not in p
+
+
+def test_a_mail_about_an_open_task_is_a_follow_card_and_a_suggested_task_carries_its_link(cfg, tmp_path):
+    from fastapi.testclient import TestClient
+    from factotum.api import create_app
+    from test_phase10 import DAY, GOOD, _seed_triage
+    app = create_app(cfg, db_path=str(tmp_path / "api.db"))
+    c = app.state.conn
+    _seed_triage(c)
+    data = {"suggest": [dict(GOOD["suggest"][0], link={"kind": "waits_on", "task_id": 2})],
+            "about": [{"evidence_id": 32, "task_id": 2, "why": "the visit logistics"}, {"evidence_id": 34, "task_id": 77, "why": "a task it was never shown"}],
+            "dismiss": [{"evidence_id": 33, "why": "marketing"}]}
+    r = mail_triage.run(c, cfg, DAY, runner=lambda *a, **k: RunResult(True, data, json.dumps(data), 0.07, 2500), at="2026-11-02T10:00")
+    assert r["ok"] and r["about"] == [2] and "1 about a task" in r["line"]
+    ev = one(c, "SELECT * FROM evidence WHERE kind = 'proposal' AND task_id = 2")
+    ch = json.loads(ev["ref"])
+    assert ch["op"] == "follow_thread" and ch["fields"]["conversation_id"] == "conv-uva" and ev["label"] == "This mail is about Task-2. Follow its thread?"
+    assert one(c, "SELECT verdict FROM evidence WHERE id = 34")["verdict"] == "dismissed"            # Task-77 was never shown: set aside, no card
+    assert active_rels(c) == set()                                                                  # a card, never a link
+    client = TestClient(app)
+    items = {i["task"]["id"]: i for i in client.get("/api/review").json()["items"]}
+    assert [e["change"]["op"] for e in items[2]["evidence"]] == ["follow_thread"]
+    res = client.post("/api/batches/apply", json={"source": "review", "changes": [
+        {"task_id": 2, "op": "follow_thread", "fields": ch["fields"]},
+        {"task_id": 2, "op": "judge_evidence", "fields": {"evidence_id": ev["id"], "verdict": "applied"}}]}).json()
+    assert res["skipped"] == [] and one(c, "SELECT ref, last_seen_at FROM links WHERE task_id = 2 AND kind = 'mail_thread'")["ref"] == "conv-uva"
+    client.post(f"/api/batches/{res['batch_id']}/undo", json={})
+    assert not rows(c, "SELECT 1 FROM links WHERE task_id = 2 AND kind = 'mail_thread'")
+    sg = client.get("/api/review").json()["suggestions"]
+    assert sg[0]["links"] == [{"kind": "waits_on", "other": 2, "other_name": "Register for the UVA Link Lab visit"}]
+    made = client.post(f"/api/review/suggestions/{sg[0]['id']}/create", json={}).json()
+    assert made["skipped"] == [] and (made["task_id"], 2, "waits_on") in active_rels(c)
+
+
+def test_follow_thread_refuses_a_closed_task_and_an_empty_thread(conn):
+    mk(conn, 1); mk(conn, 2, status="done", completed_at="2026-10-30")
+    res = batches.apply(conn, [{"task_id": 2, "op": "follow_thread", "fields": {"conversation_id": "c"}},
+                               {"task_id": 1, "op": "follow_thread", "fields": {"conversation_id": ""}}], "review", TODAY)
+    assert [s["why"] for s in res["skipped"]] == ["Task-2 is not open", "follow_thread needs fields.conversation_id"]

@@ -4,12 +4,14 @@ and turns the answer into suggestion cards.
 
     pending(conn, limit, today)      -> the unjudged candidates of the last week, oldest first
     build_prompt(cfg, conn, cands, today, clock) -> str
-    apply(conn, cfg, data, cands)    -> {suggested: [names], set_aside: n}
-    run(conn, cfg, today, runner=None, at=None) -> {ok, suggested, set_aside, left, line, cost_usd}
+    apply(conn, cfg, data, cands)    -> {suggested: [names], about: [task ids], set_aside: n}
+    run(conn, cfg, today, runner=None, at=None) -> {ok, suggested, about, set_aside, left, line, cost_usd}
 
 What Python enforces, whatever the model says: the run has no tools and reads only what is in the
 prompt; it can only name mail from the batch it was shown; a suggestion is a `proposal` card in
-Review (Create / Dismiss) and never a task, a change or a link; the fields go through the same
+Review (Create / Dismiss) and never a task or a change: a link on a card is made when Create is
+pressed, a thread is followed when the follow card is accepted; a suggestion's link and a mail
+`about` a task name only open rows the run was shown; the fields go through the same
 cleaner as every other create; a counterpart is the address Mailbird reported for the sender, never
 one the model wrote; a suggestion whose name an open task or a waiting card already has is set
 aside; and every mail in the batch is judged by the end of the run (`staged` or `dismissed`), so
@@ -27,12 +29,14 @@ from pathlib import Path
 
 from . import config as C
 from .db import get_settings, log_run, now_iso, rows, set_setting
+from .relations import LINK_KINDS
 
 KIND = "mail_new"
 PROMPT = C.ROOT / "prompts" / "mail-triage.md"
 RUNS_DIR = C.ROOT / "data" / "runs" / "triage"
 BATCH = 15                 # mail per run; more waits for the next one
 MAX_SUGGEST = 8
+MAX_ABOUT = 8              # "This mail is about Task-N" cards per run; more wait for the next one
 MAX_AGE_DAYS = 7           # a candidate nobody triaged within a week is set aside unread
 HEAD_RE = re.compile(r"^from (.*) <([^<>\s]+@[^<>\s]+)>")
 
@@ -78,10 +82,38 @@ def build_prompt(cfg: dict, conn: sqlite3.Connection, cands: list[dict], today: 
     return tpl
 
 
+def _mail(e: dict) -> dict:
+    """The mail a card came from, as Mailbird reported it (the Review card shows it, Create links it)."""
+    who, addr = sender(e)
+    return {"ref": e["ref"], "account": e.get("account"), "subject": e.get("label"), "sender": f"{who} <{addr}>" if addr else who, "at": e.get("at")}
+
+
+def _card_links(link, shown: set[int]) -> list[dict]:
+    """A suggestion's `link` as the card keeps it: a known kind to an open row the run was shown, else nothing."""
+    if isinstance(link, dict) and link.get("kind") in LINK_KINDS and type(link.get("task_id")) is int and link["task_id"] in shown:
+        return [{"kind": link["kind"], "other": link["task_id"]}]
+    return []
+
+
+def _follow_waiting(conn: sqlite3.Connection, task_id: int, conv) -> bool:
+    """Task-N follows the thread already, or a follow card for it is waiting."""
+    if rows(conn, "SELECT 1 FROM links WHERE task_id = ? AND kind = 'mail_thread' AND ref = ?", (task_id, conv)):
+        return True
+    for r in rows(conn, "SELECT ref FROM evidence WHERE kind = 'proposal' AND judged_at IS NULL AND task_id = ?", (task_id,)):
+        try:
+            ch = json.loads(r["ref"])
+        except (TypeError, ValueError):
+            continue
+        if isinstance(ch, dict) and ch.get("op") == "follow_thread" and (ch.get("fields") or {}).get("conversation_id") == conv:
+            return True
+    return False
+
+
 def apply(conn: sqlite3.Connection, cfg: dict, data: dict, cands: list[dict]) -> dict:
     from .planner import _same_suggestion
-    from .sync_file import _clean_task_fields
+    from .sync_file import _clean_task_fields, slice_rows
     by = {c["id"]: c for c in cands}
+    shown = {r["id"] for r in slice_rows(conn) if r["status"] == "open"}      # faded and lapsed rows are listed, never named
     taken = {_norm(r["name"]) for r in rows(conn, "SELECT name FROM tasks WHERE status = 'open'")}
     waiting: list[dict] = []
     for r in rows(conn, "SELECT ref FROM evidence WHERE kind = 'proposal' AND judged_at IS NULL"):
@@ -101,11 +133,13 @@ def apply(conn: sqlite3.Connection, cfg: dict, data: dict, cands: list[dict]) ->
         f = {k: v for k, v in _clean_task_fields(cfg, {k: s.get(k) for k in ("name", "project", "due", "hard", "effort", "context") if k in s}).items() if v is not None}
         if not f.get("name"):
             continue
-        who, addr = sender(e)
+        _, addr = sender(e)
         if s.get("reply_expected") and addr:
             f["counterpart"] = addr                          # Mailbird's address for the sender; the model supplies none
-        card = {"op": "create", "fields": f,
-                "mail": {"ref": e["ref"], "account": e.get("account"), "subject": e.get("label"), "sender": f"{who} <{addr}>" if addr else who, "at": e.get("at")}}
+        card = {"op": "create", "fields": f, "mail": _mail(e)}
+        links = _card_links(s.get("link"), shown)
+        if links:
+            card["links"] = links
         if _norm(f["name"]) in taken or any(_same_suggestion(card, w) for w in waiting):
             continue                                         # already a task or already a card: set aside below
         if len(suggested) >= MAX_SUGGEST:
@@ -115,11 +149,27 @@ def apply(conn: sqlite3.Connection, cfg: dict, data: dict, cands: list[dict]) ->
                      (json.dumps(card), e.get("account"), f"create: {f['name']}", str(s.get("reason") or "")[:300], now_iso()))
         conn.execute("UPDATE evidence SET judged_at = ?, verdict = 'staged' WHERE id = ?", (now_iso(), e["id"]))
         staged.add(e["id"]); suggested.append(f["name"]); waiting.append(card)
+    about: list[int] = []
+    for a in (data.get("about") if isinstance(data.get("about"), list) else [])[: BATCH * 2]:
+        if not isinstance(a, dict) or type(a.get("evidence_id")) is not int or type(a.get("task_id")) is not int:
+            continue
+        e, tid = by.get(a["evidence_id"]), a["task_id"]
+        if not e or e["id"] in staged or tid not in shown or _follow_waiting(conn, tid, e["ref"]):
+            continue                                         # set aside below
+        if len(about) >= MAX_ABOUT:
+            over.add(e["id"])
+            continue
+        change = {"op": "follow_thread", "task_id": tid,
+                  "fields": {"conversation_id": e["ref"], "account": e.get("account"), "subject": e.get("label"), "at": e.get("at")}, "mail": _mail(e)}
+        conn.execute("INSERT INTO evidence (task_id, kind, ref, account, label, excerpt, at) VALUES (?, 'proposal', ?, ?, ?, ?, ?)",
+                     (tid, json.dumps(change), e.get("account"), f"This mail is about Task-{tid}. Follow its thread?", str(a.get("why") or "")[:300], now_iso()))
+        conn.execute("UPDATE evidence SET judged_at = ?, verdict = 'staged' WHERE id = ?", (now_iso(), e["id"]))
+        staged.add(e["id"]); about.append(tid)
     aside = [i for i in by if i not in staged and i not in over]
     for i in aside:
         conn.execute("UPDATE evidence SET judged_at = ?, verdict = 'dismissed' WHERE id = ? AND judged_at IS NULL", (now_iso(), i))
     conn.commit()
-    return {"suggested": suggested, "set_aside": len(aside)}
+    return {"suggested": suggested, "about": about, "set_aside": len(aside)}
 
 
 def run(conn: sqlite3.Connection, cfg: dict, today: date, *, runner=None, at: str | None = None) -> dict:
@@ -131,7 +181,7 @@ def run(conn: sqlite3.Connection, cfg: dict, today: date, *, runner=None, at: st
     conn.commit()
     cands = pending(conn, BATCH, today)
     if not cands:
-        return {"ok": True, "suggested": [], "set_aside": 0, "left": 0, "cost_usd": 0.0, "line": "no new mail"}
+        return {"ok": True, "suggested": [], "about": [], "set_aside": 0, "left": 0, "cost_usd": 0.0, "line": "no new mail"}
     started = time.monotonic()
     prompt = build_prompt(cfg, conn, cands, today, at[11:16])
     workdir = Path(RUNS_DIR) / today.isoformat() / at[11:16].replace(":", "")      # one directory per run: several a day
@@ -172,7 +222,7 @@ def run(conn: sqlite3.Connection, cfg: dict, today: date, *, runner=None, at: st
     left = len(pending(conn, 10**6, today))
     n = len(out["suggested"])
     line = (f"{len(cands)} mail: {n} suggested" + (" (" + "; ".join(s[:50] for s in out["suggested"][:3]) + ")" if n else "")
-            + f", {out['set_aside']} set aside" + (f", {left} waiting for the next run" if left else ""))
+            + (f", {len(out['about'])} about a task" if out["about"] else "") + f", {out['set_aside']} set aside" + (f", {left} waiting for the next run" if left else ""))
     log_run(conn, "mail-triage", ms, ok=True, summary=line[:1000], cost_usd=res.cost_usd)
     conn.commit()
     return dict(out, ok=True, left=left, cost_usd=res.cost_usd, line=line)

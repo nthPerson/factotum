@@ -425,8 +425,11 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
             i["evidence"] = by_task.get(i["task"]["id"], [])      # judged in the same batch as the decision; a proposal's change can be accepted
         # Planner creates with no task (an announcement, a hunch) and Slack mentions naming no task:
         # suggestion cards with Create / Dismiss.
-        cards = [{"id": e["id"], "kind": e["kind"], "label": e["label"], "reason": e["excerpt"], "at": e["at"], "fields": _suggestion_fields(ecfg, e), "mail": _suggestion_mail(e)}
-                 for e in pending if e["task_id"] is None and e["kind"] in SUGGESTION_KINDS]
+        cards = [{"id": e["id"], "kind": e["kind"], "label": e["label"], "reason": e["excerpt"], "at": e["at"], "fields": _suggestion_fields(ecfg, e), "mail": _suggestion_mail(e),
+                  "links": _suggestion_links(e)} for e in pending if e["task_id"] is None and e["kind"] in SUGGESTION_KINDS]
+        others = task_briefs({l["other"] for c in cards for l in c["links"]})
+        for c in cards:                                          # a mail suggestion's link, made when Create is pressed
+            c["links"] = [dict(l, other_name=(others.get(l["other"]) or {}).get("name")) for l in c["links"]]
         cap = int(C.get(ecfg, "lifecycle.review_cap", 15))
         page = full[:cap]
         if page:
@@ -448,6 +451,16 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         except (ValueError, AttributeError):
             return None
         return m if isinstance(m, dict) and m.get("ref") else None
+
+    def _suggestion_links(e: dict) -> list[dict]:
+        """The links a mail suggestion carries (mail_triage.py kept only those to rows its run was shown)."""
+        if e["kind"] != "proposal":
+            return []
+        try:
+            ls = (json.loads(e["ref"]) if e.get("ref") else {}).get("links")
+        except (ValueError, AttributeError):
+            return []
+        return [{"kind": l.get("kind"), "other": l["other"]} for l in ls if isinstance(l, dict) and type(l.get("other")) is int] if isinstance(ls, list) else []
 
     def _suggestion_fields(ecfg: dict, e: dict) -> dict:
         """What Create would make: the planner's fields for an uncited create (evidence.ref holds
@@ -472,7 +485,8 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         """Create the task a suggestion describes: a planner create (label "create: <name>", the
         planner's reason) or a Slack mention with no task (source Slack, the message linked). An
         upsert by source_key, so a second tap returns the same id; the evidence is judged `applied`.
-        Like every creation, not a batch (SPEC §12 precedent)."""
+        Like every creation, not a batch (SPEC §12 precedent); a link a mail suggestion carries is
+        made after it, in a review batch, and what that batch refused is in `skipped`."""
         from .db import add_link, now_iso, upsert_task
         e = rows(conn, f"SELECT * FROM evidence WHERE id = ? AND kind IN ({','.join('?' * len(SUGGESTION_KINDS))}) AND task_id IS NULL", (evidence_id, *SUGGESTION_KINDS))
         if not e:
@@ -503,7 +517,13 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         conn.execute("UPDATE evidence SET judged_at = ?, verdict = 'applied' WHERE id = ?", (now, evidence_id))
         suggestions.at_create(conn, [tid])
         conn.commit()
-        return {"task_id": tid}
+        links = _suggestion_links(e)
+        if not links:
+            return {"task_id": tid, "skipped": []}
+        # the link the card showed, in a review batch of its own (undoable; a rule it breaks by now is said)
+        res = batches.apply(conn, [{"op": "link", "task_id": tid, "fields": {"kind": l["kind"], "other": l["other"], "why": "from the mail it came from"}} for l in links[:3]],
+                            "review", date.today())
+        return {"task_id": tid, "skipped": [s["why"] for s in res["skipped"]]}
 
     @app.post("/api/review/suggestions/{evidence_id}/open")
     def open_suggestion(evidence_id: int):

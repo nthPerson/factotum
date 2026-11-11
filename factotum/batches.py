@@ -17,7 +17,7 @@ SETTABLE = {
     "last_reviewed_at", "why_now", "calendar_event", "outcome",
 }
 OPS = {"set", "done", "drop", "reopen", "pin_top", "unpin", "keep", "longterm", "fade", "lapse", "add_reminder", "judge_evidence",
-       "create", "watch_sent", "unwatch_sent", "link", "unlink", "add_note", "merge"}
+       "create", "watch_sent", "unwatch_sent", "link", "unlink", "add_note", "merge", "follow_thread"}
 # What a `create` may carry; score, priority, status and mentions stay derived.
 CREATABLE = {"name", "project", "area", "due", "due_is_datetime", "hard", "effort", "context", "counterpart", "waiting_on", "manual_priority", "longterm", "snoozed_until"}
 CREATED_SOURCE = "Claude"          # the Source of a task a connector or skill created (and the default)
@@ -217,6 +217,8 @@ def apply(conn: sqlite3.Connection, changes: list[dict], source: str, today: dat
                 applied += _link_op(conn, cur, ch, batch_id, source, undo, skipped, refs)
             elif op == "merge":
                 applied += _merge(conn, cur, ch, batch_id, source, today, undo, skipped)
+            elif op == "follow_thread":
+                applied += _follow_thread(conn, cur, ch, batch_id, undo, skipped)
             elif _apply_one(conn, cur, ch, batch_id, source, today, closed_by, undo, skipped):
                 applied += 1
             note = str(ch.get("note") or "").strip()[:300] if isinstance(ch, dict) else ""
@@ -384,6 +386,41 @@ def _judge_suggestions(conn, cur, a: int, b: int, batch_id: int, undo: list, ski
             _judge_evidence(conn, cur, {"op": "judge_evidence", "task_id": a, "fields": {"evidence_id": s["evidence_id"], "verdict": "applied"}}, batch_id, undo, skipped)
 
 
+def _follow_thread(conn, cur, ch: dict, batch_id: int, undo: list, skipped: list) -> bool:
+    """`follow_thread`: an open task follows a mail thread from now on (a `mail_thread` row in
+    `links`, seen up to `fields.at`, so the sweep does not call the mail the card came from "Thread
+    updated"). Accepting "This mail is about Task-N. Follow its thread?" (mail_triage.py). A thread
+    the task already follows is a no-op; undo deletes the row this batch inserted."""
+    f = ch.get("fields") if isinstance(ch.get("fields"), dict) else {}
+    tid = _link_end(ch.get("task_id"), {})[0]
+    task = get_task(conn, tid) if tid is not None else None
+    if not task:
+        skipped.append({"task_id": ch.get("task_id"), "why": "no such task"})
+        return False
+    if task["status"] != "open":
+        skipped.append({"task_id": tid, "why": f"Task-{tid} is not open"})
+        return False
+    conv = f.get("conversation_id")
+    if not isinstance(conv, str) or not conv.strip():
+        skipped.append({"task_id": tid, "why": "follow_thread needs fields.conversation_id"})
+        return False
+    if len(conv) > 300:
+        skipped.append({"task_id": tid, "why": "follow_thread's conversation_id is over 300 characters"})
+        return False
+    if cur.execute("SELECT 1 FROM links WHERE task_id = ? AND kind = 'mail_thread' AND ref = ?", (tid, conv)).fetchone():
+        return False
+    subject = str(f["subject"])[:120] if f.get("subject") else None
+    account = str(f["account"]) if f.get("account") else None
+    cur.execute("INSERT INTO links (task_id, kind, ref, label, account, created_at, last_seen_at) VALUES (?, 'mail_thread', ?, ?, ?, ?, ?)",
+                (tid, conv, subject, account, now_iso(), str(f["at"]) if f.get("at") else None))
+    lid = cur.lastrowid
+    cur.execute("INSERT INTO changes (batch_id, task_id, field, old, new) VALUES (?, ?, 'thread', NULL, ?)",
+                (batch_id, tid, json.dumps({"conversation_id": conv, "subject": subject})))
+    cur.execute("UPDATE tasks SET edited_at = ? WHERE id = ?", (now_iso(), tid))
+    undo.append({"task_id": tid, "thread_link_id": lid})
+    return True
+
+
 def _apply_one(conn, cur, ch: dict, batch_id: int, source: str, today: date, closed_by: str, undo: list, skipped: list) -> bool:
     """Apply one change; returns True when it wrote something. Anything malformed is skipped with a
     reason (a tray saved by an older UI build may lack task_id), never raised."""
@@ -537,6 +574,11 @@ def undo(conn: sqlite3.Connection, batch_id: int) -> dict:
                 if not n:
                     skipped.append({"task_id": u["to"], "why": f"Task-{u['to']}: a link or reminder moved by this merge was changed since; left as it is"})
                     continue
+            elif "thread_link_id" in u:                          # a followed thread; gone unless a merge moved it or it was removed since
+                if not conn.execute("DELETE FROM links WHERE id = ? AND task_id = ?", (u["thread_link_id"], u.get("task_id"))).rowcount:
+                    skipped.append({"task_id": u.get("task_id"), "why": f"Task-{u.get('task_id')}: the thread link was moved or removed since; left as it is"})
+                    continue
+                conn.execute("UPDATE tasks SET edited_at = ? WHERE id = ?", (now_iso(), u["task_id"]))
             elif "reminder_id" in u:
                 conn.execute("UPDATE reminders SET status = 'cancelled' WHERE id = ?", (u["reminder_id"],))
             elif "evidence_id" in u:

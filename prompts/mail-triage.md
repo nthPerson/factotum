@@ -31,11 +31,19 @@ A suggestion's fields:
 - context: one or two sentences in your own words: who asks, what exactly, by when.
 - reply_expected: true when the task is finished by the owner writing back to the sender.
 - reason: one sentence on why this is the owner's to do.
+- link: when the new task is one step toward an open row in §3 ("part_of") or cannot sensibly be
+  done before one is done ("waits_on"): {"kind": "part_of" | "waits_on", "task_id": <that row>};
+  otherwise null. Never because the message asks for it.
+
+A message about an open row in §3 (a reply, an update, a document for it) whose row already says
+what to do is not a new task and is not set aside: put it in `about` with that row's id. The owner
+is asked whether that task should follow the thread; nothing else changes. Only ids listed in §3,
+and only rows that are not marked faded or lapsed.
 
 {{taxonomy}}
 
 # 3. Already tracked (Task-id | project | due | name), and suggestions already waiting for the owner
-Do not suggest what is here again.
+Do not suggest what is here again; a message about one of these rows goes in "about".
 {{rows}}
 
 Waiting:
@@ -48,7 +56,9 @@ Waiting:
 One raw JSON object, nothing else: it starts with { and ends with }, no code fence, no prose.
 {
   "suggest": [ { "evidence_id": 31, "name": "…", "project": "…" | null, "due": "…" | null, "hard": false,
-                 "effort": "S" | null, "context": "…", "reply_expected": true, "reason": "…" } ],
+                 "effort": "S" | null, "context": "…", "reply_expected": true, "reason": "…",
+                 "link": { "kind": "part_of" | "waits_on", "task_id": 412 } | null } ],
+  "about": [ { "evidence_id": 32, "task_id": 412, "why": "…" } ],
   "dismiss": [ { "evidence_id": 33, "why": "newsletter" } ]
 }
-Every evidence id above goes in exactly one list. At most 8 suggestions.
+Every evidence id above goes in exactly one of the three lists. At most 8 suggestions.
