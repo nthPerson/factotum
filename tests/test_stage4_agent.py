@@ -1,7 +1,8 @@
 """Stage 4a, the agent's surface (design §11): what the MCP tools show of links, and what they record."""
 import json
+import re
 
-from factotum import batches, mcp_server as M, relations
+from factotum import batches, config as C, lifecycle, mcp_server as M, relations
 from factotum.db import connect, now_iso
 from stage4_helpers import TODAY, link, mk
 
@@ -437,3 +438,25 @@ def test_what_else_is_related_is_a_canned_prompt(conn, cfg):
     from factotum import chat
     mk(conn, 1)
     assert chat.CANNED["related"][1] == "What else is related?" and "task_neighbours" in chat.build_prompt(cfg, conn, "", [1], TODAY, canned="related")
+
+
+# --- Task 17: prompts and skills
+
+def test_the_chat_prompt_teaches_links_and_no_longer_says_it_has_no_other_tools():
+    p = (C.ROOT / "prompts" / "chat-turn.md").read_text()
+    assert "You have no other tools" not in p and "Links are proposals like any other change" in p
+    assert "set|done|drop|pin_top|longterm|add_reminder|add_note|link_thread|link|unlink|merge|create" in p   # "link" and "ref" alone are already in today's text
+    for word in ("`outcome`", "`ref`", "`into`", "`waits_on`", "`part_of`"):
+        assert word in p
+
+
+def test_the_planner_skill_names_the_new_tools_and_phrases():
+    s = (C.ROOT / "skills" / "factotum-planner" / "SKILL.md").read_text()
+    assert "skill-version: 2026-11-10" in s and all(n in s for n in ("task_neighbours", "waiting_tasks", "twin_candidates", "goal_tree", "can't start until", "break this into steps"))
+
+
+def test_nothing_the_user_or_the_agent_reads_says_blocked_or_dependency():
+    texts = [p.read_text() for p in (C.ROOT / "prompts").glob("*.md")] + [p.read_text() for p in (C.ROOT / "skills").rglob("SKILL.md")]
+    texts += [t["description"] for t in M.TOOLS] + [M.OPS_HELP] + list(lifecycle.REVIEW_LABELS.values()) + [lifecycle.REASON_TEXTS[k] for k in lifecycle.REASON_TEXTS]
+    for t in texts:
+        assert not re.search(r"\bblocked\b|\bdependenc", t, re.I), t[:120]

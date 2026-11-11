@@ -84,6 +84,11 @@ while it is stale (kind `today-summary`; Settings → Claude turns it off or spa
 ≈ $0.14 per batch of 15 messages and only when there is new mail (kind `mail-triage`; Settings →
 Inputs → Tasks from mail), a chat turn $0.05–0.20, chat-check $0.002. `GET /api/stats` reports the last 7 days; the Log tab shows each run.
 
+## Schema versions and backups
+
+The database carries a schema version (`PRAGMA user_version`). A data migration runs at start-up and
+first writes a backup to `data/backups/` with the SQLite backup API; never `cp` the database.
+
 ## What this skill may do
 
 Read anything above and explain it. Edit `config/factotum.yaml` or the Settings tab when the user

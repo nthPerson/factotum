@@ -3,7 +3,7 @@ name: factotum-planner
 description: Query and groom the user's task list, mail, calendar and Plaud recordings through Factotum. Use for tasks, to-dos, deadlines, what is due or overdue, what to work on now, task codes like Task-17, completing / deferring / dropping / reminding, weekly review and backlog grooming, finding the email behind a task, drafting a reply, and recalling what a recorded meeting said.
 ---
 
-<!-- skill-version: 2026-11-02 -->
+<!-- skill-version: 2026-11-10 -->
 
 # Factotum — planner
 
@@ -24,7 +24,8 @@ from memory.
 
 | Need | Tool |
 |---|---|
-| open tasks, by project or keyword, scored | `tasks_query` (status open by default; `q`, `project`, `limit`) |
+| open tasks, by project or keyword, scored | `tasks_query` (status open by default; `q`, `project`, `limit`; `rel` shows a row's links; `ready`, `linked_to`, `goal` filter by links; `cut` says how many rows were dropped to fit) |
+| how tasks are linked | `task_neighbours` (one task's links and nearby tasks), `waiting_tasks` (tasks waiting on another), `twin_candidates` (likely duplicates), `goal_tree` (a goal and its steps) |
 | one task in full: links, reminders, last changes | `task_get` |
 | pending reminders | `reminders_list` |
 | the email behind a task | `mail_search` (`from:` `to:` `subject:` work), then `mail_thread`, `mail_message` |
@@ -63,11 +64,19 @@ instead of creating its twin (a create with an open task's exact name is refused
 | waiting on `<who>` | `{"op": "set", "fields": {"waiting_on": "who"}}` |
 | top of the pile / long-term, never fades | `{"op": "pin_top"}` / `{"op": "longterm"}` |
 | urgent / can wait | `{"op": "set", "fields": {"manual_priority": "P0"}}` … `P3` |
-| note `<text>` | `{"op": "set", "fields": {"context": "<existing context>\n<date>: <text>"}}` (read it first; `set` replaces) |
+| note `<text>` | `{"op": "add_note", "task_id": n, "fields": {"text": "<text>"}}` (appended with today's date) |
+| can't start until / after X / needs X first | `{"op": "link", "task_id": n, "fields": {"kind": "waits_on", "other": X, "why": "…"}}` |
+| part of / a step of / under X | `{"op": "link", "task_id": n, "fields": {"kind": "part_of", "other": X}}` |
+| same as / duplicate of / merge into | `{"op": "merge", "task_id": <goes away>, "fields": {"into": <kept>}}` (always staged; say which row is kept) |
+| break this into steps / split it | one call: `create` per step with a `ref` and `links` (`[{"kind": "part_of", "other": <goal id or ref>}]`) |
+| unlink / not related after all | `{"op": "unlink", "task_id": n, "fields": {"kind": "…", "other": X}}` |
+| how did it turn out | `done` / `drop` with `fields: {"outcome": "one line"}` |
 | remind me `<when>` | `{"op": "add_reminder", "task_id": n, "fields": {"fire_at": "YYYY-MM-DDTHH:MM", "label": "…", "repeat": null}}` |
 | add a task (with reminders) | `{"op": "create", "fields": {"name": "imperative, ≤ 80 chars", "project": "<one from the taxonomy>", "due": "YYYY-MM-DD", "hard": true, "effort": "S", "context": "…"}, "reminders": [{"fire_at": "…", "label": "…"}]}` |
 | close it once I have emailed `<person>` | `{"op": "watch_sent", "task_id": n, "fields": {"to": "person@example.org"}}` — find the address with `mail_search` if the user gave a name; the mail sweep closes the task when a message to it is sent from now on. On a new task: `"watch_sent_to": "…"` beside `fields` |
 | stop watching / bring a closed task back | `{"op": "unwatch_sent"}` / `{"op": "reopen"}` |
+
+Closing a task never closes the tasks linked to it.
 
 Every op but `create` needs `task_id` (an integer). A watch needs an email address, not a name; if
 the search finds two candidates, ask which. Read the result: `rejected` says why a change was left
@@ -110,5 +119,5 @@ writes are capped per hour; past the cap, stage.
   never proof that a task is done.
 - **Weekly review** — in this order: close what is clearly done; overdue rows one at a time
   (close / real date / drop); undated rows quiet for three weeks (drop is a success); waiting rows
-  older than two weeks (a nudge or a drop); duplicates (same deliverable from two sources). Stage
+  older than two weeks (a nudge or a drop); duplicates (`twin_candidates`, then `merge` with the kept row named). Stage
   the whole pass as **one** `stage_changes` batch with a label that says what it is.
