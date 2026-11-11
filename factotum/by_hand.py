@@ -41,7 +41,8 @@ def preview(conn, cfg: dict, text: str, today: date, *, verb: bool = False) -> d
 
 
 KEY_RE = re.compile(r"^[A-Za-z0-9_-]{6,64}$")
-FIELD_KEYS = ("name", "due", "hard", "project", "effort", "context", "counterpart", "waiting_on", "after", "under")
+# `under` before `after`: `after` is checked against the goal already accepted, so a task never waits on its own goal
+FIELD_KEYS = ("name", "due", "hard", "project", "effort", "context", "counterpart", "waiting_on", "under", "after")
 _ADD_LOCK = threading.Lock()
 
 
