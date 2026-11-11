@@ -96,6 +96,18 @@ def restore(db: Db, rel_id: int) -> None:
     db.execute("UPDATE relations SET removed_at = NULL, removed_batch_id = NULL WHERE id = ?", (rel_id,))
 
 
+def default_survivor(db: Db, a: int, b: int) -> tuple[int, int]:
+    """`(keep, goes)` for a merge of two rows: the Canvas row (an outside identity that closes
+    itself); both or neither → the older (`created_at`, then the lower id)."""
+    rows = {r["id"]: dict(r) for r in db.execute("SELECT id, source, created_at FROM tasks WHERE id IN (?, ?)", (a, b)).fetchall()}
+    ra, rb = rows.get(a) or {"id": a}, rows.get(b) or {"id": b}
+    ca, cb = ra.get("source") == "Canvas", rb.get("source") == "Canvas"
+    if ca != cb:
+        return (a, b) if ca else (b, a)
+    first = min((ra, rb), key=lambda r: (r.get("created_at") or "", r["id"]))
+    return (a, b) if first is ra else (b, a)
+
+
 def change_value(rel: dict, task_id: int, other_name: str | None) -> dict:
     """What a `link` change row holds for one end of `rel`: it names the OTHER task."""
     out = task_id == rel["src"]

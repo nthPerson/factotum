@@ -17,7 +17,7 @@ SETTABLE = {
     "last_reviewed_at", "why_now", "calendar_event", "outcome",
 }
 OPS = {"set", "done", "drop", "reopen", "pin_top", "unpin", "keep", "longterm", "fade", "lapse", "add_reminder", "judge_evidence",
-       "create", "watch_sent", "unwatch_sent", "link", "unlink", "add_note"}
+       "create", "watch_sent", "unwatch_sent", "link", "unlink", "add_note", "merge"}
 # What a `create` may carry; score, priority, status and mentions stay derived.
 CREATABLE = {"name", "project", "area", "due", "due_is_datetime", "hard", "effort", "context", "counterpart", "waiting_on", "manual_priority", "longterm", "snoozed_until"}
 CREATED_SOURCE = "Claude"          # the Source of a task a connector or skill created (and the default)
@@ -215,6 +215,8 @@ def apply(conn: sqlite3.Connection, changes: list[dict], source: str, today: dat
                 applied += _create(conn, cur, ch, batch_id, source, today, undo, skipped, created, refs)
             elif op in ("link", "unlink"):
                 applied += _link_op(conn, cur, ch, batch_id, source, undo, skipped, refs)
+            elif op == "merge":
+                applied += _merge(conn, cur, ch, batch_id, source, today, undo, skipped)
             elif _apply_one(conn, cur, ch, batch_id, source, today, closed_by, undo, skipped):
                 applied += 1
             note = str(ch.get("note") or "").strip()[:300] if isinstance(ch, dict) else ""
@@ -285,15 +287,84 @@ def _link_op(conn, cur, ch: dict, batch_id: int, source: str, undo: list, skippe
     return True
 
 
-def _link_changes(cur, batch_id: int, rel: dict, added: bool) -> None:
+def _link_changes(cur, batch_id: int, rel: dict, added: bool, extra: dict[int, dict] | None = None) -> None:
     """Two `link` changes rows, one per task, each naming the other task (History and the Log read
-    changes by task id); `new` when the link was added, `old` when it was removed."""
+    changes by task id); `new` when the link was added, `old` when it was removed. `extra` adds keys
+    to one task's row (a merge's `moved` counts on the survivor's)."""
     names = {r["id"]: r["name"] for r in cur.execute("SELECT id, name FROM tasks WHERE id IN (?, ?)", (rel["src"], rel["dst"])).fetchall()}
     for tid, other in ((rel["src"], rel["dst"]), (rel["dst"], rel["src"])):
-        v = json.dumps(R.change_value(rel, tid, names.get(other)))
+        v = json.dumps(dict(R.change_value(rel, tid, names.get(other)), **(extra or {}).get(tid, {})))
         cur.execute("INSERT INTO changes (batch_id, task_id, field, old, new) VALUES (?, ?, 'link', ?, ?)",
                     (batch_id, tid, None if added else v, v if added else None))
     cur.execute("UPDATE tasks SET edited_at = ? WHERE id IN (?, ?)", (now_iso(), rel["src"], rel["dst"]))
+
+
+def _merge(conn, cur, ch: dict, batch_id: int, source: str, today: date, undo: list, skipped: list) -> bool:
+    """`merge`: the duplicate (`task_id`) goes into the survivor (`fields.into`), all in this batch.
+    Its outside links, pending reminders and task links move to the survivor (a move a link rule
+    refuses stays on the duplicate and is said), the survivor takes a due date only when it has
+    none, and nothing else is copied; no mention is written. The duplicate is closed AFTER its links
+    move, so undo (newest first) reopens it before it restores a `waits_on` that points at it."""
+    f = ch.get("fields") if isinstance(ch.get("fields"), dict) else {}
+    goes, keep = _link_end(ch.get("task_id"), {})[0], _link_end(f.get("into"), {})[0]
+    if goes is None or keep is None:
+        skipped.append({"task_id": ch.get("task_id"), "why": "merge needs task_id and fields.into, two task ids"})
+        return False
+    if goes == keep:
+        skipped.append({"task_id": goes, "why": "a task cannot be merged into itself"})
+        return False
+    dup, surv = get_task(conn, goes), get_task(conn, keep)
+    for t, row in ((goes, dup), (keep, surv)):
+        if not row:
+            skipped.append({"task_id": t, "why": f"no Task-{t}"})
+            return False
+    if dup["status"] != "open":
+        skipped.append({"task_id": goes, "why": f"Task-{goes} is not open ({dup['status']}); only an open task can be merged away"})
+        return False
+    if surv["status"] == "dropped" and surv.get("closed_by") == "merge":
+        s = cur.execute("SELECT dst FROM relations WHERE src = ? AND kind = 'same_as' AND removed_at IS NULL ORDER BY id DESC LIMIT 1", (keep,)).fetchone()
+        if s:
+            skipped.append({"task_id": goes, "why": f"Task-{keep} was itself merged into Task-{s['dst']}; merge into Task-{s['dst']}"})
+            return False
+    moved = {"links": 0, "reminders": 0, "tasks": 0}
+    for ln in cur.execute("SELECT id, kind, ref FROM links WHERE task_id = ? ORDER BY id", (goes,)).fetchall():
+        if cur.execute("SELECT 1 FROM links WHERE task_id = ? AND kind = ? AND ref = ?", (keep, ln["kind"], ln["ref"])).fetchone():
+            continue                                         # the survivor has it already; this row stays where it is
+        cur.execute("UPDATE links SET task_id = ? WHERE id = ?", (keep, ln["id"]))
+        undo.append({"move": "link", "id": ln["id"], "from": goes, "to": keep})
+        moved["links"] += 1
+    for rm in cur.execute("SELECT id FROM reminders WHERE task_id = ? AND status IN ('pending', 'snoozed') ORDER BY id", (goes,)).fetchall():
+        cur.execute("UPDATE reminders SET task_id = ? WHERE id = ?", (keep, rm["id"]))
+        undo.append({"move": "reminder", "id": rm["id"], "from": goes, "to": keep})
+        moved["reminders"] += 1
+    for rel in [dict(r) for r in cur.execute("SELECT * FROM relations WHERE (src = ? OR dst = ?) AND removed_at IS NULL ORDER BY id", (goes, goes)).fetchall()]:
+        if rel["kind"] == "same_as" and rel["src"] == goes:
+            continue                                         # where the duplicate itself went before a reopen; on the survivor it would say the survivor went there
+        other = rel["dst"] if rel["src"] == goes else rel["src"]
+        src, dst = (keep, rel["dst"]) if rel["src"] == goes else (rel["src"], keep)
+        R.remove(cur, rel["id"], batch_id)                   # first, so the old row does not count against its own move
+        readd = other != keep and not R.find(cur, src, dst, rel["kind"])
+        if readd:
+            reason = R.check(cur, src, dst, rel["kind"])
+            if reason:
+                R.restore(cur, rel["id"])
+                skipped.append({"task_id": goes, "why": f"Task-{goes}'s link to Task-{other} was not moved: {reason}"})
+                continue
+        _link_changes(cur, batch_id, rel, added=False)
+        undo.append({"relation_id": rel["id"], "undo": "restore"})
+        if readd:
+            rid = R.add(cur, src, dst, rel["kind"], rel["why"], source, batch_id)
+            _link_changes(cur, batch_id, dict(cur.execute("SELECT * FROM relations WHERE id = ?", (rid,)).fetchone()), added=True)
+            undo.append({"relation_id": rid, "undo": "remove"})
+            moved["tasks"] += 1
+    if dup.get("due") and not surv.get("due"):
+        _write_fields(cur, surv, {"due": dup["due"], "due_is_datetime": dup.get("due_is_datetime"), "hard": dup.get("hard")}, batch_id, undo)
+    _write_fields(cur, dup, {"status": "dropped", "completed_at": today.isoformat(), "closed_by": "merge", "top_rank": None}, batch_id, undo)
+    if not R.find(cur, goes, keep, "same_as"):
+        rid = R.add(cur, goes, keep, "same_as", f.get("why"), source, batch_id)
+        _link_changes(cur, batch_id, dict(cur.execute("SELECT * FROM relations WHERE id = ?", (rid,)).fetchone()), added=True, extra={keep: {"moved": moved}})
+        undo.append({"relation_id": rid, "undo": "remove"})
+    return True
 
 
 def _apply_one(conn, cur, ch: dict, batch_id: int, source: str, today: date, closed_by: str, undo: list, skipped: list) -> bool:
@@ -415,6 +486,18 @@ def undo(conn: sqlite3.Connection, batch_id: int) -> dict:
                 skip = _undo_relation(conn, u)
                 if skip:
                     skipped.append(skip)
+                    continue
+            elif "move" in u:                                    # a merge moved an outside link or a reminder; back unless it moved again since
+                table = {"link": "links", "reminder": "reminders"}.get(u["move"])
+                if table is None or not all(k in u for k in ("id", "from", "to")):
+                    skipped.append({"task_id": u.get("to"), "why": UNKNOWN_UNDO})
+                    continue
+                try:
+                    n = conn.execute(f"UPDATE {table} SET task_id = ? WHERE id = ? AND task_id = ?", (u["from"], u["id"], u["to"])).rowcount
+                except sqlite3.IntegrityError:                   # the old owner has that link again
+                    n = 0
+                if not n:
+                    skipped.append({"task_id": u["to"], "why": f"Task-{u['to']}: a link or reminder moved by this merge was changed since; left as it is"})
                     continue
             elif "reminder_id" in u:
                 conn.execute("UPDATE reminders SET status = 'cancelled' WHERE id = ?", (u["reminder_id"],))
