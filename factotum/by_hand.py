@@ -140,3 +140,41 @@ def add(conn, cfg: dict, *, text: str | None = None, fields: dict | None = None,
     if not res.get("created"):
         raise ValueError((res["skipped"][0]["why"] if res.get("skipped") else "the task was not made"))
     return {"task_id": res["created"][0], "batch_id": res["batch_id"], "already": False, "name": name, "parts": parts, "refused": refused, "skipped": res["skipped"]}
+
+
+ID_RE = re.compile(r"^(?:task[-\s]?|#)?(\d{1,7})$", re.I)
+SEARCH_COLS = ("id", "name", "status", "project", "due", "completed_at", "closed_by", "outcome")
+
+
+def _like(word: str) -> str:
+    return "%" + word.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+
+def search(conn, q: str, limit: int = 12) -> dict:
+    """Any task, open or closed, by number or by every word of its name or project. Read-only."""
+    limit = max(1, min(30, int(limit)))
+    q = (q or "").strip()
+    if not q:
+        return {"results": [], "more": False}
+    m = ID_RE.match(q)
+    args: list = []
+    if m:
+        where, first = "CAST(id AS TEXT) LIKE ? ESCAPE '\\'", int(m.group(1))
+        args.append(f"{first}%")
+    else:
+        words = q.split()[:6]
+        where = " AND ".join("(name LIKE ? ESCAPE '\\' OR COALESCE(project, '') LIKE ? ESCAPE '\\')" for _ in words)
+        args += [_like(w) for w in words for _ in (0, 1)]
+        first = -1
+    sql = (f"SELECT {', '.join(SEARCH_COLS)} FROM tasks WHERE {where} "
+           "ORDER BY (id = ?) DESC, (status = 'open') DESC, "
+           "CASE WHEN status = 'open' THEN (due IS NULL) END, CASE WHEN status = 'open' THEN due END, "
+           "CASE WHEN status = 'open' THEN NULL ELSE completed_at END DESC, id DESC LIMIT ?")
+    got = conn.execute(sql, (*args, first, limit + 1)).fetchall()
+    results = []
+    for r in got[:limit]:
+        row = dict(zip(SEARCH_COLS, r))
+        s = conn.execute("SELECT dst FROM relations WHERE src = ? AND kind = 'same_as' AND removed_at IS NULL LIMIT 1", (row["id"],)).fetchone()
+        row["merged_into"] = s[0] if s else None
+        results.append(row)
+    return {"results": results, "more": len(got) > limit}

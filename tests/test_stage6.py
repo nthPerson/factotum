@@ -191,3 +191,41 @@ def test_the_add_command_line(cfg, tmp_path, monkeypatch, capsys):
     cli.main(["add", "Read the paper #nosuch"])
     out = capsys.readouterr().out
     assert out.startswith("Task-") and "#nosuch: no project matches #nosuch" in out
+
+
+# --- Task 7: finding any task
+
+def _found(cfg, tmp_path):
+    client, conn = _client(cfg, tmp_path)
+    mk(conn, 12, name="Ask the chair"); mk(conn, 120, name="Firmware tests"); mk(conn, 121, name="Firmware box")
+    batches.apply(conn, [{"op": "done", "task_id": 120, "fields": {"outcome": "passed"}}], "ui", date(2026, 11, 10))
+    batches.apply(conn, [{"op": "merge", "task_id": 121, "fields": {"into": 12}}], "ui", TODAY)
+    return client, conn
+
+
+def test_any_task_can_be_found_by_number_or_words(cfg, tmp_path):
+    from factotum import by_hand
+    client, conn = _found(cfg, tmp_path)
+    ids = lambda q, **k: [r["id"] for r in by_hand.search(conn, q, **k)["results"]]     # noqa: E731
+    assert ids("12") == [12, 120, 121] and ids("Task-120")[0] == 120 and ids("#121")[0] == 121
+    assert ids("firmware") == [120, 121] and ids("firm tests") == [120] and ids("") == [] and ids("100%") == []
+    r = client.get("/api/search", params={"q": "firmware"}).json()["results"]
+    assert r[0] == {"id": 120, "name": "Firmware tests", "status": "done", "project": "COMPE 510", "due": None, "completed_at": "2026-11-10",
+                    "closed_by": "ui", "outcome": "passed", "merged_into": None}
+    assert r[1]["merged_into"] == 12 and r[1]["status"] == "dropped"
+
+
+def test_search_is_capped_and_says_so(conn):
+    from factotum import by_hand
+    for i in range(1, 41):
+        mk(conn, i, name=f"Note {i}")
+    r = by_hand.search(conn, "note")
+    assert len(r["results"]) == 12 and r["more"] is True and len(by_hand.search(conn, "note", limit=50)["results"]) == 30
+
+
+def test_the_find_command_line(cfg, tmp_path, monkeypatch, capsys):
+    from factotum import __main__ as cli
+    monkeypatch.setenv("FACTOTUM_CONFIG", str(FIXTURE)); monkeypatch.setenv("FACTOTUM_DB", str(tmp_path / "t.db"))
+    _found(cfg, tmp_path)
+    cli.main(["find", "firmware"])
+    assert capsys.readouterr().out.splitlines() == ["Task-120  done 2026-11-10  Firmware tests", "Task-121  dropped 2026-11-01 merged into Task-12  Firmware box"]

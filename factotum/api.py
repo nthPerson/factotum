@@ -4,6 +4,7 @@
   GET  /api/tasks/{id}?before=&limit=    one task, any status: links, reminders, its task links, where it came from, a page of History (stamps neighbours_seen_at)
   POST /api/commands  {text}             parse the grammar → changes (nothing applied)
   POST /api/add {text|fields, key}        make a task now (one ui batch; the same key twice is one task)
+  GET  /api/search?q=&limit=12           any task, open or closed, by number or words
   GET  /api/add/preview?text=            how an add line will be filed, the tasks it names checked (writes nothing)
   POST /api/batches/apply {source, changes}   the one write path
   POST /api/batches/{id}/undo
@@ -360,6 +361,10 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
     @app.get("/api/add/preview")
     def add_preview(text: str = ""):
         return by_hand.preview(conn, eff_cfg(), text, date.today())
+
+    @app.get("/api/search")
+    def search_tasks(q: str = "", limit: int = 12):
+        return by_hand.search(conn, q, limit)
 
     @app.post("/api/add")
     def add_task(body: AddBody):

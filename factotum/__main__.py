@@ -116,6 +116,8 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("add", help="add a task by hand from one line, as the New task line does: #project ~effort ! a date, after N, under N; --dry-run prints how it would be filed")
     p.add_argument("text")
     p.add_argument("--dry-run", action="store_true")
+    p = sub.add_parser("find", help="find any task, open or closed, by number or words")
+    p.add_argument("q")
     sub.add_parser("mcp", help="the MCP server a chat turn talks to, over stdio (started by the runner; `chat-check` exercises it)")
     p = sub.add_parser("chat", help="one chat turn from the terminal: a real Claude run (~$0.20), stored like a turn from the UI")
     p.add_argument("text", nargs="?", default="")
@@ -219,6 +221,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Task-{res['task_id']} {res['name']}")
             for r in res["refused"]:
                 print(f"  {r['words']}: {r['why']}")
+    elif a.cmd == "find":
+        from . import by_hand
+        for r in by_hand.search(conn, a.q)["results"]:
+            when = f" {r['completed_at'][:10]}" if r["completed_at"] else ""
+            merged = f" merged into Task-{r['merged_into']}" if r["merged_into"] else ""
+            print(f"Task-{r['id']}  {r['status']}{when}{merged}  {r['name']}")
     elif a.cmd == "mcp":
         from . import mcp_server
         mcp_server.serve_stdio()            # stdout is the protocol from here on; logs go to stderr
