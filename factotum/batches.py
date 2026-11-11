@@ -17,7 +17,7 @@ SETTABLE = {
     "last_reviewed_at", "why_now", "calendar_event", "outcome",
 }
 OPS = {"set", "done", "drop", "reopen", "pin_top", "unpin", "keep", "longterm", "fade", "lapse", "add_reminder", "judge_evidence",
-       "create", "watch_sent", "unwatch_sent", "link", "unlink", "add_note", "merge"}
+       "create", "watch_sent", "unwatch_sent", "link", "unlink", "add_note", "merge", "follow_thread"}
 # What a `create` may carry; score, priority, status and mentions stay derived.
 CREATABLE = {"name", "project", "area", "due", "due_is_datetime", "hard", "effort", "context", "counterpart", "waiting_on", "manual_priority", "longterm", "snoozed_until"}
 CREATED_SOURCE = "Claude"          # the Source of a task a connector or skill created (and the default)
@@ -125,7 +125,8 @@ def _create(conn, cur, ch: dict, batch_id: int, source: str, today: date, undo: 
         except ValueError as e:
             skipped.append({"task_id": None, "why": f"{name[:40]}: watch not set: {e}"})
     now = now_iso()
-    tid = upsert_task(conn, dict(vals, status="open", source=created_source(source), source_key=source_key or f"batch:{batch_id}:{len(created)}", hard=vals.get("hard", 0),
+    # `created_source`, like `source_key`, is set by Python callers only (the API strips both)
+    tid = upsert_task(conn, dict(vals, status="open", source=ch.get("created_source") or created_source(source), source_key=source_key or f"batch:{batch_id}:{len(created)}", hard=vals.get("hard", 0),
                                  mentions=1, last_mention_at=today.isoformat(), created_at=now, edited_at=now))
     # `new` keeps who the create named: an address a direct batch introduced is not a contact (mcp_server.known_recipients)
     cur.execute("INSERT INTO changes (batch_id, task_id, field, old, new) VALUES (?, ?, 'created', NULL, ?)",
@@ -195,7 +196,8 @@ def _same_value(cur_v, want) -> bool:
 
 def apply(conn: sqlite3.Connection, changes: list[dict], source: str, today: date | None = None, closed_by: str | None = None, cause: dict | None = None) -> dict:
     """Apply a list of changes atomically; `cause` (what set the batch off) is stored as cause_json. Returns {"batch_id", "applied": n, "skipped": [...],
-    "created": [task ids a `create` made], "refs": {ref: task id}}."""
+    "created": [task ids a `create` made], "refs": {ref: task id}, "ripple_queued": [task ids this batch queued for a ripple
+    (`ripple.enqueue`, sorted; never any for a ripple's own batch)]}."""
     today = today or date.today()
     closed_by = closed_by or source
     cur = conn.cursor()
@@ -217,17 +219,27 @@ def apply(conn: sqlite3.Connection, changes: list[dict], source: str, today: dat
                 applied += _link_op(conn, cur, ch, batch_id, source, undo, skipped, refs)
             elif op == "merge":
                 applied += _merge(conn, cur, ch, batch_id, source, today, undo, skipped)
+            elif op == "follow_thread":
+                applied += _follow_thread(conn, cur, ch, batch_id, undo, skipped)
             elif _apply_one(conn, cur, ch, batch_id, source, today, closed_by, undo, skipped):
                 applied += 1
             note = str(ch.get("note") or "").strip()[:300] if isinstance(ch, dict) else ""
             if note:
                 cur.execute("UPDATE changes SET note = ? WHERE batch_id = ? AND id > ?", (note, batch_id, before))
+        from . import ripple                                 # here, not at the top: ripple imports batches
+        queued = ripple.enqueue(cur, batch_id, source)       # in this transaction, so a failure rolls it back with the batch
     except Exception:
         conn.rollback()   # one shared connection serves every request; never leave it mid-transaction
         raise
     cur.execute("UPDATE batches SET undo_json = ? WHERE id = ?", (json.dumps(undo), batch_id))
     conn.commit()
-    return {"batch_id": batch_id, "applied": applied, "skipped": skipped, "created": created, "refs": refs}
+    if created:
+        from . import suggestions          # lazy: suggestions must not be imported at the top of batches
+        suggestions.after_create(conn, created, source)
+    if any("outcome" in what for what in queued.values()):
+        ripple.poke()                                        # an outcome ripples at once, not after the quiet period
+    return {"batch_id": batch_id, "applied": applied, "skipped": skipped, "created": created, "refs": refs,
+            "ripple_queued": sorted(queued)}
 
 
 def _link_end(v, refs: dict) -> tuple[int | None, str | None]:
@@ -381,6 +393,41 @@ def _judge_suggestions(conn, cur, a: int, b: int, batch_id: int, undo: list, ski
             _judge_evidence(conn, cur, {"op": "judge_evidence", "task_id": a, "fields": {"evidence_id": s["evidence_id"], "verdict": "applied"}}, batch_id, undo, skipped)
 
 
+def _follow_thread(conn, cur, ch: dict, batch_id: int, undo: list, skipped: list) -> bool:
+    """`follow_thread`: an open task follows a mail thread from now on (a `mail_thread` row in
+    `links`, seen up to `fields.at`, so the sweep does not call the mail the card came from "Thread
+    updated"). Accepting "This mail is about Task-N. Follow its thread?" (mail_triage.py). A thread
+    the task already follows is a no-op; undo deletes the row this batch inserted."""
+    f = ch.get("fields") if isinstance(ch.get("fields"), dict) else {}
+    tid = _link_end(ch.get("task_id"), {})[0]
+    task = get_task(conn, tid) if tid is not None else None
+    if not task:
+        skipped.append({"task_id": ch.get("task_id"), "why": "no such task"})
+        return False
+    if task["status"] != "open":
+        skipped.append({"task_id": tid, "why": f"Task-{tid} is not open"})
+        return False
+    conv = f.get("conversation_id")
+    if not isinstance(conv, str) or not conv.strip():
+        skipped.append({"task_id": tid, "why": "follow_thread needs fields.conversation_id"})
+        return False
+    if len(conv) > 300:
+        skipped.append({"task_id": tid, "why": "follow_thread's conversation_id is over 300 characters"})
+        return False
+    if cur.execute("SELECT 1 FROM links WHERE task_id = ? AND kind = 'mail_thread' AND ref = ?", (tid, conv)).fetchone():
+        return False
+    subject = str(f["subject"])[:120] if f.get("subject") else None
+    account = str(f["account"]) if f.get("account") else None
+    cur.execute("INSERT INTO links (task_id, kind, ref, label, account, created_at, last_seen_at) VALUES (?, 'mail_thread', ?, ?, ?, ?, ?)",
+                (tid, conv, subject, account, now_iso(), str(f["at"]) if f.get("at") else None))
+    lid = cur.lastrowid
+    cur.execute("INSERT INTO changes (batch_id, task_id, field, old, new) VALUES (?, ?, 'thread', NULL, ?)",
+                (batch_id, tid, json.dumps({"conversation_id": conv, "subject": subject})))
+    cur.execute("UPDATE tasks SET edited_at = ? WHERE id = ?", (now_iso(), tid))
+    undo.append({"task_id": tid, "thread_link_id": lid})
+    return True
+
+
 def _apply_one(conn, cur, ch: dict, batch_id: int, source: str, today: date, closed_by: str, undo: list, skipped: list) -> bool:
     """Apply one change; returns True when it wrote something. Anything malformed is skipped with a
     reason (a tray saved by an older UI build may lack task_id), never raised."""
@@ -501,67 +548,122 @@ def _judge_evidence(conn, cur, ch: dict, batch_id: int, undo: list, skipped: lis
 
 def undo(conn: sqlite3.Connection, batch_id: int) -> dict:
     """Undo a batch once. An entry that can no longer be undone safely (a link restore that would
-    duplicate or loop, an entry it does not know) is skipped and reported, never raised. Any error
-    rolls back: the API shares one connection, and an open transaction holds the write lock."""
+    duplicate or loop, an entry it does not know) is skipped and reported, never raised. The ripples
+    it caused are followed first (newest writes go first, so a field both wrote comes back whole), and
+    a ripple it queued that has not run is taken out of the queue (`ripple.unqueue`), in the same
+    transaction. Any error rolls back: the API shares one connection, and an open transaction holds
+    the write lock."""
     b = conn.execute("SELECT * FROM batches WHERE id = ?", (batch_id,)).fetchone()
     if not b:
         raise NoSuchBatch(batch_id)
     if b["undone_at"]:
-        return {"batch_id": batch_id, "restored": 0, "skipped": [], "already": True}
-    restored = 0
-    skipped: list[dict] = []
+        return {"batch_id": batch_id, "restored": 0, "skipped": [], "already": True, "ripples_undone": [], "ripples_kept": []}
+    undone: list[int] = []
+    kept: list[int] = []
     try:
-        # Newest first: a batch may set one field twice (an accepted suggestion, then the decision's
-        # note), and each entry's `old` is the value just before it; forwards, the middle value would win.
-        for u in reversed(json.loads(b["undo_json"] or "[]")):
-            if not isinstance(u, dict):
-                skipped.append({"task_id": None, "why": UNKNOWN_UNDO})
-                continue
-            if "relation_id" in u:
-                skip = _undo_relation(conn, u)
-                if skip:
-                    skipped.append(skip)
-                    continue
-            elif "move" in u:                                    # a merge moved an outside link or a reminder; back unless it moved again since
-                table = {"link": "links", "reminder": "reminders"}.get(u["move"])
-                if table is None or not all(k in u for k in ("id", "from", "to")):
-                    skipped.append({"task_id": u.get("to"), "why": UNKNOWN_UNDO})
-                    continue
-                try:
-                    n = conn.execute(f"UPDATE {table} SET task_id = ? WHERE id = ? AND task_id = ?", (u["from"], u["id"], u["to"])).rowcount
-                except sqlite3.IntegrityError:                   # the old owner has that link again
-                    n = 0
-                if not n:
-                    skipped.append({"task_id": u["to"], "why": f"Task-{u['to']}: a link or reminder moved by this merge was changed since; left as it is"})
-                    continue
-            elif "reminder_id" in u:
-                conn.execute("UPDATE reminders SET status = 'cancelled' WHERE id = ?", (u["reminder_id"],))
-            elif "evidence_id" in u:
-                conn.execute("UPDATE evidence SET judged_at = NULL, verdict = NULL WHERE id = ?", (u["evidence_id"],))
-            elif "created_task_id" in u:                         # a created task is dropped, not deleted — and left alone once a later decision closed it
-                t = conn.execute("SELECT status FROM tasks WHERE id = ?", (u["created_task_id"],)).fetchone()
-                if t and t["status"] != "open":
-                    skipped.append({"task_id": u["created_task_id"], "why": f"Task-{u['created_task_id']} was closed after it was created; left as it is"})
-                    continue
-                conn.execute("UPDATE tasks SET status = 'dropped', completed_at = ?, closed_by = 'undo', top_rank = NULL, edited_at = ? WHERE id = ? AND status = 'open'",
-                             (date.today().isoformat(), now_iso(), u["created_task_id"]))
-            elif "field" in u:
-                if "new" in u:                                   # entries from before this check carry no `new` and are restored unchecked
-                    now_v = conn.execute(f"SELECT {u['field']} FROM tasks WHERE id = ?", (u["task_id"],)).fetchone()
-                    if now_v is not None and not _same_value(now_v[0], u["new"]):
-                        skipped.append({"task_id": u["task_id"], "why": f"Task-{u['task_id']} {u['field']} was changed after this batch; left as it is"})
-                        continue
-                conn.execute(f"UPDATE tasks SET {u['field']} = ?, edited_at = ? WHERE id = ?", (u["old"], now_iso(), u["task_id"]))
-            else:
-                skipped.append({"task_id": u.get("task_id"), "why": UNKNOWN_UNDO})
-                continue
-            restored += 1
+        if b["source"] != "ripple":                              # a ripple's own undo looks for nothing: a ripple never causes one
+            _follow_ripples(conn, batch_id, undone, kept)        # before the cause's own entries: the ripple wrote after it
+        restored, skipped = _undo_entries(conn, json.loads(b["undo_json"] or "[]"))
         conn.execute("UPDATE batches SET undone_at = ? WHERE id = ?", (now_iso(), batch_id))
+        from . import ripple                                     # here, not at the top: ripple imports batches
+        ripple.unqueue(conn, batch_id)                           # a ripple it queued that has not run never runs for it
         conn.commit()
     except Exception:
         conn.rollback()
         raise
-    return {"batch_id": batch_id, "restored": restored, "skipped": skipped, "already": False}
+    return {"batch_id": batch_id, "restored": restored, "skipped": skipped, "already": False,
+            "ripples_undone": sorted(undone), "ripples_kept": sorted(kept)}
+
+
+def _follow_ripples(conn: sqlite3.Connection, batch_id: int, undone: list[int], kept: list[int]) -> None:
+    """Undo, in the caller's transaction, every not-undone ripple batch that `batch_id` caused, whole,
+    when every field it wrote still holds what it wrote; otherwise leave it whole and record on its
+    cause that the cause was undone. Newest first, so a later ripple over the same text goes first."""
+    for r in conn.execute("SELECT id, cause_json, undo_json FROM batches WHERE source = 'ripple' AND undone_at IS NULL AND id > ? "
+                          "ORDER BY id DESC", (batch_id,)).fetchall():
+        try:
+            cause = json.loads(r["cause_json"] or "null")
+        except ValueError:
+            continue
+        if not isinstance(cause, dict) or not isinstance(cause.get("batches"), list) or batch_id not in cause["batches"]:
+            continue
+        entries = json.loads(r["undo_json"] or "[]")
+        if _in_place(conn, entries):
+            _undo_entries(conn, entries)
+            conn.execute("UPDATE batches SET undone_at = ? WHERE id = ?", (now_iso(), r["id"]))
+            undone.append(r["id"])
+        else:
+            cause.update(cause_undone_at=now_iso(), cause_undone_batch=batch_id)
+            conn.execute("UPDATE batches SET cause_json = ? WHERE id = ?", (json.dumps(cause), r["id"]))
+            kept.append(r["id"])
+
+
+def _in_place(conn: sqlite3.Connection, entries: list) -> bool:
+    """True when every field entry that records what it wrote (`new`) still holds that value; relation,
+    move, reminder, evidence and create entries do not count."""
+    for u in entries:
+        if isinstance(u, dict) and "field" in u and "new" in u:
+            now_v = conn.execute(f"SELECT {u['field']} FROM tasks WHERE id = ?", (u["task_id"],)).fetchone()
+            if now_v is not None and not _same_value(now_v[0], u["new"]):
+                return False
+    return True
+
+
+def _undo_entries(conn: sqlite3.Connection, entries: list) -> tuple[int, list[dict]]:
+    """Revert one batch's undo entries without committing. Returns (restored count, skipped list)."""
+    restored = 0
+    skipped: list[dict] = []
+    # Newest first: a batch may set one field twice (an accepted suggestion, then the decision's
+    # note), and each entry's `old` is the value just before it; forwards, the middle value would win.
+    for u in reversed(entries):
+        if not isinstance(u, dict):
+            skipped.append({"task_id": None, "why": UNKNOWN_UNDO})
+            continue
+        if "relation_id" in u:
+            skip = _undo_relation(conn, u)
+            if skip:
+                skipped.append(skip)
+                continue
+        elif "move" in u:                                    # a merge moved an outside link or a reminder; back unless it moved again since
+            table = {"link": "links", "reminder": "reminders"}.get(u["move"])
+            if table is None or not all(k in u for k in ("id", "from", "to")):
+                skipped.append({"task_id": u.get("to"), "why": UNKNOWN_UNDO})
+                continue
+            try:
+                n = conn.execute(f"UPDATE {table} SET task_id = ? WHERE id = ? AND task_id = ?", (u["from"], u["id"], u["to"])).rowcount
+            except sqlite3.IntegrityError:                   # the old owner has that link again
+                n = 0
+            if not n:
+                skipped.append({"task_id": u["to"], "why": f"Task-{u['to']}: a link or reminder moved by this merge was changed since; left as it is"})
+                continue
+        elif "thread_link_id" in u:                          # a followed thread; gone unless a merge moved it or it was removed since
+            if not conn.execute("DELETE FROM links WHERE id = ? AND task_id = ?", (u["thread_link_id"], u.get("task_id"))).rowcount:
+                skipped.append({"task_id": u.get("task_id"), "why": f"Task-{u.get('task_id')}: the thread link was moved or removed since; left as it is"})
+                continue
+            conn.execute("UPDATE tasks SET edited_at = ? WHERE id = ?", (now_iso(), u["task_id"]))
+        elif "reminder_id" in u:
+            conn.execute("UPDATE reminders SET status = 'cancelled' WHERE id = ?", (u["reminder_id"],))
+        elif "evidence_id" in u:
+            conn.execute("UPDATE evidence SET judged_at = NULL, verdict = NULL WHERE id = ?", (u["evidence_id"],))
+        elif "created_task_id" in u:                         # a created task is dropped, not deleted — and left alone once a later decision closed it
+            t = conn.execute("SELECT status FROM tasks WHERE id = ?", (u["created_task_id"],)).fetchone()
+            if t and t["status"] != "open":
+                skipped.append({"task_id": u["created_task_id"], "why": f"Task-{u['created_task_id']} was closed after it was created; left as it is"})
+                continue
+            conn.execute("UPDATE tasks SET status = 'dropped', completed_at = ?, closed_by = 'undo', top_rank = NULL, edited_at = ? WHERE id = ? AND status = 'open'",
+                         (date.today().isoformat(), now_iso(), u["created_task_id"]))
+        elif "field" in u:
+            if "new" in u:                                   # entries from before this check carry no `new` and are restored unchecked
+                now_v = conn.execute(f"SELECT {u['field']} FROM tasks WHERE id = ?", (u["task_id"],)).fetchone()
+                if now_v is not None and not _same_value(now_v[0], u["new"]):
+                    skipped.append({"task_id": u["task_id"], "why": f"Task-{u['task_id']} {u['field']} was changed after this batch; left as it is"})
+                    continue
+            conn.execute(f"UPDATE tasks SET {u['field']} = ?, edited_at = ? WHERE id = ?", (u["old"], now_iso(), u["task_id"]))
+        else:
+            skipped.append({"task_id": u.get("task_id"), "why": UNKNOWN_UNDO})
+            continue
+        restored += 1
+    return restored, skipped
 
 
 def _undo_relation(conn: sqlite3.Connection, u: dict) -> dict | None:

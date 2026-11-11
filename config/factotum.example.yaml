@@ -234,14 +234,19 @@ notify:
     time: "06:30"               # taste: when the brief is sent. Settings → Outputs
     to: you@example.com         # Settings → Outputs
 
+links:                          # stage 7: suggested links between tasks (design §10)
+  suggestions_per_review: 5     # Settings → Review and lifecycle. Taste: at most this many suggested links are offered a day (Review and the dashed badges); the rest wait. 0 = none
+
 claude:                         # headless `claude -p` runs (§2 for the CLI; `factotum claude-check` tests the login)
   binary: claude                # absolute path (`which claude`): the service has systemd's minimal PATH
-  models: { sync_file: sonnet, today_summary: sonnet, mail_triage: sonnet, planner_morning: sonnet, chat_turn: sonnet, check: haiku }   # the model per run kind
-  budgets_usd: { sync_file: 1.00, today_summary: 0.30, mail_triage: 0.40, planner_morning: 0.75, chat_turn: 0.60, check: 0.05 }   # the most one run may spend; chat_turn: Settings → Claude
+  models: { sync_file: sonnet, today_summary: sonnet, mail_triage: sonnet, planner_morning: sonnet, chat_turn: sonnet, check: haiku, filing: haiku }   # the model per run kind
+  budgets_usd: { sync_file: 1.00, today_summary: 0.30, mail_triage: 0.40, planner_morning: 0.75, chat_turn: 0.60, check: 0.05, filing: 0.10, ripple: 0.30 }   # the most one run may spend; chat_turn: Settings → Claude
   planner: { enabled: false }   # Settings → Claude. On = one Claude run before the brief (≈ $0.10, at most budgets_usd.planner_morning): the verdict, why-now lines and proposals; off = the plain brief
   summary: { auto: false, auto_minutes: 10 }   # Settings → Claude. auto on = the Today tab's summary is rewritten by one light run (≈ $0.18) when it goes stale,
                                 # at most every auto_minutes; off = a badge and the Refresh button only
-  timeouts_s: { sync_file: 600, today_summary: 180, mail_triage: 240, planner_morning: 480, chat_turn: 240 }   # seconds before a run is stopped
+  filing: { enabled: false }    # stage 7, Settings → Claude. On = a task you add with only a name gets one small run (no tools, at most budgets_usd.filing) that suggests its project, effort, a likely link and a likely twin as chips; off when absent
+  ripple: { enabled: false, model: sonnet, delay_seconds: 60, hourly_cap: 10 }   # Settings → Claude. On = when a linked task is closed or changes, one light run (no tools) brings the tasks linked to it up to date: it rewrites their text (History, one Undo) and suggests the rest on Review; delay_seconds of quiet first, at most hourly_cap runs an hour
+  timeouts_s: { sync_file: 600, today_summary: 180, mail_triage: 240, planner_morning: 480, chat_turn: 240, filing: 120, ripple: 180 }   # seconds before a run is stopped
   # max_turns: { sync_file: 40 }   # turns a run kind may take; 40 for every kind not named
 
 server:

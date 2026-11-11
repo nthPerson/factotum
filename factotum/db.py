@@ -85,6 +85,15 @@ CREATE TABLE IF NOT EXISTS relations (             -- links between tasks (desig
 CREATE UNIQUE INDEX IF NOT EXISTS idx_relations_active ON relations(src, dst, kind) WHERE removed_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_relations_src ON relations(src);
 CREATE INDEX IF NOT EXISTS idx_relations_dst ON relations(dst);
+CREATE TABLE IF NOT EXISTS ripple_queue (          -- linked tasks a batch changed, waiting for a ripple run (factotum/ripple.py)
+  task_id INTEGER PRIMARY KEY REFERENCES tasks(id),
+  queued_at TEXT NOT NULL,                          -- the latest batch that queued it; the quiet period counts from here
+  batches_json TEXT NOT NULL,                       -- every batch id that queued it since its last run, oldest first
+  last_batch_id INTEGER NOT NULL,                   -- a run deletes the row only while this is still what it ran
+  what_json TEXT NOT NULL,                          -- what changed: closed, merge, name, text, due, hard, outcome
+  now INTEGER NOT NULL DEFAULT 0,                   -- 1 once an outcome arrived: run without waiting
+  attempts INTEGER NOT NULL DEFAULT 0
+);
 CREATE TABLE IF NOT EXISTS chat_threads (
   id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, claude_session_id TEXT, created_at TEXT NOT NULL
 );
@@ -177,7 +186,8 @@ def connect(path: str | Path, shared: bool = False) -> sqlite3.Connection:
 # alone, so init_db adds these to databases created before them.
 MIGRATIONS = {"reminders": {"repeat": "TEXT", "sent_at": "TEXT"}, "tasks": {"last_offered_at": "TEXT", "mirrored_at": "TEXT", "close_on_sent_since": "TEXT", "close_on_sent_to": "TEXT", "outcome": "TEXT", "neighbours_seen_at": "TEXT"},
               "batches": {"cause_json": "TEXT"}, "changes": {"note": "TEXT"},
-              "chat_messages": {"drafts_json": "TEXT", "rejected_json": "TEXT", "error": "TEXT", "duration_ms": "INTEGER"}}
+              "chat_threads": {"origin": "TEXT", "task_id": "INTEGER"},
+              "chat_messages": {"drafts_json": "TEXT", "rejected_json": "TEXT", "error": "TEXT", "duration_ms": "INTEGER", "read_json": "TEXT"}}
 
 
 def init_db(conn: sqlite3.Connection) -> None:

@@ -59,9 +59,9 @@ def extract_json(text: str | None) -> dict | None:
 
 
 def command(cfg: dict, kind: str, allowed_tools: list[str] | tuple[str, ...] = (), *, mcp_servers: dict | None = None,
-            resume: str | None = None, tools: str | None = None, stream: bool = False) -> list[str]:
-    model = str(C.get(cfg, f"claude.models.{kind}", "sonnet"))
-    budget = float(C.get(cfg, f"claude.budgets_usd.{kind}", 1.0))
+            resume: str | None = None, tools: str | None = None, stream: bool = False, model: str | None = None, budget_usd: float | None = None) -> list[str]:
+    model = str(model if model is not None else C.get(cfg, f"claude.models.{kind}", "sonnet"))
+    budget = float(budget_usd if budget_usd is not None else C.get(cfg, f"claude.budgets_usd.{kind}", 1.0))
     cmd = [str(C.get(cfg, "claude.binary", "claude")), "-p", "--model", model, "--output-format", "stream-json" if stream else "json",
            "--max-budget-usd", str(budget), "--max-turns", str(int(C.get(cfg, f"claude.max_turns.{kind}", DEFAULT_MAX_TURNS))),
            "--permission-mode", "default", "--setting-sources", "", "--disable-slash-commands",
@@ -101,12 +101,14 @@ def _env(workdir) -> dict:
 
 def run(cfg: dict, kind: str, prompt: str, *, allowed_tools: list[str] | tuple[str, ...] = (), workdir: Path | str | None = None,
         timeout_s: int | None = None, exec_=subprocess.run, mcp_servers: dict | None = None, resume: str | None = None,
-        tools: str | None = None, on_event=None, popen_=subprocess.Popen) -> RunResult:
+        tools: str | None = None, on_event=None, popen_=subprocess.Popen, model: str | None = None,
+        budget_usd: float | None = None) -> RunResult:
     """`on_event` set → stream-json: every event (system init, assistant blocks, tool results, the
     final result) is passed to it as it arrives, so a chat turn can show "searching mail…" live."""
     timeout_s = timeout_s or int(C.get(cfg, f"claude.timeouts_s.{kind}", DEFAULT_TIMEOUT_S))
     cwd = str(workdir) if workdir else None
-    cmd = command(cfg, kind, allowed_tools, mcp_servers=mcp_servers, resume=resume, tools=tools, stream=on_event is not None)
+    cmd = command(cfg, kind, allowed_tools, mcp_servers=mcp_servers, resume=resume, tools=tools, stream=on_event is not None,
+                  model=model, budget_usd=budget_usd)
     if on_event is not None:
         return _run_stream(cmd, prompt, cwd, timeout_s, on_event, popen_, _env(workdir))
     try:

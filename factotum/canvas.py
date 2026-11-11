@@ -21,7 +21,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from . import batches, config as C, relations
+from . import batches, config as C, relations, suggestions
 from .db import add_mention, now_iso, set_setting, upsert_task
 
 CLOSED_STATES = {"submitted", "graded", "excused", "marked_complete"}
@@ -128,6 +128,8 @@ def sweep(conn: sqlite3.Connection, cfg: dict, items: list[dict], today: date) -
         created.append(tid)
     if changes:
         batches.apply(conn, changes, "canvas", today, closed_by="canvas")
+    if created:
+        suggestions.at_create_guarded(conn, created)
     conn.commit()
     if not (created or changes):
         return None

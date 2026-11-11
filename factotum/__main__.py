@@ -12,7 +12,10 @@
     python -m factotum calendar-check   # print the next 7 days of events
     python -m factotum chat "text" [--attach 388 23] [--thread N] [--canned search_mail|draft_reply]   # one chat turn from the terminal
     python -m factotum effective [KEY ...] [--as-before]   # each switch's value and origin; read-only, no secrets
+    python -m factotum sweep mail|canvas|calendar|slack|links   # one sweep now
+    python -m factotum links-check      # what the link detectors would suggest now; read-only
     python -m factotum chat-check       # the MCP server over a pipe, then one tiny Claude run that calls a tool through it
+    python -m factotum ripple <task_id> [--dry-run]   # one ripple now from a task (a real Claude run); --dry-run writes nothing
 """
 from __future__ import annotations
 
@@ -113,6 +116,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--subject", help="the Plaud mail subject, located within a day of --received (default today)")
     p.add_argument("--received", help="ISO date-time the mail arrived")
     p.add_argument("--dry-run", action="store_true", help="run Claude and print the JSON; write nothing")
+    p = sub.add_parser("add", help="add a task by hand from one line, as the New task line does: #project ~effort ! a date, after N, under N; --dry-run prints how it would be filed")
+    p.add_argument("text")
+    p.add_argument("--dry-run", action="store_true")
+    p = sub.add_parser("find", help="find any task, open or closed, by number or words")
+    p.add_argument("q")
     sub.add_parser("mcp", help="the MCP server a chat turn talks to, over stdio (started by the runner; `chat-check` exercises it)")
     p = sub.add_parser("chat", help="one chat turn from the terminal: a real Claude run (~$0.20), stored like a turn from the UI")
     p.add_argument("text", nargs="?", default="")
@@ -127,8 +135,15 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("planner", help="the morning planner now: one Claude run, then the brief's verdict and proposals")
     p.add_argument("--dry-run", action="store_true", help="run Claude and print the JSON; write nothing")
     p.add_argument("--send", action="store_true", help="also send the brief with the verdict")
+    p = sub.add_parser("file-task", help="one filing run for a task (a real Claude run): its project, effort, a likely link and twin as suggestions; --dry-run prints the JSON and stores nothing")
+    p.add_argument("task_id", type=int)
+    p.add_argument("--dry-run", action="store_true")
+    p = sub.add_parser("ripple", help="one ripple now from a task (a real Claude run): --dry-run prints what it would do and writes nothing")
+    p.add_argument("task_id", type=int)
+    p.add_argument("--dry-run", action="store_true")
     p = sub.add_parser("sweep", help="run one sweep now")
-    p.add_argument("which", choices=["mail", "canvas", "calendar", "slack"])
+    p.add_argument("which", choices=["mail", "canvas", "calendar", "slack", "links"])
+    sub.add_parser("links-check", help="what the link detectors would suggest now; read-only")
     sub.add_parser("slack-check", help="each configured Slack workspace: token present, auth.test, how many channels it sees")
     sub.add_parser("discord-check", help="the Discord bot: who it is, the servers it is in vs the config, text channels per configured server")
     p = sub.add_parser("mirror", help="push task rows to the Notion Tasks database (one-way); default: rows edited since the last pass")
@@ -165,20 +180,21 @@ def main(argv: list[str] | None = None) -> int:
         from .api import create_app
         app = create_app(cfg)
         if not a.no_scheduler:
-            from . import brief, canvas, gcal, mail_sweep, mail_triage, notify, notion_mirror, planner, slack_sweep, summary
+            from . import brief, canvas, gcal, mail_sweep, mail_triage, notify, notion_mirror, planner, ripple, slack_sweep, summary
             from .scheduler import Scheduler
             # its own connection: the API holds one, and SQLite serialises writers with busy_timeout
             sched = Scheduler(cfg, connect(C.db_path()), push=notify.publish, mailer=brief.smtp_mailer, calendar=gcal, canvas=canvas, mail=mail_sweep, planner=planner,
-                              mirror=notion_mirror, slack=slack_sweep, summary=summary, triage=mail_triage)
+                              mirror=notion_mirror, slack=slack_sweep, summary=summary, triage=mail_triage, ripple=ripple)
             sched.start()
             app.state.scheduler = sched          # the Today tab's Refresh asks this thread; with --no-scheduler the button is off
             _start_plaud_trigger(cfg)
         uvicorn.run(app, host=a.host or C.get(cfg, "server.host", "127.0.0.1"), port=a.port or int(C.get(cfg, "server.port", 8750)))
     elif a.cmd == "tick":
         from . import brief, gcal, notify
-        from . import canvas, mail_sweep, notion_mirror, planner, slack_sweep
+        from . import canvas, mail_sweep, notion_mirror, planner, ripple, slack_sweep
         from .scheduler import Scheduler
-        did = Scheduler(cfg, conn, push=notify.publish, mailer=brief.smtp_mailer, calendar=gcal, canvas=canvas, mail=mail_sweep, planner=planner, mirror=notion_mirror, slack=slack_sweep).tick()
+        did = Scheduler(cfg, conn, push=notify.publish, mailer=brief.smtp_mailer, calendar=gcal, canvas=canvas, mail=mail_sweep, planner=planner, mirror=notion_mirror,
+                        slack=slack_sweep, ripple=ripple).tick()
         print("\n".join(did) if did else "nothing due")
     elif a.cmd == "brief":
         from . import brief, gcal
@@ -204,6 +220,24 @@ def main(argv: list[str] | None = None) -> int:
             print(f"\n(dry run · ${res['cost_usd']:.2f} · prompt and result kept under data/runs/{res['rec']['id']}/)")
         else:
             print(res["line"], f"· ${res['cost_usd']:.2f}")
+    elif a.cmd == "add":
+        from . import by_hand
+        if a.dry_run:
+            print(json.dumps(by_hand.preview(conn, ecfg, a.text, today), indent=1, ensure_ascii=False))
+        else:
+            try:
+                res = by_hand.add(conn, ecfg, text=a.text, today=today)
+            except ValueError as e:
+                raise SystemExit(str(e))
+            print(f"Task-{res['task_id']} {res['name']}")
+            for r in res["refused"]:
+                print(f"  {r['words']}: {r['why']}")
+    elif a.cmd == "find":
+        from . import by_hand
+        for r in by_hand.search(conn, a.q)["results"]:
+            when = f" {r['completed_at'][:10]}" if r["completed_at"] else ""
+            merged = f" merged into Task-{r['merged_into']}" if r["merged_into"] else ""
+            print(f"Task-{r['id']}  {r['status']}{when}{merged}  {r['name']}")
     elif a.cmd == "mcp":
         from . import mcp_server
         mcp_server.serve_stdio()            # stdout is the protocol from here on; logs go to stderr
@@ -393,12 +427,42 @@ def main(argv: list[str] | None = None) -> int:
                 print("  rejected:", r)
             if a.send:
                 print(brief.send(conn, ecfg, today, brief.smtp_mailer, gcal, planner=res))
+    elif a.cmd == "file-task":
+        from . import filing
+        res = filing.run(conn, ecfg, a.task_id, dry_run=a.dry_run, today=today)
+        if not res["ok"]:
+            raise SystemExit(f"filing failed: {res['error']}")
+        print(json.dumps(res["data"], indent=1, ensure_ascii=False) if a.dry_run else res["line"])
+        print(f"\n({'dry run · ' if a.dry_run else ''}${res['cost_usd']:.2f} · prompt under data/runs/filing/{a.task_id}/)")
+    elif a.cmd == "ripple":
+        from . import ripple
+        res = ripple.run(conn, ecfg, [a.task_id], today, dry_run=a.dry_run)     # whatever claude.ripple.enabled says: an explicit command
+        if not res["ok"]:
+            raise SystemExit(f"ripple failed: {res['error']}")
+        if res.get("dry_run"):
+            print(json.dumps(res["data"], indent=1, ensure_ascii=False))
+            for p in res["preview"]:
+                print(f"Task-{p['task_id']}: {p['effect']} · {p['verdict']}" if "effect" in p else f"  {p['proposal'] or '(no card)'} · {p['verdict']}")
+            print(f"(dry run · ${res['cost_usd']:.2f} · prompt under data/runs/ripple/{today}/)")
+        else:
+            print(res["line"])
     elif a.cmd == "sweep":
         from datetime import datetime as _dt
-        from . import canvas, gcal, mail_sweep, slack_sweep
+        from . import canvas, gcal, mail_sweep, slack_sweep, suggestions
         now = _dt.now()
-        mod = {"mail": mail_sweep, "canvas": canvas, "calendar": gcal, "slack": slack_sweep}[a.which]
+        mod = {"mail": mail_sweep, "canvas": canvas, "calendar": gcal, "slack": slack_sweep, "links": suggestions}[a.which]
         print(mod.sweep_job(conn, ecfg, now) or "nothing to do")
+    elif a.cmd == "links-check":
+        from . import suggestions
+        words = {"same_as": "same as", "part_of": "part of", "waits_on": "waits on", "any": "linked to"}
+        total = {"twin": [0, 0], "text": [0, 0], "thread": [0, 0]}
+        for c in suggestions.detect(conn):
+            why_not = suggestions.why_not(conn, c["kind"], c["a"], c["b"])
+            t = total.setdefault(c["signal"], [0, 0])
+            t[0] += 1
+            t[1] += why_not is None
+            print(f"{c['signal']:<7} Task-{c['a']} → Task-{c['b']}  {words[c['kind']]}  {c['why']}  {why_not or 'would write'}")
+        print(" · ".join(f"{s} {n} ({w} would write)" for s, (n, w) in total.items()))
     elif a.cmd == "calendar-check":
         from datetime import datetime, timedelta
         from . import gcal

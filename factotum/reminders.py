@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo
 
 from . import batches, config as C, notify, relations
 from .dates import parse_date
-from .db import now_iso, rows
+from .db import get_settings, now_iso, rows, set_setting
 
 SNOOZE = timedelta(hours=1)
 TOKEN_TTL = timedelta(hours=24)
@@ -135,6 +135,51 @@ def fire(conn: sqlite3.Connection, cfg: dict, now_local: datetime, push, device_
     return sent
 
 
+def free_now(conn: sqlite3.Connection, cfg: dict, today, push, device_push=None) -> list[dict]:
+    """"Task-N is free now": a hard-dated open task whose last open blocker was done today, once per
+    (task, blocker, day). The first call on a database only remembers what is already true. A task
+    whose blocker was dropped, faded or lapsed is never announced. Marked sent only when a provider
+    delivered; returns what was sent."""
+    base = str(C.get(cfg, "server.public_url", "http://127.0.0.1:8750")).rstrip("/")
+    chosen = notify.providers(cfg)
+    day = today.isoformat()
+    cands = []
+    for t in relations.annotate(conn, rows(conn, "SELECT * FROM tasks WHERE status = 'open' AND hard = 1 AND due IS NOT NULL AND due != '' ORDER BY id")):
+        rel = t["rel"]
+        if rel["waits_on_open"] or not rel["freed_by"] or str(rel["freed_at"] or "")[:10] != day:
+            continue
+        if not any(c["id"] == rel["freed_by"] and c["status"] == "done" for c in rel["waits_on_closed"]):
+            continue
+        cands.append((f"{t['id']}:{rel['freed_by']}:{day}", t, rel["freed_by"]))
+    seen = get_settings(conn).get("state.free_now.sent")
+    if seen is None:
+        set_setting(conn, "state.free_now.sent", [k for k, _, _ in cands])
+        conn.commit()
+        return []
+    seen = list(seen)
+    sent = []
+    for key, t, by in cands:
+        if key in seen:
+            continue
+        title = f"Task-{t['id']} is free now"
+        d = parse_date(t.get("due"))
+        body = f"{t['name']} · Task-{by} is done" + (f" · due {d.strftime('%b')} {d.day}" if d else "")
+        sends = []
+        if "ntfy" in chosen:
+            sends.append(("ntfy", lambda: push(cfg, title, body, click=f"{base}/t/{t['id']}", tags=["white_check_mark"])))
+        if "app" in chosen and device_push is not None:
+            sends.append(("app", lambda: device_push(conn, cfg, {"title": title, "body": body, "path": f"/t/{t['id']}", "tag": f"free-{t['id']}",
+                                                               "actions": [], "urgency": "high", "ttl": 86400, "data": {"task_id": t["id"]}})))
+        delivered, _results, errors = notify.send_each(sends)
+        if not delivered:
+            continue
+        seen.append(key)
+        set_setting(conn, "state.free_now.sent", seen[-200:])
+        conn.commit()
+        sent.append({"task_id": t["id"], "freed_by": by, "task_name": t["name"], "errors": errors})
+    return sent
+
+
 class TokenError(Exception):
     def __init__(self, status: int, why: str):
         super().__init__(why)
@@ -168,3 +213,31 @@ def act(conn: sqlite3.Connection, cfg: dict, token: str, action: str, now_local:
         conn.commit()
         return {"action": "snooze", "task_id": r["task_id"], "task_name": r["task_name"], "fire_at": at}
     raise TokenError(400, f"unknown action {action!r}")
+
+
+def hanging_on(conn: sqlite3.Connection, task_id: int) -> int:
+    """How many distinct OPEN tasks have an active relation to this one (either direction, any kind)."""
+    return conn.execute(
+        "SELECT COUNT(DISTINCT t.id) FROM relations r JOIN tasks t ON t.id = CASE WHEN r.src = ? THEN r.dst ELSE r.src END "
+        "WHERE r.removed_at IS NULL AND (r.src = ? OR r.dst = ?) AND t.status = 'open'", (task_id, task_id, task_id)).fetchone()[0]
+
+
+def save_outcome(conn: sqlite3.Connection, cfg: dict, token: str, text: str) -> dict:
+    """The one optional line after a reminder's Done: only for a token that closed its task from the link."""
+    r = conn.execute("SELECT r.*, t.name AS task_name, t.status AS task_status FROM reminders r JOIN tasks t ON t.id = r.task_id WHERE r.token = ?", (token,)).fetchone()
+    if not r:
+        raise TokenError(404, "This link is unknown or was already used.")
+    r = dict(r)
+    if r["status"] != "done":
+        raise TokenError(409, "Only a task closed from this reminder takes its outcome here; open the task to add one.")
+    sent_at = datetime.fromisoformat(r["sent_at"]) if r.get("sent_at") else None
+    if sent_at is None or datetime.now(timezone.utc) - sent_at > TOKEN_TTL:
+        raise TokenError(410, "This link has expired (reminder actions are good for 24 hours).")
+    tid = r["task_id"]
+    if r["task_status"] not in ("done", "dropped"):
+        raise TokenError(409, f"Task-{tid} is open again; add its outcome when you close it.")
+    text = (text or "").strip()[:300]
+    if not text:
+        return {"saved": False, "task_id": tid, "task_name": r["task_name"]}
+    res = batches.apply(conn, [{"task_id": tid, "op": "set", "fields": {"outcome": text}}], "ntfy")
+    return {"saved": True, "task_id": tid, "task_name": r["task_name"], "batch_id": res["batch_id"], "outcome": text}

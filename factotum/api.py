@@ -3,6 +3,9 @@
   GET  /api/tasks?status=open|all        tasks with computed score/priority/tier/fade/last-call
   GET  /api/tasks/{id}?before=&limit=    one task, any status: links, reminders, its task links, where it came from, a page of History (stamps neighbours_seen_at)
   POST /api/commands  {text}             parse the grammar → changes (nothing applied)
+  POST /api/add {text|fields, key, verb?}  make a task now (one ui batch; the same key twice is one task)
+  GET  /api/search?q=&limit=12           any task, open or closed, by number or words
+  GET  /api/add/preview?text=&verb=   how an add line will be filed, the tasks it names checked (writes nothing)
   POST /api/batches/apply {source, changes}   the one write path
   POST /api/batches/{id}/undo
   GET  /api/review?exclude=1,2           one page of the review queue + total, each card's pending evidence, planner suggestions
@@ -12,7 +15,8 @@
   GET  /api/stats
   GET  /api/log                          recent batches with their changes, and the Claude runs with cost
   GET  /api/chat/threads · GET /api/chat/threads/{id}      chat history (phase 5, SPEC.md §8.3)
-  POST /api/chat/turn {thread_id|null, text, attached, canned}   one turn, streamed as server-sent events
+  POST /api/chat/turn {thread_id|null, text, attached, canned, origin?, task_id?, fresh?}   one turn, streamed as server-sent events; 409 while that thread answers
+  GET  /api/chat/place?origin=&task_id=                     the conversation a Review card, an opened task or the Today box continues
   POST /api/chat/create {message_id, index}                 create the task a proposal describes
   POST /api/chat/drafts/open {draft}                        show a draft the run saved in Mailbird's window
   GET  /api/proposals · POST /api/proposals/{id}/apply|dismiss   batches a skill staged (SPEC.md §15); Apply makes a batch
@@ -39,7 +43,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
-from . import app_push, batches, commands, config as C, lifecycle, oauth, relations, reminders, summary
+from . import app_push, batches, by_hand, commands, config as C, filing, lifecycle, oauth, relations, reminders, ripple, suggestions, summary
 from .db import connect, get_settings, get_task, init_db, now_iso, rows, seed_accounts, set_setting
 from .dates import parse_date
 
@@ -67,6 +71,13 @@ def _index_html() -> str:
 class ApplyBody(BaseModel):
     source: str = "ui"
     changes: list[dict[str, Any]]
+
+
+class AddBody(BaseModel):
+    text: str | None = None
+    fields: dict | None = None
+    key: str | None = None
+    verb: bool = False
 
 
 class CommandBody(BaseModel):
@@ -99,6 +110,9 @@ class TurnBody(BaseModel):
     text: str = ""
     attached: list[int] = []
     canned: str | None = None
+    origin: str | None = None            # a conversation in place (chat.ORIGINS); with no thread_id, the place's thread
+    task_id: int | None = None
+    fresh: bool = False                  # start a new thread in that place instead of continuing one
 
 
 class CreateBody(BaseModel):
@@ -170,8 +184,10 @@ def _form(body: bytes) -> dict:
 
 
 def _page(title: str, text: str, base: str, undo: bool = False, task_id: int | None = None,
-          free: list[dict] | None = None) -> str:
-    """Tiny phone-sized confirmation page for a reminder action."""
+          free: list[dict] | None = None, ask: dict | None = None) -> str:
+    """Tiny phone-sized confirmation page for a reminder action. `free` lists the tasks a Done freed
+    ("Free now", each a link to its address); `ask` adds the outcome question
+    ({"action": url, "hang": k, "ripples": bool}). Both sit between the text and the Open link, Free now first."""
     back = f"{base}/t/{task_id}" if task_id is not None else f"{base}/"
     label = f"Open Task-{task_id}" if task_id is not None else "Open Factotum"
     hint = ' Undo is in the Log tab.' if undo else ''
@@ -179,9 +195,20 @@ def _page(title: str, text: str, base: str, undo: bool = False, task_id: int | N
     if free:
         items = "".join(f'<li><a href="{escape(base)}/t/{f["id"]}" style="color:#2a6">Task-{f["id"]}</a> {escape(f["name"])}</li>' for f in free)
         freed = f'<p style="margin:16px 0 4px;font-weight:600">Free now:</p><ul style="margin:0;padding-left:20px">{items}</ul>'
+    form = ""
+    if ask:
+        k = ask["hang"]
+        hangs = "One task hangs on this one." if k == 1 else f"{k} tasks hang on this one."
+        tail = (" What you write is what they are told. Leave it empty and they are still brought up to date." if ask.get("ripples")
+                else " What you write is kept with this task where they list it.")
+        form = (f'<form method="post" action="{escape(ask["action"])}" style="margin:16px 0">'
+                '<label for="outcome" style="display:block;font-weight:600;margin-bottom:4px">How did it turn out?</label>'
+                f'<p style="color:#555;margin:0 0 8px">{hangs}{tail}</p>'
+                '<input id="outcome" name="outcome" maxlength="300" autocomplete="off" style="font:16px system-ui;width:100%;box-sizing:border-box;padding:10px;border:1px solid #ccc;border-radius:6px">'
+                '<button style="margin-top:8px;font:16px system-ui;padding:10px 18px;min-height:44px">Save</button></form>')
     return (f'<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Factotum</title>'
             f'<body style="font:16px system-ui;margin:0;padding:24px;background:#fafaf7;color:#1a1a1a"><h2 style="margin:0 0 8px">{escape(title)}</h2>'
-            f'<p style="color:#555">{escape(text)}{hint}</p>{freed}<p><a href="{escape(back)}" style="color:#2a6">{escape(label)}</a></p></body>')
+            f'<p style="color:#555">{escape(text)}{hint}</p>{freed}{form}<p><a href="{escape(back)}" style="color:#2a6">{escape(label)}</a></p></body>')
 
 
 class JsonOnlyMutations:
@@ -292,6 +319,10 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
             if (rel.get("changed") or {}).get("by") is not None:
                 named.add(rel["changed"]["by"])
         neighbours = task_briefs(named - {t["id"] for t in out})
+        chips = filing.chips(conn, {t["id"] for t in out})
+        for t in out:
+            if t["id"] in chips:
+                t["filing"] = chips[t["id"]]
         return {"today": today.isoformat(), "tasks": out, "neighbours": {str(k): v for k, v in neighbours.items()},
                 "projects": C.project_names(ecfg), "top_cap": C.get(ecfg, "lifecycle.top_cap", 7)}
 
@@ -335,6 +366,8 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         t["mentions_log"] = rows(conn, "SELECT * FROM mentions WHERE task_id = ? ORDER BY at DESC LIMIT 20", (task_id,))
         t["changes"] = rows(conn, "SELECT c.*, b.source, b.applied_at FROM changes c JOIN batches b ON b.id = c.batch_id WHERE c.task_id = ? ORDER BY c.id DESC LIMIT 30", (task_id,))
         t["relations"] = relations.detail(conn, task_id)
+        if (fc := filing.chips(conn, {task_id}).get(task_id)):
+            t["filing"] = fc
         t["nearby"] = relations.nearby(conn, task_id)
         t["history"] = history(task_id, before, limit)
         # The value before this request (the page marks what changed since), then the stamp that
@@ -350,13 +383,42 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
             return JSONResponse({"is_command": False, "changes": []})
         return {"is_command": True, "changes": ch}
 
-    @app.post("/api/batches/apply")
-    def apply_batch(body: ApplyBody):
-        changes = [{k: v for k, v in c.items() if k != "source_key"} for c in body.changes]   # the page never chooses one
+    @app.get("/api/add/preview")
+    def add_preview(text: str = "", verb: bool = False):
+        return by_hand.preview(conn, eff_cfg(), text, date.today(), verb=verb)
+
+    @app.get("/api/search")
+    def search_tasks(q: str = "", limit: int = 12):
+        return by_hand.search(conn, q, limit)
+
+    @app.post("/api/add")
+    def add_task(body: AddBody):
         try:
-            return batches.apply(conn, changes, body.source, date.today())
+            res = by_hand.add(conn, eff_cfg(), text=body.text, fields=body.fields, key=body.key, today=date.today(), verb=body.verb)
         except ValueError as e:
             raise HTTPException(400, str(e))
+        sch = getattr(app.state, "scheduler", None)
+        if not res["already"] and sch is not None:   # a new task is one filing may place (stage 7)
+            sch.wake()
+        return res
+
+    @app.post("/api/batches/apply")
+    def apply_batch(body: ApplyBody):
+        changes = [{k: v for k, v in c.items() if k not in ("source_key", "created_source")} for c in body.changes]   # the page never chooses either
+        try:
+            with chat._CREATE_LOCK:                  # a chat create staged here and its Create button never make two
+                left_out: list[dict] = []
+                changes = chat.resolve_staged(conn, eff_cfg(), changes, left_out)
+                res = batches.apply(conn, changes, body.source, date.today())
+                res["skipped"] = left_out + res["skipped"]
+                chat.mark_staged(conn, changes, res)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        if res.get("created"):                      # a new task is one filing may place (stage 7)
+            sch = getattr(app.state, "scheduler", None)
+            if sch is not None:
+                sch.wake()
+        return res
 
     @app.post("/api/batches/{batch_id}/undo")
     def undo_batch(batch_id: int):
@@ -392,6 +454,12 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
             sch.wake()
         return today_summary()
 
+    @app.get("/api/ripple")
+    def ripple_status(after: int | None = None):
+        """What ripples wait, whether a scheduler here will run them (with --no-scheduler they wait),
+        and the ripple batches that landed after batch `after` (the page polls this after an Apply)."""
+        return ripple.status(conn, eff_cfg(), scheduler=getattr(app.state, "scheduler", None) is not None, after=after)
+
     @app.get("/api/review")
     def review(exclude: str | None = None):
         """One page of the review queue. `exclude` is a comma-separated list of task ids the client
@@ -402,6 +470,8 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         st = get_settings(conn)
         last = parse_date(st.get("state.last_review_at"))
         skip = {int(x) for x in (exclude or "").split(",") if x.strip().lstrip("-").isdigit()}
+        suggestions.session(conn, today, suggestions.per_review(ecfg))   # today's few link suggestions
+        conn.commit()
         open_tasks = decorate_all([t for t in rows(conn, "SELECT * FROM tasks WHERE status = 'open'") if t["id"] not in skip], today, ecfg)
         from .mail_sweep import review_flags
         flags = review_flags(conn)
@@ -410,26 +480,32 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         for i in full:                                           # from the full rel (a text may name a closed task it waited on)
             i["texts"] = lifecycle.reason_texts(i["task"], i["reasons"])
             i["link_suggestions"] = [dict(s, other_name=names.get(s["other"])) for s in i["task"]["rel"]["suggestions"]]
+        for i in full:
+            if "linked_changed" in i["reasons"]:
+                i["since"] = ripple.since(conn, i["task"]["id"], i["task"]["rel"].get("changed"))
         for t in open_tasks:
             ship_rel(t)
         pending = rows(conn, "SELECT id, task_id, kind, ref, account, label, excerpt, at FROM evidence WHERE judged_at IS NULL ORDER BY id")
         by_task: dict[int, list] = {}
         for e in pending:
-            if e["task_id"] is not None and e["kind"] != "link_suggestion":     # a suggested link is its own card list, not evidence on the decision
+            if e["task_id"] is not None and e["kind"] not in ("link_suggestion", "filing"):     # a suggested link is its own card list, not evidence on the decision
                 change = None
                 if e["kind"] == "proposal":
                     try:
                         change = json.loads(e["ref"]) if e["ref"] else None
                     except ValueError:
                         change = None
-                by_task.setdefault(int(e["task_id"]), []).append({"id": e["id"], "kind": e["kind"], "label": e["label"], "reason": e["excerpt"], "change": change, "at": e["at"]})
+                by_task.setdefault(int(e["task_id"]), []).append({"id": e["id"], "kind": e["kind"], "label": e["label"], "reason": e["excerpt"], "change": change, "at": e["at"], "by": "ripple" if e["account"] == "ripple" else None})
         for i in full:
             i["flags"] = flags.get(i["task"]["id"], {})
             i["evidence"] = by_task.get(i["task"]["id"], [])      # judged in the same batch as the decision; a proposal's change can be accepted
         # Planner creates with no task (an announcement, a hunch) and Slack mentions naming no task:
         # suggestion cards with Create / Dismiss.
-        suggestions = [{"id": e["id"], "kind": e["kind"], "label": e["label"], "reason": e["excerpt"], "at": e["at"], "fields": _suggestion_fields(ecfg, e), "mail": _suggestion_mail(e)}
-                       for e in pending if e["task_id"] is None and e["kind"] in SUGGESTION_KINDS]
+        cards = [{"id": e["id"], "kind": e["kind"], "label": e["label"], "reason": e["excerpt"], "at": e["at"], "fields": _suggestion_fields(ecfg, e), "mail": _suggestion_mail(e),
+                  "links": _suggestion_links(e)} for e in pending if e["task_id"] is None and e["kind"] in SUGGESTION_KINDS]
+        others = task_briefs({l["other"] for c in cards for l in c["links"]})
+        for c in cards:                                          # a mail suggestion's link, made when Create is pressed
+            c["links"] = [dict(l, other_name=(others.get(l["other"]) or {}).get("name")) for l in c["links"]]
         cap = int(C.get(ecfg, "lifecycle.review_cap", 15))
         page = full[:cap]
         if page:
@@ -440,7 +516,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
             for i in page:
                 i["task"]["last_offered_at"] = today.isoformat()
         return {"today": today.isoformat(), "last_review_at": st.get("state.last_review_at"),
-                "cap": cap, "total": len(full), "labels": lifecycle.REVIEW_LABELS, "items": page, "suggestions": suggestions}
+                "cap": cap, "total": len(full), "labels": lifecycle.REVIEW_LABELS, "items": page, "suggestions": cards}
 
     def _suggestion_mail(e: dict) -> dict | None:
         """For a card the mail triage made (SPEC §8.5): the thread it came from, as Mailbird reported it."""
@@ -451,6 +527,16 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         except (ValueError, AttributeError):
             return None
         return m if isinstance(m, dict) and m.get("ref") else None
+
+    def _suggestion_links(e: dict) -> list[dict]:
+        """The links a mail suggestion carries (mail_triage.py kept only those to rows its run was shown)."""
+        if e["kind"] != "proposal":
+            return []
+        try:
+            ls = (json.loads(e["ref"]) if e.get("ref") else {}).get("links")
+        except (ValueError, AttributeError):
+            return []
+        return [{"kind": l.get("kind"), "other": l["other"]} for l in ls if isinstance(l, dict) and type(l.get("other")) is int] if isinstance(ls, list) else []
 
     def _suggestion_fields(ecfg: dict, e: dict) -> dict:
         """What Create would make: the planner's fields for an uncited create (evidence.ref holds
@@ -475,7 +561,8 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         """Create the task a suggestion describes: a planner create (label "create: <name>", the
         planner's reason) or a Slack mention with no task (source Slack, the message linked). An
         upsert by source_key, so a second tap returns the same id; the evidence is judged `applied`.
-        Like every creation, not a batch (SPEC §12 precedent)."""
+        Like every creation, not a batch (SPEC §12 precedent); a link a mail suggestion carries is
+        made after it, in a review batch, and what that batch refused is in `skipped`."""
         from .db import add_link, now_iso, upsert_task
         e = rows(conn, f"SELECT * FROM evidence WHERE id = ? AND kind IN ({','.join('?' * len(SUGGESTION_KINDS))}) AND task_id IS NULL", (evidence_id, *SUGGESTION_KINDS))
         if not e:
@@ -483,7 +570,8 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         e = e[0]
         is_slack = e["kind"] == "slack_mention"
         mail = _suggestion_mail(e)
-        key = f"{'slack-mention' if is_slack else 'mail-suggestion' if mail else 'planner-suggestion'}:{evidence_id}"
+        by_ripple = e.get("account") == ripple.ACCOUNT and not is_slack and not mail
+        key = f"{'slack-mention' if is_slack else 'mail-suggestion' if mail else 'ripple-suggestion' if by_ripple else 'planner-suggestion'}:{evidence_id}"
         ex = rows(conn, "SELECT id FROM tasks WHERE source_key = ?", (key,))
         if ex:
             return {"task_id": ex[0]["id"]}
@@ -494,7 +582,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         want = _suggestion_fields(ecfg, e)
         f = _clean_task_fields(ecfg, want)
         now = now_iso()
-        tid = upsert_task(conn, dict(f, status="open", source="Slack" if is_slack else "Mail" if mail else "Planner", source_key=key, source_link=want.get("source_link"),
+        tid = upsert_task(conn, dict(f, status="open", source="Slack" if is_slack else "Mail" if mail else "Ripple" if by_ripple else "Planner", source_key=key, source_link=want.get("source_link"),
                                      account=e.get("account") if is_slack else mail.get("account") if mail else None, context=f.get("context") or (e["excerpt"] or None),
                                      mentions=1, last_mention_at=date.today().isoformat(), created_at=now, edited_at=now))
         if is_slack and e.get("ref"):
@@ -504,8 +592,15 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
             # seen up to the message the card was made from, or the next sweep would call that same message "Thread updated"
             conn.execute("UPDATE links SET last_seen_at = ? WHERE task_id = ? AND kind = 'mail_thread' AND ref = ? AND last_seen_at IS NULL", (mail.get("at"), tid, str(mail["ref"])))
         conn.execute("UPDATE evidence SET judged_at = ?, verdict = 'applied' WHERE id = ?", (now, evidence_id))
+        suggestions.at_create_guarded(conn, [tid])
         conn.commit()
-        return {"task_id": tid}
+        links = _suggestion_links(e)
+        if not links:
+            return {"task_id": tid, "skipped": []}
+        # the link the card showed, in a review batch of its own (undoable; a rule it breaks by now is said)
+        res = batches.apply(conn, [{"op": "link", "task_id": tid, "fields": {"kind": l["kind"], "other": l["other"], "why": "from the mail it came from"}} for l in links[:3]],
+                            "review", date.today())
+        return {"task_id": tid, "skipped": [s["why"] for s in res["skipped"]]}
 
     @app.post("/api/review/suggestions/{evidence_id}/open")
     def open_suggestion(evidence_id: int):
@@ -649,6 +744,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
 
     # ---- Chat (SPEC.md §8.3) -------------------------------------------------------------------
     from . import chat
+    turn_lock = app.state.chat_turn_lock = threading.Lock()   # the turn route finds a place's thread and marks it busy under this; a delete checks under it
 
     @app.get("/api/chat/threads")
     def chat_threads():
@@ -661,17 +757,35 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
             raise HTTPException(404)
         return {"thread": th[0], "messages": chat.messages(conn, thread_id)}
 
+    @app.get("/api/chat/place")
+    def chat_place(origin: str, task_id: int | None = None):
+        """The conversation a place continues (a Review card, an opened task, the Today box), with every
+        task its messages read, attached or proposed named; `thread` is None when the place has none yet."""
+        if origin not in chat.ORIGINS:
+            raise HTTPException(400, "unknown origin")
+        tid = chat.place_thread(conn, origin, None if origin == "today" else task_id)
+        found = rows(conn, "SELECT id, title, origin, task_id, created_at FROM chat_threads WHERE id = ?", (tid,)) if tid is not None else []
+        if not found:                                        # none yet, or deleted between the two reads
+            return {"thread": None, "messages": [], "named": {}, "busy": False}
+        th = found[0]
+        msgs = chat.messages(conn, tid)
+        ids: set[int] = set()
+        for m in msgs:
+            ids |= {i for i in m["read"] + m["attached"] if type(i) is int} | chat.proposal_ids(m["proposals"])
+        return {"thread": th, "messages": msgs, "named": chat.named(conn, ids), "busy": tid in app.state.chat_busy}
+
     @app.delete("/api/chat/threads/{thread_id}")
     def chat_thread_delete(thread_id: int):
         """Remove a thread and its messages (chat history only: nothing a turn applied is undone, and
         the run rows with their cost stay in the Log)."""
-        if not rows(conn, "SELECT 1 FROM chat_threads WHERE id = ?", (thread_id,)):
-            raise HTTPException(404, "no such thread")
-        if thread_id in app.state.chat_busy:                 # the turn would end by writing into a thread that is gone
-            raise HTTPException(409, "a turn is still running in this thread; delete it when it has answered")
-        conn.execute("DELETE FROM chat_messages WHERE thread_id = ?", (thread_id,))
-        conn.execute("DELETE FROM chat_threads WHERE id = ?", (thread_id,))
-        conn.commit()
+        with turn_lock:                                      # a turn that has just found this thread marks it busy under the same lock
+            if not rows(conn, "SELECT 1 FROM chat_threads WHERE id = ?", (thread_id,)):
+                raise HTTPException(404, "no such thread")
+            if thread_id in app.state.chat_busy:             # the turn would end by writing into a thread that is gone
+                raise HTTPException(409, "a turn is still running in this thread; delete it when it has answered")
+            conn.execute("DELETE FROM chat_messages WHERE thread_id = ?", (thread_id,))
+            conn.execute("DELETE FROM chat_threads WHERE id = ?", (thread_id,))
+            conn.commit()
         return {"deleted": thread_id}
 
     @app.post("/api/chat/turn")
@@ -680,13 +794,26 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         stored message (or `error`). The run happens on a worker thread; this generator relays."""
         if body.canned is not None and body.canned not in chat.CANNED:
             raise HTTPException(400, f"unknown canned prompt {body.canned!r}")
-        thread_id = body.thread_id or chat.new_thread(conn)
-        if not rows(conn, "SELECT 1 FROM chat_threads WHERE id = ?", (thread_id,)):
-            raise HTTPException(404, "no such thread")
+        with turn_lock:                                      # two quick sends to one place find (or make) one thread, and only one runs
+            if body.thread_id:
+                thread_id = body.thread_id
+                if not rows(conn, "SELECT 1 FROM chat_threads WHERE id = ?", (thread_id,)):
+                    raise HTTPException(404, "no such thread")
+            elif body.origin is not None:
+                if body.origin not in chat.ORIGINS:
+                    raise HTTPException(400, "unknown origin")
+                task_id = None if body.origin == "today" else body.task_id
+                if body.origin != "today" and (task_id is None or not get_task(conn, task_id)):
+                    raise HTTPException(404, "no such task")
+                found = None if body.fresh else chat.place_thread(conn, body.origin, task_id)
+                thread_id = found or chat.new_thread(conn, None, body.origin, task_id)
+            else:
+                thread_id = chat.new_thread(conn)
+            if thread_id in app.state.chat_busy:
+                raise HTTPException(409, "Claude is still answering in this conversation")
+            app.state.chat_busy.add(thread_id)
         q: queue.Queue = queue.Queue()
         runner = app.state.chat_runner
-
-        app.state.chat_busy.add(thread_id)
 
         def work():
             try:
@@ -1021,8 +1148,28 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         if res["action"] == "open":
             return RedirectResponse(f"{base}/t/{res['task_id']}")
         what = {"done": "marked done", "snooze": f"snoozed; it fires again at {res.get('fire_at', '')[11:16]}"}[res["action"]]
+        free = ask = None
+        if res["action"] == "done":
+            free = relations.freed_by(conn, res["task_id"])           # tasks that waited only on this one (stage 4b)
+            k = reminders.hanging_on(conn, res["task_id"])            # any open neighbour: the outcome question (stage 5)
+            if k > 0:
+                ask = {"action": f"{base}/r/{token}/outcome", "hang": k, "ripples": bool(C.value(eff_cfg(), "claude.ripple.enabled"))}
         return HTMLResponse(_page(f"Task-{res['task_id']} {what}", res["task_name"], base, undo=res["action"] == "done", task_id=res["task_id"],
-                                    free=relations.freed_by(conn, res["task_id"]) if res["action"] == "done" else None))
+                                  free=free, ask=ask))
+
+    @app.post("/r/{token}/outcome")
+    async def reminder_outcome(token: str, request: Request):
+        """The optional outcome line after Done. Urlencoded form post outside /api; only a token whose
+        reminder was closed from its link (and is still inside the 24 h) is accepted."""
+        base = str(C.get(cfg, "server.public_url", "")).rstrip("/")
+        text = _form(await request.body()).get("outcome", "")
+        try:
+            res = reminders.save_outcome(conn, eff_cfg(), token, text)
+        except reminders.TokenError as e:
+            return HTMLResponse(_page("Factotum", e.why, base), status_code=e.status)
+        if not res["saved"]:
+            return HTMLResponse(_page(f"Task-{res['task_id']}: nothing saved", res["task_name"], base, task_id=res["task_id"]))
+        return HTMLResponse(_page(f"Task-{res['task_id']}: outcome saved", f"How it turned out: \u201c{res['outcome']}\u201d", base, undo=True, task_id=res["task_id"]))
 
     def index():
         return HTMLResponse(_index_html(), headers={"Cache-Control": "no-cache, must-revalidate"})

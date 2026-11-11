@@ -44,7 +44,7 @@ End with exactly one fenced JSON object (nothing after it):
 - `add_reminder` fields: `fire_at` (ISO local date-time), `label`, optional `repeat` (daily|weekdays|weekly|monthly).
 - `link_thread` fields: `conversation_id` — only a conversation you fetched in this turn. Propose one
   for every mail thread that belongs to a task; Factotum then watches it for replies.
-- `link` / `unlink` fields: `kind` (`part_of` | `waits_on`), `other` (a task id), `why` (one line).
+- `link` / `unlink` fields: `kind` (`part_of` | `waits_on`), `other` (a task id; for `link`, also the `ref` of a `create` in this reply, so an existing task can wait on a new one), `why` (one line).
 - `merge` fields: `into` (the task kept; this one is dropped as the same task).
 - `done` / `drop` may carry `outcome` (one line on how it turned out).
 - `add_note` fields: `text` (appended, dated; prefer it to rewriting `context`).

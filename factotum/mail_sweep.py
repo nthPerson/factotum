@@ -374,13 +374,13 @@ def sweep(conn: sqlite3.Connection, cfg: dict, client, now_local: datetime) -> s
 def review_flags(conn: sqlite3.Connection) -> dict[int, dict]:
     """What the sweeps and the planner want Review to say, keyed by task id."""
     out: dict[int, dict] = {}
-    for e in rows(conn, "SELECT task_id, kind, label FROM evidence WHERE judged_at IS NULL AND task_id IS NOT NULL"):
+    for e in rows(conn, "SELECT task_id, kind, label, account FROM evidence WHERE judged_at IS NULL AND task_id IS NOT NULL"):
         if e["kind"] in ("thread_updated", "reply_from_waiting", "maybe_reply_from_waiting"):
             out.setdefault(int(e["task_id"]), {})["thread_updated"] = True
         elif e["kind"] == "slack_mention":
             out.setdefault(int(e["task_id"]), {})["mentioned"] = True
         elif e["kind"] == "proposal":
-            out.setdefault(int(e["task_id"]), {})["planner"] = e["label"]
+            out.setdefault(int(e["task_id"]), {})["ripple" if e["account"] == "ripple" else "planner"] = e["label"]
     return out
 
 

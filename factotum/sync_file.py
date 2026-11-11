@@ -15,13 +15,16 @@ import sqlite3
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from . import batches, config as C, relations
+from . import batches, config as C, relations, suggestions
 from .db import now_iso, rows
 
 PROMPT = C.ROOT / "prompts" / "sync-file.md"
 RUNS_DIR = C.ROOT / "data" / "runs"
 SLICE_CAP = 150
 RETRY_DELAY_S = 120
+CLOSED_CAP = 25          # recently finished tasks listed for reference (a link's goal or twin only)
+CLOSED_DAYS = 30
+MAX_LINKS = 10           # link entries read from one recording's JSON
 
 
 def taxonomy_text(cfg: dict) -> str:
@@ -47,21 +50,42 @@ def slice_rows(conn: sqlite3.Connection, cap: int = SLICE_CAP) -> list[dict]:
                       "ORDER BY status = 'open' DESC, top_rank IS NULL, top_rank, score DESC, id DESC LIMIT ?", (cap,))
 
 
+def flat(v) -> str:
+    """One line of a row list: every run of whitespace (a newline in a name included) becomes one
+    space, so a name cannot start a record of its own. Names are written by many people."""
+    return " ".join(str(v if v is not None else "").split())
+
+
 def open_rows_text(conn: sqlite3.Connection, cap: int = SLICE_CAP) -> str:
     lines = []
     for r in slice_rows(conn, cap):
-        bits = [f"Task-{r['id']}", r["project"] or "—"]
+        bits = [f"Task-{r['id']}", flat(r["project"]) or "—"]
         if r["status"] != "open":
-            bits.append(r["status"])
+            bits.append(flat(r["status"]))
         if r["due"]:
-            bits.append(f"due {str(r['due'])[:16]}" + (" hard" if r["hard"] else ""))
+            bits.append(f"due {flat(str(r['due'])[:16])}" + (" hard" if r["hard"] else ""))
         if r["waiting_on"]:
-            bits.append(f"waiting on {r['waiting_on']}")
+            bits.append(f"waiting on {flat(r['waiting_on'])}")
         if r["top_rank"]:
-            bits.append(f"top {r['top_rank']}")
-        bits.append((r["name"] or "")[:90])
+            bits.append(f"top {flat(r['top_rank'])}")
+        bits.append(flat(r["name"])[:90])
         lines.append(" | ".join(bits))
     return "\n".join(lines) or "(no open tasks)"
+
+
+def closed_rows(conn: sqlite3.Connection, today: date, cap: int = CLOSED_CAP) -> list[dict]:
+    """Tasks done or dropped in the last CLOSED_DAYS, newest first, not merged away: a recording may
+    name them as the goal or the twin of a link and nothing else (design §10.2)."""
+    since = (today - timedelta(days=CLOSED_DAYS)).isoformat()
+    return rows(conn, "SELECT id, name, project, status, completed_at FROM tasks "
+                      "WHERE status IN ('done', 'dropped') AND COALESCE(closed_by, '') <> 'merge' AND completed_at >= ? "
+                      "ORDER BY completed_at DESC, id DESC LIMIT ?", (since, cap))
+
+
+def closed_rows_text(conn: sqlite3.Connection, today: date) -> str:
+    lines = [f"Task-{r['id']} | {flat(r['project']) or '—'} | {flat(r['status'])} {flat(str(r['completed_at'])[:10])} | {flat(r['name'])[:90]}"
+             for r in closed_rows(conn, today)]
+    return "\n".join(lines) or "(nothing finished lately)"
 
 
 def recording(cfg: dict, d: dict, fallback_name: str = "", fallback_date: str | None = None) -> dict:
@@ -97,6 +121,7 @@ def build_prompt(cfg: dict, conn: sqlite3.Connection, rec: dict, received: str, 
     fill = {
         "taxonomy": taxonomy_text(cfg),
         "open_tasks": open_rows_text(conn),
+        "closed_tasks": closed_rows_text(conn, today),
         "max_undated": f"{cap} undated",
         "rec_id": rec["id"],
         "rec_name": html.escape(str(rec.get("name") or ""), quote=False),
@@ -156,15 +181,19 @@ def _ref_index(ref) -> int | None:
 
 
 def apply_result(conn: sqlite3.Connection, cfg: dict, rec: dict, data: dict, today: date, *, calendar=None, source: str = "plaud",
-                 allowed_ids: set[int] | None = None) -> dict:
+                 allowed_ids: set[int] | None = None, closed_ids: set[int] | None = None) -> dict:
     """Write what the run decided: new rows (upsert by source_key), one batch for every change to
-    an existing row (updates, voice instructions, reminders, calendar links) so the Log tab's Undo
-    reverts the recording in one tap, mentions and links on every row touched. `calendar` is a
-    callable(event) -> {"id", "link"} or None when the calendar is off. Returns a summary."""
+    an existing row (updates, voice instructions, reminders, calendar links, the links the owner
+    said) so the Log tab's Undo reverts the recording in one tap, mentions and links on every row
+    touched. `calendar` is a callable(event) -> {"id", "link"} or None when the calendar is off.
+    `closed_ids` are the recently finished tasks the prompt listed: a link's `to` and nothing else.
+    Returns a summary."""
     from .db import add_link, add_mention, get_task, upsert_task
+    rec_id = rec["id"]
+    # Synced before: a link it stated that the owner has since removed must not come back.
+    resynced = conn.execute("SELECT 1 FROM links WHERE kind = 'plaud_note' AND ref = ? LIMIT 1", (rec_id,)).fetchone() is not None
     unresolved: list[str] = [str(u) for u in (data.get("unresolved") or []) if u]
     at = str(rec.get("start_utc") or rec.get("start_at") or rec.get("date") or now_iso())
-    rec_id = rec["id"]
     link = f"{C.get(cfg, 'sinks.notion_notes.source_link_prefix', 'https://web.plaud.ai/file/')}{rec_id}"
     cap = int(C.get(cfg, "sources.plaud.extraction.max_undated_per_recording", 3))
     created: list[int] = []
@@ -301,6 +330,7 @@ def apply_result(conn: sqlite3.Connection, cfg: dict, rec: dict, data: dict, tod
             changes.append({"task_id": row["id"], "op": "set", "fields": f})
         applied += 1
         touched.append(row["id"])
+    links, link_suggestions = _links(conn, data.get("links"), by_index, _target, closed_ids or set(), resynced, changes, unresolved)
     reminders = 0
     for r in data.get("reminders") or []:
         if not isinstance(r, dict):
@@ -341,9 +371,90 @@ def apply_result(conn: sqlite3.Connection, cfg: dict, rec: dict, data: dict, tod
     for tid in dict.fromkeys(touched):
         add_mention(conn, tid, "plaud", rec_id, at)
         add_link(conn, tid, "plaud_note", rec_id, label=str(rec.get("name") or "")[:120])
+    if created:
+        suggestions.at_create_guarded(conn, created)
     conn.commit()
     return {"created": created, "updated": list(dict.fromkeys(updated)), "applied": applied, "reminders": reminders, "events": events,
+            "links": links, "link_suggestions": link_suggestions,
             "unresolved": unresolved, "batch_id": res["batch_id"], "task_ids": list(dict.fromkeys(created + touched))}
+
+
+LINK_KINDS = ("part_of", "waits_on", "same_as")
+QUIET_WHY_NOT = {"suggested before", "linked before", "already linked"}   # the owner has seen this pair: say nothing
+
+
+def _links(conn: sqlite3.Connection, entries, by_index: dict, target, closed_ids: set[int], resynced: bool,
+           changes: list, unresolved: list) -> tuple[int, int]:
+    """The run's `links` (design §10.2). A `part_of` / `waits_on` the owner stated, with the spoken
+    sentence, joins the recording's batch (`changes`); anything inferred, and any `same_as` (a merge
+    drops a task), is a `link_suggestion` card. An end is a task this run created ("tasks[i]"), a row
+    the prompt listed, or, for `to` only, a recently finished task. Returns (stated links put in the
+    batch, suggestions written); every refusal is a line in `unresolved`."""
+    if not isinstance(entries, list):
+        return 0, 0
+    if len(entries) > MAX_LINKS:
+        unresolved.append(f"{len(entries) - MAX_LINKS} links over the {MAX_LINKS} cap, not read")
+    stated_n = suggested_n = 0
+    seen: set[tuple] = set()
+
+    def end(v, may_be_closed: bool) -> tuple[int | None, str]:
+        i = _ref_index(v) if isinstance(v, str) else None
+        if i is not None:
+            tid = by_index.get(i)
+            return (tid, "") if tid else (None, f"tasks[{i}] was not created")
+        row = target(v)
+        if row:
+            return row["id"], ""
+        if may_be_closed and type(v) in (int, str) and str(v).isdigit() and int(v) in closed_ids:
+            return int(v), ""
+        return None, f"Task-{str(v)[:20]} is not a task this recording may name"
+
+    for e in entries[:MAX_LINKS]:
+        if not isinstance(e, dict):
+            continue
+        kind = e.get("kind")
+        label = f"link {str(e.get('from'))[:20]} → {str(e.get('to'))[:20]}"
+        if kind not in LINK_KINDS:
+            unresolved.append(f"{label}: kind must be part_of, waits_on or same_as")
+            continue
+        a, why = end(e.get("from"), False)
+        b, why_b = end(e.get("to"), True) if a else (None, "")
+        if not a or not b:
+            unresolved.append(f"{label}: {why or why_b}")
+            continue
+        status = {r[0]: r[1] for r in conn.execute("SELECT id, status FROM tasks WHERE id IN (?, ?)", (a, b)).fetchall()}
+        if status.get(a) != "open":
+            unresolved.append(f"{label}: Task-{a} is not open")
+            continue
+        if kind == "waits_on" and status.get(b) in ("done", "dropped"):
+            unresolved.append(f"{label}: a finished task holds nothing up (Task-{b})")
+            continue
+        evidence = e.get("evidence")
+        stated = e.get("stated") is True and isinstance(evidence, str) and bool(evidence.strip())
+        if (a, b, kind) in seen:
+            continue
+        seen.add((a, b, kind))
+        if stated and kind != "same_as":
+            if relations.find(conn, a, b, kind):
+                continue
+            if resynced and conn.execute("SELECT 1 FROM relations WHERE (src = ? AND dst = ?) OR (src = ? AND dst = ?) LIMIT 1", (a, b, b, a)).fetchone():
+                continue
+            problem = relations.link_problem(conn, "link", a, kind, b)
+            if problem:
+                unresolved.append(f"{label}: {problem}")
+                continue
+            evidence = evidence.strip()
+            changes.append({"op": "link", "task_id": a, "fields": {"kind": kind, "other": b, "why": evidence[:160]},
+                            "note": f"Said in the recording: “{evidence[:260]}”"})
+            stated_n += 1
+            continue
+        reason = str(e.get("why") or evidence or "").strip()[:160]
+        problem = suggestions.why_not(conn, kind, a, b)
+        if problem is None and suggestions.suggest_pair(conn, kind, a, b, reason, "recording"):
+            suggested_n += 1
+        elif problem and problem not in QUIET_WHY_NOT:
+            unresolved.append(f"{label}: {problem}")
+    return stated_n, suggested_n
 
 
 # --- the whole run (SPEC.md §6 "Plaud"): fetch, ask, write, log, alert ---------------------------
@@ -414,6 +525,7 @@ def run(conn: sqlite3.Connection, cfg: dict, *, subject: str | None, received: s
     except plaud.PlaudError as e:
         return fail(f"plaud: {e}")
     allowed = {r["id"] for r in slice_rows(conn)}
+    closed = {r["id"] for r in closed_rows(conn, today)}
     prompt = build_prompt(cfg, conn, rec, received or "", files, today)
     (workdir / "prompt.md").write_text(prompt, encoding="utf-8")
     cost = 0.0
@@ -437,7 +549,7 @@ def run(conn: sqlite3.Connection, cfg: dict, *, subject: str | None, received: s
         conn.commit()
         return {"ok": True, "rec": rec, "data": data, "prompt": prompt, "cost_usd": cost}
     cal = _calendar_writer(cfg) if calendar == "auto" else calendar
-    summary = apply_result(conn, cfg, rec, data, today, calendar=cal, allowed_ids=allowed)
+    summary = apply_result(conn, cfg, rec, data, today, calendar=cal, allowed_ids=allowed, closed_ids=closed)
     note_url = None
     note_err = None
     if C.value(cfg, "sinks.notion_notes.enabled"):
@@ -459,6 +571,7 @@ def run(conn: sqlite3.Connection, cfg: dict, *, subject: str | None, received: s
             summary["unresolved"].append(note_err)
     line = (f"{rec['name'][:80]}: {len(summary['created'])} created, {len(summary['updated'])} updated, {summary['applied']} instructions, "
             f"{summary['reminders']} reminders, {summary['events']} events, {len(summary['unresolved'])} unresolved"
+            + (f" · links: {summary['links']} said, {summary['link_suggestions']} suggested" if summary["links"] or summary["link_suggestions"] else "")
             + (f"; note: {note_url}" if note_url else "") + (f"; batch {summary['batch_id']}" if summary["batch_id"] else ""))
     log_run(conn, "sync-file", int((_time.monotonic() - started) * 1000), ok=True, summary=line[:1000], error=note_err, cost_usd=cost)
     conn.commit()

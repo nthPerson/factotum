@@ -42,7 +42,10 @@ SETTINGS_KEYS = [
     "sinks.notion_notes.enabled", "sinks.notion_tasks_mirror.enabled", "sinks.notion_tasks_mirror.sweep_minutes",
     "scoring.project_weights",
     "claude.models", "claude.planner.enabled", "claude.budgets_usd.chat_turn", "claude.summary.auto", "claude.summary.auto_minutes",
+    "claude.ripple.enabled", "claude.ripple.model", "claude.ripple.delay_seconds", "claude.ripple.hourly_cap", "claude.budgets_usd.ripple",
     "server.oauth.enabled", "server.mcp_writes",
+    "links.suggestions_per_review",                                       # stage 7
+    "claude.filing.enabled",                                              # stage 7
 ]
 
 # One default for every Settings key. Absent means off for anything that costs money or sends mail
@@ -64,7 +67,11 @@ DEFAULTS: dict[str, Any] = {
     "scoring.project_weights": {},
     "claude.models": {}, "claude.planner.enabled": False, "claude.budgets_usd.chat_turn": 1.0,
     "claude.summary.auto": False, "claude.summary.auto_minutes": 10,
+    "claude.ripple.enabled": False, "claude.ripple.model": "sonnet", "claude.ripple.delay_seconds": 60,
+    "claude.ripple.hourly_cap": 10, "claude.budgets_usd.ripple": 0.30,
     "server.oauth.enabled": False, "server.mcp_writes": "stage",
+    "links.suggestions_per_review": 5,                                    # stage 7
+    "claude.filing.enabled": False,                                       # stage 7
 }
 PAID_SWITCHES = ("notify.morning_brief.enabled", "claude.planner.enabled", "claude.summary.auto", "sinks.notion_notes.enabled")
 # The code's defaults before 2026-11-10 (the four paid / mailing switches were on when absent), for

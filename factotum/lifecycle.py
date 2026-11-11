@@ -11,12 +11,13 @@ from .dates import days_until, parse_date
 OPEN = "open"
 CLOSED = ("done", "dropped", "faded", "lapsed")
 
-REVIEW_ORDER = ["last_call", "thread_updated", "mentioned", "planner", "freed", "blocker_gone", "steps_done", "linked_changed", "link_suggested", "snooze_over", "new", "slipped", "fading", "back", "reminder_missed"]
+REVIEW_ORDER = ["last_call", "thread_updated", "mentioned", "planner", "ripple", "freed", "blocker_gone", "steps_done", "linked_changed", "link_suggested", "snooze_over", "new", "slipped", "fading", "back", "reminder_missed"]
 REVIEW_LABELS = {
     "last_call": "Last call · hard deadline passed",
     "thread_updated": "Thread updated",
     "mentioned": "Mentioned in Slack",
     "planner": "Planner suggests",
+    "ripple": "Ripple suggests",
     "freed": "Free now",
     "blocker_gone": "A task it waited on closed",
     "steps_done": "All steps done",
@@ -89,6 +90,8 @@ def review_reasons(task: dict, today: date, cfg: dict, last_review_at: date | No
         out.append("mentioned")
     if flags.get("planner"):
         out.append("planner")
+    if flags.get("ripple"):
+        out.append("ripple")
     rel = task.get("rel") or {}
     freed_at = parse_date(rel.get("freed_at"))
     closed = rel.get("waits_on_closed") or []

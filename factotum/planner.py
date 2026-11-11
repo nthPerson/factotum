@@ -15,7 +15,9 @@ linked; dismissals reach only evidence about listed rows; everything else is rej
 All changes to existing rows and the verdicts the batch can honour (applied, dismissed) ride in one
 batch (source `planner`) so the Log tab undoes a morning; a created row is not in the batch (like
 every import) and shows as New in Review instead, and its evidence is moved onto it and judged
-outside the batch, like the evidence behind a staged proposal, so an undo cannot make twins.
+outside the batch, like the evidence behind a staged proposal, so an undo cannot make twins. And
+a link, an unlink or a merge is never applied: a link or merge becomes a suggested link, an unlink a
+card, whatever it cites.
 """
 from __future__ import annotations
 
@@ -26,7 +28,7 @@ import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from . import batches, config as C, lifecycle, relations
+from . import batches, config as C, lifecycle, relations, suggestions
 from .db import add_link, add_mention, get_settings, log_run, now_iso, rows, upsert_task
 from .sync_file import _clean_task_fields
 
@@ -37,6 +39,8 @@ CAND_CAP = 40          # newest unjudged evidence rows the prompt carries; older
 WHY_CAP = 15
 PROPOSAL_CAP = 12
 TASK_OPS = {"done", "drop", "set", "add_reminder", "pin_top", "longterm"}
+LINK_OPS = {"link", "unlink", "merge"}
+LINK_CAP = 5           # link proposals staged per run (the prompt asks for at most 3)
 NON_PROVING = {"slack_mention"}       # anyone in a workspace can write "Task-42 is done": a hint to cite, never proof to act on
 
 
@@ -45,7 +49,7 @@ def bundle(conn: sqlite3.Connection, cfg: dict, today: date, events: list[dict] 
     from .mail_sweep import review_flags
     open_tasks = relations.scored(conn, rows(conn, "SELECT * FROM tasks WHERE status = 'open'"), today, cfg)
     ordered = sorted(open_tasks, key=lambda t: (0 if t.get("top_rank") else 1, t.get("top_rank") or 0, -(t["score"] or 0), t["id"]))
-    cands = rows(conn, "SELECT e.*, t.name AS task_name FROM evidence e LEFT JOIN tasks t ON t.id = e.task_id WHERE e.judged_at IS NULL AND e.kind NOT IN ('proposal', 'mail_new', 'link_suggestion') ORDER BY e.id DESC LIMIT ?", (CAND_CAP,))[::-1]
+    cands = rows(conn, "SELECT e.*, t.name AS task_name FROM evidence e LEFT JOIN tasks t ON t.id = e.task_id WHERE e.judged_at IS NULL AND e.kind NOT IN ('proposal', 'mail_new', 'link_suggestion', 'filing') ORDER BY e.id DESC LIMIT ?", (CAND_CAP,))[::-1]
     anns = get_settings(conn).get("state.canvas.announcements") or []
     if isinstance(anns, str):
         try:
@@ -64,7 +68,7 @@ def bundle(conn: sqlite3.Connection, cfg: dict, today: date, events: list[dict] 
     # `snap`: the open rows as this run reads them, so the summary it writes is remembered by what
     # the model saw (summary.store); `clock`: a run at 15:00 should not write a morning's verdict.
     return {"rows": ordered[:ROW_CAP], "candidates": cands, "announcements": anns, "reminders": rem, "events": events or [], "waiting": waiting, "review_n": review_n,
-            "pending": pending, "closed": closed, "clock": (now or reminders.local_now(cfg)).strftime("%H:%M"), "snap": summary.snapshot(open_tasks, today)}
+            "pending": pending, "link_candidates": suggestions.pending(conn)[:20], "closed": closed, "clock": (now or reminders.local_now(cfg)).strftime("%H:%M"), "snap": summary.snapshot(open_tasks, today)}
 
 
 def _esc(v) -> str:
@@ -89,12 +93,15 @@ def sections(b: dict, today: date) -> dict[str, str]:
     rem_lines = [f"reminder {r['fire_at'][11:16]} Task-{r['id']} {_esc(r['name'])[:70]} ({_esc(r.get('label'))[:60]})" for r in b["reminders"]]
     ev_lines = [f"event {e.get('start')}{'' if e.get('all_day') else '–' + str(e.get('end') or '')[11:16]} {_esc(e.get('summary'))[:80]}" + (" (accepted)" if e.get("self_status") == "accepted" else "") for e in b["events"]]
     wait_lines = [f"waiting Task-{t['id']} {_esc(t['name'])[:70]} on {_esc(t['waiting_on'])[:60]}" for t in b["waiting"]]
+    link_lines = [f"Task-{s.get('a')} ~ Task-{s.get('b')}: {relations.WORDS.get(s.get('kind'), 'linked to')}? ({_esc(' '.join(str(s.get('why') or '').split()))[:100]})"
+                  for s in b.get("link_candidates") or []]          # a why may be a model's words: every line break (\r, \u2028 too) becomes a space
     return {"today": today.strftime("%A %Y-%m-%d") + (f" · it is {b['clock']}" if b.get("clock") else "") + f" · Review holds {b['review_n']} items",
             "closed": "\n".join(f"Task-{c['id']} {_esc(c['name'])[:80]} ({c['status']})" for c in b.get("closed") or []) or "(nothing closed today)",
             "rows": "\n".join(row_lines) or "(no open rows)", "candidates": "\n".join(cand_lines) or "(nothing collected)",
             "announcements": "\n".join(ann_lines) or "(none)", "reminders": "\n".join(rem_lines) or "no reminders today",
             "events": "\n".join(ev_lines) or "calendar: off or empty", "waiting": "\n".join(wait_lines) or "nothing waiting on anyone",
-            "pending": "\n".join("- " + _esc(p.get("label"))[:160] for p in b.get("pending") or []) or "(nothing)"}
+            "pending": "\n".join("- " + _esc(p.get("label"))[:160] for p in b.get("pending") or []) or "(nothing)",
+            "link_candidates": "\n".join(link_lines) or "(none)"}
 
 
 def build_prompt(cfg: dict, b: dict, today: date) -> str:
@@ -113,6 +120,8 @@ def _same_suggestion(a: dict, b: dict) -> bool:
         return False
     if a.get("op") == "create":
         return _norm((a.get("fields") or {}).get("name")) == _norm((b.get("fields") or {}).get("name"))
+    if a.get("op") == "merge":                       # one pair, whichever way round
+        return {a.get("task_id"), (a.get("fields") or {}).get("into")} == {b.get("task_id"), (b.get("fields") or {}).get("into")}
     return a.get("task_id") == b.get("task_id") and (a.get("fields") or {}) == (b.get("fields") or {})
 
 
@@ -126,7 +135,7 @@ def apply(conn: sqlite3.Connection, cfg: dict, data: dict, b: dict, today: date)
             waiting.append(json.loads(r["ref"]))
         except (TypeError, ValueError):
             pass
-    evidence = {e["id"]: e for e in rows(conn, "SELECT * FROM evidence WHERE judged_at IS NULL AND kind NOT IN ('proposal', 'mail_new', 'link_suggestion')")}      # new mail is the triage's (mail_triage.py); link cards are Review's
+    evidence = {e["id"]: e for e in rows(conn, "SELECT * FROM evidence WHERE judged_at IS NULL AND kind NOT IN ('proposal', 'mail_new', 'link_suggestion', 'filing')")}      # new mail is the triage's (mail_triage.py); link cards are Review's
     changes: list[dict] = []
     applied: list[str] = []
     staged: list[str] = []
@@ -141,6 +150,7 @@ def apply(conn: sqlite3.Connection, cfg: dict, data: dict, b: dict, today: date)
         if isinstance(tid, int) and tid in allowed and text:
             changes.append({"task_id": tid, "op": "set", "fields": {"why_now": text[:300]}}); n_why += 1
     n_create = 0
+    n_link = 0
     for p in (data.get("proposals") or [])[:PROPOSAL_CAP]:
         if not isinstance(p, dict):
             continue
@@ -181,6 +191,41 @@ def apply(conn: sqlite3.Connection, cfg: dict, data: dict, b: dict, today: date)
                 conn.execute("UPDATE evidence SET task_id = ?, judged_at = ?, verdict = 'applied' WHERE id = ?", (tid, now_iso(), e["id"]))
                 judged[e["id"]] = None
             created.append(tid); applied.append(label)
+            continue
+        if op in LINK_OPS:
+            # Never applied, whatever it cites: a link or a merge becomes a suggested link, an unlink a card.
+            other = fields.get("into") if op == "merge" else fields.get("other")
+            kind = "same_as" if op == "merge" else fields.get("kind")
+            if not (type(tid) is int and type(other) is int and tid in allowed and other in allowed):
+                rejected.append(f"{label}: not a listed row"); continue
+            if op != "merge" and kind not in relations.LINK_KINDS:
+                rejected.append(f"{label}: unknown kind"); continue
+            if any(e.get("task_id") not in (None, tid, other) for e in cited):
+                # Judging it "staged" below would take it off Review for good, with no card holding it.
+                rejected.append(f"{label}: cites evidence about another task"); continue
+            if n_link >= LINK_CAP:
+                rejected.append(f"{label}: more than {LINK_CAP} link proposals"); continue
+            if op == "unlink":
+                if problem := relations.link_problem(conn, "unlink", tid, kind, other):
+                    rejected.append(f"{label}: {problem}"); continue
+                ch = {"op": "unlink", "task_id": tid, "fields": {"kind": kind, "other": other}}
+                dup = any(_same_suggestion(ch, w) for w in waiting)
+                if not dup:
+                    conn.execute("INSERT INTO evidence (task_id, kind, ref, label, excerpt, at) VALUES (?, 'proposal', ?, ?, ?, ?)",
+                                 (tid, json.dumps(ch), label, reason, now_iso()))
+                    waiting.append(ch)
+            else:
+                if problem := suggestions.why_not(conn, kind, tid, other):
+                    rejected.append(f"{label}: {problem}"); continue
+                suggestions.suggest_pair(conn, kind, tid, other, reason or label, "planner")
+                dup = False
+            for e in cited:                                   # the card lives outside the batch, so its evidence's verdict does too
+                conn.execute("UPDATE evidence SET judged_at = ?, verdict = 'staged' WHERE id = ?", (now_iso(), e["id"]))
+                judged[e["id"]] = None
+            if dup:
+                rejected.append(f"{label}: already waiting in Review")
+            else:
+                staged.append(label); n_link += 1
             continue
         if op not in TASK_OPS or not isinstance(tid, int) or tid not in allowed:
             rejected.append(f"{label}: " + ("unknown op" if op not in TASK_OPS else "not a listed row")); continue

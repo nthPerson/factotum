@@ -237,6 +237,21 @@ def pending_suggestions(db: Db, ids: set[int] | None = None) -> dict[int, list[d
     return out
 
 
+SESSION_KEY = "state.links.session"            # written by suggestions.session: today's offered suggestion ids
+
+
+def shown_ids(db: Db) -> set[int] | None:
+    """The evidence ids of the link suggestions offered today (`suggestions.session`'s choice), or None
+    when no session was ever recorded (everything pending shows). Read-only."""
+    r = db.execute("SELECT value_json FROM settings WHERE key = ?", (SESSION_KEY,)).fetchone()
+    if r is None:
+        return None
+    try:
+        return {int(e) for e in (json.loads(r[0]) or {}).get("ids") or []}
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
 def import_duplicate(db: Db, loser: int, owner: int) -> str:
     """A row the importer found sharing another row's source key (design §5.3). A closed row is a
     duplicate that is over: `same_as` the other, source `import` (the loser when both are closed, else
@@ -295,8 +310,9 @@ def _cause_from(cause_json: str | None) -> int | None:
 def annotate(db: Db, tasks: list[dict]) -> list[dict]:
     """Put every neighbour fact under `t["rel"]` (the plan's "task["rel"]" section), in place; returns
     `tasks`. A dict needs only `id`. Reads the active links once, the rows they reach once, the ripple
-    batches once and the pending suggestions once; the rest is Python. Never writes (the MCP server's
-    connection is query_only)."""
+    batches once and the pending suggestions once (only today's offered ones, `shown_ids`, once a
+    session was recorded, and only those still `suggestions.live`: a card whose task closed today
+    leaves both ends at once); the rest is Python. Never writes (the MCP server's connection is query_only)."""
     if not tasks:
         return tasks
     ids = sorted({int(t["id"]) for t in tasks})
@@ -353,6 +369,22 @@ def annotate(db: Db, tasks: list[dict]) -> list[dict]:
             "AND (t.neighbours_seen_at IS NULL OR b.applied_at > t.neighbours_seen_at) ORDER BY b.id", (json.dumps(ids),)):
         changed[r["task_id"]] = {"by": _cause_from(r["cause_json"]), "at": r["applied_at"], "batch_id": r["id"]}
     sugg = pending_suggestions(db, set(ids))
+    shown = shown_ids(db)
+    if shown is not None:                      # today's few (the daily cap); a filing suggestion always shows
+        sugg = {tid: [s for s in lst if s["evidence_id"] in shown or s["signal"] == "filing"] for tid, lst in sugg.items()}
+    eids = sorted({s["evidence_id"] for lst in sugg.values() for s in lst})
+    if eids:                                   # a card whose task closed (or was dropped) meanwhile leaves both ends now, not tomorrow
+        from . import suggestions              # lazy: it imports this module; `live` only reads
+        refs = {r[0]: r[1] for r in db.execute("SELECT id, ref FROM evidence WHERE id IN (SELECT value FROM json_each(?))", (json.dumps(eids),))}
+        alive = set()
+        for e in eids:
+            try:
+                ref = json.loads(refs.get(e) or "")
+            except (TypeError, ValueError):
+                continue
+            if isinstance(ref, dict) and suggestions.live(db, ref):
+                alive.add(e)
+        sugg = {tid: [s for s in lst if s["evidence_id"] in alive] for tid, lst in sugg.items()}
 
     for t in tasks:
         tid = int(t["id"])
@@ -516,6 +548,13 @@ def _twin_number(name) -> int | None:
     return int(runs[-1]) if runs else None
 
 
+def _twin_name(name) -> str:
+    """A name compared as an item's identity: the first 300 characters casefolded, every digit run as
+    its integer ("Quiz 05" is "quiz 5"), whitespace collapsed."""
+    s = _DIGITS.sub(lambda m: str(int(m.group())), str(name or "")[:300].casefold())
+    return " ".join(s.split())
+
+
 def _due_at(due) -> datetime | None:
     """A due value as a naive datetime; a date-only due is midnight."""
     try:
@@ -526,8 +565,10 @@ def _due_at(due) -> datetime | None:
 
 def twin_pairs(tasks: list[dict]) -> list[tuple[int, int, str]]:
     """Pairs that look like one task made twice (design §10.1), pure: both open, the same non-empty
-    project, both dated, the same number in the name, due within TWIN_HOURS, at least one from Canvas.
-    Name similarity alone is never a signal. Returns `(goes, keep, why)`, `keep` as `default_survivor`
+    project, both dated, the same number in the name, due within TWIN_HOURS, at least one from Canvas;
+    two Canvas rows pair only when their names are the same item's (`_twin_name`: Canvas posted one
+    item twice), since two Canvas items with two Canvas ids are two items. Name similarity alone is
+    never a signal. Returns `(goes, keep, why)`, `keep` as `default_survivor`
     picks it (the Canvas row, else the older); ordered by the two ids."""
     groups: dict[tuple, list[dict]] = {}
     for t in tasks:
@@ -540,6 +581,8 @@ def twin_pairs(tasks: list[dict]) -> list[tuple[int, int, str]]:
         for i, x in enumerate(ts):
             for y in ts[i + 1:]:
                 if "Canvas" not in (x.get("source"), y.get("source")):
+                    continue
+                if x.get("source") == y.get("source") == "Canvas" and _twin_name(x.get("name")) != _twin_name(y.get("name")):
                     continue
                 gap = abs(x["_at"] - y["_at"])
                 if gap > timedelta(hours=TWIN_HOURS):
