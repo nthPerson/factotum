@@ -273,12 +273,12 @@ links: { suggestions_per_review: 5 }
 
 claude:
   binary: claude                # absolute path (`which claude`) for the same reason; `factotum claude-check` says which
-  models: { sync_file: sonnet, today_summary: sonnet, mail_triage: sonnet, planner_morning: sonnet, chat_turn: sonnet, check: haiku }
-  budgets_usd: { sync_file: 1.00, today_summary: 0.30, mail_triage: 0.40, planner_morning: 0.75, chat_turn: 0.60, check: 0.05 }
+  models: { sync_file: sonnet, today_summary: sonnet, mail_triage: sonnet, planner_morning: sonnet, chat_turn: sonnet, check: haiku, filing: haiku }
+  budgets_usd: { sync_file: 1.00, today_summary: 0.30, mail_triage: 0.40, planner_morning: 0.75, chat_turn: 0.60, check: 0.05, filing: 0.10 }
   planner: { enabled: true }   # the morning brief's verdict and proposals; off = the plain brief
   summary: { auto: true, auto_minutes: 10 }   # the Today tab's summary: rewritten by one light run when it goes stale (a row it is about changed,
                                 # or something became urgent), at most this often; off = a badge and the Refresh button only. Settings → Claude.
-  timeouts_s: { sync_file: 600, today_summary: 180, mail_triage: 240, planner_morning: 480, chat_turn: 240 }
+  timeouts_s: { sync_file: 600, today_summary: 180, mail_triage: 240, planner_morning: 480, chat_turn: 240, filing: 120 }
 
 server:
   host: 127.0.0.1

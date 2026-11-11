@@ -49,7 +49,7 @@ def bundle(conn: sqlite3.Connection, cfg: dict, today: date, events: list[dict] 
     from .mail_sweep import review_flags
     open_tasks = relations.scored(conn, rows(conn, "SELECT * FROM tasks WHERE status = 'open'"), today, cfg)
     ordered = sorted(open_tasks, key=lambda t: (0 if t.get("top_rank") else 1, t.get("top_rank") or 0, -(t["score"] or 0), t["id"]))
-    cands = rows(conn, "SELECT e.*, t.name AS task_name FROM evidence e LEFT JOIN tasks t ON t.id = e.task_id WHERE e.judged_at IS NULL AND e.kind NOT IN ('proposal', 'mail_new', 'link_suggestion') ORDER BY e.id DESC LIMIT ?", (CAND_CAP,))[::-1]
+    cands = rows(conn, "SELECT e.*, t.name AS task_name FROM evidence e LEFT JOIN tasks t ON t.id = e.task_id WHERE e.judged_at IS NULL AND e.kind NOT IN ('proposal', 'mail_new', 'link_suggestion', 'filing') ORDER BY e.id DESC LIMIT ?", (CAND_CAP,))[::-1]
     anns = get_settings(conn).get("state.canvas.announcements") or []
     if isinstance(anns, str):
         try:
@@ -135,7 +135,7 @@ def apply(conn: sqlite3.Connection, cfg: dict, data: dict, b: dict, today: date)
             waiting.append(json.loads(r["ref"]))
         except (TypeError, ValueError):
             pass
-    evidence = {e["id"]: e for e in rows(conn, "SELECT * FROM evidence WHERE judged_at IS NULL AND kind NOT IN ('proposal', 'mail_new', 'link_suggestion')")}      # new mail is the triage's (mail_triage.py); link cards are Review's
+    evidence = {e["id"]: e for e in rows(conn, "SELECT * FROM evidence WHERE judged_at IS NULL AND kind NOT IN ('proposal', 'mail_new', 'link_suggestion', 'filing')")}      # new mail is the triage's (mail_triage.py); link cards are Review's
     changes: list[dict] = []
     applied: list[str] = []
     staged: list[str] = []

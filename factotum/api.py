@@ -412,7 +412,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         pending = rows(conn, "SELECT id, task_id, kind, ref, account, label, excerpt, at FROM evidence WHERE judged_at IS NULL ORDER BY id")
         by_task: dict[int, list] = {}
         for e in pending:
-            if e["task_id"] is not None and e["kind"] != "link_suggestion":     # a suggested link is its own card list, not evidence on the decision
+            if e["task_id"] is not None and e["kind"] not in ("link_suggestion", "filing"):     # a suggested link is its own card list, not evidence on the decision
                 change = None
                 if e["kind"] == "proposal":
                     try:

@@ -129,6 +129,9 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("planner", help="the morning planner now: one Claude run, then the brief's verdict and proposals")
     p.add_argument("--dry-run", action="store_true", help="run Claude and print the JSON; write nothing")
     p.add_argument("--send", action="store_true", help="also send the brief with the verdict")
+    p = sub.add_parser("file-task", help="one filing run for a task (a real Claude run): its project, effort, a likely link and twin as suggestions; --dry-run prints the JSON and stores nothing")
+    p.add_argument("task_id", type=int)
+    p.add_argument("--dry-run", action="store_true")
     p = sub.add_parser("sweep", help="run one sweep now")
     p.add_argument("which", choices=["mail", "canvas", "calendar", "slack", "links"])
     sub.add_parser("links-check", help="what the link detectors would suggest now; read-only")
@@ -396,6 +399,13 @@ def main(argv: list[str] | None = None) -> int:
                 print("  rejected:", r)
             if a.send:
                 print(brief.send(conn, ecfg, today, brief.smtp_mailer, gcal, planner=res))
+    elif a.cmd == "file-task":
+        from . import filing
+        res = filing.run(conn, ecfg, a.task_id, dry_run=a.dry_run, today=today)
+        if not res["ok"]:
+            raise SystemExit(f"filing failed: {res['error']}")
+        print(json.dumps(res["data"], indent=1, ensure_ascii=False) if a.dry_run else res["line"])
+        print(f"\n({'dry run · ' if a.dry_run else ''}${res['cost_usd']:.2f} · prompt under data/runs/filing/{a.task_id}/)")
     elif a.cmd == "sweep":
         from datetime import datetime as _dt
         from . import canvas, gcal, mail_sweep, slack_sweep, suggestions
