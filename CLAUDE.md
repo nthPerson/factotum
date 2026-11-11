@@ -272,6 +272,10 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
 - **What lands on a merged duplicate goes to its survivor in three ways only** (2026-11-10): a
   sync-file mention, a sync-file instruction, a Canvas close or due move. Fields are never copied, and a
   merge writes no mention.
+- **A reopened duplicate is its own task again** (review 2026-11-11): `reopen` removes its outgoing
+  `same_as` in the batch (`batches._unmerge`), and `relations.survivor` hops only from a closed row; with
+  the row left active, a recording saying "Task-1 is done" closed Task-2. A re-synced merged create
+  lends the survivor no `calendar_event`.
 - **`link_suggestion` evidence is not the planner's** (2026-11-10): excluded like `mail_new`, and not a
   card's `evidence`. A judged pair is never suggested again.
 - **The summary fingerprint grew a sixth field** (2026-11-10, `waits_on_open`); `stale` compares a

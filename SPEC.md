@@ -180,6 +180,10 @@ brief shows (≤ 15); it never writes scores.
 tasks exist; a step has one goal, a step cannot have steps, a goal cannot be a step; a task cannot wait on
 its own goal; a task waits only on an open task and a `waits_on` loop is refused (checked again at apply,
 so two staged links that make a loop together skip the second); at most 20 links of a kind per task.
+A reopened duplicate is a task of its own again: `reopen` removes its `same_as` in the same batch (undo
+restores it unless the row was merged elsewhere since), the redirect (`relations.survivor`) hops only from
+a closed row, and a merge refuses a target a merge dropped (`relations.merge_target_problem`, shared with
+the MCP validator).
 **Closing never cascades**: closing a goal does not close its steps, closing the last step does not close
 the goal, closing a task does not close what waits on it; the effect is on Review and on scores.
 *Scoring* (`scoring.links`, `enabled` false is exactly the old arithmetic): a task that waits on an open
