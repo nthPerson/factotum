@@ -952,7 +952,7 @@
     const bool = key => `<input type="checkbox" id="s-${key}" data-key="${key}" ${e[key] ? 'checked' : ''}>`;   // effective has every key, its default filled in by the server
     const text = (key, w) => `<input type="text" id="s-${key}" data-key="${key}" value="${esc(e[key] || '')}" style="width:${w || '100%'}">`;
     const time = key => `<input type="time" id="s-${key}" data-key="${key}" value="${esc(e[key] || '')}">`;
-    const accounts = (settings.accounts || []).map((a, i) => `<tr><td><input type="text" data-acc="${i}" data-f="address" value="${esc(a.address)}"></td><td><input type="text" data-acc="${i}" data-f="display" value="${esc(a.display || '')}" style="width:90px"></td><td><input type="text" data-acc="${i}" data-f="roles" value="${esc((a.roles || []).join(','))}" style="width:150px"></td><td><input type="checkbox" data-acc="${i}" data-f="enabled" ${a.enabled ? 'checked' : ''}></td><td><button class="btn small" data-accdel="${i}">×</button></td></tr>`).join('');
+    const accounts = (settings.accounts || []).map((a, i) => `<tr><td><input type="text" id="acc-${i}-address" data-acc="${i}" data-f="address" value="${esc(a.address)}"></td><td><input type="text" id="acc-${i}-display" data-acc="${i}" data-f="display" value="${esc(a.display || '')}" style="width:90px"></td><td><input type="text" id="acc-${i}-roles" data-acc="${i}" data-f="roles" value="${esc((a.roles || []).join(','))}" style="width:150px"></td><td><input type="checkbox" id="acc-${i}-enabled" data-acc="${i}" data-f="enabled" ${a.enabled ? 'checked' : ''}></td><td><button class="btn small" data-accdel="${i}">×</button></td></tr>`).join('');
     return `<div class="settings">
       <div class="note">Overrides are stored in the database. Defaults and everything structural (projects, weights, sources, property names) live in <code>${esc(settings.config_file)}</code>; edit that file to adapt Factotum to another workflow.</div>
       <h3>Review and lifecycle</h3>
@@ -1266,6 +1266,23 @@
     if (el.type === 'number') { const n = Number(el.value); return el.value === '' || Number.isNaN(n) ? undefined : n; }
     return el.value;
   }
+  // The save's render() rebuilds the panel from settings, and a change event comes only on blur, so the box
+  // being typed in next (Tab from one field to the next) would lose its text and focus: take them before the
+  // render, put them back after. Read just before the render, since typing goes on while the request runs.
+  function heldSettingsBox() {
+    const a = document.activeElement, panel = document.getElementById('panel');
+    if (!a || !a.id || !panel.contains(a) || !a.matches('input, textarea, select')) return null;
+    let s = null, e = null; try { s = a.selectionStart; e = a.selectionEnd; } catch (_) {}
+    return { id: a.id, value: a.value, typed: a.matches('textarea, input:not([type=checkbox]):not([type=radio])'), s, e };
+  }
+  function restoreSettingsBox(held) {
+    if (!held) return;
+    const el = document.getElementById(held.id); if (!el) return;
+    el.focus({ preventScroll: true });
+    // Focus first, then the text: set while focused, the box still counts it as changed, so leaving it fires change.
+    if (held.typed && el.value !== held.value) el.value = held.value;
+    if (held.s !== null) try { el.setSelectionRange(held.s, held.e); } catch (_) {}
+  }
   // Sends what changed and nothing else: the dirty keys, and the accounts table only when an account changed.
   async function saveSettings() {
     clearTimeout(saveSettings.t);
@@ -1279,13 +1296,14 @@
       if (settings.accounts.some(a => !String(a.address || '').trim())) { waiting = true; settingsDirty.set('#accounts', true); }
       else body.accounts = settings.accounts.map(a => ({ address: a.address, display: a.display, roles: a.roles, enabled: a.enabled }));
     }
-    const active = document.activeElement && document.activeElement.dataset ? document.activeElement.id : null;
     try {
       const kept = settings.accounts;
       settings = await api('/api/settings', { method: 'PUT', body: JSON.stringify(body) });
-      if (!body.accounts) settings.accounts = kept;      // the page's rows, a half-typed one included, over the server's
+      // The page's rows, a half-typed one included, over the server's; also when an account changed during the request.
+      if (!body.accounts || settingsDirty.has('#accounts')) settings.accounts = kept;
       toast(waiting ? 'Settings saved · the new account row needs an address' : 'Settings saved');
-      render(); const el = active && document.getElementById(active); if (el) el.focus();
+      const held = heldSettingsBox();
+      render(); restoreSettingsBox(held);
     } catch (e) {
       for (const [k, v] of snap) if (!settingsDirty.has(k)) settingsDirty.set(k, v);      // a newer change made meanwhile wins
       toast('Save failed: ' + e.message);
