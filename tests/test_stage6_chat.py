@@ -142,6 +142,10 @@ def test_a_staged_create_already_made_by_its_create_button_is_not_made_twice(cfg
         {"op": "create", "task_id": None, "fields": {}, "from_chat": {"message_id": res["message_id"], "index": 0}},
         {"op": "link", "task_id": 6, "fields": {"kind": "waits_on", "other": f"m{res['message_id']}-0"}}]}).json()
     assert out["created"] == [] and out["skipped"] == [] and (6, made, "waits_on") in active_rels(conn)
+    conn.execute("UPDATE tasks SET status = 'dropped', closed_by = 'undo' WHERE id = ?", (made,)); conn.commit()   # as an Undo of that Create leaves it
+    out = c.post("/api/batches/apply", json={"changes": [{"op": "create", "fields": {}, "from_chat": {"message_id": res["message_id"], "index": 0}}]}).json()
+    assert out["created"] == [] and out["skipped"] == [{"task_id": made, "why": f"Task-{made} was already made from this proposal and is dropped now; "
+                                                                               "reopen it instead of making it again"}]
     assert c.post("/api/batches/apply", json={"changes": [{"op": "create", "fields": {}, "from_chat": {"message_id": res["message_id"], "index": 1}}]}).status_code == 400
     assert c.post("/api/batches/apply", json={"changes": [{"op": "create", "fields": {}, "from_chat": {"message_id": 999999, "index": 0}}]}).status_code == 400
 

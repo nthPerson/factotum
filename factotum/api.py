@@ -382,8 +382,10 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         changes = [{k: v for k, v in c.items() if k not in ("source_key", "created_source")} for c in body.changes]   # the page never chooses either
         try:
             with chat._CREATE_LOCK:                  # a chat create staged here and its Create button never make two
-                changes = chat.resolve_staged(conn, eff_cfg(), changes)
+                left_out: list[dict] = []
+                changes = chat.resolve_staged(conn, eff_cfg(), changes, left_out)
                 res = batches.apply(conn, changes, body.source, date.today())
+                res["skipped"] = left_out + res["skipped"]
                 chat.mark_staged(conn, changes, res)
         except ValueError as e:
             raise HTTPException(400, str(e))

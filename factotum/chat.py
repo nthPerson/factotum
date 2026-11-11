@@ -527,19 +527,24 @@ def _made(conn: sqlite3.Connection, v):
     return int(ex["id"]) if ex else v
 
 
-def resolve_staged(conn: sqlite3.Connection, cfg: dict, changes: list[dict]) -> list[dict]:
+def resolve_staged(conn: sqlite3.Connection, cfg: dict, changes: list[dict], skipped: list[dict] | None = None) -> list[dict]:
     """The tray's changes, with every chat create (`from_chat: {message_id, index}`) replaced by the
     stored, validated proposal (the page's fields are ignored), keyed `chat:<m>:<i>` like Create and
-    labelled Source Chat; one Create already made is left out, and every tray ref to a made task
-    becomes its id. Raises ValueError when `from_chat` names no stored create."""
+    labelled Source Chat; one Create already made is left out (silently while that task is open; when it
+    has been closed since, by an Undo or a decision, with a reason appended to `skipped`), and every tray
+    ref to a made task becomes its id. Raises ValueError when `from_chat` names no stored create."""
     cache: dict[int, list[dict]] = {}
     out = []
     for ch in changes:
         if isinstance(ch, dict) and "from_chat" in ch:
             m, i, props = _staged_proposals(conn, ch["from_chat"], cache)
             key = f"chat:{m}:{i}"
-            if one(conn, "SELECT id FROM tasks WHERE source_key = ?", (key,)):
-                continue                                     # Create was pressed: the task exists
+            ex = one(conn, "SELECT id, status FROM tasks WHERE source_key = ?", (key,))
+            if ex:                                           # Create was pressed (or an earlier batch made it): the task exists
+                if ex["status"] != "open" and skipped is not None:
+                    skipped.append({"task_id": ex["id"], "why": f"Task-{ex['id']} was already made from this proposal and is {ex['status']} now; "
+                                                                "reopen it instead of making it again"})
+                continue
             pf = props[i].get("fields") or {}
             f = _clean_task_fields(cfg, pf)
             f["ref"] = tray_ref(m, i)
