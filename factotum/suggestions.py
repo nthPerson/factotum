@@ -1,8 +1,8 @@
 """Suggested links (design §5.4, §10.1): every rule about a link Factotum proposes rather than the
 owner typing it. It owns one card per unordered pair, ever (`why_not`, `suggest_pair`), whether a
-waiting card is still worth showing (`live`), and the detectors (`twins`). It writes `link_suggestion`
-evidence through `relations.suggest` only and never writes `relations`: a suggestion becomes a link
-when the owner taps it, through `batches`. `relations.suggest` stays as it is for the import; every
+waiting card is still worth showing (`live`), and the detectors (`twins`, `threads`, `text_refs`, all
+three in `detect`). It writes `link_suggestion` evidence through `relations.suggest` only and never
+writes `relations`: a suggestion becomes a link when the owner taps it, through `batches`. `relations.suggest` stays as it is for the import; every
 other writer goes through `suggest_pair`. Nothing here commits except `sweep_job` and `after_create`;
 everything else leaves that to the caller."""
 from __future__ import annotations
@@ -53,6 +53,16 @@ def _kind_problem(db: Db, kind: str, a: int, b: int) -> str | None:
     if kind == "any":
         return next((f"Task-{x} is not open" for x in (a, b) if _status(db, x) != "open"), None)
     return KIND_ERROR
+
+
+def _rule_problem(db: Db, kind: str, a: int, b: int) -> str | None:
+    """`why_not`'s rule part: two distinct existing tasks, and the kind's own rule."""
+    if a == b:
+        return "the same task"
+    for x in (a, b):
+        if _status(db, x) is None:
+            return f"no Task-{x}"
+    return _kind_problem(db, kind, a, b)
 
 
 def why_not(db: Db, kind: str, a: int, b: int) -> str | None:
@@ -124,3 +134,120 @@ def twins(db: Db, ids: set[int] | None = None) -> list[dict]:
     return [{"kind": "same_as", "a": goes, "b": keep, "why": why, "signal": "twin"}
             for goes, keep, why in pairs
             if (ids is None or goes in ids or keep in ids) and chosen(goes, (goes, keep, why)) and chosen(keep, (goes, keep, why))]
+
+
+# --- a shared mail thread or calendar event (design §10.1) ------------------------------------------
+
+THREAD_GROUP_MAX = 4                            # five or more open tasks on one thread: a mailing list, not a pair
+THREAD_WHY = {"mail_thread": "both follow the same mail thread", "calendar": "both are on the same calendar event"}
+
+
+def threads(db: Db) -> list[dict]:
+    """`any` suggestions for every pair of a group of 2 to THREAD_GROUP_MAX open tasks that share one
+    mail thread or calendar event, ordered by (a, b). A shared recording (`plaud_note`) or a shared
+    person (`counterpart`) is provenance and is never read here. A pair on both a thread and an event
+    is listed once, as the thread."""
+    groups: dict[tuple[str, str], list[int]] = {}
+    for r in db.execute("SELECT l.kind, l.ref, l.task_id FROM links l JOIN tasks t ON t.id = l.task_id "
+                        "WHERE t.status = 'open' AND l.kind IN ('mail_thread', 'calendar') ORDER BY l.task_id").fetchall():
+        groups.setdefault((r[0], r[1]), []).append(int(r[2]))
+    out: dict[tuple[int, int], dict] = {}
+    for (kind, _ref), members in sorted(groups.items(), key=lambda g: g[0][0] != "mail_thread"):
+        if not 2 <= len(members) <= THREAD_GROUP_MAX:
+            continue
+        for i, a in enumerate(members):
+            for b in members[i + 1:]:
+                out.setdefault((a, b), {"kind": "any", "a": a, "b": b, "why": THREAD_WHY[kind], "signal": "thread"})
+    return [out[p] for p in sorted(out)]
+
+
+# --- "Task-N" in a task's text (design §10.1) -------------------------------------------------------
+
+TEXT_CAP = 4000                                 # characters of a task's text read
+MAX_REFS = 10                                   # references kept per task
+_LINES, _LINE_CAP, _LOOKBACK = 200, 600, 60     # lines read, characters per line, characters before a reference
+_REF = re.compile(r"\btask-(\d{1,7})\b", re.I)
+_LABEL = re.compile(r"\b(?:sub-?tasks?|steps)\s{0,2}:")
+_SEP = r"[\s:,(-]{0,6}$"                        # all that may stand between a cue and the reference
+# The words just before a reference, per word refs_in returns. "blocked on / by" is one phrase, so a
+# shorter word inside it never wins over it. These patterns are the only place the word appears.
+_CUES = {
+    "same_as": r"merged\s{0,3}into|merged\s{0,3}with|duplicate\s{0,3}of|dupe\s{0,3}of|same\s{0,3}as",
+    "part_of": r"part\s{0,3}of|sub-?task\s{0,3}of|step\s{0,3}\d{0,3}\s{0,3}(?:of|in|for)|under",
+    "waits_on": r"after|waits?\s{0,3}on|waiting\s{0,3}(?:on|for)|blocked\s{0,3}(?:on|by)|depends\s{0,3}on|needs|requires|until|once",
+    "frees": r"before|unlocks?|frees|unblocks?|enables?",
+}
+_CUE_RE = {word: re.compile(rf"\b(?:{p})(?={_SEP})") for word, p in _CUES.items()}
+
+
+def _cue(line: str, start: int) -> str | None:
+    """The word whose cue ends nearest the reference at `start`, within the _LOOKBACK characters before
+    it on `line` (only `_SEP` may stand between); the longer cue on a tie. Searched in place, not on a
+    slice, so a cut word ("th|under") is not read as a cue."""
+    best = None
+    for word, rx in _CUE_RE.items():
+        for m in rx.finditer(line, max(0, start - _LOOKBACK), start):
+            key = (m.end(), -m.start())
+            if best is None or key > best[0]:
+                best = (key, word)
+    return best[1] if best else None
+
+
+def refs_in(text: str, self_id: int) -> list[tuple[str, int]]:
+    """Every "Task-N" in `text` as (word, N), in order of appearance: `same_as` (this task goes into N),
+    `part_of` (this is a step of N), `goal_of` (N is a step of this), `waits_on` (this waits on N),
+    `frees` (N waits on this) or `any`. The word comes from the cue just before the reference on its
+    line, else a "Sub-tasks:" / "Steps:" label earlier on the line makes it `goal_of`. Reads a capped
+    slice through bounded patterns (text written by anyone), at most MAX_REFS, never `self_id`, and
+    one entry per N (the first wins)."""
+    out: list[tuple[str, int]] = []
+    seen = {self_id}
+    for line in str(text or "")[:TEXT_CAP].split("\n")[:_LINES]:
+        line = line[:_LINE_CAP].casefold()
+        label = _LABEL.search(line)
+        label_end = label.end() if label else None
+        for m in _REF.finditer(line):
+            n = int(m.group(1))
+            if n in seen:
+                continue
+            seen.add(n)
+            word = _cue(line, m.start())
+            if word is None:
+                word = "goal_of" if label_end is not None and label_end <= m.start() else "any"
+            out.append((word, n))
+            if len(out) >= MAX_REFS:
+                return out
+    return out
+
+
+def _ref_pair(word: str, t: int, n: int) -> tuple[str, int, int]:
+    """(kind, a, b) of the suggestion that `word` in Task-t's text, naming Task-n, stands for."""
+    if word == "goal_of":
+        return "part_of", n, t
+    if word == "frees":
+        return "waits_on", n, t
+    if word == "any":
+        return "any", min(t, n), max(t, n)
+    return word, t, n
+
+
+def text_refs(db: Db, ids: set[int] | None = None) -> list[dict]:
+    """Suggestions from "Task-N" in the text (name, then context) of the open tasks (only `ids` when
+    given). A reference to a missing task, to a closed one where the kind needs it open, or that a
+    link rule refuses is dropped, never turned into `any`. The `why` never quotes the text."""
+    out = []
+    for r in db.execute("SELECT id, name, context FROM tasks WHERE status = 'open' ORDER BY id").fetchall():
+        t = int(r[0])
+        if ids is not None and t not in ids:
+            continue
+        for word, n in refs_in(f"{r[1] or ''}\n{r[2] or ''}", t):
+            kind, a, b = _ref_pair(word, t, n)
+            if _rule_problem(db, kind, a, b) is None:
+                out.append({"kind": kind, "a": a, "b": b, "why": f"Task-{t}'s text names Task-{n}", "signal": "text"})
+    return out
+
+
+def detect(db: Db, ids: set[int] | None = None) -> list[dict]:
+    """Every detector's suggestions: twins, then "Task-N" in text, then (over the whole list only, not
+    for `ids`) a shared thread or event."""
+    return twins(db, ids) + text_refs(db, ids) + (threads(db) if ids is None else [])
