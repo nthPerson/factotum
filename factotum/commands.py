@@ -165,12 +165,13 @@ def _project(words: str, projects: list[str]) -> tuple[str | None, str | None]:
 def _date_at(toks: list[str], j: int) -> dict | None:
     """The date phrase that ends at token j (with a "by"/"due" in front of it), or None."""
     low = [t.lower() for t in toks]
-    if j >= 1 and ((low[j - 1] == "next" and (low[j] in _WEEKDAY_WORDS or low[j] == "week"))
-                   or (low[j - 1] in _MONTH_WORDS and re.fullmatch(r"\d{1,2}", low[j]))):
-        start, bang, when = j - 1, False, f"{low[j - 1]} {low[j]}"
+    bang = len(low[j]) > 1 and low[j].endswith("!")     # a trailing "!" is the hard mark; the date is read without it
+    last = low[j][:-1] if bang else low[j]
+    if j >= 1 and ((low[j - 1] == "next" and (last in _WEEKDAY_WORDS or last == "week"))
+                   or (low[j - 1] in _MONTH_WORDS and re.fullmatch(r"\d{1,2}", last))):
+        start, when = j - 1, f"{low[j - 1]} {last}"
     else:
-        bang = len(low[j]) > 1 and low[j].endswith("!")
-        when = low[j][:-1] if bang else low[j]
+        when = last
         if when not in _DAY_WORDS and not _ISO_DAY.fullmatch(when):
             return None
         start = j

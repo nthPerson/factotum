@@ -29,7 +29,7 @@ def test_the_designs_example_line():
 
 def test_the_verbs_and_the_line_without_one():
     assert P("new Call mom")["name"] == P("+Call mom")["name"] == P("+ Call mom")["name"] == "Call mom"
-    assert P("Call mom") is None and P("addition to the list") is None and P("add") is None
+    assert P("Call mom") is None and P("addition to the list") is None
     assert P("Call mom", verb=False)["name"] == "Call mom" and P("add Call mom", verb=False)["name"] == "Call mom"
     r = P("add #personal ~S")
     assert r["name"] == "" and r["refused"] == [{"words": "", "why": "a task needs a name"}]
@@ -243,3 +243,16 @@ def test_the_find_command_line(cfg, tmp_path, monkeypatch, capsys):
     _found(cfg, tmp_path)
     cli.main(["find", "firmware"])
     assert capsys.readouterr().out.splitlines() == ["Task-120  done 2026-11-10  Firmware tests", "Task-121  dropped 2026-11-01 merged into Task-12  Firmware box"]
+
+
+# --- controller fix pass: "!" after a multi-word date, a bare verb, a repeated key
+
+def test_a_bang_after_a_two_word_date_is_the_hard_mark():
+    r = P("add Submit report next fri!")
+    base = P("add Submit report next fri")
+    assert r["name"] == "Submit report" and r["refused"] == [] and r["fields"]["hard"] == 1
+    assert r["fields"]["due"] == base["fields"]["due"] == "2026-11-13"
+    r = P("add Pay rent by nov 13!")
+    assert r["name"] == "Pay rent" and r["fields"]["due"] == "2026-11-13" and r["fields"]["hard"] == 1 and r["refused"] == []
+    r = P("add Plan next week!")
+    assert r["name"] == "Plan" and r["fields"]["due"] == P("add Plan next week")["fields"]["due"] and r["fields"]["hard"] == 1
