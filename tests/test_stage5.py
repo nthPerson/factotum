@@ -1,6 +1,6 @@
 """Stage 5, ripples (Part A)."""
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -15,7 +15,7 @@ from factotum import config as C
 from factotum.api import create_app
 from factotum.claude import runner
 from factotum.claude.runner import run as real_run
-from factotum.db import get_settings, get_task, log_run
+from factotum.db import get_settings, get_task, log_run, now_iso
 from factotum.scheduler import Scheduler
 
 # --- Task 1: the ripple keys and the runner's per-run model and budget
@@ -282,3 +282,50 @@ def test_an_outcome_needs_a_token_closed_from_this_reminder(cfg, tmp_path):
     assert "nothing saved" in client.post(f"/r/{tok}/outcome", data={"outcome": "   "}).text and c.execute("SELECT COUNT(*) FROM batches").fetchone()[0] == n
     c.execute("UPDATE reminders SET sent_at = '2026-01-01T00:00:00+00:00'"); c.commit()
     assert client.post(f"/r/{tok}/outcome", data={"outcome": "x"}).status_code == 410
+
+
+# --- Task 9: Review says what the linked task did and what a ripple suggests
+def _ripple_on_two(client) -> int:
+    c = client.app.state.conn
+    mk(c, 1, name="Ask the chair"); mk(c, 2, context="Old"); link(c, 2, 1, "waits_on")
+    client.post("/api/batches/apply", json={"source": "ui", "changes": [{"op": "done", "task_id": 1},
+                                                                         {"op": "set", "task_id": 1, "fields": {"outcome": "The chair can serve remotely"}}]})
+    b = ripple.bundle(c, C.load(FIXTURE), [1], TODAY)
+    out = ripple.apply(c, {}, b, ripple.parse({"ripples": [entry(2, context="Free to send the form.", why="Task-1 settled it")]}, b), None, TODAY)
+    return out["batch_id"]
+
+
+def test_review_says_what_the_linked_task_did_and_what_the_ripple_wrote(cfg, tmp_path):
+    client = TestClient(create_app(cfg, db_path=str(tmp_path / "a.db")))
+    r = _ripple_on_two(client)
+    item = next(i for i in client.get("/api/review").json()["items"] if i["task"]["id"] == 2)
+    assert "linked_changed" in item["reasons"]
+    s = item["since"]
+    assert s["batch_id"] == r and not s["undone"] and not s["cause_undone"] and not s["noted"]
+    assert s["by"] == [{"id": 1, "name": "Ask the chair", "status": "done", "outcome": "The chair can serve remotely",
+                        "completed_at": date.today().isoformat(), "did": "done", "what": ["closed", "outcome"]}]
+    assert s["text"] == {"before": "Old", "after": "Free to send the form.", "note": "Task-1 settled it"}
+    client.get("/api/tasks/2")                                               # opening the task is looking at it
+    assert not any(i["task"]["id"] == 2 and "linked_changed" in i["reasons"] for i in client.get("/api/review").json()["items"])
+
+
+def test_a_ripple_proposal_is_its_own_review_reason(cfg, tmp_path):
+    client = TestClient(create_app(cfg, db_path=str(tmp_path / "a.db")))
+    c = client.app.state.conn
+    mk(c, 5)
+    c.execute("INSERT INTO evidence (task_id, kind, ref, account, label, excerpt, at) VALUES (5, 'proposal', ?, 'ripple', 'set due 2026-11-20 on Task-5', 'the form can go', ?)",
+              (json.dumps({"task_id": 5, "op": "set", "fields": {"due": "2026-11-20"}}), now_iso())); c.commit()
+    rv = client.get("/api/review").json()
+    item = next(i for i in rv["items"] if i["task"]["id"] == 5)
+    assert item["primary"] == "ripple" and "planner" not in item["reasons"] and item["evidence"][0]["by"] == "ripple"
+    assert rv["labels"]["ripple"] == "Ripple suggests"
+
+
+def test_a_ripple_create_card_makes_a_ripple_task(cfg, tmp_path):
+    client = TestClient(create_app(cfg, db_path=str(tmp_path / "a.db")))
+    c = client.app.state.conn
+    c.execute("INSERT INTO evidence (task_id, kind, ref, account, label, excerpt, at) VALUES (NULL, 'proposal', ?, 'ripple', 'create: Book the bench', 'r', ?)",
+              (json.dumps({"task_id": None, "op": "create", "fields": {"name": "Book the bench"}}), now_iso())); c.commit()
+    eid = c.execute("SELECT id FROM evidence").fetchone()[0]
+    tid = client.post(f"/api/review/suggestions/{eid}/create", json={}).json()["task_id"]
+    assert get_task(c, tid)["source"] == "Ripple"

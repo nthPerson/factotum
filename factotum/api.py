@@ -423,6 +423,9 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         for i in full:                                           # from the full rel (a text may name a closed task it waited on)
             i["texts"] = lifecycle.reason_texts(i["task"], i["reasons"])
             i["link_suggestions"] = [dict(s, other_name=names.get(s["other"])) for s in i["task"]["rel"]["suggestions"]]
+        for i in full:
+            if "linked_changed" in i["reasons"]:
+                i["since"] = ripple.since(conn, i["task"]["id"], i["task"]["rel"].get("changed"))
         for t in open_tasks:
             ship_rel(t)
         pending = rows(conn, "SELECT id, task_id, kind, ref, account, label, excerpt, at FROM evidence WHERE judged_at IS NULL ORDER BY id")
@@ -435,7 +438,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
                         change = json.loads(e["ref"]) if e["ref"] else None
                     except ValueError:
                         change = None
-                by_task.setdefault(int(e["task_id"]), []).append({"id": e["id"], "kind": e["kind"], "label": e["label"], "reason": e["excerpt"], "change": change, "at": e["at"]})
+                by_task.setdefault(int(e["task_id"]), []).append({"id": e["id"], "kind": e["kind"], "label": e["label"], "reason": e["excerpt"], "change": change, "at": e["at"], "by": "ripple" if e["account"] == "ripple" else None})
         for i in full:
             i["flags"] = flags.get(i["task"]["id"], {})
             i["evidence"] = by_task.get(i["task"]["id"], [])      # judged in the same batch as the decision; a proposal's change can be accepted
@@ -496,7 +499,8 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         e = e[0]
         is_slack = e["kind"] == "slack_mention"
         mail = _suggestion_mail(e)
-        key = f"{'slack-mention' if is_slack else 'mail-suggestion' if mail else 'planner-suggestion'}:{evidence_id}"
+        by_ripple = e.get("account") == ripple.ACCOUNT and not is_slack and not mail
+        key = f"{'slack-mention' if is_slack else 'mail-suggestion' if mail else 'ripple-suggestion' if by_ripple else 'planner-suggestion'}:{evidence_id}"
         ex = rows(conn, "SELECT id FROM tasks WHERE source_key = ?", (key,))
         if ex:
             return {"task_id": ex[0]["id"]}
@@ -507,7 +511,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         want = _suggestion_fields(ecfg, e)
         f = _clean_task_fields(ecfg, want)
         now = now_iso()
-        tid = upsert_task(conn, dict(f, status="open", source="Slack" if is_slack else "Mail" if mail else "Planner", source_key=key, source_link=want.get("source_link"),
+        tid = upsert_task(conn, dict(f, status="open", source="Slack" if is_slack else "Mail" if mail else "Ripple" if by_ripple else "Planner", source_key=key, source_link=want.get("source_link"),
                                      account=e.get("account") if is_slack else mail.get("account") if mail else None, context=f.get("context") or (e["excerpt"] or None),
                                      mentions=1, last_mention_at=date.today().isoformat(), created_at=now, edited_at=now))
         if is_slack and e.get("ref"):

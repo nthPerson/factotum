@@ -734,3 +734,31 @@ def status(conn: sqlite3.Connection, cfg: dict, *, scheduler: bool, after: int |
                            "from": cause.get("from", []) if isinstance(cause, dict) else [], "tasks": tasks, "undone": b["undone_at"] is not None})
     return {"enabled": enabled, "scheduler": scheduler, "pending": waiting,
             "waiting_for_scheduler": bool(enabled and waiting and not scheduler), "landed": landed}
+
+
+def since(conn: sqlite3.Connection, task_id: int, changed: dict | None) -> dict | None:
+    """What Review's "Since you last looked" block says about a card a ripple changed: which linked
+    tasks did what (with their outcome) and the text the ripple wrote, before and after. None when
+    `changed` (annotate's `rel.changed`) is missing or its batch is not a ripple."""
+    if not changed:
+        return None
+    bid = changed.get("batch_id")
+    row = conn.execute("SELECT id, applied_at, undone_at, cause_json FROM batches WHERE id = ?", (bid,)).fetchone()
+    cause = _load(row["cause_json"]) if row else None
+    if not isinstance(cause, dict) or cause.get("kind") != RUN_KIND:
+        return None
+    by = []
+    for fid in cause.get("from") or []:
+        t = get_task(conn, fid)
+        if not t:
+            continue
+        what = list((cause.get("what") or {}).get(str(fid)) or [])
+        did = t["status"] if "closed" in what and t["status"] in ("done", "dropped") else "merged" if "merge" in what else "changed"
+        by.append({"id": fid, "name": t["name"], "status": t["status"], "outcome": t.get("outcome"),
+                   "completed_at": t.get("completed_at"), "did": did, "what": what})
+    text = None
+    c = conn.execute("SELECT old, new, note FROM changes WHERE batch_id = ? AND task_id = ? AND field = 'context' ORDER BY id LIMIT 1", (bid, task_id)).fetchone()
+    if c:
+        text = {"before": _load(c["old"]), "after": _load(c["new"]), "note": c["note"]}
+    return {"batch_id": bid, "at": row["applied_at"], "undone": bool(row["undone_at"]), "cause_undone": bool(cause.get("cause_undone_at")),
+            "by": by, "text": text, "noted": task_id in (cause.get("noted") or [])}
