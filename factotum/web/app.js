@@ -31,7 +31,8 @@
   function setFold(key, shut) { folds[key] = !!shut; try { localStorage.setItem('factotum.folds', JSON.stringify(folds)); } catch (_) {} }
   let ui = { tab: 'today', focus: null, sel: new Set(), open: new Set(), reviewIdx: 0, laterOpen: false, datePick: false, trayOpen: false, trayOff: new Set(), reviewPaused: false, rvNote: { id: null, text: '' }, remOpen: null, dueOpen: null, rvReply: null,
              railOpen: !window.matchMedia('(max-width: 860px)').matches, chatDrawer: false,
-             page: null, pageTask: null, pageScroll: 0 };     // the phone task page: its id, the row fetched when the list lacks it, the list's scroll
+             page: null, pageTask: null, pageScroll: 0,      // the phone task page: its id, the row fetched when the list lacks it, the list's scroll
+             bulkMore: false };      // the phone's short bar shows its second line (back to false when nothing is selected)
   try { ui.tab = parseAddress().tab; } catch (_) {}
   try { const r = localStorage.getItem('factotum.rail'); if (r === '0' || r === '1') ui.railOpen = r === '1'; } catch (_) {}
   try { const s = JSON.parse(localStorage.getItem('factotum.staged') || '[]'); staged = new Map(s); } catch (_) {}
@@ -388,12 +389,23 @@
       ${box}
       <p class="hint keys">Tap a row to select it (the bulk bar appears) · <kbd>j</kbd><kbd>k</kbd> move · <kbd>d</kbd> done · <kbd>x</kbd> drop · <kbd>s</kbd> snooze · <kbd>t</kbd> top · <kbd>l</kbd> long-term · <kbd>e</kbd> details · double-click a row for details · <kbd>Esc</kbd> deselect</p>
       <p class="hint touch">${phone ? 'Tap a row to open it · tick the box to select it' : 'Tap a row to select it · double-tap or ▸ for details'}</p></div>
-      <div class="bulk" id="bulk"><b id="bulk-n"></b> selected
+      ${phone ? shortBar() : `<div class="bulk" id="bulk"><b id="bulk-n"></b> selected
         <button class="btn small" data-bulk="done">Done</button><button class="btn small" data-bulk="drop">Drop</button>
         <button class="btn small" data-bulk="snooze">Snooze to tomorrow</button>
         <span class="remform"><input type="date" id="bulk-date" aria-label="Due date"><button class="btn small" data-bulk="setdue">Set due</button><button class="btn small" data-bulk="cleardue">Remove due date</button></span>
         <button class="btn small" data-bulk="top">Pin to Top</button><button class="btn small" data-bulk="longterm">Long-term</button>
-        <span class="spacer"></span><button class="btn small" data-bulk="clear">Clear</button></div>`;
+        <span class="spacer"></span><button class="btn small" data-bulk="clear">Clear</button></div>`}`;
+  }
+  // The phone's bulk bar: one line (Done, Drop, Snooze, More, ✕) that takes the tray's place at the
+  // bottom while rows are selected; More opens a second line with the rest of desktop's actions.
+  function shortBar() {
+    return `<div class="bulk short" id="bulk"><b id="bulk-n"></b>
+        <button class="btn small" data-bulk="done">Done</button><button class="btn small" data-bulk="drop">Drop</button><button class="btn small" data-bulk="snooze">Snooze</button>
+        <button class="btn small" id="bulk-more" aria-expanded="${ui.bulkMore}">More</button>
+        <span class="spacer"></span><button class="btn small" data-bulk="clear" aria-label="Clear selection">✕</button>
+        ${ui.bulkMore ? `<div class="bulk-more">
+          <span class="remform"><input type="date" id="bulk-date" aria-label="Due date"><button class="btn small" data-bulk="setdue">Set due</button><button class="btn small" data-bulk="cleardue">Remove due date</button></span>
+          <button class="btn small" data-bulk="top">Pin to Top</button><button class="btn small" data-bulk="longterm">Long-term</button></div>` : ''}</div>`;
   }
   // A section of rows with a heading that folds it: {key, title, rows, cls, tag}. A folded section
   // renders no rows, so j/k and the bulk bar only ever see what is on screen.
@@ -967,10 +979,13 @@
       if (k === 'setdue' && !d) { toast('Pick a date'); return; }
       [...ui.sel].forEach(id => act(id, k, d)); ui.sel.clear(); render();
     }));
+    const bm = document.getElementById('bulk-more'); if (bm) bm.onclick = () => { ui.bulkMore = !ui.bulkMore; render(); };
+    if (!ui.sel.size) ui.bulkMore = false;      // the next selection starts with the short bar on one line
     const bulk = document.getElementById('bulk');
     if (bulk) {
       bulk.classList.toggle('on', ui.sel.size > 0); const n = document.getElementById('bulk-n'); if (n) n.textContent = ui.sel.size;
-      const tray = document.getElementById('tray'); bulk.style.bottom = tray.classList.contains('on') ? (tray.offsetHeight + 8) + 'px' : '';
+      // On a phone the tray slides away while rows are selected (app.css), so the bar sits at the bottom edge.
+      const tray = document.getElementById('tray'); bulk.style.bottom = !PHONE() && tray.classList.contains('on') ? (tray.offsetHeight + 8) + 'px' : '';
     }
     document.body.classList.toggle('bulk-on', ui.sel.size > 0 && !!bulk);      // Chat has no bulk bar: what is selected there is what a prompt carries
     panel.querySelectorAll('[data-proj]').forEach(b => b.addEventListener('click', () => { const k = 'projects:' + b.dataset.proj; setFold(k, !folded(k, true)); render(); }));

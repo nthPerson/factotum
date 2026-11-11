@@ -355,6 +355,16 @@ body.tray-open main { padding-bottom: 60vh; }
 .log .scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 .runs { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 520px; } .runs th, .runs td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); } .runs tr.bad td { color: var(--crit); }
 .bulk .remform { display: inline-flex; width: auto; }
+/* The phone's short bar (app.js shortBar): one line at 390 px, More opens a second; while rows are
+   selected it is the only thing at the bottom, so the tray slides away and comes back with the
+   same changes once the selection is cleared. */
+.bulk.short { gap: 6px; padding: 6px 8px; }
+.bulk.short > .btn { padding: 6px 10px; }
+.bulk.short > b { min-width: 2ch; text-align: center; }
+.bulk.short .bulk-more { flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding-top: 6px; border-top: 1px solid var(--accent); }
+.bulk.short .bulk-more .remform { width: 100%; }
+.bulk.short .bulk-more .remform input[type=date] { flex: 1; min-width: 0; }
+@media (max-width: 700px) { body.bulk-on .tray { transform: translateY(110%); } }
 
 /* Chat (phase 5) */
 .chat { max-width: 1000px; display: grid; grid-template-columns: 230px minmax(0, 1fr); gap: 16px; align-items: start; }
