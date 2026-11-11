@@ -810,6 +810,49 @@
       <span class="lhint">${lv === 'linked' ? 'Tasks that belong together, shown together.' : 'A badge names the linked task. Click it to jump there.'}</span></div>`;
   }
 
+  // ---------- links (stage 4b): Today's order ----------
+  // Within one group, a waiting task is drawn under the first task it waits on that the group holds, chains
+  // included (depth first, roots in their current order). A loop in old data draws each row once.
+  function nestWaiting(rows) {
+    const ids = new Set(rows.map(x => x.id)), parent = new Map(), kids = new Map();
+    for (const w of rows) {
+      const p = ((w.rel && w.rel.waits_on_open) || []).find(id => id !== w.id && ids.has(id));
+      if (p == null) continue;
+      parent.set(w.id, p);
+      if (!kids.has(p)) kids.set(p, []);
+      kids.get(p).push(w);
+    }
+    if (!parent.size) return rows;
+    const out = [], seen = new Set();
+    const walk = (x, child) => {
+      if (seen.has(x.id)) return;
+      seen.add(x.id); out.push(child ? under(x) : x);
+      for (const k of kids.get(x.id) || []) walk(k, true);
+    };
+    rows.filter(x => !parent.has(x.id)).forEach(x => walk(x, false));
+    rows.forEach(x => walk(x, false));      // rows of a loop, which no root reaches
+    return out;
+  }
+  // Today's groups in link order. A task that frees a hard-dated task in an earlier group is drawn in that
+  // group, just before it (never pushed to a later one); then each group nests its waiting tasks. `open` is
+  // todayGroups' own list, so a snoozed or filtered-out task is never pulled in. A hard-dated waiting task
+  // never leaves its group. The rows given are never changed: an indented row is a copy.
+  function arrangeToday(groups, open) {
+    const gs = groups.map(g => Object.assign({}, g, { rows: g.rows.slice() }));
+    const holds = (g, id) => g.rows.some(y => y.id === id);
+    for (const x of open) {
+      const r = x.rel;
+      if (!r || !r.needed_by || r.needed_by_id == null || !['frees', 'chain'].includes(r.needed_by_via)) continue;
+      if (isWaiting(x) && x.hard && x.due) continue;
+      const H = r.needed_by_id, h = gs.findIndex(g => holds(g, H));
+      if (h < 0 || gs.slice(0, h + 1).some(g => holds(g, x.id))) continue;
+      gs.slice(h + 1).forEach(g => { g.rows = g.rows.filter(y => y.id !== x.id); });
+      gs[h].rows.splice(gs[h].rows.findIndex(y => y.id === H), 0, x);
+    }
+    gs.forEach(g => { g.rows = nestWaiting(g.rows); });
+    return gs;
+  }
+
   // ---------- rendering ----------
   function render() {
     document.body.classList.toggle('page-on', ui.page !== null);      // before measuring: the page hides the bar on a phone
@@ -1055,12 +1098,12 @@
     const o = openOnes().filter(x => !(x.snoozed_until && x.snoozed_until > data.today) && (!ready || readyRow(x)));   // Later = hidden until its date
     const by = f => o.filter(f);
     const today = by(x => dueDays(x) === 0), tomorrow = by(x => dueDays(x) === 1);
-    return { open: o, groups: [
+    return { open: o, groups: arrangeToday([
       { key: 'today:overdue', title: 'Overdue · hard deadlines', cls: 'crit', rows: by(x => x.hard && dueDays(x) !== null && dueDays(x) < 0) },
       { key: 'today:today', title: 'Due today', cls: 'warn', rows: today },
       { key: 'today:tomorrow', title: 'Due tomorrow', rows: tomorrow },
       { key: 'today:starting', title: 'Starting soon · reminders set', rows: by(x => (x.reminders || []).some(r => daysTo(r.fire_at.slice(0, 10)) <= 1) && !today.includes(x) && !tomorrow.includes(x)) },
-      { key: 'today:week', title: 'Rest of the week', rows: by(x => dueDays(x) > 1 && dueDays(x) <= 7) }] };
+      { key: 'today:week', title: 'Rest of the week', rows: by(x => dueDays(x) > 1 && dueDays(x) <= 7) }], o) };
   }
   function renderToday() {
     const { groups } = todayGroups();      // snoozed rows are not in these groups but are open: Timeline lists them
