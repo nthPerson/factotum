@@ -20,7 +20,7 @@
   // What is being typed, kept outside the DOM: every render() rebuilds the panel (a chat turn's status
   // line re-renders it every second), and a long prompt must survive that with its caret.
   const draft = { cmd: '', ask: '', askFor: null, pick: '', outcome: '', askToday: '', askTask: '', askTaskFor: null,
-                  newLine: '', newKey: newKey(),
+                  newLine: '', newKey: newKey(), newName: '',      // newName: the phone sheet's "What needs doing" (stage 6)
                   findQ: '', picks: {} };      // Find any task's box; the shared task picker's boxes by slot (stage 6)      // the New task line, and the key its next add carries (stage 6)
   let asking = null;        // {id, name} of the task whose outcome the toast asks (ripples (stage 5): the outcome question)
   try { draft.cmd = sessionStorage.getItem('factotum.cmd') || ''; sessionStorage.removeItem('factotum.cmd'); } catch (_) {}   // kept by reloadKeepingDraft
@@ -44,6 +44,7 @@
              bulkMore: false,      // the phone's short bar shows its second line (back to false when nothing is selected)
              askTask: null,        // the opened task whose conversation shows (stage 6; one at a time)
              newOpen: false,
+             sheet: null,          // the phone's New task sheet when open: {due, pick, project, effort, links, hit, linking} (stage 6)
              findOpen: false };      // Find any task is open (stage 6)     // the New task line is open (stage 6; a desktop's list tabs)
   try { ui.tab = parseAddress().tab; } catch (_) {}
   try { const r = localStorage.getItem('factotum.rail'); if (r === '0' || r === '1') ui.railOpen = r === '1'; } catch (_) {}
@@ -357,9 +358,9 @@
   // Focus in an empty draft-backed box does not count: its text lives in `draft` and render() puts the
   // focus and caret back, so a reload of the lists loses nothing (a box left focused and empty would
   // otherwise keep the lists stale on every return). render() uses the same list, through isDraftBox.
-  const DRAFT_BOXES = ['cmd', 'rv-ask', 'chat-pick', 'rv-note', 'today-ask', 'task-ask', 'new-line', 'find-q', 'pick-link', 'pick-merge', 'pick-sheet'];
+  const DRAFT_BOXES = ['cmd', 'rv-ask', 'chat-pick', 'rv-note', 'today-ask', 'task-ask', 'new-line', 'find-q', 'pick-link', 'pick-merge', 'pick-sheet', 'new-name'];
   function typingNow() {
-    if ([draft.cmd, draft.ask, draft.pick, draft.outcome, draft.askToday, draft.askTask, draft.newLine, ui.findOpen ? draft.findQ : '', ...Object.values(draft.picks), ui.rvNote.text].some(s => (s || '').trim())) return true;
+    if ([draft.cmd, draft.ask, draft.pick, draft.outcome, draft.askToday, draft.askTask, draft.newLine, draft.newName, ui.findOpen ? draft.findQ : '', ...Object.values(draft.picks), ui.rvNote.text].some(s => (s || '').trim())) return true;
     if (ui.remOpen !== null || ui.dueOpen !== null || chat.busy) return true;
     const a = document.activeElement;
     return !!(a && a.matches('input, textarea, select') && a.closest('#panel') && !isDraftBox(a.id));
@@ -1255,8 +1256,15 @@
     document.getElementById('n-review').textContent = review && (review.total || (review.suggestions || []).length) ? review.total + (review.suggestions || []).filter(x => !x.created).length : '';
     renderRemind();
     renderTray();
+    renderSheet();
+    bottomRule();
     wire();
     ensureDetails();
+  }
+  // On a phone one thing sits at the bottom (stage 6): the tray, the short bar, the task page's bar, Review's
+  // decisions, or else, on a list tab, the round New task button.
+  function bottomRule() {
+    document.body.classList.toggle('fab-on', PHONE() && LIST_TABS.includes(ui.tab) && ui.page === null && !staged.size && !ui.sel.size && !ui.sheet);
   }
   function starterHtml() {
     if (!(settings && settings.starter)) return '';
@@ -2095,7 +2103,7 @@
         if (p.op === 'link_thread' || p.applied) return `<div class="pprop"><span></span>${words}<span class="chip staged">${p.op === 'create' && p.task_id ? 'created ' + tref(p.task_id) : 'linked'}</span></div>`;
         if (staged.has(placeKey(p, m.id, i))) return `<div class="pprop"><span></span>${words}<span class="chip staged">staged</span></div>`;
         if (!PLACE_OPS.has(p.op)) return `<div class="pprop"><span></span>${words}<span></span></div>`;
-        return `<label class="pprop"><input type="checkbox" data-pprop="${esc(k)}" ${pl.off.has(k) ? '' : 'checked'} aria-label="Stage this">${words}${p.op === 'create' ? `<span class="pbtns"><button class="btn small" data-place-create="${esc(k)}">Create</button>${PHONE() ? '' : `<button class="btn small" data-edit-first="${esc(k)}">Edit first</button>`}</span>` : '<span></span>'}</label>`;
+        return `<label class="pprop"><input type="checkbox" data-pprop="${esc(k)}" ${pl.off.has(k) ? '' : 'checked'} aria-label="Stage this">${words}${p.op === 'create' ? `<span class="pbtns"><button class="btn small" data-place-create="${esc(k)}">Create</button><button class="btn small" data-edit-first="${esc(k)}">Edit first</button></span>` : '<span></span>'}</label>`;
       };
       const short = PHONE() && !pl.more && props.length > 2;
       const rows = (short ? props.slice(0, 2) : props).map((p, i) => row(p, i)).join('')
@@ -2206,8 +2214,16 @@
     const a = document.activeElement;
     if (document.body.classList.contains('kb-open') && a && a.matches('input, textarea')) {      // a smaller window: the box stays in view
       const r = a.getBoundingClientRect();
-      if (r.top < 0 || r.bottom > vv.height) a.scrollIntoView({ block: 'center' });
+      if (r.top < 0 || r.bottom > vv.height) showBox(a, false);
     }
+  }
+  // A box into view: a box in the New task sheet scrolls the sheet alone (scrollIntoView would also scroll the list
+  // under the fixed sheet, which the user then finds moved when it closes); any other box is centred on the page.
+  function showBox(t, smooth) {
+    const sh = t.closest('#sheet');
+    if (!sh) { t.scrollIntoView({ block: 'center', behavior: smooth ? 'smooth' : 'auto' }); return; }
+    const r = t.getBoundingClientRect(), s = sh.getBoundingClientRect(), vv = window.visualViewport, bottom = Math.min(s.bottom, vv ? vv.offsetTop + vv.height : innerHeight);
+    if (r.top < s.top) sh.scrollTop -= s.top - r.top + 12; else if (r.bottom > bottom) sh.scrollTop += r.bottom - bottom + 12;
   }
   if (window.visualViewport) { visualViewport.addEventListener('resize', fitKeyboard); visualViewport.addEventListener('scroll', fitKeyboard); }
   const typesText = el => el && el.matches && el.matches('textarea, input:not([type=checkbox]):not([type=radio]):not([type=button]):not([type=submit])') && !!el.closest('#panel, #sheet');
@@ -2216,7 +2232,7 @@
     document.body.classList.add('kb-open');
     if (refocusing) return;      // a redraw put the focus back: the box is where it was
     const t = e.target;
-    setTimeout(() => { if (document.activeElement === t) t.scrollIntoView({ block: 'center', behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' }); }, 300);
+    setTimeout(() => { if (document.activeElement === t) showBox(t, !window.matchMedia('(prefers-reduced-motion: reduce)').matches); }, 300);
   });
   document.addEventListener('focusout', () => document.body.classList.remove('kb-open'));
   let logData = null;
@@ -2647,9 +2663,16 @@
     return ln.filter(Boolean).join(' ');
   }
   // Edit first on a proposed new task: its line goes into the New task line, to be changed and added with Enter.
+  // On a phone it fills the New task sheet instead (sheetOf).
   function editFirst(mid, i) {
     const p = proposalsOf(mid)[i]; if (!p || p.op !== 'create') return;
     const f = p.fields || {};
+    if (PHONE()) {
+      draft.newName = String(f.name || '').trim(); draft.newKey = newKey();
+      openSheet(sheetOf(f));
+      if ((f.links || []).some(l => l && typeof l.other === 'string')) toast('A link to another new task is left out');
+      return;
+    }
     draft.newLine = addLineOf(f); draft.newKey = newKey();
     openNewLine();
     previewAdd('new', draft.newLine);
@@ -2677,6 +2700,148 @@
     if (id === 'new-line' || id === 'new-name' || /^step-line-\d+$/.test(id) || (id === 'cmd' && ADD_RE.test(e.target.value))) draft.newKey = newKey();
     if (id === 'cmd' && ui.tab !== 'chat') previewAdd('cmd', e.target.value);
   });
+
+  // ---------- by hand (stage 6): New task on a phone ----------
+  // A round button at the bottom (when nothing else is there, bottomRule) opens a sheet (frame 11): the name, then
+  // taps for the date, project, effort and one link of each kind, since typed shorthand is awkward on a phone
+  // keyboard. Add task makes it at once like the desktop line (POST /api/add with {fields}, nothing stripped from
+  // the name); Let Claude file it sends the name as a sentence to the Today box's conversation. `ui.sheet` holds the
+  // taps, `draft.newName` the name, so a redraw or a Cancel loses nothing typed.
+  const SHEET_EFFORTS = ['XS', 'S', 'M', 'L'];
+  const sheetDays = () => [['Today', data.today], ['Tomorrow', isoPlus(1)], ['Fri', nextFri()]];
+  const freshSheet = () => ({ due: null, pick: false, project: '', effort: '', links: [], hit: null, linking: false });
+  // A proposed new task's fields as the sheet's taps: a day that is not one of the three shows under Pick a date;
+  // a link to a task number becomes a chip (the last of each kind), a link to another new task's ref is left out.
+  function sheetOf(f) {
+    const due = f.due ? String(f.due).slice(0, 10) : null, links = [];
+    for (const l of f.links || []) {
+      if (!l || !Number.isInteger(l.other) || !['part_of', 'waits_on'].includes(l.kind)) continue;
+      const j = links.findIndex(x => x.kind === l.kind); if (j >= 0) links.splice(j, 1);
+      links.push({ kind: l.kind, other: l.other });
+    }
+    return Object.assign(freshSheet(), { due, pick: !!due && !sheetDays().some(([, d]) => d === due),
+      project: (data.projects || []).includes(f.project) ? f.project : '', effort: f.effort || '', links });
+  }
+  // A task the link picker found: an open one from the lists, a closed one from the search answers.
+  function sheetHitInfo(id) {
+    const t = byId(id); if (t) return { id, name: t.name, status: 'open', due: t.due };
+    for (const res of (find.done || new Map()).values()) { const r = (res.results || []).find(x => x.id === id); if (r) return r; }
+    return { id, name: '', status: 'open' };
+  }
+  const SHEET_X = '<svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M6 6l12 12"></path><path d="M18 6L6 18"></path></svg>';
+  function sheetHtml() {
+    const s = ui.sheet, tog = (attrs, on, label) => `<button type="button" class="stog" ${attrs} aria-pressed="${on}">${label}</button>`;
+    const dayOn = s.pick ? null : (sheetDays().find(([, d]) => d === s.due) || [])[0];      // Tomorrow and Fri may be one day: the first lights
+    const due = sheetDays().map(([l, d]) => tog(`data-sheet-due="${d}"`, l === dayOn, l)).join('') + tog('data-sheet-pick', s.pick, 'Pick a date');
+    const chips = s.links.map(l => `<span class="lchip ${l.kind === 'waits_on' ? 'wait' : 'ok'}">${l.kind === 'waits_on' ? 'waits on' : 'part of'} <span class="code">Task-${l.other}</span><button type="button" data-sheet-unlink="${l.kind}" aria-label="Remove link to Task-${l.other}">${SHEET_X}</button></span>`).join('');
+    let linking = '';
+    if (s.linking) {
+      linking = pickerHtml('sheet', { closed: true, exclude: new Set(s.links.map(l => l.other)), placeholder: 'A task number, or words from its name' });
+      if (s.hit !== null) {
+        const h = sheetHitInfo(s.hit), closed = h.status !== 'open';
+        linking += `<div class="shit"><div class="shname"><span class="code">Task-${h.id}</span> <span class="nm">${esc(h.name)}</span>${statusChip(h)}</div>
+          <div class="sbtns"><button type="button" class="stog" data-sheet-link="waits_on" ${closed ? `disabled title="Task-${h.id} is ${esc(h.status)}: nothing can wait on it"` : ''}>waits on it</button><button type="button" class="stog" data-sheet-link="part_of">is a step of it</button></div></div>`;
+      }
+    }
+    return `<span class="handle" aria-hidden="true"></span>
+      <div class="shead"><span class="stitle">New task</span><button type="button" class="slink-plain" data-sheet-cancel>Cancel</button></div>
+      <label class="sfield">What needs doing<input id="new-name" type="text" autocomplete="off" enterkeyhint="done" value="${esc(draft.newName)}"></label>
+      <div class="sfield"><span>Due</span><div class="stogs">${due}</div>${s.pick ? `<input type="date" id="sheet-date" value="${esc(s.due || '')}" aria-label="Due date">` : ''}</div>
+      <div class="sgrid"><label class="sfield">Project<select id="sheet-project"><option value="">No project</option>${(data.projects || []).map(p => `<option value="${esc(p)}" ${p === s.project ? 'selected' : ''}>${esc(p)}</option>`).join('')}</select></label>
+        <div class="sfield"><span>Effort</span><div class="seffort">${SHEET_EFFORTS.map(v => tog(`data-sheet-effort="${v}"`, s.effort === v, v)).join('')}</div></div></div>
+      <div class="sfield"><span>Linked to</span><div class="slinks">${chips}<button type="button" class="stog slink" data-sheet-linking aria-expanded="${s.linking}">Link a task</button></div>${linking}</div>
+      <button type="button" class="btn primary sadd" id="sheet-add">Add task</button>
+      <div class="sclaude"><button type="button" class="btn" id="sheet-claude">Let Claude file it</button><div class="hint">Type or dictate a whole sentence. Claude names it, files it and links it.</div></div>`;
+  }
+  // Drawn by render() (and alone by the sheet's own taps), with the focus, caret and scroll inside it kept.
+  function renderSheet() {
+    const el = document.getElementById('sheet'), back = document.getElementById('sheet-back');
+    document.body.classList.toggle('sheet-on', !!ui.sheet);
+    el.hidden = back.hidden = !ui.sheet;
+    if (!ui.sheet) { el.innerHTML = ''; return; }
+    const held = heldDraftBox(el), top = el.scrollTop;
+    el.innerHTML = sheetHtml();
+    el.scrollTop = top;
+    restoreDraftBox(held);
+    wireSheet(el);
+  }
+  function focusSheetBox(id) {
+    const el = document.getElementById(id); if (!el) return;
+    el.focus({ preventScroll: true }); try { el.setSelectionRange(el.value.length, el.value.length); } catch (_) {}
+  }
+  // `n` on a phone, the round button, Edit first (with the proposal's taps): on this list tab, Today from any other.
+  function openSheet(fill) {
+    ui.sheet = fill || ui.sheet || freshSheet();
+    if (ui.page !== null || !LIST_TABS.includes(ui.tab)) go(LIST_TABS.includes(ui.tab) ? ui.tab : 'today'); else render();
+    focusSheetBox('new-name');
+  }
+  // The taps go; the name stays in draft.newName for the next time the sheet opens.
+  function closeSheet() {
+    const a = document.activeElement; if (a && a.closest && a.closest('#sheet')) a.blur();      // a removed box would leave kb-open on
+    ui.sheet = null; draft.picks.sheet = '';
+    render();
+  }
+  function sheetAdd() {
+    const s = ui.sheet; if (!s) return;
+    if (!draft.newName.trim()) { toast('Type what needs doing first'); focusSheetBox('new-name'); return; }
+    const link = kind => (s.links.find(l => l.kind === kind) || {}).other ?? null;
+    addTask({ fields: { name: draft.newName, due: s.due, project: s.project || null, effort: s.effort || null, after: link('waits_on'), under: link('part_of') } },
+      { clear: () => { draft.newName = ''; } }).then(id => { if (id != null && ui.sheet) closeSheet(); });
+  }
+  // The name, as a sentence, to the Today box's conversation: the sheet closes and the tab becomes Today first.
+  async function sheetToClaude() {
+    const text = draft.newName.trim();
+    if (!text) { toast('Type or dictate a sentence first'); focusSheetBox('new-name'); return; }
+    if (chat.busy) { toast('Claude is still answering · your text is kept'); return; }
+    draft.newName = '';
+    closeSheet();
+    if (ui.tab !== 'today' || ui.page !== null) go('today');
+    const pl = placeOf('today', null);
+    if (!pl.loaded) await loadPlace(pl);
+    sendTurn(pl, text, null, 'newName');
+  }
+  pickers.sheet = id => { if (ui.sheet) { ui.sheet.hit = id; renderSheet(); } };
+  function wireSheet(el) {
+    const s = ui.sheet, again = () => renderSheet();
+    const nm = el.querySelector('#new-name');
+    nm.oninput = () => { draft.newName = nm.value; };
+    nm.addEventListener('keydown', e => {
+      if (e.key === 'Escape') { e.preventDefault(); closeSheet(); }
+      else if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); sheetAdd(); }
+      e.stopPropagation();      // no key typed here acts on the list
+    });
+    el.querySelector('[data-sheet-cancel]').onclick = closeSheet;
+    el.querySelectorAll('[data-sheet-due]').forEach(b => b.onclick = () => { const d = b.dataset.sheetDue; s.due = b.getAttribute('aria-pressed') === 'true' ? null : d; s.pick = false; again(); });
+    el.querySelector('[data-sheet-pick]').onclick = () => {
+      s.pick = !s.pick; if (!s.pick) s.due = null;
+      again();
+      const di = document.getElementById('sheet-date'); if (di) { di.focus({ preventScroll: true }); try { di.showPicker(); } catch (_) {} }
+    };
+    const di = el.querySelector('#sheet-date'); if (di) di.onchange = () => { s.due = di.value || null; };
+    const sp = el.querySelector('#sheet-project'); sp.onchange = () => { s.project = sp.value; };
+    el.querySelectorAll('[data-sheet-effort]').forEach(b => b.onclick = () => { const v = b.dataset.sheetEffort; s.effort = s.effort === v ? '' : v; again(); });
+    el.querySelectorAll('[data-sheet-unlink]').forEach(b => b.onclick = () => { s.links = s.links.filter(l => l.kind !== b.dataset.sheetUnlink); again(); });
+    el.querySelector('[data-sheet-linking]').onclick = () => { s.linking = !s.linking; s.hit = null; draft.picks.sheet = ''; again(); if (s.linking) focusSheetBox('pick-sheet'); };
+    el.querySelectorAll('[data-sheet-link]').forEach(b => b.onclick = () => {
+      const kind = b.dataset.sheetLink;      // one link of each kind: a second replaces the first
+      s.links = s.links.filter(l => l.kind !== kind).concat({ kind, other: s.hit });
+      s.hit = null; s.linking = false; again();
+    });
+    const pk = el.querySelector('#pick-sheet');
+    if (pk) {
+      pk.oninput = e => { draft.picks.sheet = pk.value; wantSearch(pk.value, false); if (!e.isComposing) again(); };
+      pk.addEventListener('keydown', e => {
+        if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); const h = pickHits('sheet')[0]; if (h) takePick('sheet', h.id); }
+        else if (e.key === 'Escape') { e.preventDefault(); s.linking = false; s.hit = null; draft.picks.sheet = ''; again(); }
+        e.stopPropagation();
+      });
+    }
+    el.querySelectorAll('[data-picker="sheet"]').forEach(b => b.onclick = () => takePick('sheet', +b.dataset.hit));
+    el.querySelector('#sheet-add').onclick = sheetAdd;
+    el.querySelector('#sheet-claude').onclick = sheetToClaude;
+  }
+  document.getElementById('fab-new').onclick = () => openSheet();
+  document.getElementById('sheet-back').onclick = closeSheet;
 
   // ---------- wiring ----------
   // A text box that grows: Enter sends (Shift+Enter is a new line); on a touch keyboard Enter is a new line and the button sends.
@@ -3065,6 +3230,7 @@
     if (!document.getElementById('signedout').hidden) return;      // signed out: no key acts on the app behind the screen
     if (e.key === 'Escape') {   // Esc: deselect everything; in Chat the selection is what a prompt carries, so it only closes the task picker
       lastTap = { id: null, at: 0 };
+      if (ui.sheet) { closeSheet(); return; }      // the New task sheet closes first; what is under it stays as it was
       if (ui.page !== null) history.back();      // the task page closes like the phone's Back
       else if (ui.findOpen && LIST_TABS.includes(ui.tab)) { ui.findOpen = false; render(); }
       else if (ui.tab === 'chat') { if (ui.pickOpen) { ui.pickOpen = false; render(); } }
@@ -3072,10 +3238,11 @@
       if (e.target.matches('input, select, textarea')) e.target.blur(); return;
     }
     if (e.target.matches('input, select, textarea')) return;
+    if (ui.sheet) return;      // the sheet covers the list: no key acts on what is under it
     if (e.key === '/' && !e.ctrlKey && !e.metaKey && !e.altKey && ui.page === null && LIST_TABS.includes(ui.tab)) { e.preventDefault(); openFind(); return; }
     if (ui.page !== null) return;      // the task page covers the tab: no key acts on what is under it
     // Before the returns below: Review has its own keys, and an empty list has no rows (and says "Press n").
-    if (e.key === 'n' && !e.ctrlKey && !e.metaKey && !e.altKey && !PHONE()) { e.preventDefault(); openNewLine(); return; }
+    if (e.key === 'n' && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); if (PHONE()) openSheet(); else openNewLine(); return; }      // a phone's hardware keyboard opens the sheet
     if (ui.tab === 'review') { const map = { d: 'done', k: 'keep', s: 'later', x: 'drop', t: 'top', l: 'longterm' }; if (map[e.key]) { e.preventDefault(); reviewAct(map[e.key]); } return; }
     const visible = [...document.querySelectorAll('#panel .row')].map(r => +r.dataset.id); if (!visible.length) return;
     const i = visible.indexOf(ui.focus);
@@ -3087,7 +3254,7 @@
     else return;
     e.preventDefault();
   });
-  window.addEventListener('resize', () => { const bar = document.querySelector('header.bar'); if (bar) document.documentElement.style.setProperty('--bar-h', bar.offsetHeight + 'px'); });
+  window.addEventListener('resize', () => { const bar = document.querySelector('header.bar'); if (bar) document.documentElement.style.setProperty('--bar-h', bar.offsetHeight + 'px'); bottomRule(); });
   document.addEventListener('visibilitychange', onReturn);
   load().then(() => { applyAddress(); registerWorker(); return loadSettings(); }).then(loadPush).catch(e => { document.getElementById('panel').innerHTML = `<div class="empty">Could not load /api/tasks: ${esc(e.message)}</div>`; });
 })();

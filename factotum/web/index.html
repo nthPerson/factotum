@@ -45,6 +45,10 @@
     <div class="tray-panel" id="tray-panel" hidden></div>
   </div>
   <div class="toast" id="toast"></div>
+  <!-- On a phone: the round New task button and its sheet (stage 6, frames 8 and 11); app.js draws the sheet. -->
+  <button class="fab" id="fab-new" aria-label="New task"><svg aria-hidden="true" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14"></path><path d="M5 12h14"></path></svg></button>
+  <div class="sheet-back" id="sheet-back" hidden></div>
+  <div class="sheet" id="sheet" role="dialog" aria-modal="true" aria-label="New task" hidden></div>
   <div class="signedout" id="signedout" role="alertdialog" aria-modal="true" aria-labelledby="so-title" hidden><div class="box"><h2 id="so-title">Signed out</h2><p>Your sign-in has expired. Changes waiting in the tray are kept.</p><button class="btn primary" id="signin">Sign in again</button></div></div>
 </div>
 <script src="/static/app.js"></script>
