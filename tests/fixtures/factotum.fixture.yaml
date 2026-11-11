@@ -278,6 +278,7 @@ claude:
   planner: { enabled: true }   # the morning brief's verdict and proposals; off = the plain brief
   summary: { auto: true, auto_minutes: 10 }   # the Today tab's summary: rewritten by one light run when it goes stale (a row it is about changed,
                                 # or something became urgent), at most this often; off = a badge and the Refresh button only. Settings → Claude.
+  filing: { enabled: false }
   timeouts_s: { sync_file: 600, today_summary: 180, mail_triage: 240, planner_morning: 480, chat_turn: 240, filing: 120 }
 
 server:

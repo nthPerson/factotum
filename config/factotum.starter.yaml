@@ -75,6 +75,7 @@ links: { suggestions_per_review: 5 }
 claude:
   planner: { enabled: false }
   summary: { auto: false, auto_minutes: 10 }
+  filing: { enabled: false }
 
 server:
   host: 127.0.0.1

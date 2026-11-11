@@ -359,7 +359,11 @@ def after_create(conn, created: list[int], source: str) -> None:
     """`at_create`, then commit; never raises (a failure rolls back and leaves one line on stderr)."""
     try:
         at_create(conn, created)
+        from . import batches, filing           # lazy: both import this module
+        if batches.created_source(source) == "Manual":
+            filing.enqueue(conn, created)
         conn.commit()
     except Exception as e:
         conn.rollback()
         print(f"factotum: suggestions after create failed: {type(e).__name__}: {e}", file=sys.stderr)
+

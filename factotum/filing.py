@@ -13,12 +13,12 @@ from __future__ import annotations
 import html
 import json
 import time
-from datetime import date
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from . import config as C
 from . import relations, suggestions
-from .db import log_run, now_iso, one, rows
+from .db import get_settings, log_run, now_iso, one, rows, set_setting
 from .relations import LINK_KINDS, WORDS
 from .sync_file import slice_rows, taxonomy_text
 
@@ -146,3 +146,77 @@ def run(conn, cfg: dict, task_id: int, *, runner=None, dry_run: bool = False, to
     log_run(conn, KIND, ms, ok=True, summary=line[:1000], cost_usd=res.cost_usd)
     conn.commit()
     return {"ok": True, "stored": stored, "dropped": dropped, "cost_usd": res.cost_usd, "line": line}
+
+
+# --- the queue (design §10.3): filled at create, emptied by the scheduler -----------------------------
+
+QUEUE_KEY = "state.filing.pending"
+QUEUE_MAX = 50
+PER_TICK = 3
+
+
+def _queue(conn) -> list[dict]:
+    q = get_settings(conn).get(QUEUE_KEY)
+    return [e for e in q if isinstance(e, dict) and type(e.get("task_id")) is int and isinstance(e.get("day"), str)] if isinstance(q, list) else []
+
+
+def _fresh(q: list[dict], today: date) -> list[dict]:
+    keep = {today.isoformat(), (today - timedelta(days=1)).isoformat()}
+    return [e for e in q if e["day"] in keep]
+
+
+def wants(conn, task_id: int) -> bool:
+    t = one(conn, "SELECT * FROM tasks WHERE id = ?", (task_id,))
+    return bool(t and t["status"] == "open" and t["source"] == "Manual" and _unset(t, "project") and _unset(t, "effort")
+                and not one(conn, "SELECT 1 AS x FROM relations WHERE src = ? OR dst = ?", (task_id, task_id)))
+
+
+def enqueue(conn, ids: list[int], today: date | None = None) -> list[int]:
+    """Queue the ids that `wants`; the caller commits."""
+    today = today or date.today()
+    q = _fresh(_queue(conn), today)
+    have = {e["task_id"] for e in q}
+    added = [i for i in ids if i not in have and wants(conn, i)]
+    q += [{"task_id": i, "day": today.isoformat()} for i in added]
+    set_setting(conn, QUEUE_KEY, q[-QUEUE_MAX:])
+    return added
+
+
+def queued(conn, today: date) -> list[int]:
+    return [e["task_id"] for e in _fresh(_queue(conn), today)]
+
+
+def run_queue(conn, cfg: dict, now: datetime, runner=None) -> str | None:
+    q = _queue(conn)
+    if len(_fresh(q, now.date())) != len(q):
+        set_setting(conn, QUEUE_KEY, _fresh(q, now.date()))
+        conn.commit()
+    lines: list[str] = []
+    for tid in queued(conn, now.date())[:PER_TICK]:
+        set_setting(conn, QUEUE_KEY, [e for e in _queue(conn) if e["task_id"] != tid])
+        conn.commit()                                   # dequeued before the run: a failure is not retried
+        try:
+            res = run(conn, cfg, tid, runner=runner, today=now.date())
+        except Exception as e:
+            conn.rollback()
+            res = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        lines.append(res.get("line") if res.get("ok") else f"Task-{tid}: failed ({str(res.get('error') or '')[:80]})")
+    return "; ".join(lines) or None
+
+
+def chips(conn, ids: set[int]) -> dict[int, list[dict]]:
+    if not ids:
+        return {}
+    out: dict[int, list[dict]] = {}
+    tasks = {t["id"]: t for t in rows(conn, f"SELECT * FROM tasks WHERE id IN ({','.join('?' * len(ids))})", tuple(ids))}
+    for e in rows(conn, f"SELECT id, task_id, ref, label FROM evidence WHERE kind = 'filing' AND judged_at IS NULL AND task_id IN ({','.join('?' * len(ids))}) ORDER BY id", tuple(ids)):
+        try:
+            ref = json.loads(e["ref"])
+            field, value = ref["field"], ref["value"]
+        except (TypeError, ValueError, KeyError):
+            continue
+        t = tasks.get(e["task_id"])
+        if t is None or not _unset(t, field):
+            continue
+        out.setdefault(e["task_id"], []).append({"evidence_id": e["id"], "field": field, "value": value, "label": e["label"]})
+    return out

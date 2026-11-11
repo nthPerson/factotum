@@ -39,7 +39,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
-from . import app_push, batches, commands, config as C, lifecycle, oauth, relations, reminders, suggestions, summary
+from . import app_push, batches, commands, config as C, filing, lifecycle, oauth, relations, reminders, suggestions, summary
 from .db import connect, get_settings, get_task, init_db, now_iso, rows, seed_accounts, set_setting
 from .dates import parse_date
 
@@ -287,6 +287,10 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
             if (rel.get("changed") or {}).get("by") is not None:
                 named.add(rel["changed"]["by"])
         neighbours = task_briefs(named - {t["id"] for t in out})
+        chips = filing.chips(conn, {t["id"] for t in out})
+        for t in out:
+            if t["id"] in chips:
+                t["filing"] = chips[t["id"]]
         return {"today": today.isoformat(), "tasks": out, "neighbours": {str(k): v for k, v in neighbours.items()},
                 "projects": C.project_names(ecfg), "top_cap": C.get(ecfg, "lifecycle.top_cap", 7)}
 
@@ -330,6 +334,8 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         t["mentions_log"] = rows(conn, "SELECT * FROM mentions WHERE task_id = ? ORDER BY at DESC LIMIT 20", (task_id,))
         t["changes"] = rows(conn, "SELECT c.*, b.source, b.applied_at FROM changes c JOIN batches b ON b.id = c.batch_id WHERE c.task_id = ? ORDER BY c.id DESC LIMIT 30", (task_id,))
         t["relations"] = relations.detail(conn, task_id)
+        if (fc := filing.chips(conn, {task_id}).get(task_id)):
+            t["filing"] = fc
         t["nearby"] = relations.nearby(conn, task_id)
         t["history"] = history(task_id, before, limit)
         # The value before this request (the page marks what changed since), then the stamp that
@@ -349,9 +355,14 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
     def apply_batch(body: ApplyBody):
         changes = [{k: v for k, v in c.items() if k != "source_key"} for c in body.changes]   # the page never chooses one
         try:
-            return batches.apply(conn, changes, body.source, date.today())
+            res = batches.apply(conn, changes, body.source, date.today())
         except ValueError as e:
             raise HTTPException(400, str(e))
+        if res.get("created"):
+            sch = getattr(app.state, "scheduler", None)
+            if sch is not None:
+                sch.wake()
+        return res
 
     @app.post("/api/batches/{batch_id}/undo")
     def undo_batch(batch_id: int):

@@ -244,6 +244,7 @@ claude:                         # headless `claude -p` runs (§2 for the CLI; `f
   planner: { enabled: false }   # Settings → Claude. On = one Claude run before the brief (≈ $0.10, at most budgets_usd.planner_morning): the verdict, why-now lines and proposals; off = the plain brief
   summary: { auto: false, auto_minutes: 10 }   # Settings → Claude. auto on = the Today tab's summary is rewritten by one light run (≈ $0.18) when it goes stale,
                                 # at most every auto_minutes; off = a badge and the Refresh button only
+  filing: { enabled: false }    # stage 7, Settings → Claude. On = a task you add with only a name gets one small run (no tools, at most budgets_usd.filing) that suggests its project, effort, a likely link and a likely twin as chips; off when absent
   timeouts_s: { sync_file: 600, today_summary: 180, mail_triage: 240, planner_morning: 480, chat_turn: 240, filing: 120 }   # seconds before a run is stopped
   # max_turns: { sync_file: 40 }   # turns a run kind may take; 40 for every kind not named
 

@@ -27,7 +27,7 @@ import time
 import traceback
 from datetime import date, datetime, timedelta
 
-from . import app_push, batches, config as C, lifecycle, notify, relations, reminders, suggestions
+from . import app_push, batches, config as C, filing, lifecycle, notify, relations, reminders, suggestions
 from .db import get_settings, log_run, rows, set_setting
 
 RETRY_AFTER = timedelta(hours=1)
@@ -107,6 +107,12 @@ class Scheduler:
     def _suggestions(self, ecfg: dict, now: datetime, st: dict, did: list[str]) -> None:
         """stage 7: the link detectors after the sweeps (free); filing runs join in Task 9."""
         self._every("link_suggestions", suggestions.SWEEP_MINUTES, now, st, did, lambda: suggestions.sweep_job(self.conn, ecfg, now))
+        if C.value(ecfg, "claude.filing.enabled") and filing.queued(self.conn, now.date()):
+            def job() -> None:
+                line = filing.run_queue(self.conn, ecfg, now)      # each run logged itself, with its cost
+                if line:
+                    did.append(f"filing: {line}")
+            self._run("filing", now, st, did, job, mark=now.strftime("%Y-%m-%dT%H:%M"))
 
     def _daily(self, name: str, hhmm: str | None, now: datetime, st: dict, did: list[str], fn) -> None:
         if not hhmm or now.strftime("%H:%M") < str(hhmm):

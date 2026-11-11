@@ -88,3 +88,60 @@ def test_the_filing_run_kind_has_a_small_model_and_budget_in_the_example_and_the
     for p in (C.EXAMPLE_CONFIG, FIXTURE):
         y = yaml.safe_load(p.read_text())
         assert (C.get(y, "claude.models.filing"), C.get(y, "claude.budgets_usd.filing"), C.get(y, "claude.timeouts_s.filing")) == ("haiku", 0.1, 120), p
+
+
+def test_a_task_made_by_hand_with_only_a_name_is_queued_and_nothing_else_is(conn):
+    plain = batches.apply(conn, [{"op": "create", "fields": {"name": "Water the plants"}}], "ui", TODAY)["created"][0]
+    filed = batches.apply(conn, [{"op": "create", "fields": {"name": "Pay rent", "project": "Personal"}}], "ui", TODAY)["created"][0]
+    chat = batches.apply(conn, [{"op": "create", "fields": {"name": "From chat"}}], "chat", TODAY)["created"][0]
+    mk(conn, 500)                                                                              # a high id: the creates above took the low ones
+    linked = batches.apply(conn, [{"op": "create", "fields": {"name": "A step", "links": [{"kind": "part_of", "other": 500}]}}], "ui", TODAY)["created"][0]
+    assert filing.queued(conn, date.today()) == [plain] and not conn.in_transaction            # not `filed`, `chat` or `linked`
+
+
+def test_filing_runs_from_the_scheduler_only_when_switched_on_and_never_twice(conn, cfg, tmp_path, monkeypatch):
+    from factotum.claude import runner as R
+    from factotum.scheduler import Scheduler
+    monkeypatch.setattr(filing, "RUNS_DIR", tmp_path / "runs")
+    calls = []
+    monkeypatch.setattr(R, "run", _runner({"project": None, "effort": "S", "link": None, "twin": None}, calls))
+    tid = batches.apply(conn, [{"op": "create", "fields": {"name": "Water the plants"}}], "ui", TODAY)["created"][0]
+    now = datetime.now().replace(second=0, microsecond=0)
+    Scheduler(cfg, conn, push=lambda *a, **k: None, mailer=None).tick(now)                    # the fixture leaves filing off
+    assert calls == [] and filing.queued(conn, now.date()) == [tid]
+    on = copy.deepcopy(cfg); C.set_(on, "claude.filing.enabled", True)
+    did = Scheduler(on, conn, push=lambda *a, **k: None, mailer=None).tick(now)
+    assert [k for k, *_ in calls] == ["filing"] and filing.queued(conn, now.date()) == [] and any(d.startswith("filing: ") for d in did)
+    assert [f["value"] for f in filing.chips(conn, {tid})[tid]] == ["S"]
+    Scheduler(on, conn, push=lambda *a, **k: None, mailer=None).tick(now)
+    assert len(calls) == 1                                                                       # dequeued: never filed twice
+    set_setting(conn, filing.QUEUE_KEY, [{"task_id": tid, "day": "2020-01-01"}]); conn.commit()
+    assert filing.queued(conn, now.date()) == []
+    assert filing.run_queue(conn, on, now) is None and len(calls) == 1 and get_settings(conn)[filing.QUEUE_KEY] == []   # a stale entry is dropped unrun
+
+
+def test_the_list_carries_filing_chips_until_the_field_is_set_and_a_create_wakes_the_scheduler(cfg, tmp_path):
+    from types import SimpleNamespace
+    from fastapi.testclient import TestClient
+    from factotum import api
+    app = api.create_app(cfg, db_path=str(tmp_path / "t.db"))
+    c = app.state.conn
+    woke = []
+    app.state.scheduler = SimpleNamespace(wake=lambda: woke.append(1))
+    client = TestClient(app)
+    tid = client.post("/api/batches/apply", json={"source": "ui", "changes": [{"op": "create", "fields": {"name": "Water the plants"}}]}).json()["created"][0]
+    assert woke == [1]
+    filing.apply(c, cfg, tid, {"project": "Personal", "effort": "XS", "link": None, "twin": None}, shown=set()); c.commit()
+    t = {x["id"]: x for x in client.get("/api/tasks").json()["tasks"]}[tid]
+    assert [(f["field"], f["value"], f["label"]) for f in t["filing"]] == [("project", "Personal", "Personal?"), ("effort", "XS", "XS?")]
+    client.post("/api/batches/apply", json={"source": "ui", "changes": [{"task_id": tid, "op": "set", "fields": {"effort": "M"}}]})
+    assert woke == [1] and [f["field"] for f in client.get(f"/api/tasks/{tid}").json()["filing"]] == ["project"]
+
+
+def test_the_filing_switch_is_off_when_its_key_is_missing():
+    import yaml
+    from conftest import FIXTURE
+    assert "claude.filing.enabled" in C.SETTINGS_KEYS and C.DEFAULTS["claude.filing.enabled"] is False and C.value({}, "claude.filing.enabled") is False
+    assert "claude.filing.enabled" not in C.PAID_SWITCHES                                       # OLD_DEFAULTS would invent a difference for `effective --as-before`
+    for p in (C.EXAMPLE_CONFIG, C.STARTER_CONFIG, FIXTURE):
+        assert C.get(yaml.safe_load(p.read_text()), "claude.filing.enabled") is False, p
