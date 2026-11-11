@@ -1373,6 +1373,56 @@
     if (review.total === undefined) review.total = review.items.length;   // older server
     ui.reviewIdx = 0; ui.reviewPaused = false; ui.laterOpen = false; render();
   }
+  // ---------- Review (stage 4b): link reasons in words, link suggestions ----------
+  // A link reason's colour; any other reason keeps the rule it had (last call red, new / back teal, else amber).
+  const REASON_CLS = { freed: 'ok', steps_done: 'ok', blocker_gone: 'warn', linked_changed: 'chg', link_suggested: 'new' };
+  // The card's reason line: the server's sentence for a link reason (every Task-N in it opens that task),
+  // else the reason's label; then the other reasons and the planner's flag, as before.
+  function reasonText(item) {
+    const { reasons, primary, flags } = item, said = (item.texts || {})[primary];
+    const head = said ? esc(said).replace(/Task-(\d+)/g, '<a href="/t/$1" data-open-task="$1">Task-$1</a>') : esc(review.labels[primary]);
+    return head + (reasons.length > 1 ? ' · also ' + esc(reasons.slice(1).map(r => review.labels[r]).join(', ')) : '') + (flags && flags.planner ? ` · <b>${esc(flags.planner)}</b>` : '');
+  }
+  // Which of two tasks a merge keeps when the suggestion does not say: the Canvas row, else the older, else
+  // the lower id (relations.default_survivor's rule, on what the page holds).
+  function defaultKeep(a, b) {
+    const A = nameOf(a) || {}, B = nameOf(b) || {}, ca = A.source === 'Canvas', cb = B.source === 'Canvas';
+    if (ca !== cb) return ca ? a : b;
+    const ka = A.created_at || '', kb = B.created_at || '';
+    return ka !== kb ? (ka < kb ? a : b) : Math.min(a, b);
+  }
+  const suggestionKeep = (s, card) => s.keep != null ? s.keep : defaultKeep(card, s.other);
+  // A suggested link on the card: the question, one tap to confirm it, or Not related. Gone once either is staged.
+  function linkSuggestionsHtml(item) {
+    const card = item.task.id;
+    return (item.link_suggestions || []).filter(s => !suggestionStaged(s.evidence_id)).map(s => {
+      const N = s.other, out = s.dir === 'out', T = `<span class="code">Task-${N}</span>${s.other_name ? ' ' + esc(s.other_name) : ''}`;
+      const btn = (act, words, primary) => `<button class="btn small${primary ? ' primary' : ''}" data-lsug="${s.evidence_id}" data-lsug-act="${act}">${esc(words)}</button>`;
+      let q, bs;
+      if (s.kind === 'same_as') { q = `Same task as ${T}?`; bs = btn('merge', `Merge into ${suggestionKeep(s, card)}`, true) + btn('not', 'Not the same'); }
+      else if (s.kind === 'part_of' || s.kind === 'waits_on') {
+        q = s.kind === 'part_of' ? (out ? `Part of ${T}?` : `${T} is a step of this?`) : (out ? `Waits on ${T}?` : `${T} waits on this?`);
+        bs = btn('link', 'Link', true) + btn('not', 'Not related');
+      } else { q = `Related to ${T}?`; bs = btn('step', 'is a step of it') + btn('waits', 'waits on it') + btn('same', 'is the same task') + btn('not', 'Not related'); }
+      return `<div class="extra lsug"><span class="chip">Suggested link</span><span>${q}</span>${bs}${s.why ? `<span class="hint">— ${esc(s.why)}</span>` : ''}</div>`;
+    }).join('');
+  }
+  // What a suggestion's button stages: the link or merge, carrying the suggestion (the server judges it with the
+  // change), or the suggestion dismissed.
+  function linkSuggestionAct(card, eid, act) {
+    const item = review && review.items.find(i => i.task.id === card);
+    const s = item && (item.link_suggestions || []).find(x => x.evidence_id === eid); if (!s) return;
+    const N = s.other;
+    if (act === 'not') { stageJudge(eid, card, 'dismissed', `${s.kind === 'same_as' ? 'not the same as' : 'not related to'} Task-${N}`); return; }
+    let c;
+    if (act === 'link') c = { task_id: s.dir === 'out' ? card : N, op: 'link', fields: { kind: s.kind, other: s.dir === 'out' ? N : card } };
+    else if (act === 'step') c = { task_id: card, op: 'link', fields: { kind: 'part_of', other: N } };
+    else if (act === 'waits') c = { task_id: card, op: 'link', fields: { kind: 'waits_on', other: N } };
+    else if (act === 'merge' || act === 'same') { const K = act === 'merge' ? suggestionKeep(s, card) : defaultKeep(card, N); c = { task_id: K === card ? N : card, op: 'merge', fields: { into: K } }; }
+    else return;
+    stageChange(c, '', { ev: eid });
+    toast('Link staged · decide on the card, then Apply');
+  }
   function renderReview() {
     if (!review) { loadReview(); return '<div class="empty">Loading review queue…</div>'; }
     const items = review.items.filter(i => !staged.has(i.task.id));
@@ -1387,18 +1437,18 @@
       const what = !ui.reviewPaused && !total ? '<p class="hint">Review gathers what needs a decision: soft dates that slipped, new tasks, backlog about to fade, and suggestions from the inputs you switch on.</p>' : '';
       return `<div class="review"><div class="finish"><h2>${head}</h2>${what}${body}${more}${review.last_review_at ? `<p class="hint">Last review: ${review.last_review_at}</p>` : ''}</div></div>`;
     }
-    const { task: raw, reasons, primary, flags } = items[0];
+    const { task: raw, primary } = items[0];
     const x = view(raw);   // staged edits (a due date set on this card) show at once, not only after Apply
     const d = fmtDue(x.due);
-    const cls = primary === 'last_call' ? 'crit' : primary === 'new' || primary === 'back' ? 'new' : 'warn';
+    const cls = REASON_CLS[primary] || (primary === 'last_call' ? 'crit' : primary === 'new' || primary === 'back' ? 'new' : 'warn');
     const idx = total - items.length;
     const note = ui.rvNote.id === x.id ? ui.rvNote.text : '';
     return `<div class="review">
       <div class="progress"><span>${idx + 1} of ${total}</span><div class="track"><div class="fill" style="width:${Math.round(100 * idx / total)}%"></div></div><span>~${Math.max(1, Math.ceil(items.length * 12 / 60))} min left</span></div>
       <div class="card" data-id="${x.id}">
-        <div class="why ${cls}">${esc(review.labels[primary])}${reasons.length > 1 ? ' · also ' + reasons.slice(1).map(r => review.labels[r]).join(', ') : ''}${flags && flags.planner ? ` · <b>${esc(flags.planner)}</b>` : ''}</div>
+        <div class="why ${cls}">${reasonText(items[0])}</div>
         <h2>${esc(x.name)}</h2>
-        <div class="sub"><span class="code">Task-${x.id}</span><span class="chip proj">${esc(x.project || '—')}</span>${d ? `<span class="chip due ${d.days < 0 ? 'crit' : ''} ${x.hard ? 'hard' : ''}">${d.label}</span>` : '<span class="chip">no date</span>'}<span class="chip eff">${esc(x.effort || '?')}</span><span class="chip">${x.mentions} mention${x.mentions === 1 ? '' : 's'}</span><span class="chip">score ${x.score}</span></div>
+        <div class="sub"><span class="code">Task-${x.id}</span><span class="chip proj">${esc(x.project || '—')}</span>${d ? `<span class="chip due ${d.days < 0 ? 'crit' : ''} ${x.hard ? 'hard' : ''}">${d.label}</span>` : '<span class="chip">no date</span>'}<span class="chip eff">${esc(x.effort || '?')}</span>${x.rel && x.rel.steps_total ? stepsChip(x.rel) : ''}<span class="chip">${x.mentions} mention${x.mentions === 1 ? '' : 's'}</span><span class="chip">score ${x.score}</span></div>
         <p>${esc(x.why_now || (x.score_reasons || []).join(' · '))}</p>${x.context ? `<p class="ctx ${ui.ctxOpen === x.id ? 'open' : ''}">${esc(x.context)}</p><button class="btn small more" data-ctx-more="${x.id}">${ui.ctxOpen === x.id ? 'Less' : 'More'}</button>` : ''}
         <textarea id="rv-note" rows="2" placeholder="Note to save with this decision (optional) — appended to the task's context">${esc(note)}</textarea>
         <div class="links">${x.source_link ? `<a href="${esc(x.source_link)}" target="_blank" rel="noopener">${x.source === 'Plaud' ? 'Plaud note' : 'Source'}</a>` : ''}</div>
@@ -1406,6 +1456,7 @@
         <div class="later-menu ${ui.laterOpen ? 'on' : ''}"><span class="hint">Comes back on:</span><button class="btn small" data-rv="tomorrow">Tomorrow</button><button class="btn small" data-rv="fri">Friday</button><button class="btn small" data-rv="nextweek">Next week</button><button class="btn small" data-rv="pickdate">📅 ${ui.datePick ? 'Hide date' : 'Pick a date…'}</button></div>
         ${ui.laterOpen && ui.datePick ? `<div class="remform datepick"><label for="rv-date" class="hint">Comes back on</label><input type="date" id="rv-date" min="${data.today}" value="${isoPlus(1)}" aria-label="Pick a date"><button class="btn small primary" id="rv-date-go">Use this date</button></div>` : ''}
         ${(items[0].evidence || []).filter(e => e.change && !staged.has('e:' + e.id)).map(e => `<div class="extra"><span class="chip">Planner suggests</span><span>${esc(e.label)}${e.reason ? ` <span class="hint" style="margin:0">— ${esc(e.reason)}</span>` : ''}</span><button class="btn small primary" data-rv-accept="${e.id}">Accept</button></div>`).join('')}
+        ${linkSuggestionsHtml(items[0])}
         <div class="extra"><button class="btn small" data-rv="top">★ Pin to Top</button><button class="btn small" data-rv="longterm">Mark long-term (never fades)</button>${dueForm(x.id, x.due)}${reminderForm(x.id)}</div>
         ${reviewAsk(x.id)}
       </div>
@@ -1844,6 +1895,7 @@
       else { toast('This suggestion cannot be staged here'); return; }
       stageJudge(eid, tid, 'applied', 'suggestion accepted'); toast(['done', 'drop'].includes(c.op) ? 'Decision staged · Apply in the tray' : 'Suggestion staged · decide on the card, then Apply');
     });
+    panel.querySelectorAll('[data-lsug]').forEach(b => b.onclick = () => linkSuggestionAct(+b.closest('.card').dataset.id, +b.dataset.lsug, b.dataset.lsugAct));
     panel.querySelectorAll('[data-pending-apply]').forEach(b => b.onclick = async () => {
       try { const r = await api(`/api/proposals/${b.dataset.pendingApply}/apply`, { method: 'POST' }); lastBatch = r.batch_id; review = null; logData = null; await load(); toast(`${r.applied} change${r.applied === 1 ? '' : 's'} applied` + (r.skipped.length ? ` · ${r.skipped.length} skipped` : ''), true); }
       catch (e) { toast('Apply failed: ' + e.message); }

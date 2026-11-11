@@ -404,6 +404,8 @@ body.tray-open main { padding-bottom: 60vh; }
 .card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; }
 .card .why { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; margin-bottom: 8px; }
 .card .why.crit { color: var(--crit); } .card .why.warn { color: var(--warn); } .card .why.new { color: var(--accent); }
+.card .why.ok { color: var(--ok); } .card .why.chg { color: var(--top); }
+.card .why a { color: inherit; }
 .card h2 { margin: 0 0 6px; font-size: 20px; text-wrap: balance; font-weight: 600; }
 .card .sub { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
 .card p { margin: 0 0 8px; color: var(--muted); max-width: 62ch; }
@@ -417,6 +419,9 @@ body.tray-open main { padding-bottom: 60vh; }
 .card .big button.drop { background: var(--crit-soft); color: var(--crit); border-color: transparent; }
 .card .extra, .card .later-menu { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
 .card .later-menu { display: none; align-items: center; } .card .later-menu.on { display: flex; }
+.card .lsug { align-items: center; }      /* a suggested link: the question, its buttons, why (wraps like every .extra) */
+.card .lsug .hint { margin: 0; }
+@media (max-width: 700px) { .card .lsug .btn { width: 100%; min-height: 44px; } }
 .card .later-menu input[type=date] { font: inherit; font-size: 13px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-2); color: var(--fg); }
 .card textarea { width: 100%; box-sizing: border-box; font: inherit; font-size: 14px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); color: var(--fg); resize: vertical; margin: 4px 0 8px; }
 .card p.ctx { white-space: pre-wrap; }
