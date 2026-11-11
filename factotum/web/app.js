@@ -46,7 +46,13 @@
   // redirect: 'manual' the page sees it as an opaqueredirect. A 401 or 403 counts the same (/api sends
   // none of the three). A restarting server (502) or no network (fetch rejects) is not a sign-out.
   const expired = r => r.type === 'opaqueredirect' || r.status === 401 || r.status === 403;
+  // The build stamp the page loaded with; every /api response carries the server's. When they differ a
+  // newer app is on the server, and the next return to the front reloads (onReturn).
+  const BUILD = (document.querySelector('meta[name="factotum-build"]') || {}).content || '';
+  let newBuild = false;
+  function noteBuild(r) { const b = r.headers.get('X-Factotum-Build') || ''; if (BUILD && b && b !== BUILD) newBuild = true; }
   const api = (path, opts) => fetch(path, Object.assign({ headers: { 'Content-Type': 'application/json' }, redirect: 'manual' }, opts)).then(r => {
+    noteBuild(r);
     if (expired(r)) { signedOut(); throw new Error('signed out'); }
     if (!r.ok) throw new Error(r.status); return r.json();
   });
@@ -136,6 +142,29 @@
     logData = null; if (ui.tab !== 'review') review = null;      // a Review session in progress keeps its page
     toast(last.ok ? 'Refreshed · ' + (last.line || '') : 'Refresh failed · ' + (last.line || ''));
   }
+  // Something is being typed: a draft or a Review note, an open reminder or due-date form (their values
+  // live only in the DOM), a chat turn running, or focus in a box of the panel (Settings, among others).
+  function typingNow() {
+    if ([draft.cmd, draft.ask, draft.pick, ui.rvNote.text].some(s => (s || '').trim())) return true;
+    if (ui.remOpen !== null || ui.dueOpen !== null || chat.busy) return true;
+    const a = document.activeElement;
+    return !!(a && a.matches('input, textarea, select') && a.closest('#panel'));
+  }
+  // The app came back to the front. A newer build on the server reloads the page, or only says
+  // "Update ready" while something is typed or staged; otherwise the lists are reloaded, unless
+  // something is typed, when only the summary is polled so the box being typed in is not redrawn.
+  function onReturn() {
+    if (document.hidden || !document.getElementById('signedout').hidden) return;
+    if (newBuild) {
+      if (typingNow() || staged.size) document.getElementById('update').hidden = false;
+      else location.reload();
+      return;
+    }
+    if (typingNow()) { if (ui.tab === 'today') { clearTimeout(sumTimer); pollSummary(); } return; }
+    if (ui.tab === 'log') logData = null;
+    load().catch(() => {});      // a failed reload keeps what is on screen; a sign-out shows its own screen
+  }
+  document.getElementById('update').onclick = () => location.reload();      // the tray is in localStorage: it survives
 
   // ---------- the Today summary (SPEC §8.4) ----------
   // The planner's verdict, kept by the server with what has changed since. Python decides "stale";
@@ -1231,6 +1260,6 @@
     e.preventDefault();
   });
   window.addEventListener('resize', () => { const bar = document.querySelector('header.bar'); if (bar) document.documentElement.style.setProperty('--bar-h', bar.offsetHeight + 'px'); });
-  document.addEventListener('visibilitychange', () => { if (!document.hidden && ui.tab === 'today') { clearTimeout(sumTimer); pollSummary(); } });
+  document.addEventListener('visibilitychange', onReturn);
   load().then(() => { applyAddress(); return loadSettings(); }).catch(e => { document.getElementById('panel').innerHTML = `<div class="empty">Could not load /api/tasks: ${esc(e.message)}</div>`; });
 })();

@@ -46,6 +46,7 @@ nav.tabs button[aria-selected="true"] { background: var(--surface-2); color: var
 nav.tabs button .n { font-family: var(--mono); font-size: 11px; margin-left: 6px; color: var(--muted); }
 button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .spacer { flex: 1; }
+.btn.update { flex: none; white-space: nowrap; border-color: var(--accent); color: var(--accent); font-weight: 500; }      /* a newer build is on the server (app.js onReturn) */
 .remind { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 8px; }
 .remind .pill { background: var(--surface-2); border-radius: 999px; padding: 3px 9px; font-family: var(--mono); font-size: 11px; }
 main { flex: 1; padding-block: 16px 110px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
