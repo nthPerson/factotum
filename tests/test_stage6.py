@@ -172,6 +172,10 @@ def test_add_with_fields_for_the_phone_sheet_add_a_step_and_duplicate(cfg, tmp_p
     assert [x["why"] for x in r["refused"]] == ["'soon' is not a date", "'Nope' is not a project", "'XXL' is not an effort (XS, S, M, L)",
                                                 "'12' is not a task number", "score cannot be set on a new task"]
     assert one(conn, "SELECT project, effort, due FROM tasks WHERE id = ?", (r["task_id"],)) == {"project": None, "effort": None, "due": None}
+    for bad in ("20261120", "2026-W47-1"):
+        r = client.post("/api/add", json={"key": "kd" + bad[:6] + "xx", "fields": {"name": "D", "due": bad}}).json()
+        assert [x["why"] for x in r["refused"]] == [f"'{bad}' is not a date"]
+        assert one(conn, "SELECT due FROM tasks WHERE id = ?", (r["task_id"],))["due"] is None
     assert client.post("/api/add", json={"fields": {"name": " "}}).status_code == 400
     assert client.post("/api/add", json={"text": "x", "key": "bad key!"}).status_code == 400
     assert client.post("/api/add", json={}).status_code == 400

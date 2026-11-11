@@ -65,8 +65,10 @@ def _clean_fields(conn, cfg: dict, fields: dict) -> tuple[dict, list[dict]]:
                 out["name"] = v
         elif k == "due":
             try:
-                date.fromisoformat(str(v))
-                out["due"] = str(v)
+                s = str(v).strip()
+                if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
+                    raise ValueError(s)
+                out["due"] = date.fromisoformat(s).isoformat()
             except ValueError:
                 refuse(k, f"'{v}' is not a date")
         elif k == "hard":
