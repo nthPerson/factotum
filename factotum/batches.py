@@ -222,12 +222,17 @@ def apply(conn: sqlite3.Connection, changes: list[dict], source: str, today: dat
             note = str(ch.get("note") or "").strip()[:300] if isinstance(ch, dict) else ""
             if note:
                 cur.execute("UPDATE changes SET note = ? WHERE batch_id = ? AND id > ?", (note, batch_id, before))
+        from . import ripple                                 # here, not at the top: ripple imports batches
+        queued = ripple.enqueue(cur, batch_id, source)       # in this transaction, so a failure rolls it back with the batch
     except Exception:
         conn.rollback()   # one shared connection serves every request; never leave it mid-transaction
         raise
     cur.execute("UPDATE batches SET undo_json = ? WHERE id = ?", (json.dumps(undo), batch_id))
     conn.commit()
-    return {"batch_id": batch_id, "applied": applied, "skipped": skipped, "created": created, "refs": refs}
+    if any("outcome" in what for what in queued.values()):
+        ripple.poke()                                        # an outcome ripples at once, not after the quiet period
+    return {"batch_id": batch_id, "applied": applied, "skipped": skipped, "created": created, "refs": refs,
+            "ripple_queued": sorted(queued)}
 
 
 def _link_end(v, refs: dict) -> tuple[int | None, str | None]:
