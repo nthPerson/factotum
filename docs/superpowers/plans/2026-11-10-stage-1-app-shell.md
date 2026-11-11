@@ -172,15 +172,11 @@ def test_a_dateless_command_with_words_left_over_is_not_a_command():
     assert P("reopen 5 to friday") is None           # a date tail on a verb that takes none
     assert P("nodue 364 tomorrow") is None
     assert P("snooze 12 duplicate of 14") is None    # unreadable words never silently mean "tomorrow"
-    # what keeps working
-    assert [c["task_id"] for c in P("done 389 392")] == [389, 392]
+    # what keeps working (the plain forms, `done 389 392`, `snooze #23`, `push Task-364 fri`, `defer 388 to next week`,
+    # `nodue 364 Task-365`, are already pinned in test_core.py and test_phase9.py; not repeated here)
     assert [c["task_id"] for c in P("done 12 and 14")] == [12, 14]
     assert [c["task_id"] for c in P("drop Task-12, Task-14")] == [12, 14]
-    assert P("snooze #23")[0]["fields"]["snoozed_until"] == "2026-11-02"
     assert P("snooze 23 fri")[0]["fields"]["snoozed_until"] == "2026-11-06"
-    assert P("push Task-364 fri")[0]["fields"]["due"] == "2026-11-06"
-    assert P("defer 388 to next week")[0]["fields"]["due"] == "2026-11-02"
-    assert P("nodue 364 Task-365") == [{"task_id": 364, "op": "set", "fields": {"due": None}}, {"task_id": 365, "op": "set", "fields": {"due": None}}]
 ```
 
 - [ ] **Step 2: Run it to verify it fails**
@@ -220,13 +216,19 @@ def _brief_sched(cfg, conn, mailer, planner):
     upsert_task(conn, task(id=1, name="x", top_rank=1)); conn.commit()
     return Scheduler(cfg, conn, push=lambda *a, **k: None, mailer=mailer, planner=planner)
 
-def test_a_failed_brief_send_does_not_run_the_planner_again(conn, cfg):
-    runs, sent, fail = [], [], [True]
+def _flaky_mailer(sent):
+    """The first send fails (SMTP down); later ones are recorded in `sent`."""
+    fail = [True]
     def mailer(cfg, to, subject, text, html):
         if fail[0]:
             fail[0] = False
             raise OSError("smtp down")
         sent.append(text)
+    return mailer
+
+def test_a_failed_brief_send_does_not_run_the_planner_again(conn, cfg):
+    runs, sent = [], []
+    mailer = _flaky_mailer(sent)
     pl = SimpleNamespace(run=lambda conn, cfg, today, calendar=None: runs.append(today) or {"ok": True, "verdict": "Verdict here.", "applied": [], "staged": [], "cost_usd": 0.3})
     s = _brief_sched(cfg, conn, mailer, pl)
     s.tick(datetime(2026, 11, 2, 6, 31))
@@ -237,12 +239,8 @@ def test_a_failed_brief_send_does_not_run_the_planner_again(conn, cfg):
     assert len(runs) == 2 and len(sent) == 2
 
 def test_a_planner_that_failed_is_not_retried_with_the_brief(conn, cfg):
-    runs, sent, fail = [], [], [True]
-    def mailer(cfg, to, subject, text, html):
-        if fail[0]:
-            fail[0] = False
-            raise OSError("smtp down")
-        sent.append(text)
+    runs, sent = [], []
+    mailer = _flaky_mailer(sent)
     def boom(conn, cfg, today, calendar=None):
         runs.append(today)
         raise RuntimeError("claude down")
@@ -332,7 +330,7 @@ Implementer: **sonnet**. UI task: **no** (server only; the page reads the new ad
   - `test_task_and_tab_addresses_answer_with_the_app(cfg, tmp_path)`: for `/`, `/today`, `/timeline`, `/projects`, `/review`, `/chat`, `/log`, `/settings`, `/t/42`: status 200, `'id="panel"' in r.text`, `"/static/app.js?v=" in r.text`, `r.headers["cache-control"] == "no-cache, must-revalidate"`; `/t/abc` and `/nowhere` are 404; `GET /mcp` is still 405.
   - `test_every_api_response_carries_the_build_stamp(cfg, tmp_path)`: `s = api.build_stamp()`; `len(s) == 12`; `GET /api/tasks` has `headers["x-factotum-build"] == s`; `POST /api/batches/apply` with `content=b"{}"` and no JSON content type is 415 and carries the header too; `GET /` contains `<meta name="factotum-build" content="{s}">`.
   - `test_the_build_stamp_follows_the_web_files(tmp_path, monkeypatch)`: copy the four `STAMPED` files into `tmp_path`, `monkeypatch.setattr(api, "WEB", tmp_path)`; `a = api.build_stamp()`; `api.build_stamp() == a`; `os.utime(tmp_path / "app.js", ns=(…+10**9, …+10**9))` changes it.
-  - `test_a_reminders_open_goes_to_its_task(cfg, tmp_path)`: set up one task with a reminder fired as `tests/test_core.py::test_reminder_action_links_are_single_use_and_expire` does (`batches.apply(... "add_reminder" ...)`, `reminders.fire(c, cfg, datetime(2026, 11, 3, 9, 0, 30), lambda *a, **k: "m1")`, two tasks with one reminder each); `client.get(f"/r/{tok}", params={"a": "open"}, follow_redirects=False)` is a redirect whose `location` ends with `/t/1`; `?a=done` on a second reminder's token returns a page containing `/t/<its task id>"` and `Open Task-<id>`.
+  - `test_a_reminders_open_goes_to_its_task(cfg, tmp_path)`: set up two tasks with one reminder each, fired as `tests/test_core.py::test_reminder_action_links_are_single_use_and_expire` does (`batches.apply(... "add_reminder" ...)`, `reminders.fire(c, cfg, datetime(2026, 11, 3, 9, 0, 30), lambda *a, **k: "m1")`); `client.get(f"/r/{tok}", params={"a": "open"}, follow_redirects=False)` is a redirect whose `location` ends with `/t/1`; `?a=done` on a second reminder's token returns a page containing `/t/<its task id>"` and `Open Task-<id>`.
 
 - [ ] **Step 2: Run to verify they fail**
 
@@ -366,8 +364,8 @@ Implementer: **opus**. UI task: **yes**.
   - `parseAddress() -> { tab: string, task: number | null, legacy: boolean }` — from `location.pathname` and, only when the path is `/`, a `location.hash` naming a tab (`legacy: true`); `/today` → `today`; `/t/<digits>` → `{ tab: 'today', task: n }`; anything else → `today`.
   - `setAddress(path: string, replace?: boolean)` — `history.pushState(null, '', path)` (or `replaceState`) unless `location.pathname + location.hash === path` already.
   - `go(tab: string)` — `ui.tab = tab; ui.laterOpen = false; setAddress(addressOf(tab)); render();`.
-  - `applyAddress(ev?: PopStateEvent)` — called once with no argument after the first `load()`, and as the `popstate` listener (with the event, so Task 7 can tell a startup address from a pop). A tab address sets `ui.tab` and renders (a `legacy` or `/today` address is rewritten with `replace`). A task address runs `jumpTo(id, true)` and then `setAddress(addressOf(ui.tab), true)`; Task 7 changes this branch on phones.
-- Every `location.hash = …` assignment in `app.js` goes: the tabs click handler calls `go(b.dataset.tab)`; `jumpTo` calls `setAddress(addressOf(hit.tab))` when it changes tab; `sendChat` and the `[data-goto-chat]` handler use `go('chat')` (the latter after setting `chat.current` and `chat.threads = null`). `reviewAsk`'s link becomes `href="/chat"` (still `preventDefault`ed). The initial `ui.tab` comes from `parseAddress().tab`.
+  - `applyAddress(ev?: PopStateEvent)` — called once with no argument after the first `load()`, and as the `popstate` listener (with the event, so Task 7 can tell a startup address from a pop). A tab address sets `ui.tab` and renders (a `legacy` or `/today` address is rewritten with `replace`). A task address runs `jumpTo(id, true, true)` and then `setAddress(addressOf(ui.tab), true)`; Task 7 changes this branch on phones.
+- Every `location.hash = …` assignment in `app.js` goes: the tabs click handler calls `go(b.dataset.tab)`; `jumpTo(id, expand, replace = false)` calls `setAddress(addressOf(hit.tab), replace)` when it changes tab (only `applyAddress` passes `replace`: a pushed `/timeline` above `/t/<id>` would let Back return to `/t/<id>`, which jumps and pushes again, so Back could never leave); `sendChat` and the `[data-goto-chat]` handler use `go('chat')` (the latter after setting `chat.current` and `chat.threads = null`). `reviewAsk`'s link becomes `href="/chat"` (still `preventDefault`ed). The initial `ui.tab` comes from `parseAddress().tab`.
 - Server links name the real addresses: review push click `f"{base}/review"`, brief `{base}/review`, consent page `{base}/settings`.
 
 - [ ] **Step 1: Write the failing Python test** (section `# --- Task 6: server links name real addresses`):
@@ -379,7 +377,8 @@ def test_server_links_name_real_addresses(conn, cfg):
     from factotum.scheduler import Scheduler
     upsert_task(conn, task(id=1, due=None, created_at="2026-10-30T00:00:00+00:00", last_mention_at="2026-10-30")); conn.commit()
     html = brief.build(conn, cfg, TODAY)["html"]
-    assert 'https://factotum.nthperson.dev/review"' in html and "/#review" not in html
+    base = str(C.get(cfg, "server.public_url")).rstrip("/")
+    assert base and f'{base}/review"' in html and "/#review" not in html
     clicks = []
     Scheduler(cfg, conn, push=lambda cfg, title, body, click=None, **k: clicks.append(click))._review_push(cfg, date(2026, 11, 1), {})
     assert clicks and clicks[0].endswith("/review")
@@ -414,10 +413,10 @@ Implementer: **opus**. UI task: **yes**.
 **Interfaces:**
 - Consumes: `parseAddress`, `setAddress`, `addressOf`, `applyAddress`, `go` (Task 6); `GET /api/tasks/{id}` (existing: a decorated task with `links`, `reminders`, or 404).
 - Produces:
-  - `ui.page: number | null` (the task shown full-screen), `ui.pageTask: object | null` (the fetched row when the id is not in `data.tasks`; `{ missing: true }` after a 404), `ui.pageScroll: number`.
+  - `ui.page: number | null` (the task shown full-screen), `ui.pageTask: object | null` (the fetched row when the id is not in `data.tasks`, which carries its `id`; `{ id, missing: true }` after a 404), `ui.pageScroll: number`.
   - `chipsHtml(x, extraChip) -> string` and `detailsHtml(x) -> string`: the two pieces of today's `row()` markup (the `.meta` chips; the two `<dl>`s and `.actions`), moved out unchanged so `row()` renders byte-for-byte what it renders today. `detailsHtml` omits `.actions` when `x.status !== 'open'`.
-  - `taskPageHtml() -> string`: `<div class="taskpage" data-id="…">` with a bar (`<button class="btn" id="page-back">‹ Back</button>` and `<span class="code">Task-N</span>`), `<h2>` name, the chips, then `<div class="details">` + `detailsHtml(x)`. For a closed task a line `This task is done.` / `This task is dropped.` (from its status) above the details; for `{missing: true}` only `<div class="empty">Task-N does not exist.</div>` under the bar; while the fetch runs, `<div class="empty">Loading Task-N…</div>`.
-  - `openTask(id: number, push = true)`: not `PHONE()` → `jumpTo(id, true)` and return. Else save `ui.pageScroll = window.scrollY`, set `ui.page = id`, `ui.pageTask = null`, `push` → `setAddress('/t/' + id)`, `render()`, `scrollTo(0, 0)`; when `byId(id)` is missing, fetch `/api/tasks/${id}` through `api()` into `ui.pageTask` (a 404 → `{ missing: true }`) and render again if `ui.page` is still `id`.
+  - `taskPageHtml() -> string`: `<div class="taskpage" data-id="…">` with a bar (`<button class="btn" id="page-back">‹ Back</button>` and `<span class="code">Task-N</span>`), `<h2>` name, the chips, then `<div class="details">` + `detailsHtml(x)`. An open task is drawn from `view(byId(id))` like its row (so a staged change shows as the row's staged chip); whether it is closed is read from the server's row (`byId(id)` or `ui.pageTask`), never from `view()`, so a staged Done keeps the actions and the tray's Discard still makes sense. For a closed task a line `This task is done.` / `This task is dropped.` (from that status) above the details; for `{missing: true}` only `<div class="empty">Task-N does not exist.</div>` under the bar; while the fetch runs, `<div class="empty">Loading Task-N…</div>`.
+  - `openTask(id: number, push = true)`: not `PHONE()` → `jumpTo(id, true)` and return. Else save `ui.pageScroll = window.scrollY`, set `ui.page = id`, `ui.pageTask = null`, `push` → `setAddress('/t/' + id)`, `render()`, `scrollTo(0, 0)`; when `byId(id)` is missing, fetch `/api/tasks/${id}` through `api()` into `ui.pageTask` (a 404 → `{ id, missing: true }`) and render again if `ui.page` is still `id`. That fetch is a helper `render()` also starts (once per id) whenever it draws the page and neither `byId(ui.page)` nor a `ui.pageTask` with that id exists: a task applied Done from its own page, or closed elsewhere before a `load()` on return, leaves `data.tasks` and must become its read-only page, not "Loading Task-N…" for good.
   - `closeTask()`: `ui.page = null`, `render()`, `scrollTo(0, ui.pageScroll)`.
 - Behaviour:
   - `render()`: when `ui.page !== null` the panel is `taskPageHtml()` alone (no pending banners, no composer); `document.body.classList.toggle('page-on', ui.page !== null)`.
@@ -428,7 +427,7 @@ Implementer: **opus**. UI task: **yes**.
   - `composer()` on `PHONE()`: the touch hint reads `Tap a row to open it · tick the box to select it`; the empty-attachment line reads `Nothing attached · tick a row to attach it`. Elsewhere the texts are today's.
   - CSS, inside `@media (max-width: 700px)`: `body.page-on header.bar, body.page-on aside.rail { display: none; }`; the main grid has one column; `.taskpage` has top padding of `max(12px, env(safe-area-inset-top))`, its bar is a row with the Back button at a 44 px touch height, `h2` 20 px, and `.taskpage .details` is always shown as one column (`display: grid`), on the surface colour with the card border and radius. Nothing horizontal scrolls at 390 px.
 
-- [ ] **Step 1: Refactor `row()` into `chipsHtml` + `detailsHtml` without changing its output.** Check: on desktop, `s1-7` step 6 below must match `shots/baseline-row-open-desktop.png`.
+- [ ] **Step 1: Refactor `row()` into `chipsHtml` + `detailsHtml` without changing its output.** Check: the desktop shot `s1-7-desktop-desktop.png` (Step 5, "On the desktop") must match `shots/baseline-row-open-desktop.png`.
 - [ ] **Step 2: Add the page state, `taskPageHtml`, `openTask`, `closeTask`, the `render` and `wire` branches, the CSS.**
 - [ ] **Step 3: Change `applyAddress`, `jumpTo`, `sendChat`, the composer texts and the Esc branch** as above.
 - [ ] **Step 4: Run the suite** (`/home/robert/factotum/.venv/bin/pytest -q`, all pass: nothing Python changed, but it must stay green).
@@ -494,13 +493,13 @@ Implementer: **opus**. UI task: **yes**.
 - [ ] **Step 1: Implement.**
 - [ ] **Step 2: Run the suite** (all pass).
 - [ ] **Step 3: Write `scenarios/s1-9-signed-out.mjs` and run it for both devices.** The trigger is a command: fill `#cmd` with `top 1` and click `#cmd-go` (it calls `POST /api/commands`; with the route below nothing reaches the server, so nothing is staged).
-  1. `goto(base + '/log')`, wait for the Log. `context.route('**/api/**', r => r.fulfill({ status: 302, headers: { location: 'https://team.cloudflareaccess.com/cdn-cgi/access/login/factotum' } }))`. Trigger. `#signedout` is visible; shot `s1-9-signed-out`.
-  2. `context.unroute('**/api/**')`; click `#signin`: the page reloads at `/log` and the screen is gone; shot `s1-9-after-signin`.
+  1. `goto(base + '/timeline')`, wait for `#panel .row` (the Log tab has no command box; Timeline has one and is not Today, so the reload's address is tested). `context.route('**/api/**', r => r.fulfill({ status: 302, headers: { location: 'https://team.cloudflareaccess.com/cdn-cgi/access/login/factotum' } }))`. Trigger. `#signedout` is visible; shot `s1-9-signed-out`.
+  2. `context.unroute('**/api/**')`; click `#signin`: the page reloads at `/timeline` and the screen is gone; shot `s1-9-after-signin`.
   3. Route `**/api/**` to `fulfill({ status: 502, body: 'Bad gateway' })`; trigger: no `#signedout` (log its `hidden`); unroute.
   4. `context.setOffline(true)`; trigger: no `#signedout`; `context.setOffline(false)`.
   5. Route to `fulfill({ status: 401 })`; trigger: `#signedout` shows; shot `s1-9-401`; unroute.
   If Playwright cannot deliver the fulfilled 302 as an `opaqueredirect` (step 1 shows no screen), say so in the report, check with `page.evaluate` what `fetch('/api/tasks', { redirect: 'manual' })` returns under that route, and do not weaken the detection to cover failed fetches.
-  Expected: `s1-9-signed-out-*` is a full-screen "Signed out" with one "Sign in again" button and nothing of the app reachable around it; `s1-9-after-signin-*` is the Log tab; steps 3 and 4 log the screen as hidden. The problems list will show the intercepted requests; name them in the report.
+  Expected: `s1-9-signed-out-*` is a full-screen "Signed out" with one "Sign in again" button and nothing of the app reachable around it; `s1-9-after-signin-*` is the Timeline tab; steps 3 and 4 log the screen as hidden. The problems list will show the intercepted requests; name them in the report.
 - [ ] **Step 4: Commit** (`web: an expired sign-in (an /api request answered with a redirect, 401 or 403) shows a full-screen "Sign in again" that reloads at the same address; a restarting server or a dead network does not` + trailer).
 
 ---
