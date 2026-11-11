@@ -38,7 +38,7 @@ from .sync_file import _clean_task_fields
 PROMPTS = C.ROOT / "prompts"
 RUNS_DIR = C.ROOT / "data" / "runs" / "chat"
 CANNED = {"search_mail": ("chat-search-mail.md", "Search related emails"), "draft_reply": ("chat-draft-reply.md", "Draft a reply"),
-          "related": ("chat-related.md", "What else is related?")}
+          "related": ("chat-related.md", "What else is related?"), "split": ("chat-split.md", "Split into steps")}
 CHAT_OPS = {"set", "done", "drop", "pin_top", "longterm", "add_reminder", "add_note", "create", "link_thread", "link", "unlink", "merge"}
 LINKED_CAP = 10
 PROPOSAL_CAP = 12

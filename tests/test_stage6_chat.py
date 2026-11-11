@@ -159,3 +159,20 @@ def test_the_page_cannot_choose_a_created_source(cfg, tmp_path):
     out = TestClient(app).post("/api/batches/apply", json={"changes": [{"op": "create", "fields": {"name": "Mine"}, "created_source": "Chat", "source_key": "x"}]}).json()
     t = one(app.state.conn, "SELECT source, source_key FROM tasks WHERE id = ?", (out["created"][0],))
     assert t["source"] == "Manual" and t["source_key"] != "x"
+
+
+# --- Task 6: Split into steps
+
+def test_split_into_steps_is_a_canned_prompt(conn, cfg, tmp_path, monkeypatch):
+    monkeypatch.setattr(chat, "RUNS_DIR", tmp_path / "runs")
+    mk(conn, 5, name="Goal")
+    p = chat.build_prompt(cfg, conn, "", [5], TODAY, canned="split")
+    assert "## Task: split the attached task into steps" in p and '"kind": "part_of"' in p
+    data = {"reply_md": "1. a\n2. b", "proposals": [
+        {"op": "create", "fields": {"name": "a", "ref": "s1", "links": [{"kind": "part_of", "other": 5}]}, "label": "a"},
+        {"op": "create", "fields": {"name": "b", "ref": "s2", "links": [{"kind": "part_of", "other": 5}, {"kind": "waits_on", "other": "s1"}]}, "label": "b"}]}
+    tid = chat.new_thread(conn, None, "task", 5)
+    res = chat.turn(conn, cfg, tid, "Make them tasks", [], today=TODAY, canned="split", runner=_runner(data))
+    assert res["rejected"] == [] and res["proposals"][1]["fields"]["links"] == [{"kind": "part_of", "other": 5}, {"kind": "waits_on", "other": "s1"}]
+    assert chat.messages(conn, tid)[0]["text"] == "Make them tasks"
+    assert chat.CANNED["split"][1] == "Split into steps"
