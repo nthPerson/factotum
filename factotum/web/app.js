@@ -61,7 +61,13 @@
   const api = (path, opts) => fetch(path, Object.assign({ headers: { 'Content-Type': 'application/json' }, redirect: 'manual' }, opts)).catch(netFail).then(r => {
     noteBuild(r);
     if (expired(r)) { signedOut(); throw new Error('signed out'); }
-    if (!r.ok) throw new Error(r.status); return r.json();
+    if (!r.ok) return r.json().catch(() => null).then(j => {
+      // The message stays the status (what every toast shows); a refusal's own words ride along as `detail`.
+      const e = new Error(r.status); e.status = r.status;
+      if (j && typeof j.detail === 'string') e.detail = j.detail;
+      throw e;
+    });
+    return r.json();
   });
 
   function view(t) {
@@ -275,7 +281,7 @@
       catch (e) { pushDev.reason = (e && (e.message || e.name)) || String(e); return; }
       pushDev.sub = sub;
       try { pushInfo = await api('/api/push/subscribe', { method: 'POST', body: JSON.stringify(Object.assign(sub.toJSON(), { label: deviceLabel(), origin: location.origin })) }); }
-      catch (e) { if (e.message !== 'signed out') pushDev.reason = 'Factotum did not take the subscription: ' + e.message; return; }
+      catch (e) { if (e.message !== 'signed out') pushDev.reason = 'Factotum did not take the subscription: ' + (e.detail || e.message); return; }
       toast('Notifications are on for this device');
     } catch (e) {
       pushDev.reason = (e && (e.message || e.name)) || String(e);
