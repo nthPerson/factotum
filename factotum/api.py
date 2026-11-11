@@ -14,7 +14,8 @@
   GET  /api/stats
   GET  /api/log                          recent batches with their changes, and the Claude runs with cost
   GET  /api/chat/threads · GET /api/chat/threads/{id}      chat history (phase 5, SPEC.md §8.3)
-  POST /api/chat/turn {thread_id|null, text, attached, canned}   one turn, streamed as server-sent events
+  POST /api/chat/turn {thread_id|null, text, attached, canned, origin?, task_id?, fresh?}   one turn, streamed as server-sent events; 409 while that thread answers
+  GET  /api/chat/place?origin=&task_id=                     the conversation a Review card, an opened task or the Today box continues
   POST /api/chat/create {message_id, index}                 create the task a proposal describes
   POST /api/chat/drafts/open {draft}                        show a draft the run saved in Mailbird's window
   GET  /api/proposals · POST /api/proposals/{id}/apply|dismiss   batches a skill staged (SPEC.md §15); Apply makes a batch
@@ -107,6 +108,9 @@ class TurnBody(BaseModel):
     text: str = ""
     attached: list[int] = []
     canned: str | None = None
+    origin: str | None = None            # a conversation in place (chat.ORIGINS); with no thread_id, the place's thread
+    task_id: int | None = None
+    fresh: bool = False                  # start a new thread in that place instead of continuing one
 
 
 class CreateBody(BaseModel):
@@ -667,6 +671,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
 
     # ---- Chat (SPEC.md §8.3) -------------------------------------------------------------------
     from . import chat
+    turn_lock = threading.Lock()                     # the turn route finds a place's thread and marks it busy under this
 
     @app.get("/api/chat/threads")
     def chat_threads():
@@ -678,6 +683,22 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         if not th:
             raise HTTPException(404)
         return {"thread": th[0], "messages": chat.messages(conn, thread_id)}
+
+    @app.get("/api/chat/place")
+    def chat_place(origin: str, task_id: int | None = None):
+        """The conversation a place continues (a Review card, an opened task, the Today box), with every
+        task its messages read, attached or proposed named; `thread` is None when the place has none yet."""
+        if origin not in chat.ORIGINS:
+            raise HTTPException(400, "unknown origin")
+        tid = chat.place_thread(conn, origin, None if origin == "today" else task_id)
+        if tid is None:
+            return {"thread": None, "messages": [], "named": {}, "busy": False}
+        (th,) = rows(conn, "SELECT id, title, origin, task_id, created_at FROM chat_threads WHERE id = ?", (tid,))
+        msgs = chat.messages(conn, tid)
+        ids: set[int] = set()
+        for m in msgs:
+            ids |= {i for i in m["read"] + m["attached"] if type(i) is int} | chat.proposal_ids(m["proposals"])
+        return {"thread": th, "messages": msgs, "named": chat.named(conn, ids), "busy": tid in app.state.chat_busy}
 
     @app.delete("/api/chat/threads/{thread_id}")
     def chat_thread_delete(thread_id: int):
@@ -698,13 +719,26 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         stored message (or `error`). The run happens on a worker thread; this generator relays."""
         if body.canned is not None and body.canned not in chat.CANNED:
             raise HTTPException(400, f"unknown canned prompt {body.canned!r}")
-        thread_id = body.thread_id or chat.new_thread(conn)
-        if not rows(conn, "SELECT 1 FROM chat_threads WHERE id = ?", (thread_id,)):
-            raise HTTPException(404, "no such thread")
+        with turn_lock:                                      # two quick sends to one place find (or make) one thread, and only one runs
+            if body.thread_id:
+                thread_id = body.thread_id
+                if not rows(conn, "SELECT 1 FROM chat_threads WHERE id = ?", (thread_id,)):
+                    raise HTTPException(404, "no such thread")
+            elif body.origin is not None:
+                if body.origin not in chat.ORIGINS:
+                    raise HTTPException(400, "unknown origin")
+                task_id = None if body.origin == "today" else body.task_id
+                if body.origin != "today" and (task_id is None or not get_task(conn, task_id)):
+                    raise HTTPException(404, "no such task")
+                found = None if body.fresh else chat.place_thread(conn, body.origin, task_id)
+                thread_id = found or chat.new_thread(conn, None, body.origin, task_id)
+            else:
+                thread_id = chat.new_thread(conn)
+            if thread_id in app.state.chat_busy:
+                raise HTTPException(409, "Claude is still answering in this conversation")
+            app.state.chat_busy.add(thread_id)
         q: queue.Queue = queue.Queue()
         runner = app.state.chat_runner
-
-        app.state.chat_busy.add(thread_id)
 
         def work():
             try:
