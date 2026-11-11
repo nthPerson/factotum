@@ -24,6 +24,8 @@
   const TOUCH = () => window.matchMedia('(hover: none)').matches;
   let logView = 'all', logQuiet = false, logLimit = 60, logOpen = new Set();
   try { const v = localStorage.getItem('factotum.logview'); if (['timeline', 'changes', 'runs', 'all'].includes(v)) logView = v; logQuiet = localStorage.getItem('factotum.logquiet') === '1'; } catch (_) {}
+  let linkView = 'all';     // Today's and Timeline's All / Linked / Ready now (links (stage 4b): filters and the Linked view)
+  try { const v = localStorage.getItem('factotum.linkview'); if (['all', 'linked', 'ready'].includes(v)) linkView = v; } catch (_) {}
   let summary = null;       // /api/summary payload: the Today summary, what changed since, the refresh state
   let sumTimer = null;
   // Which sections are folded, per tab ("today:week", "timeline:later", "projects:<name>"); kept in
@@ -736,6 +738,78 @@
     return `<div class="lblegend"><span><i class="ok"></i>a link you or Claude confirmed</span><span><i class="sus"></i>a link the app suspects, one tap to confirm</span><span><i class="chg"></i>changed by a linked task since you last looked</span></div>`;
   }
 
+  // ---------- links (stage 4b): filters and the Linked view ----------
+  // One remembered choice for Today and Timeline. Without links the bar is not drawn and the choice reads as All.
+  function setLinkView(v) { linkView = v; try { localStorage.setItem('factotum.linkview', v); } catch (_) {} }
+  const effectiveLinkView = () => hasLinks() ? linkView : 'all';
+  // Ready now hides a waiting task, never a hard-dated one (design §7.4): that one stays, dimmed.
+  const readyRow = x => !isWaiting(x) || !!(x.hard && x.due);
+  const dayMon = iso => iso ? new Date(String(iso).slice(0, 10) + 'T12:00:00').toLocaleDateString([], { month: 'short', day: 'numeric' }) : '';
+  // What belongs together: a goal with its steps, a chain of waiting tasks from its first task, a suspected twin.
+  // A task may sit in more than one group.
+  function linkedGroups() {
+    const open = openOnes(), byOpen = new Map(open.map(x => [x.id, x]));
+    const out = [];
+    const dueThenScore = (a, b) => (a.due || '9').localeCompare(b.due || '9') || (b.score || 0) - (a.score || 0);
+    for (const g of open.filter(x => x.rel && x.rel.steps_total > 0).sort(dueThenScore)) {
+      const steps = (g.rel.links || []).filter(l => l.kind === 'part_of' && l.dir === 'in').map(l => l.other).filter((id, i, a) => a.indexOf(id) === i);
+      const closed = steps.filter(id => !byOpen.has(id)).map(id => { const t = byId(id); return t ? view(t) : nameOf(id); }).filter(Boolean);
+      const total = g.rel.steps_total, done = total - (g.rel.steps_open || 0);
+      out.push({ key: 'linked:g' + g.id, kind: 'goal', rows: [g].concat(steps.filter(id => byOpen.has(id)).map(id => byOpen.get(id))), closed, done, total });
+    }
+    for (const h of open.filter(x => x.rel && (x.rel.frees_open || []).length && !isWaiting(x))) {
+      const rows = [h], seen = new Set([h.id]);
+      const walk = t => { for (const id of (t.rel && t.rel.frees_open) || []) { const w = byOpen.get(id); if (!w || seen.has(id)) continue; seen.add(id); rows.push(w); walk(w); } };
+      walk(h);
+      if (rows.length < 2) continue;
+      const late = rows.slice(1).filter(x => x.hard && x.due && fmtDue(x.due).days < 0).sort((a, b) => a.due.localeCompare(b.due))[0];
+      out.push({ key: 'linked:w' + h.id, kind: 'waits', rows, late });
+    }
+    const twins = new Set();
+    for (const x of open) for (const s of (x.rel && x.rel.suggestions) || []) {
+      if (s.kind !== 'same_as' || twins.has(s.evidence_id) || suggestionStaged(s.evidence_id) || !byOpen.has(s.other)) continue;
+      twins.add(s.evidence_id);
+      const keep = s.keep != null ? s.keep : s.other, goes = keep === x.id ? s.other : x.id;
+      if (!byOpen.has(keep) || !byOpen.has(goes) || keep === goes) continue;
+      out.push({ key: 'linked:t' + s.evidence_id, kind: 'twin', rows: [byOpen.get(keep), byOpen.get(goes)], keep, goes, eid: s.evidence_id, why: s.why });
+    }
+    return out;
+  }
+  const SOURCE_SAID = { Canvas: 'from Canvas', Plaud: 'from a recording', Mail: 'from mail', Manual: 'made by hand' };
+  function twinHtml(g) {
+    const cell = x => { const d = fmtDue(x.due), from = SOURCE_SAID[x.source] || (x.source ? 'from ' + x.source : '');
+      return `<div class="twt"><div><span class="code">Task-${x.id}</span> <span class="name">${esc(x.name)}</span></div><div class="src">${esc([from, d ? 'due ' + d.label : 'no date'].filter(Boolean).join(', '))}</div></div>`; };
+    return `<section class="lgroup twin"><div class="lhead"><span class="lt">Possibly the same task, twice</span><span class="spacer"></span>${g.why ? `<span class="why">${esc(g.why)}</span>` : ''}</div>
+      <div class="tw">${cell(g.rows[0])}${cell(g.rows[1])}<div class="twb"><button class="btn small primary" data-twin-merge="${g.goes}:${g.keep}:${g.eid}">Merge into ${g.keep}</button><button class="btn small" data-twin-not="${g.eid}:${g.goes}:${g.keep}">Not the same</button></div></div></section>`;
+  }
+  const TICK = '<svg role="img" aria-label="Done" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5 9-10"></path></svg>';
+  function closedStepHtml(t) {
+    const dropped = t.status === 'dropped', when = dayMon(t.completed_at);
+    return `<a class="lstep closed" href="/t/${t.id}" data-lb="${t.id}">${TICK}<span class="body"><span><span class="code">Task-${t.id}</span> <span class="name">${esc(t.name)}</span></span>${t.outcome ? `<span class="outcome">Outcome: <span>${esc(t.outcome)}</span></span>` : ''}</span><span class="chip ${dropped ? 'dropped' : 'donechip'}">${dropped ? 'dropped' : 'done'}${when ? ' ' + esc(when) : ''}</span></a>`;
+  }
+  // Steps and waiting tasks are drawn indented: a copy carries `under`, never the row openOnes() returned.
+  const under = x => Object.assign({}, x, { under: true });
+  function linkedHtml() {
+    const gs = linkedGroups();
+    if (!gs.length) return '<div class="empty">No linked tasks.</div>';
+    return gs.map(g => {
+      if (g.kind === 'twin') return twinHtml(g);
+      if (g.kind === 'goal') return `<section class="lgroup"><div class="lhead"><span class="lt">Steps of one goal</span><span class="spacer"></span>${stepsBar(g.done, g.total)}<span class="cnt">${g.done} of ${g.total} done</span></div>
+        ${row(g.rows[0])}${g.closed.map(closedStepHtml).join('')}${g.rows.slice(1).map(x => row(under(x))).join('')}</section>`;
+      const k = g.rows.length - 1, late = g.late && fmtDue(g.late.due);
+      return `<section class="lgroup"><div class="lhead"><span class="lt">${k === 1 ? 'One task is holding up another' : `One task is holding up ${k} others`}</span><span class="spacer"></span>${late ? `<span class="late">the waiting task is ${esc(late.days === -1 ? '1d overdue' : late.label)}</span>` : ''}</div>
+        ${row(g.rows[0])}${g.rows.slice(1).map(x => row(under(x))).join('')}</section>`;
+    }).join('');
+  }
+  function linkBarHtml() {
+    if (!hasLinks()) return '';
+    const open = openOnes(), lv = linkView;
+    const linked = new Set(); linkedGroups().forEach(g => g.rows.forEach(x => linked.add(x.id)));
+    const views = [['all', 'All', open.length], ['linked', 'Linked', linked.size], ['ready', 'Ready now', open.filter(readyRow).length]];
+    return `<div class="linkbar"><div class="seg" role="tablist" aria-label="Show">${views.map(([k, l, n]) => `<button role="tab" data-linkview="${k}" aria-selected="${lv === k}">${l}<span class="n">${n}</span></button>`).join('')}</div>
+      <span class="lhint">${lv === 'linked' ? 'Tasks that belong together, shown together.' : 'A badge names the linked task. Click it to jump there.'}</span></div>`;
+  }
+
   // ---------- rendering ----------
   function render() {
     document.body.classList.toggle('page-on', ui.page !== null);      // before measuring: the page hides the bar on a phone
@@ -784,6 +858,7 @@
   // Where a task's row is: this tab if it lists it, else Today, else Timeline (which lists every
   // open task). The section is unfolded, the row focused, scrolled to and flashed; `expand` opens its details.
   function groupsOf(tab) {
+    if ((tab === 'today' || tab === 'timeline') && effectiveLinkView() === 'linked') return linkedGroups();
     return tab === 'today' ? todayGroups().groups : tab === 'timeline' ? timelineGroups() : tab === 'projects' ? projectGroups().map(([p, rows]) => ({ key: 'projects:' + p, rows })) : [];
   }
   // `replace` (only when opening at /t/<id>) swaps the address instead of pushing the tab's: a /timeline
@@ -791,8 +866,16 @@
   function jumpTo(id, expand, replace = false) {
     if (expand && PHONE()) { openTask(id); return; }      // a phone opens the task page instead (a Top tile's double-tap)
     const tabs = [ui.tab, 'today', 'timeline'].filter((t, i, a) => ['today', 'timeline', 'projects'].includes(t) && a.indexOf(t) === i);
-    let hit = null;
-    for (const tab of tabs) { const g = groupsOf(tab).find(g => g.rows.some(r => r.id === id)); if (g) { hit = { tab, key: g.key }; break; } }
+    const find = () => {      // a twin card draws no rows to scroll to
+      for (const tab of tabs) { const g = groupsOf(tab).find(g => g.kind !== 'twin' && g.rows.some(r => r.id === id)); if (g) return { tab, key: g.key }; }
+      return null;
+    };
+    let hit = find();
+    if (!hit && linkView !== 'all') {      // filtered out by Linked or Ready now: All shows it (the choice stays when All does not either)
+      const was = linkView; linkView = 'all';
+      hit = find();
+      if (hit) setLinkView('all'); else linkView = was;
+    }
     if (!hit) { toast(`Task-${id} is not in a list right now`); return; }
     const from = ui.tab;
     if (folded(hit.key, hit.tab === 'projects')) setFold(hit.key, false);
@@ -867,7 +950,7 @@
     return `<section class="group ${shut ? 'folded' : ''}"><h3 class="${g.cls || ''}"><button class="fold" data-fold="${esc(g.key)}" aria-expanded="${!shut}">${g.title}<span class="n">${g.rows.length}</span></button></h3>${shut ? '' : `<div class="rows">${g.rows.map(x => row(x, g.tag ? g.tag(x) : '')).join('')}</div>`}</section>`;
   }
   function row(x, extraChip) {
-    const cls = ['row', x.status === 'done' ? 'done' : '', x.status === 'dropped' ? 'drop' : '', ui.open.has(x.id) ? 'open' : '', ui.sel.has(x.id) ? 'sel' : '', ui.focus === x.id ? 'focus' : '', isWaiting(x) ? 'waiting' : ''].join(' ');
+    const cls = ['row', x.status === 'done' ? 'done' : '', x.status === 'dropped' ? 'drop' : '', ui.open.has(x.id) ? 'open' : '', ui.sel.has(x.id) ? 'sel' : '', ui.focus === x.id ? 'focus' : '', isWaiting(x) ? 'waiting' : '', x.under ? 'under' : ''].join(' ');
     return `<div class="${cls}" data-id="${x.id}">
       <div class="main">
         <input type="checkbox" id="ck-${x.id}" aria-label="Select" ${ui.sel.has(x.id) ? 'checked' : ''}>
@@ -968,7 +1051,8 @@
     return '<div class="empty"><b>No open tasks.</b> Tasks arrive from the inputs you switch on in Settings (Plaud recordings, Canvas), from suggestions you accept in Review (mail, Slack), and from Chat, where Claude can propose a task for you to create. Coming from a Notion tasks database? Run <code>python -m factotum import-notion --dry-run</code>, then <code>--apply</code> (docs/SETUP.md §5).</div>';
   }
   function todayGroups() {
-    const o = openOnes().filter(x => !(x.snoozed_until && x.snoozed_until > data.today));   // Later = hidden until its date
+    const ready = effectiveLinkView() === 'ready';
+    const o = openOnes().filter(x => !(x.snoozed_until && x.snoozed_until > data.today) && (!ready || readyRow(x)));   // Later = hidden until its date
     const by = f => o.filter(f);
     const today = by(x => dueDays(x) === 0), tomorrow = by(x => dueDays(x) === 1);
     return { open: o, groups: [
@@ -980,13 +1064,15 @@
   }
   function renderToday() {
     const { groups } = todayGroups();      // snoozed rows are not in these groups but are open: Timeline lists them
-    return summaryHtml() + composer() + groups.map(group).join('') + legendHtml() +
-      (!openOnes().length ? noTasksHtml() : groups.some(g => g.rows.length) ? '' : '<div class="empty">Nothing is due today or this week. Every open task is on Timeline.</div>') +
+    const lists = effectiveLinkView() === 'linked' ? linkedHtml() : groups.map(group).join('') +
+      (!openOnes().length ? noTasksHtml() : groups.some(g => g.rows.length) ? '' : '<div class="empty">Nothing is due today or this week. Every open task is on Timeline.</div>');
+    return summaryHtml() + composer() + linkBarHtml() + lists + legendHtml() +
       `<div class="note">Soft dates that slipped, new items, and fading backlog are not here. They wait in <b>Review</b> so this screen stays short.</div>`;
   }
   const RECENT_CAP = 30;
   function timelineGroups() {
-    const o = openOnes(), dd = dueDays;
+    const ready = effectiveLinkView() === 'ready';
+    const o = openOnes().filter(x => !ready || readyRow(x)), dd = dueDays;
     const sortDue = (a, b) => (a.due || '').localeCompare(b.due || '');
     return [
       { key: 'timeline:overdue', title: 'Overdue', cls: 'crit', rows: o.filter(x => dd(x) !== null && dd(x) < 0).sort(sortDue) },
@@ -1000,7 +1086,10 @@
       { key: 'timeline:recent', title: 'Recently added · newest first', rows: o.slice().sort((a, b) => (b.created_at || '').localeCompare(a.created_at || '')).slice(0, RECENT_CAP),
         tag: x => `<span class="chip" title="Created ${esc(x.created_at || '')}">added ${x.created_at ? new Date(x.created_at).toLocaleDateString([], { month: 'short', day: 'numeric' }) : '?'}</span>` }];
   }
-  function renderTimeline() { return composer() + (openOnes().length ? timelineGroups().map(group).join('') + legendHtml() : noTasksHtml()); }
+  function renderTimeline() {
+    if (!openOnes().length) return composer() + noTasksHtml();
+    return composer() + linkBarHtml() + (effectiveLinkView() === 'linked' ? linkedHtml() : timelineGroups().map(group).join('')) + legendHtml();
+  }
   function projectGroups() {
     const m = new Map();
     openOnes().forEach(x => { const k = x.project || '—'; if (!m.has(k)) m.set(k, []); m.get(k).push(x); });
@@ -1552,6 +1641,16 @@
     };
     panel.querySelectorAll('[data-sugg-open]').forEach(b => b.onclick = async () => {
       try { await api(`/api/review/suggestions/${b.dataset.suggOpen}/open`, { method: 'POST' }); toast('Shown in Mailbird'); } catch (e) { toast('Mailbird could not show it (' + e.message + '); it may have been moved'); }
+    });
+    panel.querySelectorAll('[data-linkview]').forEach(b => b.onclick = () => { setLinkView(b.dataset.linkview); render(); });
+    panel.querySelectorAll('[data-twin-merge]').forEach(b => b.onclick = () => {
+      const [goes, keep, eid] = b.dataset.twinMerge.split(':').map(Number);
+      stageChange({ task_id: goes, op: 'merge', fields: { into: keep } }, '', { ev: eid });
+      toast('Merge staged · press Apply in the tray');
+    });
+    panel.querySelectorAll('[data-twin-not]').forEach(b => b.onclick = () => {
+      const [eid, goes, keep] = b.dataset.twinNot.split(':').map(Number);
+      stageJudge(eid, goes, 'dismissed', `not the same as Task-${keep}`);
     });
     panel.querySelectorAll('[data-logview]').forEach(b => b.onclick = () => { logView = b.dataset.logview; try { localStorage.setItem('factotum.logview', logView); } catch (_) {} render(); });
     const lq = document.getElementById('log-quiet'); if (lq) lq.onchange = () => { logQuiet = lq.checked; try { localStorage.setItem('factotum.logquiet', logQuiet ? '1' : '0'); } catch (_) {} render(); };
