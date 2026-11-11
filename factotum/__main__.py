@@ -15,6 +15,7 @@
     python -m factotum sweep mail|canvas|calendar|slack|links   # one sweep now
     python -m factotum links-check      # what the link detectors would suggest now; read-only
     python -m factotum chat-check       # the MCP server over a pipe, then one tiny Claude run that calls a tool through it
+    python -m factotum ripple <task_id> [--dry-run]   # one ripple now from a task (a real Claude run); --dry-run writes nothing
 """
 from __future__ import annotations
 
@@ -132,6 +133,9 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("file-task", help="one filing run for a task (a real Claude run): its project, effort, a likely link and twin as suggestions; --dry-run prints the JSON and stores nothing")
     p.add_argument("task_id", type=int)
     p.add_argument("--dry-run", action="store_true")
+    p = sub.add_parser("ripple", help="one ripple now from a task (a real Claude run): --dry-run prints what it would do and writes nothing")
+    p.add_argument("task_id", type=int)
+    p.add_argument("--dry-run", action="store_true")
     p = sub.add_parser("sweep", help="run one sweep now")
     p.add_argument("which", choices=["mail", "canvas", "calendar", "slack", "links"])
     sub.add_parser("links-check", help="what the link detectors would suggest now; read-only")
@@ -171,20 +175,21 @@ def main(argv: list[str] | None = None) -> int:
         from .api import create_app
         app = create_app(cfg)
         if not a.no_scheduler:
-            from . import brief, canvas, gcal, mail_sweep, mail_triage, notify, notion_mirror, planner, slack_sweep, summary
+            from . import brief, canvas, gcal, mail_sweep, mail_triage, notify, notion_mirror, planner, ripple, slack_sweep, summary
             from .scheduler import Scheduler
             # its own connection: the API holds one, and SQLite serialises writers with busy_timeout
             sched = Scheduler(cfg, connect(C.db_path()), push=notify.publish, mailer=brief.smtp_mailer, calendar=gcal, canvas=canvas, mail=mail_sweep, planner=planner,
-                              mirror=notion_mirror, slack=slack_sweep, summary=summary, triage=mail_triage)
+                              mirror=notion_mirror, slack=slack_sweep, summary=summary, triage=mail_triage, ripple=ripple)
             sched.start()
             app.state.scheduler = sched          # the Today tab's Refresh asks this thread; with --no-scheduler the button is off
             _start_plaud_trigger(cfg)
         uvicorn.run(app, host=a.host or C.get(cfg, "server.host", "127.0.0.1"), port=a.port or int(C.get(cfg, "server.port", 8750)))
     elif a.cmd == "tick":
         from . import brief, gcal, notify
-        from . import canvas, mail_sweep, notion_mirror, planner, slack_sweep
+        from . import canvas, mail_sweep, notion_mirror, planner, ripple, slack_sweep
         from .scheduler import Scheduler
-        did = Scheduler(cfg, conn, push=notify.publish, mailer=brief.smtp_mailer, calendar=gcal, canvas=canvas, mail=mail_sweep, planner=planner, mirror=notion_mirror, slack=slack_sweep).tick()
+        did = Scheduler(cfg, conn, push=notify.publish, mailer=brief.smtp_mailer, calendar=gcal, canvas=canvas, mail=mail_sweep, planner=planner, mirror=notion_mirror,
+                        slack=slack_sweep, ripple=ripple).tick()
         print("\n".join(did) if did else "nothing due")
     elif a.cmd == "brief":
         from . import brief, gcal
@@ -406,6 +411,18 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit(f"filing failed: {res['error']}")
         print(json.dumps(res["data"], indent=1, ensure_ascii=False) if a.dry_run else res["line"])
         print(f"\n({'dry run · ' if a.dry_run else ''}${res['cost_usd']:.2f} · prompt under data/runs/filing/{a.task_id}/)")
+    elif a.cmd == "ripple":
+        from . import ripple
+        res = ripple.run(conn, ecfg, [a.task_id], today, dry_run=a.dry_run)     # whatever claude.ripple.enabled says: an explicit command
+        if not res["ok"]:
+            raise SystemExit(f"ripple failed: {res['error']}")
+        if res.get("dry_run"):
+            print(json.dumps(res["data"], indent=1, ensure_ascii=False))
+            for p in res["preview"]:
+                print(f"Task-{p['task_id']}: {p['effect']} · {p['verdict']}" if "effect" in p else f"  {p['proposal'] or '(no card)'} · {p['verdict']}")
+            print(f"(dry run · ${res['cost_usd']:.2f} · prompt under data/runs/ripple/{today}/)")
+        else:
+            print(res["line"])
     elif a.cmd == "sweep":
         from datetime import datetime as _dt
         from . import canvas, gcal, mail_sweep, slack_sweep, suggestions

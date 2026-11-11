@@ -10,10 +10,15 @@ the review time or turning the brief off takes effect at the next tick.
     slack_sweep     every sources.slack.sweep_minutes when Slack is on: @-mentions of the user into evidence
     mail_triage     when the mail sweep left new mail to read (mail_triage.pending) and sources.mail.suggest.enabled:
                     one light run that turns it into Review suggestions, no more often than sources.mail.suggest.minutes
+    link_suggestions every suggestions.SWEEP_MINUTES (free): the link detectors (stage 7, design §10)
+    filing          when claude.filing.enabled (off when the key is absent) and a task waits in the filing queue: its runs
     notion_mirror   every sinks.notion_tasks_mirror.sweep_minutes when the mirror is on: rows edited since the last pass
     refresh         when the Today tab asked (`state.refresh.requested`): every enabled sweep now, then the planner
     today_summary   when the Today summary is stale (summary.get) and claude.summary.auto is switched on (off when the key is absent): one light run,
                     no more often than claude.summary.auto_minutes
+    ripples         every tick when claude.ripple.enabled (off when the key is absent): one connected group of queued tasks
+                    (ripple.next_group: after claude.ripple.delay_seconds of quiet, at once for an outcome, within the hourly
+                    cap); off empties the queue
 
 Daily jobs are "at or after HH:MM, once per day", so a service that was down at 06:30 still sends
 the brief when it comes back. A failed job retries after an hour, not the next day. Everything
@@ -34,13 +39,14 @@ RETRY_AFTER = timedelta(hours=1)
 
 
 class Scheduler:
-    def __init__(self, cfg: dict, conn: sqlite3.Connection, push=notify.publish, mailer=None, calendar=None, canvas=None, mail=None, planner=None, mirror=None, slack=None, summary=None, triage=None, device_push=None):
+    def __init__(self, cfg: dict, conn: sqlite3.Connection, push=notify.publish, mailer=None, calendar=None, canvas=None, mail=None, planner=None, mirror=None, slack=None, summary=None, triage=None, device_push=None, ripple=None):
         self.cfg, self.conn, self.push, self.mailer, self.calendar, self.canvas, self.mail, self.planner = cfg, conn, push, mailer, calendar, canvas, mail, planner
         self.mirror = mirror
         self.slack = slack
         self.summary = summary
         self.triage = triage
         self.device_push = device_push or app_push.send_all
+        self.ripple = ripple
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._thread: threading.Thread | None = None
@@ -55,6 +61,7 @@ class Scheduler:
         ecfg = C.effective(self.cfg, st)
         did: list[str] = []
         self._reminders(ecfg, now, did)
+        self._free_now(ecfg, now, did)
         self._daily("expire", C.get(ecfg, "lifecycle.expire_time", "03:30"), now, st, did, lambda: self._expire(ecfg, today))
         if C.value(ecfg, "notify.morning_brief.enabled") and self.mailer:
             self._daily("morning_brief", C.get(ecfg, "notify.morning_brief.time", "06:30"), now, st, did, lambda: self._brief(ecfg, today))
@@ -80,6 +87,7 @@ class Scheduler:
                 set_setting(self.conn, "state.refresh.requested", None)
                 self.conn.commit()
             self._auto_summary(ecfg, now, st, did)
+        self._ripples(ecfg, now, st, did)
         return did
 
     def _reminders(self, ecfg: dict, now: datetime, did: list[str]) -> None:
@@ -114,6 +122,25 @@ class Scheduler:
                 if line:
                     did.append(f"filing: {line}")
             self._run("filing", now, st, did, job, mark=now.strftime("%Y-%m-%dT%H:%M"))
+
+    def _free_now(self, ecfg: dict, now: datetime, did: list[str]) -> None:
+        if not notify.ready(self.conn, ecfg):
+            return
+        started = time.monotonic()
+        try:
+            sent = reminders.free_now(self.conn, ecfg, now.date(), self.push, device_push=self.device_push)
+        except Exception as e:
+            self.conn.rollback()
+            if not self._rem_error_at or now - self._rem_error_at > RETRY_AFTER:
+                self._rem_error_at = now
+                log_run(self.conn, "reminder", int((time.monotonic() - started) * 1000), ok=False, error=f"{type(e).__name__}: {e}"[:500])
+                self.conn.commit()
+            return
+        if sent:
+            summary = "free now: " + ", ".join(f"Task-{s['task_id']} {s['task_name']}"[:60] for s in sent)
+            log_run(self.conn, "reminder", int((time.monotonic() - started) * 1000), ok=True, summary=summary)
+            self.conn.commit()
+            did.append(summary)
 
     def _daily(self, name: str, hhmm: str | None, now: datetime, st: dict, did: list[str], fn) -> None:
         if not hhmm or now.strftime("%H:%M") < str(hhmm):
@@ -342,12 +369,44 @@ class Scheduler:
             did.append("today_summary: rewritten")      # the run logged itself (kind today-summary, with its cost)
         self._run("today_summary", now, st, did, job, mark=now.strftime("%Y-%m-%dT%H:%M"))
 
+    def _ripples(self, ecfg: dict, now: datetime, st: dict, did: list[str]) -> None:
+        """Run one connected group of queued tasks (design §8.1). Off empties the queue, so switching
+        ripples on later starts clean. The queue's stamps are the wall clock's (`now_iso`), so the
+        stale rows and the due group are judged on it, never on the tick's local `now`. A failed run
+        backs off an hour like every job; its rows stay queued (a group that fails twice is set aside)."""
+        if self.ripple is None:
+            return
+        try:
+            if not C.value(ecfg, "claude.ripple.enabled"):
+                self.ripple.clear(self.conn)
+                self.conn.commit()
+                return
+            aside = self.ripple.drop_stale(self.conn)
+            if aside:
+                log_run(self.conn, "ripples", 0, ok=True, summary="set aside unrun: " + ", ".join(f"Task-{t}" for t in aside))
+            self.conn.commit()
+            ids = self.ripple.next_group(self.conn, ecfg)
+        except Exception:
+            self.conn.rollback()        # never leave this thread holding the write lock (every UI Apply would wait on it)
+            raise
+        if not ids:
+            return
+
+        def job() -> None:
+            res = self.ripple.run(self.conn, ecfg, ids, now.date(), at=now.strftime("%Y-%m-%dT%H:%M"))
+            if not res.get("ok"):
+                raise RuntimeError(res.get("error") or "no result")
+            did.append(f"ripples: {res.get('line')}")       # the run logged itself (kind ripple, with its cost)
+        self._run("ripples", now, st, did, job, mark=now.strftime("%Y-%m-%dT%H:%M"))
+
     # ---- the thread --------------------------------------------------------------------------
 
     def start(self, interval_s: int = 30) -> None:
         if get_settings(self.conn).get("state.refresh.running"):       # a refresh the last process died in
             set_setting(self.conn, "state.refresh.running", None)
             self.conn.commit()
+        if self.ripple is not None:
+            self.ripple.set_waker(self.wake)     # an Apply that queued an outcome ticks at once
 
         def loop():
             while not self._stop.is_set():
@@ -365,5 +424,7 @@ class Scheduler:
         self._wake.set()
 
     def stop(self) -> None:
+        if self.ripple is not None:
+            self.ripple.set_waker(None)
         self._stop.set()
         self._wake.set()

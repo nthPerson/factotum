@@ -39,7 +39,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
-from . import app_push, batches, commands, config as C, filing, lifecycle, oauth, relations, reminders, suggestions, summary
+from . import app_push, batches, commands, config as C, filing, lifecycle, oauth, relations, reminders, ripple, suggestions, summary
 from .db import connect, get_settings, get_task, init_db, now_iso, rows, seed_accounts, set_setting
 from .dates import parse_date
 
@@ -169,14 +169,26 @@ def _form(body: bytes) -> dict:
     return {k: v[0] for k, v in parse_qs(body.decode("utf-8", "replace"), keep_blank_values=True).items()}
 
 
-def _page(title: str, text: str, base: str, undo: bool = False, task_id: int | None = None) -> str:
-    """Tiny phone-sized confirmation page for a reminder action."""
+def _page(title: str, text: str, base: str, undo: bool = False, task_id: int | None = None, ask: dict | None = None) -> str:
+    """Tiny phone-sized confirmation page for a reminder action. `ask` adds the outcome question
+    ({"action": url, "hang": k, "ripples": bool}) between the text and the Open link."""
     back = f"{base}/t/{task_id}" if task_id is not None else f"{base}/"
     label = f"Open Task-{task_id}" if task_id is not None else "Open Factotum"
     hint = ' Undo is in the Log tab.' if undo else ''
+    form = ""
+    if ask:
+        k = ask["hang"]
+        hangs = "One task hangs on this one." if k == 1 else f"{k} tasks hang on this one."
+        tail = (" What you write is what they are told. Leave it empty and they are still brought up to date." if ask.get("ripples")
+                else " What you write is kept with this task where they list it.")
+        form = (f'<form method="post" action="{escape(ask["action"])}" style="margin:16px 0">'
+                '<label for="outcome" style="display:block;font-weight:600;margin-bottom:4px">How did it turn out?</label>'
+                f'<p style="color:#555;margin:0 0 8px">{hangs}{tail}</p>'
+                '<input id="outcome" name="outcome" maxlength="300" autocomplete="off" style="font:16px system-ui;width:100%;box-sizing:border-box;padding:10px;border:1px solid #ccc;border-radius:6px">'
+                '<button style="margin-top:8px;font:16px system-ui;padding:10px 18px;min-height:44px">Save</button></form>')
     return (f'<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Factotum</title>'
             f'<body style="font:16px system-ui;margin:0;padding:24px;background:#fafaf7;color:#1a1a1a"><h2 style="margin:0 0 8px">{escape(title)}</h2>'
-            f'<p style="color:#555">{escape(text)}{hint}</p><p><a href="{escape(back)}" style="color:#2a6">{escape(label)}</a></p></body>')
+            f'<p style="color:#555">{escape(text)}{hint}</p>{form}<p><a href="{escape(back)}" style="color:#2a6">{escape(label)}</a></p></body>')
 
 
 class JsonOnlyMutations:
@@ -398,6 +410,12 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
             sch.wake()
         return today_summary()
 
+    @app.get("/api/ripple")
+    def ripple_status(after: int | None = None):
+        """What ripples wait, whether a scheduler here will run them (with --no-scheduler they wait),
+        and the ripple batches that landed after batch `after` (the page polls this after an Apply)."""
+        return ripple.status(conn, eff_cfg(), scheduler=getattr(app.state, "scheduler", None) is not None, after=after)
+
     @app.get("/api/review")
     def review(exclude: str | None = None):
         """One page of the review queue. `exclude` is a comma-separated list of task ids the client
@@ -418,6 +436,9 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         for i in full:                                           # from the full rel (a text may name a closed task it waited on)
             i["texts"] = lifecycle.reason_texts(i["task"], i["reasons"])
             i["link_suggestions"] = [dict(s, other_name=names.get(s["other"])) for s in i["task"]["rel"]["suggestions"]]
+        for i in full:
+            if "linked_changed" in i["reasons"]:
+                i["since"] = ripple.since(conn, i["task"]["id"], i["task"]["rel"].get("changed"))
         for t in open_tasks:
             ship_rel(t)
         pending = rows(conn, "SELECT id, task_id, kind, ref, account, label, excerpt, at FROM evidence WHERE judged_at IS NULL ORDER BY id")
@@ -430,7 +451,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
                         change = json.loads(e["ref"]) if e["ref"] else None
                     except ValueError:
                         change = None
-                by_task.setdefault(int(e["task_id"]), []).append({"id": e["id"], "kind": e["kind"], "label": e["label"], "reason": e["excerpt"], "change": change, "at": e["at"]})
+                by_task.setdefault(int(e["task_id"]), []).append({"id": e["id"], "kind": e["kind"], "label": e["label"], "reason": e["excerpt"], "change": change, "at": e["at"], "by": "ripple" if e["account"] == "ripple" else None})
         for i in full:
             i["flags"] = flags.get(i["task"]["id"], {})
             i["evidence"] = by_task.get(i["task"]["id"], [])      # judged in the same batch as the decision; a proposal's change can be accepted
@@ -505,7 +526,8 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         e = e[0]
         is_slack = e["kind"] == "slack_mention"
         mail = _suggestion_mail(e)
-        key = f"{'slack-mention' if is_slack else 'mail-suggestion' if mail else 'planner-suggestion'}:{evidence_id}"
+        by_ripple = e.get("account") == ripple.ACCOUNT and not is_slack and not mail
+        key = f"{'slack-mention' if is_slack else 'mail-suggestion' if mail else 'ripple-suggestion' if by_ripple else 'planner-suggestion'}:{evidence_id}"
         ex = rows(conn, "SELECT id FROM tasks WHERE source_key = ?", (key,))
         if ex:
             return {"task_id": ex[0]["id"]}
@@ -516,7 +538,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         want = _suggestion_fields(ecfg, e)
         f = _clean_task_fields(ecfg, want)
         now = now_iso()
-        tid = upsert_task(conn, dict(f, status="open", source="Slack" if is_slack else "Mail" if mail else "Planner", source_key=key, source_link=want.get("source_link"),
+        tid = upsert_task(conn, dict(f, status="open", source="Slack" if is_slack else "Mail" if mail else "Ripple" if by_ripple else "Planner", source_key=key, source_link=want.get("source_link"),
                                      account=e.get("account") if is_slack else mail.get("account") if mail else None, context=f.get("context") or (e["excerpt"] or None),
                                      mentions=1, last_mention_at=date.today().isoformat(), created_at=now, edited_at=now))
         if is_slack and e.get("ref"):
@@ -1050,7 +1072,26 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         if res["action"] == "open":
             return RedirectResponse(f"{base}/t/{res['task_id']}")
         what = {"done": "marked done", "snooze": f"snoozed; it fires again at {res.get('fire_at', '')[11:16]}"}[res["action"]]
-        return HTMLResponse(_page(f"Task-{res['task_id']} {what}", res["task_name"], base, undo=res["action"] == "done", task_id=res["task_id"]))
+        ask = None
+        if res["action"] == "done":
+            k = reminders.hanging_on(conn, res["task_id"])
+            if k > 0:
+                ask = {"action": f"{base}/r/{token}/outcome", "hang": k, "ripples": bool(C.value(eff_cfg(), "claude.ripple.enabled"))}
+        return HTMLResponse(_page(f"Task-{res['task_id']} {what}", res["task_name"], base, undo=res["action"] == "done", task_id=res["task_id"], ask=ask))
+
+    @app.post("/r/{token}/outcome")
+    async def reminder_outcome(token: str, request: Request):
+        """The optional outcome line after Done. Urlencoded form post outside /api; only a token whose
+        reminder was closed from its link (and is still inside the 24 h) is accepted."""
+        base = str(C.get(cfg, "server.public_url", "")).rstrip("/")
+        text = _form(await request.body()).get("outcome", "")
+        try:
+            res = reminders.save_outcome(conn, eff_cfg(), token, text)
+        except reminders.TokenError as e:
+            return HTMLResponse(_page("Factotum", e.why, base), status_code=e.status)
+        if not res["saved"]:
+            return HTMLResponse(_page(f"Task-{res['task_id']}: nothing saved", res["task_name"], base, task_id=res["task_id"]))
+        return HTMLResponse(_page(f"Task-{res['task_id']}: outcome saved", f"How it turned out: \u201c{res['outcome']}\u201d", base, undo=True, task_id=res["task_id"]))
 
     def index():
         return HTMLResponse(_index_html(), headers={"Cache-Control": "no-cache, must-revalidate"})
