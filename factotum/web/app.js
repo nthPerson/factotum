@@ -2021,7 +2021,8 @@
       : `<h3>Changes</h3>${changesHtml()}<h3>Runs · automations and Claude</h3>${runsHtml()}`;
     return `<div class="log ${logView}">${bar}${body}${more}</div>`;
   }
-  async function loadSettings() { [settings, connectors] = await Promise.all([api('/api/settings'), api('/api/connectors').catch(() => null)]); render(); }
+  let rippleInfo = null;    // GET /api/ripple, fetched with the settings (Settings → Claude says when ripples wait)
+  async function loadSettings() { [settings, connectors, rippleInfo] = await Promise.all([api('/api/settings'), api('/api/connectors').catch(() => null), api('/api/ripple').catch(() => null)]); render(); }
   function renderSettings() {
     if (!settings) { loadSettings(); return '<div class="empty">Loading settings…</div>'; }
     if (pushInfo === null) loadPush();
@@ -2064,6 +2065,8 @@
       <h3>Claude</h3>
       ${f('claude.planner.enabled', 'Morning planner', 'One Claude run before the brief: the verdict, why-now lines and proposals. Off = the plain brief.', bool('claude.planner.enabled'))}
       ${f('claude.summary.auto', 'Today summary', 'Rewritten by one light Claude run when a task it is about changes, something becomes urgent, or the day turns. Off: the Today tab still says what changed, and Refresh rewrites it.', bool('claude.summary.auto') + ' &nbsp; at most every ' + num('claude.summary.auto_minutes', 1, 240) + ' min')}
+      ${f('claude.ripple.enabled', 'Ripples', 'When a linked task is closed or changes, one light Claude run brings the tasks linked to it up to date: it may rewrite their text (each rewrite is in History with Undo) and suggests anything else on Review. About 3 cents a run (measured 2026-11-11), at most ' + esc(e['claude.ripple.hourly_cap']) + ' runs an hour.', bool('claude.ripple.enabled') + ' &nbsp; after ' + num('claude.ripple.delay_seconds', 10, 3600) + ' s of quiet · at most ' + num('claude.ripple.hourly_cap', 1, 60) + ' runs an hour · $ ' + num('claude.budgets_usd.ripple', 0.05, 2) + ' a run · ' + `<select id="s-claude.ripple.model" data-key="claude.ripple.model" aria-label="Ripple model">${['sonnet', 'haiku', 'opus'].map(m => `<option value="${m}" ${(e['claude.ripple.model'] || 'sonnet') === m ? 'selected' : ''}>${m}</option>`).join('')}</select>`)}
+      ${rippleInfo && rippleInfo.waiting_for_scheduler ? `<p class="hint warn">${rippleInfo.pending.length} ${rippleInfo.pending.length === 1 ? 'ripple' : 'ripples'} waiting: this instance runs no scheduler, so they run when the service does.</p>` : ''}
       ${f('claude.budgets_usd.chat_turn', 'Chat turn budget', 'Dollars a single chat turn may spend before Claude stops.', '$ ' + num('claude.budgets_usd.chat_turn', 0.05, 5) )}
       <h3>Connections</h3>
       ${f('server.oauth.enabled', 'claude.ai / Claude Desktop connector', `Factotum is the OAuth server behind <code>${esc(connectors ? connectors.url : '')}</code>: add that URL as a custom connector and approve it once on the consent page (docs/SETUP.md §16). What a connector may do with tasks is the next setting.`, bool('server.oauth.enabled'))}

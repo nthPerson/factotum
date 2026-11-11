@@ -646,3 +646,4 @@ body.tray-on .chat-main .composer { bottom: 84px; }
 .pending .plist { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
 .pending .plist .chip { background: var(--surface); color: var(--fg); white-space: normal; }
 .pending .pact { display: flex; gap: 8px; }
+.hint.warn { color: var(--warn); }
