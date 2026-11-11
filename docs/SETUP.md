@@ -590,6 +590,14 @@ pair empties the devices list). Nothing goes in `.env`. If the file becomes unre
 "Factotum cannot send notifications right now", reminders to the app wait and the Log says why;
 Factotum never overwrites it, so restore it from the backup or delete it.
 
+**Which push services.** The server sends only to the push services browsers use: Google's (Chrome,
+Edge on Android, most Android browsers), Mozilla's (Firefox), Apple's (Safari, the iPhone) and
+Microsoft's (Edge on Windows). If "This device" says "… is not a known push service (add it to
+notify.app.push_hosts …)", the browser uses another one: add that exact host name to the list under
+`notify: app: push_hosts:` in `config/factotum.yaml`, restart, and tap "Try again". An IP address or
+`localhost` is never accepted. A push service's own error text is not shown anywhere, only its status
+code (for example "HTTP 403 from fcm.googleapis.com").
+
 **What was verified and what was not.** Verified offline (the test suite): the encryption against
 RFC 8291's own test vector, VAPID signatures, sending, removal on 404/410, trimming, the provider
 choice, the routes. Verified in a headless browser: the worker registers and controls the app, its

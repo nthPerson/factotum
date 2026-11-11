@@ -698,7 +698,9 @@ pair, the devices, the payload and sending; `factotum/web/sw.js` is the worker.
   run the worker and wait on it. Its links are absolute on each device's own origin
   (`push_subscriptions.origin`), so the dev instance's notifications open the dev instance. It is at
   most `webpush.MAX_PLAINTEXT` (3993) bytes, one 4096-byte record: over that, the body is cut (ending
-  in "…"), then the title, then the buttons go; the links and the tag never change.
+  in "…"), then the title, then the buttons are dropped; `navigate`, the tag and `data` are never cut
+  (every notice Factotum makes keeps them short; one too large anyway is refused by `encrypt` and
+  recorded as that device's failure).
 - **Tag, Topic, TTL, urgency.** The tag is `task-<id>` (the nudge `review`, a test `test`) and is
   also the push service's `Topic` header, so a newer reminder for the same task replaces an older
   one on the device and at the service. A reminder lives 86400 s (the token's life) at urgency
@@ -722,7 +724,8 @@ pair, the devices, the payload and sending; `factotum/web/sw.js` is the worker.
 - **Delivery.** `app_push.send_all` makes every network call before its first write, then writes
   the device rows and commits them itself (a removal must survive the caller's rollback). A 404 or
   410 removes the device; any other failure or no answer is kept on its row (`last_failure_at`,
-  `last_error`). It raises `NothingSent` when there was a device and none took the push. One
+  `last_error`: `HTTP <status> from <host>`, `could not reach <host>: <error name>`; a push service's
+  own answer is never repeated, in a route, on a row or in the Log). It raises `NothingSent` when there was a device and none took the push. One
   provider failing never holds the other (`notify.send_each`): a reminder is marked sent when at
   least one chosen provider delivered (ntfy returned a message id; the app reached a device); when
   none did and one raised, the reminder stays pending and the error is logged once an hour, as an
@@ -730,6 +733,15 @@ pair, the devices, the payload and sending; `factotum/web/sw.js` is the worker.
   provider that can deliver (ntfy on with a topic; the app with a device), so nothing is marked sent
   into the void. A test from Settings (`POST /api/push/test`) is sent in the request, to that one
   device.
+- **Only known push services.** A subscription's endpoint must be `https` on a known push service:
+  `fcm.googleapis.com`, `updates.push.services.mozilla.com`, `web.push.apple.com` or any
+  `*.push.apple.com`, any `*.notify.windows.com`, the names in `notify.app.push_hosts` (config file
+  only, not a Settings key; exact names), and any name under `.invalid` (it never resolves; the UI
+  checks use `push.invalid`). An IP literal, `localhost` (with a trailing dot or as a suffix),
+  credentials in the address, or a host a resolver might read as a number is refused whatever the
+  config says. `app_push.endpoint_problem` decides, at subscribe (a 400 that names the host and the
+  key) and again before every send, so a row stored earlier or by hand is recorded as a failure and
+  never posted to. The server must never be a way to make requests to an address a caller chose.
 - **Routes.** `GET /api/push` (the public key, made on first ask, or why there is none; the
   provider; the devices without their keys), `POST /api/push/subscribe`, `/unsubscribe` (by
   endpoint or id), `/test`. A refusal is a 400, 404 or 409, never a 401 or 403.

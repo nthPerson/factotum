@@ -322,7 +322,14 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
   rows itself** (2026-11-10): a 410 removal must survive the caller's rollback. It raises
   `NothingSent` when no device took it.
 - **The payload is at most 3993 bytes of plaintext** (2026-11-10, `webpush.MAX_PLAINTEXT`, one
-  4096-byte record): `payload()` trims the body, then the title, never a link.
+  4096-byte record): `payload()` trims the body, then the title, then drops the buttons last; it never
+  cuts `navigate`, the tag or `data`, so a new notice must keep those short (one too large is refused
+  by `encrypt` and recorded as a failure).
+- **The server posts only to known push services** (2026-11-11, the stage review): `app_push.endpoint_problem`
+  checks a subscription's host at subscribe AND before every send (Google, Mozilla, Apple, Microsoft,
+  `.invalid`, plus `notify.app.push_hosts`; never an IP, `localhost` or a numeric host). Without it,
+  anyone who reaches `/api/push/subscribe` makes the server POST wherever they like. Never repeat a
+  push service's response body in a route, a row or the Log: status and host only.
 - **The permission is asked first thing in the tap handler** (2026-11-10, `pushOn`): an `await`
   before `Notification.requestPermission()` makes iOS refuse it.
 - **Notification buttons use the reminder's token links, which stay behind the sign-in**
