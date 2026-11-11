@@ -22,6 +22,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import queue
 import threading
@@ -42,6 +43,24 @@ from .db import connect, get_settings, get_task, init_db, rows, seed_accounts, s
 from .dates import parse_date
 
 WEB = Path(__file__).resolve().parent / "web"
+PAGE_TABS = ("today", "timeline", "projects", "review", "chat", "log", "settings")
+STAMPED = ("index.html", "app.js", "app.css", "manifest.webmanifest")
+
+
+def build_stamp() -> str:
+    """Twelve hex digits over the modification times of the files the page is made of; read per call
+    (the web files are served from disk, so a JS-only deploy changes it without a restart)."""
+    return hashlib.sha1("|".join(str((WEB / f).stat().st_mtime_ns) for f in STAMPED).encode()).hexdigest()[:12]
+
+
+def _index_html() -> str:
+    # The page stamps its assets with their mtime and everything says no-cache: Cloudflare caches
+    # .js/.css by default and browsers guess freshness when the origin is silent, which left the
+    # phone on an old app.js after a deploy.
+    html = (WEB / "index.html").read_text(encoding="utf-8")
+    for asset in ("app.js", "app.css"):
+        html = html.replace(f"/static/{asset}", f"/static/{asset}?v={int((WEB / asset).stat().st_mtime)}")
+    return html.replace('<meta name="factotum-build" content="">', f'<meta name="factotum-build" content="{build_stamp()}">')
 
 
 class ApplyBody(BaseModel):
@@ -114,13 +133,14 @@ def _form(body: bytes) -> dict:
     return {k: v[0] for k, v in parse_qs(body.decode("utf-8", "replace"), keep_blank_values=True).items()}
 
 
-def _page(title: str, text: str, base: str, undo: bool = False) -> str:
+def _page(title: str, text: str, base: str, undo: bool = False, task_id: int | None = None) -> str:
     """Tiny phone-sized confirmation page for a reminder action."""
-    back = f"{base}/#today" if base else "/#today"
+    back = f"{base}/t/{task_id}" if task_id is not None else f"{base}/"
+    label = f"Open Task-{task_id}" if task_id is not None else "Open Factotum"
     hint = ' Undo is in the Log tab.' if undo else ''
     return (f'<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Factotum</title>'
             f'<body style="font:16px system-ui;margin:0;padding:24px;background:#fafaf7;color:#1a1a1a"><h2 style="margin:0 0 8px">{escape(title)}</h2>'
-            f'<p style="color:#555">{escape(text)}{hint}</p><p><a href="{escape(back)}" style="color:#2a6">Open Factotum</a></p></body>')
+            f'<p style="color:#555">{escape(text)}{hint}</p><p><a href="{escape(back)}" style="color:#2a6">{escape(label)}</a></p></body>')
 
 
 class JsonOnlyMutations:
@@ -140,6 +160,25 @@ class JsonOnlyMutations:
         await self.app(scope, receive, send)
 
 
+class BuildStamp:
+    """Adds X-Factotum-Build to every /api/ response so an open page can tell a new deploy. Pure ASGI
+    (the chat stream must stay untouched); outermost, so a 415 from JsonOnlyMutations carries it too."""
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or not scope.get("path", "").startswith("/api/"):
+            await self.app(scope, receive, send)
+            return
+        stamp = build_stamp().encode()
+
+        async def send_with(message):
+            if message["type"] == "http.response.start":
+                message = {**message, "headers": [*message.get("headers", []), (b"x-factotum-build", stamp)]}
+            await send(message)
+        await self.app(scope, receive, send_with)
+
+
 def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=None) -> FastAPI:
     cfg = cfg or C.load()
     conn = connect(db_path or C.db_path(), shared=True)      # one connection for every request thread: no statement cache (db.connect)
@@ -151,6 +190,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         return C.effective(cfg, get_settings(conn))
 
     app.add_middleware(JsonOnlyMutations)
+    app.add_middleware(BuildStamp)
 
     def decorate(t: dict, today: date, ecfg: dict) -> dict:
         s, pr, reasons = scoring.score(t, today, ecfg)
@@ -807,19 +847,18 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         except reminders.TokenError as e:
             return HTMLResponse(_page("Factotum", e.why, base), status_code=e.status)
         if res["action"] == "open":
-            return RedirectResponse(f"{base}/#today" if base else "/#today")
+            return RedirectResponse(f"{base}/t/{res['task_id']}")
         what = {"done": "marked done", "snooze": f"snoozed; it fires again at {res.get('fire_at', '')[11:16]}"}[res["action"]]
-        return HTMLResponse(_page(f"Task-{res['task_id']} {what}", res["task_name"], base, undo=res["action"] == "done"))
+        return HTMLResponse(_page(f"Task-{res['task_id']} {what}", res["task_name"], base, undo=res["action"] == "done", task_id=res["task_id"]))
 
-    @app.get("/")
     def index():
-        # The page stamps its assets with their mtime and everything says no-cache: Cloudflare caches
-        # .js/.css by default and browsers guess freshness when the origin is silent, which left the
-        # phone on an old app.js after a deploy.
-        html = (WEB / "index.html").read_text(encoding="utf-8")
-        for asset in ("app.js", "app.css"):
-            html = html.replace(f"/static/{asset}", f"/static/{asset}?v={int((WEB / asset).stat().st_mtime)}")
-        return HTMLResponse(html, headers={"Cache-Control": "no-cache, must-revalidate"})
+        return HTMLResponse(_index_html(), headers={"Cache-Control": "no-cache, must-revalidate"})
+
+    # One explicit path per tab, never a `/{tab}` pattern (it would shadow /mcp).
+    app.add_api_route("/", index, methods=["GET"], include_in_schema=False)
+    for _tab in PAGE_TABS:
+        app.add_api_route(f"/{_tab}", index, methods=["GET"], include_in_schema=False)
+    app.add_api_route("/t/{task_id:int}", lambda task_id: index(), methods=["GET"], include_in_schema=False)
 
     class NoCacheStatic(StaticFiles):
         async def get_response(self, path, scope):

@@ -535,7 +535,7 @@ def test_reminder_push_carries_a_click_only_when_asked(conn, cfg):
     C.set_(cfg, "notify.ntfy.tap_opens_app", True)
     push = FakePush()
     reminders.fire(conn, cfg, datetime(2026, 11, 3, 9, 0, 30), push)
-    assert push.sent[0]["click"].endswith("/#today")
+    assert push.sent[0]["click"].endswith("/t/1")
 
 
 def test_reminder_action_links_are_single_use_and_expire(cfg, tmp_path):

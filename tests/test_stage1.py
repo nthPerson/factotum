@@ -125,3 +125,55 @@ def test_the_icon_tool_draws_valid_icons():
     spec.loader.exec_module(mod)
     for n in (180, 192, 512):
         assert _png_size(mod.png(n)) == (n, n)
+
+
+# --- Task 5: addresses and the build stamp
+
+def test_task_and_tab_addresses_answer_with_the_app(cfg, tmp_path):
+    c = TestClient(api.create_app(cfg, db_path=str(tmp_path / "a.db")))
+    for path in ("/", "/today", "/timeline", "/projects", "/review", "/chat", "/log", "/settings", "/t/42"):
+        r = c.get(path)
+        assert r.status_code == 200, path
+        assert 'id="panel"' in r.text and "/static/app.js?v=" in r.text
+        assert r.headers["cache-control"] == "no-cache, must-revalidate"
+    assert c.get("/t/abc").status_code == 404
+    assert c.get("/nowhere").status_code == 404
+    assert c.get("/mcp").status_code == 405
+
+
+def test_every_api_response_carries_the_build_stamp(cfg, tmp_path):
+    c = TestClient(api.create_app(cfg, db_path=str(tmp_path / "a.db")))
+    s = api.build_stamp()
+    assert len(s) == 12
+    assert c.get("/api/tasks").headers["x-factotum-build"] == s
+    r = c.post("/api/batches/apply", content=b"{}")
+    assert r.status_code == 415 and r.headers["x-factotum-build"] == s
+    assert f'<meta name="factotum-build" content="{s}">' in c.get("/").text
+
+
+def test_the_build_stamp_follows_the_web_files(tmp_path, monkeypatch):
+    import shutil
+    for f in api.STAMPED:
+        shutil.copy(api.WEB / f, tmp_path / f)
+    monkeypatch.setattr(api, "WEB", tmp_path)
+    a = api.build_stamp()
+    assert api.build_stamp() == a
+    ns = (tmp_path / "app.js").stat().st_mtime_ns + 10**9
+    os.utime(tmp_path / "app.js", ns=(ns, ns))
+    assert api.build_stamp() != a
+
+
+def test_a_reminders_open_goes_to_its_task(cfg, tmp_path):
+    from test_core import _rem
+    app = api.create_app(cfg, db_path=str(tmp_path / "a.db"))
+    c = app.state.conn
+    upsert_task(c, task(id=1, name="Call Reza")); upsert_task(c, task(id=2, name="Other")); c.commit()
+    batches.apply(c, [{"task_id": 1, "op": "add_reminder", "fields": {"fire_at": "2026-11-03T09:00"}},
+                      {"task_id": 2, "op": "add_reminder", "fields": {"fire_at": "2026-11-03T09:00"}}], "ui", TODAY)
+    reminders.fire(c, cfg, datetime(2026, 11, 3, 9, 0, 30), lambda *a, **k: "m1")
+    tok1, tok2 = [r["token"] for r in _rem(c, 1) + _rem(c, 2) if r["status"] == "sent"]
+    client = TestClient(app)
+    r = client.get(f"/r/{tok1}", params={"a": "open"}, follow_redirects=False)
+    assert r.status_code in (302, 307) and r.headers["location"].endswith("/t/1")
+    r = client.get(f"/r/{tok2}", params={"a": "done"})
+    assert r.status_code == 200 and '/t/2"' in r.text and "Open Task-2" in r.text

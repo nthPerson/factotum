@@ -87,7 +87,7 @@ def fire(conn: sqlite3.Connection, cfg: dict, now_local: datetime, push) -> list
         # No Click by default: on the phone a Click opens the browser the moment the notification is
         # tapped, so Snooze / Done are only reachable by going back to ntfy. Without it the tap shows
         # the message with its three buttons; "Open" is one of them.
-        click = f"{base}/#today" if C.get(cfg, "notify.ntfy.tap_opens_app", False) else None
+        click = f"{base}/t/{r['task_id']}" if C.get(cfg, "notify.ntfy.tap_opens_app", False) else None
         msg_id = push(cfg, r["task_name"], _body(r), click=click, actions=actions, tags=["alarm_clock"])
         conn.execute("UPDATE reminders SET status = 'sent', sent_at = ?, token = ?, ntfy_seq = ? WHERE id = ?", (now_iso(), token, msg_id, r["id"]))
         if r.get("repeat"):
