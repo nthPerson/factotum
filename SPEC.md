@@ -691,23 +691,24 @@ task); opening a task stamps `neighbours_seen_at`. Review items carry `texts` fo
 changed since, a link whose restore would loop or duplicate, each with a reason) and 404 only for a batch
 that does not exist. The Log carries each batch's `cause` and each change's `note`. The page is described next.
 
-**Links on the page (stage 4b, 2026-11-11).** A row carries one badge per kind, in this order and look:
-"waits on" (amber), "do first / frees", "steps" and "part of" (teal), "updated by" (purple), a suggestion
-(dashed amber), a link staged in the tray (the staged look); several tasks of one kind read "waits on
-Task-12 +1". On a phone the badges sit one per row. A badge is a link to `/t/N` and jumps to that task.
+**Links on the page (stage 4b, 2026-11-11).** A row carries one badge per kind, in this order:
+"do first: frees" / "frees" (teal), "waits on" (amber), "steps" (teal), "updated by" (purple), "part of"
+(teal), a suggestion (dashed amber); a badge whose link is staged in the tray takes the staged look instead
+of its colour. Several tasks of one kind read "waits on Task-12 +1". On a phone a row shows its first badge
+and "N more links" for the rest. A badge is a link to `/t/N` and jumps to that task.
 A bar over Today and Timeline chooses All / Linked / Ready now (one remembered choice for both); Ready now
 hides waiting tasks but keeps a hard-dated waiting task, dimmed, with its badge. The Linked view regroups
 every open task that has a link or a suggestion into three kinds of group: a goal with its steps, a chain
 of waiting tasks from the first one they wait on, and a card for a pair suggested as the same. With no
 links, suggestions or markers nothing is drawn: no bar, no badges, no legend. Today's order: a task that
 frees a hard-dated task in an earlier group is pulled forward into that group, a waiting task is drawn
-under the task it waits on, and a hard-dated task never moves.
+under the task it waits on, and a hard-dated waiting task never leaves its group.
 
 The opened task has Linked tasks, provenance and History, fetched only when the task is opened (opening
 stamps `neighbours_seen_at`). History is one entry per batch: who, what, why, before and after, an Undo
 for the batch ("Undo all N changes made together" when it holds more than one), and Earlier for the next
-page. The task page (the phone's, and on a desktop for a task no list holds) pins Done / Later / More and
-keeps a trail back to the task you came from. A closed task is read-only with Reopen, on both devices.
+page. The task page (the phone's, and on a desktop for a task no list holds) keeps a trail back to the task you
+came from; on a phone it pins Done / Later / More at the bottom, on a desktop they sit in the page. A closed task is read-only with Reopen, on both devices.
 
 Review shows the link reasons in words, a steps chip for progress, and link suggestions (a suggestion
 carries `dir`: "out" when the listed task is the suggestion's first end, so the page knows which end is the
