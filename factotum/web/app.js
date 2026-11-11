@@ -70,10 +70,15 @@
     return r.json();
   });
 
+  // A task as it will be after Apply: its staged decision and date, and its links with the staged link
+  // changes and suggestion verdicts drawn in (overlayRel). Never mutates `data`.
   function view(t) {
-    const st = staged.get(t.id), due = staged.get(t.id + ':due');
-    if (!st && !due) return t;
+    const st = staged.get(t.id), due = staged.get(t.id + ':due'), rel = overlayRel(t);
+    const merged = [...staged.values()].some(s => s.op === 'merge' && s.task_id === t.id);
+    if (!st && !due && !rel && !merged) return t;
     const v = Object.assign({}, t, due ? due.fields : {}, st ? st.fields : {});
+    if (rel) v.rel = rel;
+    if (merged) v.status = 'dropped';      // a staged merge: the duplicate leaves the lists
     if (!st) return v;
     if (st.op === 'done') v.status = 'done';
     if (st.op === 'drop') v.status = 'dropped';
@@ -606,6 +611,131 @@
     return `Undone · ${k} left as ${k === 1 ? 'it is' : 'they are'}: ${res.skipped[0].why}`;
   }
 
+  // ---------- links (stage 4b): badges ----------
+  // A task the page names, from the open list or, for one it did not load (closed, merged away), from `neighbours`.
+  function nameOf(id) { return byId(id) || (data.neighbours || {})[String(id)] || null; }
+  const isOpenTask = id => { const n = nameOf(id); return !!(n && n.status === 'open'); };
+  const REL_OPS = ['link', 'unlink', 'merge'];
+  const emptyRel = () => ({ links: [], waits_on_open: [], frees_open: [], goal_id: null, steps_open: 0, steps_total: 0, needed_by: null, needed_by_id: null, needed_by_via: null, changed: null, suggestions: [] });
+  // A task's links with what is staged drawn in: a staged link at either end, an unlink, a merge, a suggestion
+  // judged in the tray. undefined when nothing staged touches it (the server's `rel` stands as it is).
+  function overlayRel(t) {
+    const mine = [...staged.values()].filter(s => REL_OPS.includes(s.op) && (s.task_id === t.id || (s.fields || {}).other === t.id || (s.fields || {}).into === t.id));
+    const sugg = (t.rel && t.rel.suggestions) || [];
+    if (!mine.length && !sugg.some(s => suggestionStaged(s.evidence_id))) return undefined;
+    const base = t.rel || emptyRel();
+    const r = Object.assign({}, base, { links: (base.links || []).slice(), waits_on_open: (base.waits_on_open || []).slice(), frees_open: (base.frees_open || []).slice() });
+    const drop = (arr, x) => arr.filter(y => y !== x);
+    let suggs = sugg.filter(s => !suggestionStaged(s.evidence_id));
+    for (const s of mine) {
+      const f = s.fields || {};
+      if (s.op === 'merge') {        // the pair's suggestions are settled by it; the duplicate's status is view()'s
+        const other = s.task_id === t.id ? f.into : s.task_id;
+        suggs = suggs.filter(x => x.other !== other);
+        continue;
+      }
+      const dir = s.task_id === t.id ? 'out' : 'in', other = dir === 'out' ? f.other : s.task_id, kind = f.kind;
+      const same = l => l.kind === kind && l.dir === dir && l.other === other;
+      if (s.op === 'link') {
+        if (r.links.some(same)) continue;      // already linked: Apply would skip it
+        r.links.push({ kind, dir, other, staged: true });
+        if (kind === 'waits_on' && isOpenTask(other)) {
+          if (dir === 'out') r.waits_on_open = [other].concat(drop(r.waits_on_open, other));     // first, so its badge names it
+          else r.frees_open = drop(r.frees_open, other).concat([other]);      // last: "do first" keeps naming what makes it urgent
+        }
+        if (kind === 'part_of') {
+          if (dir === 'out') r.goal_id = other;
+          else { r.steps_total += 1; if (isOpenTask(other)) r.steps_open += 1; }
+        }
+      } else {      // unlink
+        if (!r.links.some(same)) continue;
+        r.links = r.links.filter(l => !same(l));
+        if (kind === 'waits_on') {
+          if (dir === 'out') r.waits_on_open = drop(r.waits_on_open, other);
+          else r.frees_open = drop(r.frees_open, other);
+        }
+        if (kind === 'part_of') {
+          if (dir === 'out' && r.goal_id === other) r.goal_id = (r.links.find(l => l.kind === 'part_of' && l.dir === 'out') || {}).other || null;
+          if (dir === 'in') { r.steps_total = Math.max(0, r.steps_total - 1); if (isOpenTask(other)) r.steps_open = Math.max(0, r.steps_open - 1); }
+        }
+      }
+    }
+    if (!r.frees_open.length && ['frees', 'chain'].includes(r.needed_by_via)) Object.assign(r, { needed_by: null, needed_by_id: null, needed_by_via: null });     // it frees nothing now
+    r.suggestions = suggs;
+    return r;
+  }
+  function isWaiting(x) { return !!(x.rel && x.rel.waits_on_open && x.rel.waits_on_open.length); }
+  // The badges a row carries, in frame 1's order. `jump` names the task a tap goes to, `open` the row's own task.
+  function badgesFor(x) {
+    const r = x.rel; if (!r) return [];
+    const links = r.links || [], out = [];
+    const more = n => n > 1 ? ` +${n - 1}` : '';
+    const tagged = (kind, dir, other) => links.some(l => l.staged && l.kind === kind && l.dir === dir && (other === undefined || l.other === other));
+    const title = n => { const t = nameOf(n); return `Task-${n}` + (t ? ` · ${t.name}` + (t.status === 'done' ? ' (done)' : t.status === 'dropped' ? ' (dropped)' : '') : ''); };
+    const frees = r.frees_open || [], waits = r.waits_on_open || [], sugg = r.suggestions || [];
+    if (frees.length) {
+      const n = r.needed_by_via === 'frees' && r.needed_by_id != null ? r.needed_by_id : frees[0];
+      out.push({ kind: 'frees', look: tagged('waits_on', 'in', n) ? 'staged' : 'ok', text: (r.needed_by ? 'do first: frees ' : 'frees ') + `Task-${n}` + more(frees.length), jump: n, title: title(n) });
+    }
+    if (waits.length) out.push({ kind: 'waits', look: tagged('waits_on', 'out', waits[0]) ? 'staged' : 'wait', text: `waits on Task-${waits[0]}` + more(waits.length), jump: waits[0], title: title(waits[0]) });
+    if (r.steps_total > 0) {
+      const done = r.steps_total - (r.steps_open || 0);
+      out.push({ kind: 'steps', look: tagged('part_of', 'in') ? 'staged' : 'ok', text: `${done} of ${r.steps_total} steps done`, open: x.id, done, total: r.steps_total, title: `Task-${x.id}: ${r.steps_open || 0} of ${r.steps_total} steps still open` });
+    }
+    if (r.changed) {
+      const by = r.changed.by;
+      out.push({ kind: 'changed', look: 'chg', text: by != null ? `updated by Task-${by}` : 'updated by a linked task', open: x.id, title: by != null ? title(by) : 'Changed by a linked task since you last looked' });
+    }
+    if (r.goal_id != null) {
+      const goals = links.filter(l => l.kind === 'part_of' && l.dir === 'out').length;
+      out.push({ kind: 'partof', look: tagged('part_of', 'out', r.goal_id) ? 'staged' : 'ok', text: `part of Task-${r.goal_id}` + more(goals), jump: r.goal_id, title: title(r.goal_id) });
+    }
+    if (sugg.length) {
+      const s = sugg[0], n = s.other, T = `Task-${n}`;
+      const said = s.kind === 'same_as' ? `same as ${T}?` : s.kind === 'part_of' ? (s.dir === 'in' ? `step: ${T}?` : `part of ${T}?`)
+        : s.kind === 'waits_on' ? (s.dir === 'in' ? `frees ${T}?` : `waits on ${T}?`) : `linked to ${T}?`;
+      out.push({ kind: 'suggest', look: 'sus', text: said + more(sugg.length), jump: n, title: title(n) });
+    }
+    return out;
+  }
+  const BADGE_ICON = {
+    frees: '<svg aria-hidden="true" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"></path><path d="M13 6l6 6-6 6"></path></svg>',
+    waits: '<svg aria-hidden="true" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"></circle><path d="M12 7v5l3 2"></path></svg>',
+    changed: '<span class="dot" aria-hidden="true"></span>',
+  };
+  const stepsBar = (done, total) => `<span class="bar" aria-hidden="true"><span style="width:${total ? Math.round(100 * done / total) : 0}%"></span></span>`;
+  function badgeHtml(b) {
+    const words = '<span>' + esc(b.text).replace(/Task-\d+/, '<span class="tid">$&</span>') + '</span>';      // one flex item: no gap before a "?" or "+1"
+    const inner = (b.kind === 'steps' ? stepsBar(b.done, b.total) : BADGE_ICON[b.kind] || '') + words;
+    const target = b.jump != null ? `href="/t/${b.jump}" data-lb="${b.jump}"` : `href="/t/${b.open}" data-lb-open="${b.open}"`;
+    return `<a class="lb ${b.look}${b.kind === 'steps' ? ' steps' : ''}" ${target} title="${esc(b.title)}">${inner}</a>`;
+  }
+  // The steps badge alone and not a link (Review's progress chip).
+  function stepsChip(rel) {
+    if (!rel || !(rel.steps_total > 0)) return '';
+    const done = rel.steps_total - (rel.steps_open || 0);
+    return `<span class="lb ok steps">${stepsBar(done, rel.steps_total)}<span>${done} of ${rel.steps_total} steps done</span></span>`;
+  }
+  // A row's link badges and "needed for <date>": every badge on a desktop; one on a phone, the rest counted.
+  function linkChipsHtml(x) {
+    if (!x.rel) return '';
+    const bs = badgesFor(x), r = x.rel;
+    const need = r.needed_by ? new Date(String(r.needed_by).slice(0, 10) + 'T12:00:00').toLocaleDateString([], { month: 'short', day: 'numeric' }) : null;
+    if (!PHONE()) return bs.map(badgeHtml).join('') + (need ? `<span class="chip need">needed for ${need}</span>` : '');
+    const k = bs.length - 1;
+    return (bs.length ? badgeHtml(bs[0]) : '') + (k > 0 ? `<span class="chip morelinks">${k === 1 ? '1 more link' : k + ' more links'}</span>` : '') + (need ? `<span class="chip need">for ${need}</span>` : '');
+  }
+  // A badge's tap: the named task's row on a desktop, its page on a phone.
+  function goTask(id) { if (PHONE()) openTask(id); else jumpTo(id, false); }
+  // Some open task has something a badge shows (a finished merge's same_as alone does not count).
+  function hasLinks() {
+    return openOnes().some(x => x.rel && ((x.rel.links || []).some(l => l.kind === 'part_of' || l.kind === 'waits_on') || (x.rel.suggestions || []).length || x.rel.changed));
+  }
+  function legendHtml() {
+    if (PHONE() || !hasLinks()) return '';
+    return `<div class="lblegend"><span><i class="ok"></i>a link you or Claude confirmed</span><span><i class="sus"></i>a link the app suspects, one tap to confirm</span><span><i class="chg"></i>changed by a linked task since you last looked</span></div>`;
+  }
+
   // ---------- rendering ----------
   function render() {
     document.body.classList.toggle('page-on', ui.page !== null);      // before measuring: the page hides the bar on a phone
@@ -737,7 +867,7 @@
     return `<section class="group ${shut ? 'folded' : ''}"><h3 class="${g.cls || ''}"><button class="fold" data-fold="${esc(g.key)}" aria-expanded="${!shut}">${g.title}<span class="n">${g.rows.length}</span></button></h3>${shut ? '' : `<div class="rows">${g.rows.map(x => row(x, g.tag ? g.tag(x) : '')).join('')}</div>`}</section>`;
   }
   function row(x, extraChip) {
-    const cls = ['row', x.status === 'done' ? 'done' : '', x.status === 'dropped' ? 'drop' : '', ui.open.has(x.id) ? 'open' : '', ui.sel.has(x.id) ? 'sel' : '', ui.focus === x.id ? 'focus' : ''].join(' ');
+    const cls = ['row', x.status === 'done' ? 'done' : '', x.status === 'dropped' ? 'drop' : '', ui.open.has(x.id) ? 'open' : '', ui.sel.has(x.id) ? 'sel' : '', ui.focus === x.id ? 'focus' : '', isWaiting(x) ? 'waiting' : ''].join(' ');
     return `<div class="${cls}" data-id="${x.id}">
       <div class="main">
         <input type="checkbox" id="ck-${x.id}" aria-label="Select" ${ui.sel.has(x.id) ? 'checked' : ''}>
@@ -755,6 +885,7 @@
     const dueCls = d ? (d.days < 0 ? 'crit' : d.days <= 1 ? 'warn' : '') : '';
     const fadeDays = x.fade_at ? daysTo(x.fade_at) : null;
     return [
+      linkChipsHtml(x),
       x.top_rank ? `<span class="chip top">Top ${topPos.get(x.id) || x.top_rank}</span>` : '',
       x.longterm_effective ? `<span class="chip lt">Long-term</span>` : '',
       x.close_on_sent_since ? `<span class="chip" title="Closes itself when a message to ${esc(x.close_on_sent_to || 'the watched address')} is sent">✉ closes on send</span>` : '',
@@ -849,7 +980,7 @@
   }
   function renderToday() {
     const { groups } = todayGroups();      // snoozed rows are not in these groups but are open: Timeline lists them
-    return summaryHtml() + composer() + groups.map(group).join('') +
+    return summaryHtml() + composer() + groups.map(group).join('') + legendHtml() +
       (!openOnes().length ? noTasksHtml() : groups.some(g => g.rows.length) ? '' : '<div class="empty">Nothing is due today or this week. Every open task is on Timeline.</div>') +
       `<div class="note">Soft dates that slipped, new items, and fading backlog are not here. They wait in <b>Review</b> so this screen stays short.</div>`;
   }
@@ -869,7 +1000,7 @@
       { key: 'timeline:recent', title: 'Recently added · newest first', rows: o.slice().sort((a, b) => (b.created_at || '').localeCompare(a.created_at || '')).slice(0, RECENT_CAP),
         tag: x => `<span class="chip" title="Created ${esc(x.created_at || '')}">added ${x.created_at ? new Date(x.created_at).toLocaleDateString([], { month: 'short', day: 'numeric' }) : '?'}</span>` }];
   }
-  function renderTimeline() { return composer() + (openOnes().length ? timelineGroups().map(group).join('') : noTasksHtml()); }
+  function renderTimeline() { return composer() + (openOnes().length ? timelineGroups().map(group).join('') + legendHtml() : noTasksHtml()); }
   function projectGroups() {
     const m = new Map();
     openOnes().forEach(x => { const k = x.project || '—'; if (!m.has(k)) m.set(k, []); m.get(k).push(x); });
@@ -1296,7 +1427,7 @@
       // between the two clicks, so the browser's dblclick event would not fire.
       // On a phone a tap opens the task page and only the tick box selects.
       r.querySelector('.main').addEventListener('click', e => {
-        if (e.target.closest('input, button, .chip.due')) return;
+        if (e.target.closest('input, button, a, .chip.due')) return;
         if (PHONE()) { openTask(id); return; }
         const now = Date.now();
         if (lastTap.id === id && now - lastTap.at < 400) { lastTap = { id: null, at: 0 }; ui.sel.has(id) ? ui.sel.delete(id) : ui.sel.add(id); ui.open.has(id) ? ui.open.delete(id) : ui.open.add(id); render(); return; }
@@ -1308,6 +1439,8 @@
       r.querySelector('.main').addEventListener('dragstart', e => e.dataTransfer.setData('text/plain', String(id)));
     });
     const pb = document.getElementById('page-back'); if (pb) pb.onclick = () => history.back();
+    panel.querySelectorAll('[data-lb]').forEach(a => a.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); goTask(+a.dataset.lb); }));
+    panel.querySelectorAll('[data-lb-open]').forEach(a => a.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); openTask(+a.dataset.lbOpen); }));
     panel.querySelectorAll('[data-act]').forEach(b => b.addEventListener('click', () => act(+b.dataset.id, b.dataset.act)));
     panel.querySelectorAll('[data-due]').forEach(c => c.addEventListener('click', () => {
       const id = +c.dataset.due; if (!byId(id)) return;      // a closed task's page: its date is not for changing
