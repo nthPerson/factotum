@@ -8,6 +8,9 @@
   let data = { tasks: [], projects: [], today: new Date().toISOString().slice(0, 10), top_cap: 7 };
   let review = null;        // /api/review payload
   let settings = null;      // /api/settings payload
+  // Settings changed but not saved yet: key → the value captured when its control changed; '#accounts' → true
+  // when the accounts table changed. A save sends only these, so a value nobody touched stays the file's.
+  const settingsDirty = new Map();
   let connectors = null;    // /api/connectors payload (Settings → Connections)
   let staged = new Map();   // task id -> {op, fields, label}
   let lastBatch = null;
@@ -946,7 +949,7 @@
     const e = settings.effective;
     const f = (key, label, sub, control) => `<div class="field"><label for="s-${key}">${label}<span class="sub">${sub}</span></label><div>${control}</div></div>`;
     const num = (key, min, max) => `<input type="number" id="s-${key}" data-key="${key}" value="${e[key] == null ? '' : e[key]}" min="${min}" max="${max}" ${Number.isInteger(min) ? '' : 'step="0.05"'}>`;
-    const bool = (key, dflt) => `<input type="checkbox" id="s-${key}" data-key="${key}" ${(e[key] == null ? dflt : e[key]) ? 'checked' : ''}>`;   // dflt: a key an older config file lacks
+    const bool = key => `<input type="checkbox" id="s-${key}" data-key="${key}" ${e[key] ? 'checked' : ''}>`;   // effective has every key, its default filled in by the server
     const text = (key, w) => `<input type="text" id="s-${key}" data-key="${key}" value="${esc(e[key] || '')}" style="width:${w || '100%'}">`;
     const time = key => `<input type="time" id="s-${key}" data-key="${key}" value="${esc(e[key] || '')}">`;
     const accounts = (settings.accounts || []).map((a, i) => `<tr><td><input type="text" data-acc="${i}" data-f="address" value="${esc(a.address)}"></td><td><input type="text" data-acc="${i}" data-f="display" value="${esc(a.display || '')}" style="width:90px"></td><td><input type="text" data-acc="${i}" data-f="roles" value="${esc((a.roles || []).join(','))}" style="width:150px"></td><td><input type="checkbox" data-acc="${i}" data-f="enabled" ${a.enabled ? 'checked' : ''}></td><td><button class="btn small" data-accdel="${i}">×</button></td></tr>`).join('');
@@ -963,7 +966,7 @@
       ${f('sources.plaud.enabled', 'Plaud recordings', 'IMAP trigger + plaud CLI (phase 3).', bool('sources.plaud.enabled'))}
       ${f('sources.canvas.enabled', 'Canvas', 'New items become hard-deadline tasks, submitted ones close.', bool('sources.canvas.enabled') + ' &nbsp; every ' + num('sources.canvas.sweep_minutes', 5, 1440) + ' min')}
       ${f('sources.mail.enabled', 'Email via Mailbird', 'Replies flip Waiting, sent mail closes reply tasks, invitations and confirmations feed the planner.', bool('sources.mail.enabled') + ' &nbsp; every ' + num('sources.mail.sweep_minutes', 5, 1440) + ' min')}
-      ${f('sources.mail.suggest.enabled', 'Tasks from mail', 'New mail that is about none of your tasks is read by one light Claude run, and what it leaves you to do becomes a suggestion card in Review. Nothing becomes a task without your Create. The run happens only when there is new mail.', bool('sources.mail.suggest.enabled', false) + ' &nbsp; at most every ' + `<input type="number" id="s-sources.mail.suggest.minutes" data-key="sources.mail.suggest.minutes" value="${Number(e['sources.mail.suggest.minutes']) || 30}" min="5" max="1440">` + ' min')}
+      ${f('sources.mail.suggest.enabled', 'Tasks from mail', 'New mail that is about none of your tasks is read by one light Claude run, and what it leaves you to do becomes a suggestion card in Review. Nothing becomes a task without your Create. The run happens only when there is new mail.', bool('sources.mail.suggest.enabled') + ' &nbsp; at most every ' + num('sources.mail.suggest.minutes', 5, 1440) + ' min')}
       ${f('sources.calendar.enabled', 'Google Calendar', 'Needs config/google-credentials.json (docs/SETUP.md §6).', bool('sources.calendar.enabled') + ' &nbsp; every ' + num('sources.calendar.sweep_minutes', 5, 1440) + ' min &nbsp; calendar id ' + text('sources.calendar.calendar_id', '160px'))}
       ${f('sources.slack.enabled', 'Slack', 'Chat can search and read the workspaces named in the config file (docs/SETUP.md §12); tokens in .env. The sweep turns @-mentions of you into Review items.', bool('sources.slack.enabled') + ' &nbsp; every ' + num('sources.slack.sweep_minutes', 5, 1440) + ' min')}
       ${f('sources.discord.enabled', 'Discord', 'Chat can list channels and read recent messages in the servers named in the config file (docs/SETUP.md §13).', bool('sources.discord.enabled'))}
@@ -977,7 +980,7 @@
       ${f('notify.morning_brief.enabled', 'Morning brief', 'Email at this time: Top, due today, reminders.', bool('notify.morning_brief.enabled') + ' ' + time('notify.morning_brief.time') + ' to ' + text('notify.morning_brief.to', '240px'))}
       <h3>Claude</h3>
       ${f('claude.planner.enabled', 'Morning planner', 'One Claude run before the brief: the verdict, why-now lines and proposals. Off = the plain brief.', bool('claude.planner.enabled'))}
-      ${f('claude.summary.auto', 'Today summary', 'Rewritten by one light Claude run when a task it is about changes, something becomes urgent, or the day turns. Off: the Today tab still says what changed, and Refresh rewrites it.', bool('claude.summary.auto', true) + ' &nbsp; at most every ' + `<input type="number" id="s-claude.summary.auto_minutes" data-key="claude.summary.auto_minutes" value="${Number(e['claude.summary.auto_minutes']) || 10}" min="1" max="240">` + ' min')}
+      ${f('claude.summary.auto', 'Today summary', 'Rewritten by one light Claude run when a task it is about changes, something becomes urgent, or the day turns. Off: the Today tab still says what changed, and Refresh rewrites it.', bool('claude.summary.auto') + ' &nbsp; at most every ' + num('claude.summary.auto_minutes', 1, 240) + ' min')}
       ${f('claude.budgets_usd.chat_turn', 'Chat turn budget', 'Dollars a single chat turn may spend before Claude stops.', '$ ' + num('claude.budgets_usd.chat_turn', 0.05, 5) )}
       <h3>Connections</h3>
       ${f('server.oauth.enabled', 'claude.ai / Claude Desktop connector', `Factotum is the OAuth server behind <code>${esc(connectors ? connectors.url : '')}</code>: add that URL as a custom connector and approve it once on the consent page (docs/SETUP.md §16). What a connector may do with tasks is the next setting.`, bool('server.oauth.enabled'))}
@@ -1163,9 +1166,23 @@
       if (!confirm('Revoke this connector? Its tokens stop working at once; it can connect again through the consent page.')) return;
       try { await api(`/api/connectors/${encodeURIComponent(b.dataset.connRevoke)}/revoke`, { method: 'POST' }); await loadSettings(); toast('Connector revoked'); } catch (e) { toast('Revoke failed: ' + e.message); }
     });
-    if (ui.tab === 'settings') panel.querySelectorAll('[data-key], [data-acc]').forEach(el => el.addEventListener('change', () => { clearTimeout(saveSettings.t); saveSettings.t = setTimeout(saveSettings, 300); }));
+    if (ui.tab === 'settings') {
+      // A change is captured at once (the map, not the DOM, is what a save reads), so leaving the tab
+      // inside the 300 ms still saves it, and a control nobody touched is never sent.
+      const later = () => { clearTimeout(saveSettings.t); saveSettings.t = setTimeout(saveSettings, 300); };
+      panel.querySelectorAll('[data-key]').forEach(el => el.addEventListener('change', () => {
+        const v = controlValue(el); if (v === undefined) return;
+        settingsDirty.set(el.dataset.key, v); later();
+      }));
+      panel.querySelectorAll('[data-acc]').forEach(el => el.addEventListener('change', () => {
+        const a = settings.accounts[+el.dataset.acc]; const f = el.dataset.f; if (!a) return;
+        if (f === 'roles') a.roles = el.value.split(',').map(s => s.trim()).filter(Boolean);
+        else if (f === 'enabled') a.enabled = el.checked; else a[f] = el.value;
+        settingsDirty.set('#accounts', true); later();
+      }));
+      panel.querySelectorAll('[data-accdel]').forEach(b => b.onclick = () => { settings.accounts.splice(+b.dataset.accdel, 1); settingsDirty.set('#accounts', true); render(); later(); });
+    }
     const accAdd = document.getElementById('acc-add'); if (accAdd) accAdd.onclick = () => { settings.accounts.push({ address: '', display: '', roles: ['monitor'], enabled: true }); render(); };
-    panel.querySelectorAll('[data-accdel]').forEach(b => b.onclick = () => { settings.accounts.splice(+b.dataset.accdel, 1); render(); });
     wireRail();
   }
   function wireRail() {
@@ -1243,24 +1260,36 @@
       sendChat(text, null, attachedIds());
     }
   }
+  // A Settings control's value as it would be saved; undefined for a number box that holds no number.
+  function controlValue(el) {
+    if (el.type === 'checkbox') return el.checked;
+    if (el.type === 'number') { const n = Number(el.value); return el.value === '' || Number.isNaN(n) ? undefined : n; }
+    return el.value;
+  }
+  // Sends what changed and nothing else: the dirty keys, and the accounts table only when an account changed.
   async function saveSettings() {
+    clearTimeout(saveSettings.t);
+    if (!settingsDirty.size) { toast('Nothing to save'); return; }
+    const snap = new Map(settingsDirty); settingsDirty.clear();
     const values = {};
-    document.querySelectorAll('#panel [data-key]').forEach(el => {
-      const k = el.dataset.key;
-      values[k] = el.type === 'checkbox' ? el.checked : el.type === 'number' ? Number(el.value) : el.value;
-      if (el.type === 'number' && (el.value === '' || Number.isNaN(values[k]))) delete values[k];
-    });
-    let accounts = settings.accounts.map((a, i) => ({ address: a.address, display: a.display, roles: a.roles, enabled: a.enabled }));
-    document.querySelectorAll('#panel [data-acc]').forEach(el => {
-      const a = accounts[+el.dataset.acc]; const f = el.dataset.f;
-      if (f === 'roles') a.roles = el.value.split(',').map(s => s.trim()).filter(Boolean);
-      else if (f === 'enabled') a.enabled = el.checked; else a[f] = el.value;
-    });
-    settings.accounts = accounts.map(a => Object.assign({}, a));
-    if (accounts.some(a => !String(a.address || '').trim())) accounts = null;   // a row still being typed: the server's table stays until it has an address
+    for (const [k, v] of snap) if (k !== '#accounts') values[k] = v;
+    const body = { values };
+    let waiting = false;      // a row still being typed: the server's table stays until it has an address
+    if (snap.has('#accounts')) {
+      if (settings.accounts.some(a => !String(a.address || '').trim())) { waiting = true; settingsDirty.set('#accounts', true); }
+      else body.accounts = settings.accounts.map(a => ({ address: a.address, display: a.display, roles: a.roles, enabled: a.enabled }));
+    }
     const active = document.activeElement && document.activeElement.dataset ? document.activeElement.id : null;
-    try { const kept = settings.accounts; settings = await api('/api/settings', { method: 'PUT', body: JSON.stringify({ values, accounts }) }); if (accounts === null) settings.accounts = kept; toast(accounts === null ? 'Settings saved · the new account row needs an address' : 'Settings saved'); render(); const el = active && document.getElementById(active); if (el) el.focus(); }
-    catch (e) { toast('Save failed: ' + e.message); }
+    try {
+      const kept = settings.accounts;
+      settings = await api('/api/settings', { method: 'PUT', body: JSON.stringify(body) });
+      if (!body.accounts) settings.accounts = kept;      // the page's rows, a half-typed one included, over the server's
+      toast(waiting ? 'Settings saved · the new account row needs an address' : 'Settings saved');
+      render(); const el = active && document.getElementById(active); if (el) el.focus();
+    } catch (e) {
+      for (const [k, v] of snap) if (!settingsDirty.has(k)) settingsDirty.set(k, v);      // a newer change made meanwhile wins
+      toast('Save failed: ' + e.message);
+    }
   }
 
   document.getElementById('tabs').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; go(b.dataset.tab); });
