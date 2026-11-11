@@ -36,7 +36,7 @@
   if (!folds || typeof folds !== 'object' || Array.isArray(folds)) folds = {};
   const folded = (key, dflt) => Object.prototype.hasOwnProperty.call(folds, key) ? !!folds[key] : !!dflt;
   function setFold(key, shut) { folds[key] = !!shut; try { localStorage.setItem('factotum.folds', JSON.stringify(folds)); } catch (_) {} }
-  let ui = { tab: 'today', focus: null, sel: new Set(), open: new Set(), reviewIdx: 0, laterOpen: false, datePick: false, trayOpen: false, trayOff: new Set(), reviewPaused: false, rvNote: { id: null, text: '' }, remOpen: null, dueOpen: null, rvReply: null,
+  let ui = { tab: 'today', focus: null, sel: new Set(), open: new Set(), reviewIdx: 0, laterOpen: false, datePick: false, trayOpen: false, trayOff: new Set(), reviewPaused: false, rvNote: { id: null, text: '' }, remOpen: null, dueOpen: null, rvReply: null, sinceOpen: null,
              railOpen: !window.matchMedia('(max-width: 860px)').matches, chatDrawer: false,
              page: null, pageScroll: 0, pageMore: false, pageLater: false,      // the task page: its id, the list's scroll, a phone's More and Later open
              bulkMore: false };      // the phone's short bar shows its second line (back to false when nothing is selected)
@@ -887,7 +887,7 @@
     }
     return out;
   }
-  const SOURCE_SAID = { Canvas: 'from Canvas', Plaud: 'from a recording', Mail: 'from mail', Manual: 'made by hand' };
+  const SOURCE_SAID = { Canvas: 'from Canvas', Plaud: 'from a recording', Mail: 'from mail', Manual: 'made by hand', Ripple: 'suggested after a linked task changed' };
   function twinHtml(g) {
     const cell = x => { const d = fmtDue(x.due), from = SOURCE_SAID[x.source] || (x.source ? 'from ' + x.source : '');
       return `<div class="twt"><div><span class="code">Task-${x.id}</span> <span class="name">${esc(x.name)}</span></div><div class="src">${esc([from, d ? 'due ' + d.label : 'no date'].filter(Boolean).join(', '))}</div></div>`; };
@@ -1090,8 +1090,7 @@
   }
   function diffHtml(e) {
     if (!['context', 'name', 'why_now'].includes(e.field) || isAppend(e)) return '';
-    const val = v => textOf(v) ? esc(textOf(v)) : '<span class="code">none</span>';
-    return `<div class="hdiff"><span class="bl">before</span><span class="bv">${val(e.old)}</span><span class="al">after</span><span class="av">${val(e.new)}</span></div>`;
+    return beforeAfter(e.old, e.new);
   }
   // The content of [data-dhist]: one entry per batch, newest first, with its Undo.
   function historyHtml(id) {
@@ -1471,21 +1470,34 @@
   }
   // One page of the queue. Ids already staged in the tray are excluded server-side, so a page is
   // always `cap` fresh items and the counter counts this page only.
+  // Each load stamps the page's rows as offered, so a render waiting for one never asks again
+  // (`reviewLoading`); only the newest load's answer is kept, and a failed one waits for Try again.
+  let reviewLoading = null, reviewSeq = 0, reviewFailed = '';
   async function loadReview() {
+    const n = ++reviewSeq;
+    reviewFailed = '';
     const exclude = [...staged.keys()].filter(k => typeof k === 'number').join(',');
-    review = await api('/api/review' + (exclude ? '?exclude=' + exclude : ''));
+    const p = api('/api/review' + (exclude ? '?exclude=' + exclude : ''));
+    reviewLoading = p;
+    let r;
+    try { r = await p; }
+    catch (e) { if (n === reviewSeq) { reviewFailed = e.detail || e.message || String(e); render(); } throw e; }
+    finally { if (reviewLoading === p) reviewLoading = null; }
+    if (n !== reviewSeq) return;      // a newer load was asked for (an Apply, Review another): its answer wins
+    review = r;
     if (review.total === undefined) review.total = review.items.length;   // older server
     ui.reviewIdx = 0; ui.reviewPaused = false; ui.laterOpen = false; render();
   }
   // ---------- Review (stage 4b): link reasons in words, link suggestions ----------
   // A link reason's colour; any other reason keeps the rule it had (last call red, new / back teal, else amber).
-  const REASON_CLS = { freed: 'ok', steps_done: 'ok', blocker_gone: 'warn', linked_changed: 'chg', link_suggested: 'new' };
+  const REASON_CLS = { freed: 'ok', steps_done: 'ok', blocker_gone: 'warn', linked_changed: 'chg', link_suggested: 'new', ripple: 'chg' };
   // The card's reason line: the server's sentence for a link reason (every Task-N in it opens that task),
-  // else the reason's label; then the other reasons and the planner's flag, as before.
+  // else the reason's label; then the other reasons and the planner's and the ripple's flags.
   function reasonText(item) {
     const { reasons, primary, flags } = item, said = (item.texts || {})[primary];
     const head = said ? esc(said).replace(/Task-(\d+)/g, '<a href="/t/$1" data-open-task="$1">Task-$1</a>') : esc(review.labels[primary]);
-    return head + (reasons.length > 1 ? ' · also ' + esc(reasons.slice(1).map(r => review.labels[r]).join(', ')) : '') + (flags && flags.planner ? ` · <b>${esc(flags.planner)}</b>` : '');
+    const flag = k => flags && flags[k] ? ` · <b>${esc(flags[k])}</b>` : '';
+    return head + (reasons.length > 1 ? ' · also ' + esc(reasons.slice(1).map(r => review.labels[r]).join(', ')) : '') + flag('planner') + flag('ripple');
   }
   // Which of two tasks a merge keeps when the suggestion does not say: the Canvas row, else the older, else
   // the lower id (relations.default_survivor's rule, on what the page holds).
@@ -1528,7 +1540,11 @@
     toast('Link staged · decide on the card, then Apply');
   }
   function renderReview() {
-    if (!review) { loadReview(); return '<div class="empty">Loading review queue…</div>'; }
+    if (!review) {
+      if (reviewFailed) return `<div class="empty">Could not load Review: ${esc(reviewFailed)} <button class="btn small" id="review-retry">Try again</button></div>`;
+      if (!reviewLoading) loadReview().catch(() => {});      // a failure is drawn above, from reviewFailed
+      return '<div class="empty">Loading review queue…</div>';
+    }
     const items = review.items.filter(i => !staged.has(i.task.id));
     const total = review.items.length;
     const remaining = ui.reviewPaused ? review.total : review.total - total;
@@ -1553,13 +1569,14 @@
         <div class="why ${cls}">${reasonText(items[0])}</div>
         <h2>${esc(x.name)}</h2>
         <div class="sub"><span class="code">Task-${x.id}</span><span class="chip proj">${esc(x.project || '—')}</span>${d ? `<span class="chip due ${d.days < 0 ? 'crit' : ''} ${x.hard ? 'hard' : ''}">${d.label}</span>` : '<span class="chip">no date</span>'}<span class="chip eff">${esc(x.effort || '?')}</span>${x.rel && x.rel.steps_total ? stepsChip(x.rel) : ''}<span class="chip">${x.mentions} mention${x.mentions === 1 ? '' : 's'}</span><span class="chip">score ${x.score}</span></div>
+        ${sinceHtml(items[0])}
         <p>${esc(x.why_now || (x.score_reasons || []).join(' · '))}</p>${x.context ? `<p class="ctx ${ui.ctxOpen === x.id ? 'open' : ''}">${esc(x.context)}</p><button class="btn small more" data-ctx-more="${x.id}">${ui.ctxOpen === x.id ? 'Less' : 'More'}</button>` : ''}
         <textarea id="rv-note" rows="2" placeholder="Optional note · Done or Drop: the outcome · Keep or Later: added to the text">${esc(note)}</textarea>
         <div class="links">${x.source_link ? `<a href="${esc(x.source_link)}" target="_blank" rel="noopener">${x.source === 'Plaud' ? 'Plaud note' : 'Source'}</a>` : ''}</div>
         <div class="big"><button class="done" data-rv="done">Done <kbd>d</kbd></button><button data-rv="keep">Keep <kbd>k</kbd></button><button class="later" data-rv="later">Later <kbd>s</kbd></button><button class="drop" data-rv="drop">Drop <kbd>x</kbd></button></div>
         <div class="later-menu ${ui.laterOpen ? 'on' : ''}"><span class="hint">Comes back on:</span><button class="btn small" data-rv="tomorrow">Tomorrow</button><button class="btn small" data-rv="fri">Friday</button><button class="btn small" data-rv="nextweek">Next week</button><button class="btn small" data-rv="pickdate">📅 ${ui.datePick ? 'Hide date' : 'Pick a date…'}</button></div>
         ${ui.laterOpen && ui.datePick ? `<div class="remform datepick"><label for="rv-date" class="hint">Comes back on</label><input type="date" id="rv-date" min="${data.today}" value="${isoPlus(1)}" aria-label="Pick a date"><button class="btn small primary" id="rv-date-go">Use this date</button></div>` : ''}
-        ${(items[0].evidence || []).filter(e => e.change && !staged.has('e:' + e.id)).map(e => `<div class="extra"><span class="chip">Planner suggests</span><span>${esc(e.label)}${e.reason ? ` <span class="hint" style="margin:0">— ${esc(e.reason)}</span>` : ''}</span><button class="btn small primary" data-rv-accept="${e.id}">Accept</button></div>`).join('')}
+        ${(items[0].evidence || []).filter(e => e.change && !staged.has('e:' + e.id)).map(e => e.by === 'ripple' ? rippleLineHtml(e, x.id) : `<div class="extra"><span class="chip">Planner suggests</span><span>${esc(e.label)}${e.reason ? ` <span class="hint" style="margin:0">— ${esc(e.reason)}</span>` : ''}</span><button class="btn small primary" data-rv-accept="${e.id}">Accept</button></div>`).join('')}
         ${linkSuggestionsHtml(items[0])}
         <div class="extra"><button class="btn small" data-rv="top">★ Pin to Top</button><button class="btn small" data-rv="longterm">Mark long-term (never fades)</button>${dueForm(x.id, x.due)}${reminderForm(x.id)}</div>
         ${reviewAsk(x.id)}
@@ -1569,7 +1586,7 @@
   // A planner create with no task behind it: one card, Create or Dismiss (the dismissal is a batch
   // change like any other, so the Log tab undoes it).
   function suggestionCard(sg, n) {
-    const slack = sg.kind === 'slack_mention', mail = sg.mail, f = sg.fields || {};
+    const slack = sg.kind === 'slack_mention', mail = sg.mail, f = sg.fields || {}, rip = !slack && !mail && sg.by === 'ripple';
     const link = slack && f.source_link;
     const d = f.due ? fmtDue(String(f.due)) : null;
     const day = iso => new Date(iso.length > 10 && !/[zZ+]/.test(iso.slice(10)) ? iso + 'Z' : iso).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
@@ -1578,7 +1595,7 @@
     return `<div class="review">
       <div class="progress"><span>${n} suggestion${n === 1 ? '' : 's'} waiting</span><div class="track"></div></div>
       <div class="card" data-sugg="${sg.id}">
-        <div class="why new">${slack ? 'Mentioned in Slack' : mail ? 'From your mail' : 'Planner suggests'}</div>
+        <div class="why ${rip ? 'chg' : 'new'}">${slack ? 'Mentioned in Slack' : mail ? 'From your mail' : rip ? 'Ripple suggests' : 'Planner suggests'}</div>
         <h2>${esc(slack || mail ? f.name || sg.label : sg.label.replace(/^create:\s*/i, ''))}</h2>
         ${would ? `<div class="sub">${would}</div>` : ''}
         ${mail && f.context ? `<p>${esc(f.context)}</p>` : ''}
@@ -1589,9 +1606,66 @@
         <div class="big"><button class="done" data-sugg-create="${sg.id}">Create task</button><button class="drop" data-sugg-dismiss="${sg.id}">Dismiss</button></div>
         ${mail ? `<div class="extra"><button class="btn small" data-sugg-open="${sg.id}">✉ Show the message in Mailbird</button></div>` : ''}
       </div>
-      <div class="note">${mail ? 'Create makes an open task (source Mail) linked to this thread, so a reply or a message you send is noticed from then on. ' : `Create makes an open task (source ${slack ? 'Slack, the message linked' : 'Planner'}) that shows as New in Review; `}Dismiss stages a change you can undo from the Log tab.</div></div>`;
+      <div class="note">${mail ? 'Create makes an open task (source Mail) linked to this thread, so a reply or a message you send is noticed from then on. ' : `Create makes an open task (source ${slack ? 'Slack, the message linked' : rip ? 'Ripple: suggested after a linked task changed' : 'Planner'}) that shows as New in Review; `}Dismiss stages a change you can undo from the Log tab.</div></div>`;
   }
   function stageJudge(evidenceId, taskId, verdict, label) { stageExtra('e:' + evidenceId, taskId, 'judge_evidence', { evidence_id: evidenceId, verdict }, label); }
+
+  // ---------- ripples (stage 5): Review ----------
+  // "Since you last looked": what the linked tasks did, then what the ripple did to this task's text,
+  // with See what changed (before / after, as History shows a rewrite) and Undo (design §12.4).
+  // The before / after block (History's `diffHtml` draws it too), for any two texts.
+  function beforeAfter(before, after) {
+    const val = v => textOf(v) ? esc(textOf(v)) : '<span class="code">none</span>';
+    return `<div class="hdiff"><span class="bl">before</span><span class="bv">${val(before)}</span><span class="al">after</span><span class="av">${val(after)}</span></div>`;
+  }
+  const SINCE_WHAT = { name: 'its name', text: 'its text', due: 'its due date', hard: 'its hard deadline', outcome: 'its outcome' };
+  const sentence = s => /[.!?…]$/.test(s) ? s : s + '.';
+  function sinceHtml(item) {
+    const s = item && item.since; if (!s) return '';
+    const lines = (s.by || []).map(b => {
+      const T = tref(b.id), on = monDay(b.completed_at);
+      if (b.did === 'done') return `${T} finished${on ? ' ' + on : ''}.${b.outcome ? ' Outcome: ' + esc(sentence(String(b.outcome).trim())) : ''}`;
+      if (b.did === 'dropped') return `${T} was dropped${on ? ' ' + on : ''}.`;
+      if (b.did === 'merged') return `${T} had another task merged into it.`;
+      const what = (b.what || []).map(w => SINCE_WHAT[w]).filter(Boolean);
+      return what.length ? `${T} changed: ${what.join(', ')}.` : `${T} changed.`;
+    }).map(l => `<div class="sl">${l}</div>`);
+    let said = '';
+    if (s.noted) said = 'A note was added to this task\'s text.';
+    else if (s.cause_undone) said = 'This task\'s text was brought up to date. Its cause was undone since; the text was kept because it changed after.';
+    else if (s.text) said = 'This task\'s text was brought up to date.';
+    if (s.undone) said += (said ? ' ' : '') + 'Undone.';
+    const open = ui.sinceOpen === s.batch_id && s.text;
+    const acts = (s.text ? `<button class="btn small" data-since-see="${s.batch_id}" aria-expanded="${!!open}">See what changed</button>` : '')
+      + (s.undone ? '' : `<button class="btn small" data-since-undo="${s.batch_id}">Undo</button>`);
+    const diff = open ? beforeAfter(s.text.before, s.text.after) + (s.text.note ? `<div class="sl swhy">Why: ${linkTasks(s.text.note)}</div>` : '') : '';
+    return `<div class="since"><h4>Since you last looked</h4>${lines.join('')}${said || acts ? `<div class="sl said">${said ? `<span>${esc(said)}</span>` : ''}${acts}</div>` : ''}${diff}</div>`;
+  }
+  // A ripple's proposal on the card: Accept and Dismiss. A proposed text shows its before and after first;
+  // when the text has changed since the ripple read it, the line says so and offers Dismiss only (Accept
+  // would be refused by the change's `expect`).
+  const normText = v => String(v == null ? '' : v).split(/\s+/).filter(Boolean).join(' ');
+  function rippleLineHtml(e, tid) {
+    const c = e.change || {}, f = c.fields || {};
+    const text = c.op === 'set' && 'context' in f;
+    const before = text ? ((c.expect || {}).context != null ? c.expect.context : null) : null;
+    const t = byId(tid);
+    const stale = text && t && before != null && normText(before) !== normText(t.context);
+    const diff = text ? beforeAfter(before, f.context) : '';
+    const note = stale ? '<span class="hint stale">This task\'s text has changed since the ripple read it, so this rewrite would write over the newer text. Dismiss it, or edit the text yourself.</span>' : '';
+    return `<div class="extra rsug"><span class="chip rip">Ripple suggests</span><span class="what">${linkTasks(e.label)}${e.reason ? ` <span class="hint" style="margin:0">— ${linkTasks(e.reason)}</span>` : ''}</span>${diff}${note}`
+      + `${stale ? '' : `<button class="btn small primary" data-rv-accept="${e.id}">Accept</button>`}<button class="btn small" data-rv-dismiss="${e.id}">Dismiss</button></div>`;
+  }
+  // The one undo-and-tell step (the Review card's Undo; the landing toast's too): the toast says what was
+  // left as it is, the Log and the list are read again.
+  async function undoAndSay(id) {
+    let res;
+    try { res = await undoBatch(id); } catch (e) { toast('Undo failed: ' + (e.detail || e.message)); return null; }
+    toast(undoSaid(res));
+    logData = null;
+    await load();
+    return res;
+  }
   // ---------- Chat (SPEC §8.3) ----------
   // A tiny Markdown renderer for reply_md: escape first, then paragraphs, lists, code, bold, links.
   function md(src) {
@@ -2016,10 +2090,18 @@
       else if (['pin_top', 'longterm'].includes(c.op)) stageExtra(`${tid}:a${eid}`, tid, c.op, {}, e.label);   // an extra beside the decision, like the ★ button
       else if (c.op === 'add_reminder') stageExtra(tid + ':r', tid, 'add_reminder', c.fields, e.label);
       else if (['link', 'unlink', 'merge', 'add_note'].includes(c.op)) stageChange(c, e.label, {}, 'a' + eid);
-      else if (c.op === 'set') stageExtra(`${tid}:c${eid}`, tid, 'set', c.fields || {}, e.label, { expect: textExpect(tid, c.fields) });
+      else if (c.op === 'set') stageExtra(`${tid}:c${eid}`, tid, 'set', c.fields || {}, e.label, { expect: c.expect || textExpect(tid, c.fields) });     // a ripple's text carries the text it read
       else { toast('This suggestion cannot be staged here'); return; }
       stageJudge(eid, tid, 'applied', 'suggestion accepted'); toast(['done', 'drop'].includes(c.op) ? 'Decision staged · Apply in the tray' : 'Suggestion staged · decide on the card, then Apply');
     });
+    panel.querySelectorAll('[data-rv-dismiss]').forEach(b => b.onclick = () => { stageJudge(+b.dataset.rvDismiss, +b.closest('.card').dataset.id, 'dismissed', 'suggestion dismissed'); });
+    panel.querySelectorAll('[data-since-see]').forEach(b => b.onclick = () => { const id = +b.dataset.sinceSee; ui.sinceOpen = ui.sinceOpen === id ? null : id; render(); });
+    panel.querySelectorAll('[data-since-undo]').forEach(b => b.onclick = async () => {
+      b.disabled = true;
+      if (!await undoAndSay(+b.dataset.sinceUndo)) { b.disabled = false; return; }
+      review = null; await loadReview().catch(() => {}); render();      // a failed load says so in the panel
+    });
+    const rr = document.getElementById('review-retry'); if (rr) rr.onclick = () => { loadReview().catch(() => {}); render(); };
     panel.querySelectorAll('[data-lsug]').forEach(b => b.onclick = () => linkSuggestionAct(+b.closest('.card').dataset.id, +b.dataset.lsug, b.dataset.lsugAct));
     panel.querySelectorAll('[data-pending-apply]').forEach(b => b.onclick = async () => {
       try { const r = await api(`/api/proposals/${b.dataset.pendingApply}/apply`, { method: 'POST' }); lastBatch = r.batch_id; review = null; logData = null; await load(); toast(`${r.applied} change${r.applied === 1 ? '' : 's'} applied` + (r.skipped.length ? ` · ${r.skipped.length} skipped` : ''), true); }

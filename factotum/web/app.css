@@ -281,7 +281,7 @@ span.lb { cursor: default; }      /* stepsChip: the same look, not a link */
 .details .dcol > [data-dlinks]:empty { display: none; }
 .details .dcol dt:first-child { margin-top: 0; }
 .dsec { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-.dsec h4, .details .hhead h4 { margin: 0; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; }
+.dsec h4, .details .hhead h4, .card .since h4 { margin: 0; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; }
 .dsec .ctx { margin: 0; white-space: pre-line; overflow-wrap: anywhere; }
 .details .rewritten, .dsec .near { margin: 0; font-size: 12px; color: var(--muted); }
 .details .rewritten { margin-top: -8px; }      /* it reads as the last line of Where this stands */
@@ -306,11 +306,11 @@ span.lb { cursor: default; }      /* stepsChip: the same look, not a link */
 .hitem .who.chg { background: var(--top-soft); color: var(--top); }
 .hitem .hl { overflow-wrap: anywhere; }
 .hitem .why { color: var(--muted); }
-.hitem .hdiff { display: grid; grid-template-columns: 48px minmax(0, 1fr); gap: 4px 8px; font-size: 12px; background: var(--bg); border-radius: 6px; padding: 8px 10px; }
-.hitem .hdiff > span { overflow-wrap: anywhere; white-space: pre-line; }
-.hitem .hdiff .bl { color: var(--crit); font-weight: 600; }
-.hitem .hdiff .bv { color: var(--muted); }
-.hitem .hdiff .al { color: var(--ok); font-weight: 600; }
+.hitem .hdiff, .since .hdiff, .rsug .hdiff { display: grid; grid-template-columns: 48px minmax(0, 1fr); gap: 4px 8px; font-size: 12px; background: var(--bg); border-radius: 6px; padding: 8px 10px; }
+.hitem .hdiff > span, .since .hdiff > span, .rsug .hdiff > span { overflow-wrap: anywhere; white-space: pre-line; }
+.hitem .hdiff .bl, .since .hdiff .bl, .rsug .hdiff .bl { color: var(--crit); font-weight: 600; }
+.hitem .hdiff .bv, .since .hdiff .bv, .rsug .hdiff .bv { color: var(--muted); }
+.hitem .hdiff .al, .since .hdiff .al, .rsug .hdiff .al { color: var(--ok); font-weight: 600; }
 .hitem.undone .hl, .hitem.undone .hdiff, .hitem.undone .who { opacity: .6; }
 .details [data-hist-more] { align-self: flex-start; }
 /* The task page (app.js taskPageHtml): a task in place of the tab. On a desktop (a task no list shows) the
@@ -439,6 +439,26 @@ body.tray-open .toast.ask { bottom: calc(38vh + 110px + env(safe-area-inset-bott
 .card .lsug { align-items: center; }      /* a suggested link: the question, its buttons, why (wraps like every .extra) */
 .card .lsug .hint { margin: 0; }
 @media (max-width: 700px) { .card .lsug .btn { width: 100%; min-height: 44px; } }
+/* Ripples on the card (stage 5): "Since you last looked", and a ripple's proposal with Accept / Dismiss. */
+.card .since { background: var(--surface-2); border-radius: 8px; padding: 10px 12px; margin: 10px 0; display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+.card .since .sl { overflow-wrap: anywhere; }
+.card .since .said { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.card .since .swhy { color: var(--muted); }
+.card .since a, .card .rsug a { color: var(--accent); }
+.card .since .tref, .card .rsug .tref { font-family: var(--mono); font-size: 12px; }
+.card .since .hdiff { background: var(--surface); }
+.card .rsug { align-items: center; }
+.card .rsug .what { flex: 1 1 220px; min-width: 0; overflow-wrap: anywhere; }
+.card .rsug .hdiff, .card .rsug .stale { flex-basis: 100%; }
+.card .rsug .stale { margin: 0; color: var(--warn); }
+.card .rsug + .rsug { border-top: 1px solid var(--line); padding-top: 10px; }
+.chip.rip { background: var(--top-soft); color: var(--top); }
+@media (max-width: 700px) {
+  .card .since .btn, .card .rsug .btn { min-height: 44px; }
+  .card .rsug .what { flex-basis: 100%; }      /* the words on their own line, Accept and Dismiss side by side under them */
+  .card .rsug .btn { flex: 1 1 0; }
+  .card .since .hdiff, .card .rsug .hdiff { grid-template-columns: minmax(0, 1fr); }
+}
 .card .later-menu input[type=date] { font: inherit; font-size: 13px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-2); color: var(--fg); }
 .card textarea { width: 100%; box-sizing: border-box; font: inherit; font-size: 14px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); color: var(--fg); resize: vertical; margin: 4px 0 8px; }
 .card p.ctx { white-space: pre-wrap; }
