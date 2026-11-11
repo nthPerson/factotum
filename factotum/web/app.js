@@ -682,14 +682,24 @@
     const w = rippleWatch;
     if (!document.hidden && w && w.paused) { w.paused = false; if (Date.now() < w.until) pollRipple(w); else rippleWatch = null; }
   });
-  // The lists are read again (unless something is being typed: then on the next return), and the toast says
-  // how many linked tasks changed, with See changes (the first one, opened with its History) and Undo.
+  // The lists are read again, then the toast says how many linked tasks changed, with See changes (the first
+  // one, opened with its History) and Undo. A draft-backed box (the command box, Review's ask and note, the
+  // picker, the outcome line in the toast) survives the redraw, so typing there does not hold the reload back;
+  // only a box whose value lives in the DOM alone does (an open reminder or due-date form, focus in another
+  // input of the panel such as Settings). Then the lists are read when See changes is pressed.
+  function domHoldsTyping() {
+    if (ui.remOpen !== null || ui.dueOpen !== null) return true;
+    const a = document.activeElement;
+    return !!(a && a.matches('input, textarea, select') && a.closest('#panel') && !DRAFT_BOXES.includes(a.id));
+  }
   async function rippleLanded(landed) {
     const ids = new Set(landed.flatMap(l => l.tasks.map(t => t.id))), n = ids.size;
     const first = landed[0].tasks[0].id, batch = landed[0].batch_id;
-    if (!typingNow()) { logData = null; try { await load(); } catch (_) {} }
+    logData = null;
+    let stale = domHoldsTyping();
+    if (!stale) { try { await load(); } catch (_) { stale = true; } }
     toast(`${n} linked task${n === 1 ? '' : 's'} brought up to date`, false, { holdMs: 15000, buttons: [
-      { text: 'See changes', attrs: `data-ripple-see="${first}"`, run: () => jumpTo(first, true) },
+      { text: 'See changes', attrs: `data-ripple-see="${first}"`, run: async () => { if (stale) { try { await load(); } catch (_) {} } jumpTo(first, true); } },
       { text: 'Undo', attrs: `data-ripple-undo="${batch}"`, run: () => undoAndSay(batch) }] });
   }
   // The sign-in has expired (see `expired`): a full-screen "Sign in again" over the whole app, whose
@@ -2170,7 +2180,7 @@
     const rr = document.getElementById('review-retry'); if (rr) rr.onclick = () => { loadReview().catch(() => {}); render(); };
     panel.querySelectorAll('[data-lsug]').forEach(b => b.onclick = () => linkSuggestionAct(+b.closest('.card').dataset.id, +b.dataset.lsug, b.dataset.lsugAct));
     panel.querySelectorAll('[data-pending-apply]').forEach(b => b.onclick = async () => {
-      try { const r = await api(`/api/proposals/${b.dataset.pendingApply}/apply`, { method: 'POST' }); lastBatch = r.batch_id; review = null; logData = null; await load(); toast(`${r.applied} change${r.applied === 1 ? '' : 's'} applied` + (r.skipped.length ? ` · ${r.skipped.length} skipped` : ''), true); }
+      try { const r = await api(`/api/proposals/${b.dataset.pendingApply}/apply`, { method: 'POST' }); lastBatch = r.batch_id; review = null; logData = null; await load(); toast(`${r.applied} change${r.applied === 1 ? '' : 's'} applied` + (r.skipped.length ? ` · ${r.skipped.length} skipped` : ''), true); if ((r.ripple_queued || []).length) watchRipple(r.batch_id); }
       catch (e) { toast('Apply failed: ' + e.message); }
     });
     panel.querySelectorAll('[data-pending-dismiss]').forEach(b => b.onclick = async () => {
