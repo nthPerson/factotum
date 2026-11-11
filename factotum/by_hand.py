@@ -135,7 +135,7 @@ def add(conn, cfg: dict, *, text: str | None = None, fields: dict | None = None,
         if key is not None:
             old = conn.execute("SELECT id, name FROM tasks WHERE source_key = ?", (f"add:{key}",)).fetchone()
             if old:
-                return {"task_id": old[0], "batch_id": None, "already": True, "name": old[1], "parts": parts, "refused": refused, "skipped": []}
+                return {"task_id": old[0], "batch_id": None, "already": True, "name": old[1], "parts": [], "refused": [], "skipped": []}
             ch["source_key"] = f"add:{key}"
         res = batches.apply(conn, [ch], "ui", today)
     if not res.get("created"):

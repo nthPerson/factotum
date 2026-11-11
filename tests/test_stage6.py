@@ -277,3 +277,11 @@ def test_a_bare_verb_writes_nothing(cfg, tmp_path):
         r = client.post("/api/add", json={"text": t, "key": "kbare" + str(len(t)) + "xx"})
         assert (r.status_code, r.json()) == (plus.status_code, plus.json())
     assert one(conn, "SELECT COUNT(*) AS n FROM tasks")["n"] == n
+
+
+def test_a_repeated_key_answers_with_the_first_task_and_no_parts(cfg, tmp_path):
+    client, conn = _client(cfg, tmp_path)
+    a = client.post("/api/add", json={"text": "Water the plants fri #personal", "key": "keyrep01"}).json()
+    b = client.post("/api/add", json={"text": "Feed the cat mon ~S", "key": "keyrep01"}).json()
+    assert a["parts"] and b["already"] and b["task_id"] == a["task_id"] and b["name"] == a["name"]
+    assert b["parts"] == [] and b["refused"] == []
