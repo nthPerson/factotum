@@ -5,7 +5,7 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, NamedTuple
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS tasks (
@@ -28,7 +28,9 @@ CREATE TABLE IF NOT EXISTS tasks (
   calendar_event TEXT, notion_page_id TEXT, canvas_id TEXT,
   mirrored_at TEXT,                              -- when the Notion mirror last pushed this row (not an edit)
   close_on_sent_since TEXT,                      -- a watch: close when mail to close_on_sent_to is sent after this time
-  close_on_sent_to TEXT                          -- the watched address(es); its own column so a watch never makes anyone a contact
+  close_on_sent_to TEXT,                         -- the watched address(es); its own column so a watch never makes anyone a contact
+  outcome TEXT,                                  -- how a closed task ended, at most 300 characters
+  neighbours_seen_at TEXT                        -- when the owner last looked at this task's neighbours (not an edit, not in TASK_FIELDS)
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project);
@@ -59,13 +61,30 @@ CREATE TABLE IF NOT EXISTS batches (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   created_at TEXT NOT NULL, applied_at TEXT, undone_at TEXT,
   source TEXT NOT NULL,                          -- ui|command|chat|review|automation|import
-  undo_json TEXT
+  undo_json TEXT,
+  cause_json TEXT                                -- what set the batch off (a ripple from another task), or NULL
 );
 CREATE TABLE IF NOT EXISTS changes (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   batch_id INTEGER NOT NULL REFERENCES batches(id),
-  task_id INTEGER NOT NULL, field TEXT NOT NULL, old TEXT, new TEXT
+  task_id INTEGER NOT NULL, field TEXT NOT NULL, old TEXT, new TEXT, note TEXT
 );
+CREATE TABLE IF NOT EXISTS relations (             -- links between tasks (design §5.1); soft-deleted so History and undo keep the row
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  src INTEGER NOT NULL REFERENCES tasks(id),
+  dst INTEGER NOT NULL REFERENCES tasks(id),
+  kind TEXT NOT NULL,                               -- part_of | waits_on | same_as
+  why TEXT,
+  source TEXT NOT NULL,
+  batch_id INTEGER,
+  created_at TEXT NOT NULL,
+  removed_at TEXT,
+  removed_batch_id INTEGER,
+  CHECK (src <> dst)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_relations_active ON relations(src, dst, kind) WHERE removed_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_relations_src ON relations(src);
+CREATE INDEX IF NOT EXISTS idx_relations_dst ON relations(dst);
 CREATE TABLE IF NOT EXISTS chat_threads (
   id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, claude_session_id TEXT, created_at TEXT NOT NULL
 );
@@ -121,7 +140,7 @@ TASK_FIELDS = [
     "due", "due_is_datetime", "hard", "effort", "source", "source_key", "source_link", "account",
     "counterpart", "waiting_on", "waiting_since", "context", "why_now", "score", "priority",
     "manual_priority", "mentions", "last_mention_at", "created_at", "edited_at", "completed_at",
-    "closed_by", "snoozed_until", "last_reviewed_at", "last_offered_at", "calendar_event", "notion_page_id", "canvas_id", "mirrored_at", "close_on_sent_since", "close_on_sent_to",
+    "closed_by", "snoozed_until", "last_reviewed_at", "last_offered_at", "calendar_event", "notion_page_id", "canvas_id", "mirrored_at", "close_on_sent_since", "close_on_sent_to", "outcome",
 ]
 
 
@@ -147,7 +166,8 @@ def connect(path: str | Path, shared: bool = False) -> sqlite3.Connection:
 
 # Columns added after a table first shipped. CREATE TABLE IF NOT EXISTS leaves an existing table
 # alone, so init_db adds these to databases created before them.
-MIGRATIONS = {"reminders": {"repeat": "TEXT", "sent_at": "TEXT"}, "tasks": {"last_offered_at": "TEXT", "mirrored_at": "TEXT", "close_on_sent_since": "TEXT", "close_on_sent_to": "TEXT"},
+MIGRATIONS = {"reminders": {"repeat": "TEXT", "sent_at": "TEXT"}, "tasks": {"last_offered_at": "TEXT", "mirrored_at": "TEXT", "close_on_sent_since": "TEXT", "close_on_sent_to": "TEXT", "outcome": "TEXT", "neighbours_seen_at": "TEXT"},
+              "batches": {"cause_json": "TEXT"}, "changes": {"note": "TEXT"},
               "chat_messages": {"drafts_json": "TEXT", "rejected_json": "TEXT", "error": "TEXT", "duration_ms": "INTEGER"}}
 
 
@@ -159,6 +179,62 @@ def init_db(conn: sqlite3.Connection) -> None:
             if col not in have:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
     conn.commit()
+    migrate(conn)
+
+
+class Migration(NamedTuple):
+    version: int
+    name: str
+    fn: Callable[[sqlite3.Connection], None]
+    needs_backup: Callable[[sqlite3.Connection], bool] | None = None   # True when fn will change data (not just add a column)
+
+
+VERSIONED: list[Migration] = []   # data migrations, run once each in version order, tracked by PRAGMA user_version
+
+
+def schema_version(conn: sqlite3.Connection) -> int:
+    return conn.execute("PRAGMA user_version").fetchone()[0]
+
+
+def backup_copy(conn: sqlite3.Connection, tag: str) -> Path | None:
+    """A consistent copy of the open database through the backup API (a file copy of a WAL database is stale). None for an in-memory one."""
+    file = next((r[2] for r in conn.execute("PRAGMA database_list") if r[1] == "main"), "")
+    if not file:
+        return None
+    src = Path(file)
+    dest = src.parent / "backups" / f"{src.stem}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{tag}.db"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    out = sqlite3.connect(str(dest))
+    try:
+        conn.backup(out)
+    finally:
+        out.close()
+    return dest
+
+
+def migrate(conn: sqlite3.Connection, migrations: list[Migration] | None = None) -> list[str]:
+    """Run every migration newer than the database's user_version, each in its own transaction; a failure rolls back and raises, so the app never starts half-migrated."""
+    ran: list[str] = []
+    for m in sorted(VERSIONED if migrations is None else migrations, key=lambda m: m.version):
+        if m.version <= schema_version(conn):
+            continue
+        if conn.in_transaction:
+            conn.commit()
+        if m.needs_backup and m.needs_backup(conn):
+            backup_copy(conn, f"before-v{m.version}")
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            if m.version <= schema_version(conn):   # another process ran it meanwhile
+                conn.rollback()
+                continue
+            m.fn(conn)
+            conn.execute(f"PRAGMA user_version = {int(m.version)}")
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        ran.append(m.name)
+    return ran
 
 
 def rows(conn: sqlite3.Connection, sql: str, params: tuple = ()) -> list[dict]:
