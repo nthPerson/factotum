@@ -1,10 +1,12 @@
+import json
 import sqlite3
 
 import pytest
+from fastapi.testclient import TestClient
 
-from factotum import db
-from factotum.db import Migration, init_db, migrate, schema_version
-from stage4_helpers import mk
+from factotum import api, batches, db
+from factotum.db import Migration, connect, init_db, migrate, one, rows, schema_version
+from stage4_helpers import TODAY, active_rels, link, mk
 
 
 # --- Task 1: migrations and schema
@@ -70,3 +72,124 @@ def test_a_failing_migration_rolls_back_and_raises(conn):
         migrate(conn, [Migration(1, "boom", boom)])
     assert conn.execute("SELECT name FROM tasks WHERE id = 1").fetchone()[0] == "keep"
     assert schema_version(conn) == 0 and conn.in_transaction is False
+
+
+# --- Task 2: link, unlink, undo
+
+def _unlink(conn, src, dst, kind):
+    return batches.apply(conn, [{"op": "unlink", "task_id": src, "fields": {"kind": kind, "other": dst}}], "ui", TODAY)
+
+
+def test_link_records_one_relation_two_changes_and_bumps_both_tasks(conn):
+    mk(conn, 1, name="Run the analysis"); mk(conn, 2, name="Get the data")
+    res = link(conn, 1, 2, "waits_on", why="needs the data")
+    rel = one(conn, "SELECT * FROM relations")
+    assert (rel["src"], rel["dst"], rel["kind"], rel["source"], rel["batch_id"], rel["why"]) == (1, 2, "waits_on", "ui", res["batch_id"], "needs the data")
+    ch = {r["task_id"]: json.loads(r["new"]) for r in rows(conn, "SELECT task_id, new FROM changes WHERE field = 'link'")}
+    assert ch[1] == {"relation_id": rel["id"], "kind": "waits_on", "dir": "out", "other": 2, "other_name": "Get the data", "why": "needs the data"}
+    assert ch[2]["dir"] == "in" and ch[2]["other"] == 1 and ch[2]["other_name"] == "Run the analysis"
+    assert all(t["edited_at"] > "2026-10-01T00:00:00+00:00" for t in rows(conn, "SELECT edited_at FROM tasks"))
+    assert json.loads(one(conn, "SELECT undo_json FROM batches")["undo_json"]) == [{"relation_id": rel["id"], "undo": "remove"}]
+
+
+def test_an_unchanged_link_is_a_no_op(conn):
+    mk(conn, 1); mk(conn, 2)
+    assert link(conn, 1, 2, "part_of")["applied"] == 1
+    res = link(conn, 1, 2, "part_of")
+    assert (res["applied"], res["skipped"]) == (0, [])
+    assert one(conn, "SELECT COUNT(*) AS n FROM relations")["n"] == 1
+    assert one(conn, "SELECT COUNT(*) AS n FROM changes WHERE batch_id = ?", (res["batch_id"],))["n"] == 0
+
+
+def test_link_rules_are_enforced_on_the_batchs_own_cursor(conn):
+    for i in (1, 2, 3, 4, 5, 6, 8, 9):
+        mk(conn, i)
+    mk(conn, 7, status="done", completed_at="2026-10-20")
+    L = lambda a, b, kind: {"op": "link", "task_id": a, "fields": {"kind": kind, "other": b}}
+    res = batches.apply(conn, [L(2, 1, "part_of"), L(3, 2, "part_of"), L(2, 4, "part_of"), L(1, 5, "part_of"), L(2, 1, "waits_on"),
+                               L(6, 7, "waits_on"), L(6, 6, "waits_on"), L(6, 999, "waits_on")], "ui", TODAY)
+    assert res["applied"] == 1 and active_rels(conn) == {(2, 1, "part_of")}
+    whys = [s["why"] for s in res["skipped"]]
+    expected = ["a step cannot have steps", "is already part of Task-1", "has steps of its own", "cannot wait on its own goal",
+                "is already done", "linked to itself", "no Task-999"]
+    assert len(whys) == len(expected) and all(e in w for e, w in zip(expected, whys)), whys
+    assert "Task-2 is a step of Task-1" in whys[0] and "Task-7 is already done" in whys[4]
+
+    res = batches.apply(conn, [L(8, 9, "waits_on"), L(9, 8, "waits_on")], "ui", TODAY)
+    assert res["applied"] == 1 and "that would make a loop" in res["skipped"][0]["why"]
+
+    for i in range(10, 31):
+        mk(conn, i)
+    res = batches.apply(conn, [L(i, 30, "part_of") for i in range(9, 30)], "ui", TODAY)          # 21 steps for goal 30
+    assert res["applied"] == 20 and len(res["skipped"]) == 1 and "Task-30 already has 20 part of links" in res["skipped"][0]["why"]
+
+
+def test_a_cycle_across_two_batches_is_refused_when_the_second_applies(conn):
+    mk(conn, 1); mk(conn, 2); mk(conn, 3)
+    assert link(conn, 1, 2, "waits_on")["applied"] == 1
+    assert link(conn, 2, 3, "waits_on")["applied"] == 1
+    c = link(conn, 3, 1, "waits_on")
+    assert c["applied"] == 0 and "that would make a loop" in c["skipped"][0]["why"]
+    assert active_rels(conn) == {(1, 2, "waits_on"), (2, 3, "waits_on")}
+
+
+def test_unlink_soft_removes_and_undo_restores(conn):
+    mk(conn, 1); mk(conn, 2)
+    link(conn, 1, 2, "waits_on")
+    res = _unlink(conn, 1, 2, "waits_on")
+    assert res["applied"] == 1
+    rel = one(conn, "SELECT * FROM relations")
+    assert rel["removed_at"] and rel["removed_batch_id"] == res["batch_id"] and active_rels(conn) == set()
+    ch = rows(conn, "SELECT task_id, old, new FROM changes WHERE batch_id = ? AND field = 'link' ORDER BY task_id", (res["batch_id"],))
+    assert [c["task_id"] for c in ch] == [1, 2] and all(c["new"] is None and json.loads(c["old"])["relation_id"] == rel["id"] for c in ch)
+    u = batches.undo(conn, res["batch_id"])
+    assert (u["restored"], u["skipped"], u["already"]) == (1, [], False)
+    again = one(conn, "SELECT * FROM relations")
+    assert again["id"] == rel["id"] and again["removed_at"] is None and again["removed_batch_id"] is None
+    assert batches.undo(conn, res["batch_id"])["already"] is True
+
+
+def test_undo_restore_is_skipped_when_it_would_loop_or_duplicate(conn):
+    for i in (1, 2, 3, 4):
+        mk(conn, i)
+    link(conn, 1, 2, "waits_on")
+    b2 = _unlink(conn, 1, 2, "waits_on")
+    link(conn, 2, 1, "waits_on")
+    u = batches.undo(conn, b2["batch_id"])
+    assert u["restored"] == 0 and "not restored" in u["skipped"][0]["why"] and "loop" in u["skipped"][0]["why"]
+    assert active_rels(conn) == {(2, 1, "waits_on")}
+
+    link(conn, 3, 4, "part_of")
+    b5 = _unlink(conn, 3, 4, "part_of")
+    link(conn, 3, 4, "part_of")
+    u = batches.undo(conn, b5["batch_id"])
+    assert u["restored"] == 0 and "an identical link exists" in u["skipped"][0]["why"]
+    assert active_rels(conn) == {(2, 1, "waits_on"), (3, 4, "part_of")}
+
+
+def test_undo_skips_an_entry_it_does_not_recognise_and_reports_it(conn):
+    conn.execute("INSERT INTO batches (created_at, applied_at, source, undo_json) VALUES ('now', 'now', 'ui', ?)", (json.dumps([{"nonsense": 1}]),))
+    conn.commit()
+    bid = one(conn, "SELECT MAX(id) AS id FROM batches")["id"]
+    u = batches.undo(conn, bid)
+    assert u["restored"] == 0 and u["skipped"] == [{"task_id": None, "why": "an undo entry Factotum does not recognise was left alone"}]
+    assert one(conn, "SELECT undone_at FROM batches WHERE id = ?", (bid,))["undone_at"]
+
+
+def test_undo_route_answers_404_only_for_a_missing_batch_and_never_leaves_a_transaction_open(cfg, tmp_path):
+    path = tmp_path / "t.db"
+    app = api.create_app(cfg, db_path=str(path))
+    client = TestClient(app, raise_server_exceptions=False)
+    assert client.post("/api/batches/999/undo", json={}).status_code == 404
+    c = app.state.conn
+    mk(c, 1)
+    c.execute("INSERT INTO batches (created_at, applied_at, source, undo_json) VALUES ('now', 'now', 'ui', ?)",
+              (json.dumps([{"task_id": 1, "field": "no_such_column", "old": 1}, {"task_id": 1, "field": "name", "old": "Before"}]),))   # newest first: the name is written, then the bad entry fails
+    c.commit()
+    bid = one(c, "SELECT MAX(id) AS id FROM batches")["id"]
+    assert client.post(f"/api/batches/{bid}/undo", json={}).status_code == 500
+    assert app.state.conn.in_transaction is False and one(c, "SELECT name FROM tasks WHERE id = 1")["name"] == "Task 1"
+    other = connect(path)
+    other.execute("BEGIN IMMEDIATE")
+    other.rollback()
+    other.close()

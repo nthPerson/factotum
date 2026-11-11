@@ -261,8 +261,8 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
     def undo_batch(batch_id: int):
         try:
             return batches.undo(conn, batch_id)
-        except KeyError:
-            raise HTTPException(404)
+        except batches.NoSuchBatch:
+            raise HTTPException(404, "no such batch")
 
     # The Today summary (SPEC §8.4). Its clock is the owner's, like the scheduler's that writes it.
     @app.get("/api/summary")

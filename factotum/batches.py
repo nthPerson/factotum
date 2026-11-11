@@ -7,6 +7,7 @@ import re
 import sqlite3
 from datetime import date, datetime
 
+from . import relations as R
 from .db import get_task, now_iso, upsert_task
 
 # Fields a change may set directly. Everything else is derived or owned by an automation.
@@ -16,13 +17,18 @@ SETTABLE = {
     "last_reviewed_at", "why_now", "calendar_event",
 }
 OPS = {"set", "done", "drop", "reopen", "pin_top", "unpin", "keep", "longterm", "fade", "lapse", "add_reminder", "judge_evidence",
-       "create", "watch_sent", "unwatch_sent"}
+       "create", "watch_sent", "unwatch_sent", "link", "unlink"}
 # What a `create` may carry; score, priority, status and mentions stay derived.
 CREATABLE = {"name", "project", "area", "due", "due_is_datetime", "hard", "effort", "context", "counterpart", "waiting_on", "manual_priority", "longterm", "snoozed_until"}
 CREATED_SOURCE = "Claude"          # the Source of a task a connector or skill created
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 REPEATS = {"daily", "weekdays", "weekly", "monthly"}
 VERDICTS = ("applied", "dismissed", "reviewed", "staged")
+UNKNOWN_UNDO = "an undo entry Factotum does not recognise was left alone"
+
+
+class NoSuchBatch(KeyError):
+    """undo() of a batch id that does not exist (the API answers 404)."""
 
 
 def _next_top_rank(conn: sqlite3.Connection) -> int:
@@ -141,7 +147,7 @@ def _resolve(conn: sqlite3.Connection, change: dict, today: date, closed_by: str
 
 def apply(conn: sqlite3.Connection, changes: list[dict], source: str, today: date | None = None, closed_by: str | None = None) -> dict:
     """Apply a list of changes atomically. Returns {"batch_id", "applied": n, "skipped": [...],
-    "created": [task ids a `create` made]}."""
+    "created": [task ids a `create` made], "refs": {ref: task id}}."""
     today = today or date.today()
     closed_by = closed_by or source
     cur = conn.cursor()
@@ -151,10 +157,14 @@ def apply(conn: sqlite3.Connection, changes: list[dict], source: str, today: dat
     applied = 0
     skipped: list[dict] = []
     created: list[int] = []
+    refs: dict[str, int] = {}          # a create's `ref` → its new id, for links later in the same batch
     try:
         for ch in changes:
-            if isinstance(ch, dict) and ch.get("op") == "create":
+            op = ch.get("op") if isinstance(ch, dict) else None
+            if op == "create":
                 applied += _create(conn, cur, ch, batch_id, source, today, undo, skipped, created)
+            elif op in ("link", "unlink"):
+                applied += _link_op(conn, cur, ch, batch_id, source, undo, skipped, refs)
             elif _apply_one(conn, cur, ch, batch_id, source, today, closed_by, undo, skipped):
                 applied += 1
     except Exception:
@@ -162,7 +172,75 @@ def apply(conn: sqlite3.Connection, changes: list[dict], source: str, today: dat
         raise
     cur.execute("UPDATE batches SET undo_json = ? WHERE id = ?", (json.dumps(undo), batch_id))
     conn.commit()
-    return {"batch_id": batch_id, "applied": applied, "skipped": skipped, "created": created}
+    return {"batch_id": batch_id, "applied": applied, "skipped": skipped, "created": created, "refs": refs}
+
+
+def _link_end(v, refs: dict) -> tuple[int | None, str | None]:
+    """One end of a link as a task id: an int (never a bool: True is Task-1), a digit string, or the
+    ref of a task created earlier in this batch. Returns (id, None) or (None, why or None)."""
+    if type(v) is int:
+        return v, None
+    if isinstance(v, str) and v.strip():
+        s = v.strip()
+        if s.isascii() and s.isdigit():
+            return int(s), None
+        if s in refs:
+            return refs[s], None
+        return None, f"no task made in this batch has ref {v!r}"
+    return None, None
+
+
+def _link_op(conn, cur, ch: dict, batch_id: int, source: str, undo: list, skipped: list, refs: dict) -> bool:
+    """`link` / `unlink` one `part_of` or `waits_on` relation, the rules checked on the batch's own
+    cursor so links made earlier in the batch count. An unchanged link is a no-op, as an unchanged
+    `set` is; anything refused is skipped with a reason."""
+    f = ch.get("fields") if isinstance(ch.get("fields"), dict) else {}
+    kind, other = f.get("kind"), f.get("other")
+    if not kind or other is None:
+        skipped.append({"task_id": ch.get("task_id"), "why": "link needs fields.kind and fields.other"})
+        return False
+    if kind not in R.LINK_KINDS:
+        skipped.append({"task_id": ch.get("task_id"), "why": f"kind must be part_of or waits_on, not {kind!r}"})
+        return False
+    a, why = _link_end(ch.get("task_id"), refs)
+    if a is None:
+        skipped.append({"task_id": ch.get("task_id"), "why": why or "missing or invalid task_id"})
+        return False
+    b, why = _link_end(other, refs)
+    if b is None:
+        skipped.append({"task_id": a, "why": why or "link needs fields.kind and fields.other"})
+        return False
+    rel = R.find(cur, a, b, kind)
+    if ch["op"] == "link":
+        if rel:
+            return False
+        reason = R.check(cur, a, b, kind)
+        if reason:
+            skipped.append({"task_id": a, "why": reason})
+            return False
+        rid = R.add(cur, a, b, kind, f.get("why"), source, batch_id)
+        rel = dict(cur.execute("SELECT * FROM relations WHERE id = ?", (rid,)).fetchone())
+        _link_changes(cur, batch_id, rel, added=True)
+        undo.append({"relation_id": rid, "undo": "remove"})
+        return True
+    if not rel:
+        skipped.append({"task_id": a, "why": f"Task-{a} has no {R.WORDS[kind]} link to Task-{b}"})
+        return False
+    R.remove(cur, rel["id"], batch_id)
+    _link_changes(cur, batch_id, rel, added=False)
+    undo.append({"relation_id": rel["id"], "undo": "restore"})
+    return True
+
+
+def _link_changes(cur, batch_id: int, rel: dict, added: bool) -> None:
+    """Two `link` changes rows, one per task, each naming the other task (History and the Log read
+    changes by task id); `new` when the link was added, `old` when it was removed."""
+    names = {r["id"]: r["name"] for r in cur.execute("SELECT id, name FROM tasks WHERE id IN (?, ?)", (rel["src"], rel["dst"])).fetchall()}
+    for tid, other in ((rel["src"], rel["dst"]), (rel["dst"], rel["src"])):
+        v = json.dumps(R.change_value(rel, tid, names.get(other)))
+        cur.execute("INSERT INTO changes (batch_id, task_id, field, old, new) VALUES (?, ?, 'link', ?, ?)",
+                    (batch_id, tid, None if added else v, v if added else None))
+    cur.execute("UPDATE tasks SET edited_at = ? WHERE id IN (?, ?)", (now_iso(), rel["src"], rel["dst"]))
 
 
 def _apply_one(conn, cur, ch: dict, batch_id: int, source: str, today: date, closed_by: str, undo: list, skipped: list) -> bool:
@@ -245,25 +323,68 @@ def _judge_evidence(conn, cur, ch: dict, batch_id: int, undo: list, skipped: lis
 
 
 def undo(conn: sqlite3.Connection, batch_id: int) -> dict:
+    """Undo a batch once. An entry that can no longer be undone safely (a link restore that would
+    duplicate or loop, an entry it does not know) is skipped and reported, never raised. Any error
+    rolls back: the API shares one connection, and an open transaction holds the write lock."""
     b = conn.execute("SELECT * FROM batches WHERE id = ?", (batch_id,)).fetchone()
     if not b:
-        raise KeyError("no such batch")
+        raise NoSuchBatch(batch_id)
     if b["undone_at"]:
-        return {"batch_id": batch_id, "restored": 0, "already": True}
+        return {"batch_id": batch_id, "restored": 0, "skipped": [], "already": True}
     restored = 0
-    # Newest first: a batch may set one field twice (an accepted suggestion, then the decision's
-    # note), and each entry's `old` is the value just before it; forwards, the middle value would win.
-    for u in reversed(json.loads(b["undo_json"] or "[]")):
-        if "reminder_id" in u:
-            conn.execute("UPDATE reminders SET status = 'cancelled' WHERE id = ?", (u["reminder_id"],))
-        elif "evidence_id" in u:
-            conn.execute("UPDATE evidence SET judged_at = NULL, verdict = NULL WHERE id = ?", (u["evidence_id"],))
-        elif "created_task_id" in u:                         # a created task is dropped, not deleted — and left alone once a later decision closed it
-            conn.execute("UPDATE tasks SET status = 'dropped', completed_at = ?, closed_by = 'undo', top_rank = NULL, edited_at = ? WHERE id = ? AND status = 'open'",
-                         (date.today().isoformat(), now_iso(), u["created_task_id"]))
-        else:
-            conn.execute(f"UPDATE tasks SET {u['field']} = ?, edited_at = ? WHERE id = ?", (u["old"], now_iso(), u["task_id"]))
-        restored += 1
-    conn.execute("UPDATE batches SET undone_at = ? WHERE id = ?", (now_iso(), batch_id))
-    conn.commit()
-    return {"batch_id": batch_id, "restored": restored, "already": False}
+    skipped: list[dict] = []
+    try:
+        # Newest first: a batch may set one field twice (an accepted suggestion, then the decision's
+        # note), and each entry's `old` is the value just before it; forwards, the middle value would win.
+        for u in reversed(json.loads(b["undo_json"] or "[]")):
+            if not isinstance(u, dict):
+                skipped.append({"task_id": None, "why": UNKNOWN_UNDO})
+                continue
+            if "relation_id" in u:
+                skip = _undo_relation(conn, u)
+                if skip:
+                    skipped.append(skip)
+                    continue
+            elif "reminder_id" in u:
+                conn.execute("UPDATE reminders SET status = 'cancelled' WHERE id = ?", (u["reminder_id"],))
+            elif "evidence_id" in u:
+                conn.execute("UPDATE evidence SET judged_at = NULL, verdict = NULL WHERE id = ?", (u["evidence_id"],))
+            elif "created_task_id" in u:                         # a created task is dropped, not deleted — and left alone once a later decision closed it
+                conn.execute("UPDATE tasks SET status = 'dropped', completed_at = ?, closed_by = 'undo', top_rank = NULL, edited_at = ? WHERE id = ? AND status = 'open'",
+                             (date.today().isoformat(), now_iso(), u["created_task_id"]))
+            elif "field" in u:
+                conn.execute(f"UPDATE tasks SET {u['field']} = ?, edited_at = ? WHERE id = ?", (u["old"], now_iso(), u["task_id"]))
+            else:
+                skipped.append({"task_id": u.get("task_id"), "why": UNKNOWN_UNDO})
+                continue
+            restored += 1
+        conn.execute("UPDATE batches SET undone_at = ? WHERE id = ?", (now_iso(), batch_id))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return {"batch_id": batch_id, "restored": restored, "skipped": skipped, "already": False}
+
+
+def _undo_relation(conn: sqlite3.Connection, u: dict) -> dict | None:
+    """Undo one link entry: remove what the batch added, or restore what it removed unless that
+    would now duplicate an active link or break a rule (a loop, a second goal). Returns the skip
+    entry, or None when it was undone."""
+    r = conn.execute("SELECT * FROM relations WHERE id = ?", (u["relation_id"],)).fetchone()
+    if not r or u.get("undo") not in ("remove", "restore"):
+        return {"task_id": u.get("task_id"), "why": UNKNOWN_UNDO}
+    rel = dict(r)
+    what = f"the link Task-{rel['src']} {R.WORDS.get(rel['kind'], rel['kind'])} Task-{rel['dst']}"
+    if u["undo"] == "remove":
+        if rel["removed_at"]:
+            return {"task_id": rel["src"], "why": f"{what} was already removed"}
+        R.remove(conn, rel["id"], None)
+    else:
+        if R.find(conn, rel["src"], rel["dst"], rel["kind"]):
+            return {"task_id": rel["src"], "why": f"{what} was not restored: an identical link exists"}
+        reason = R.check(conn, rel["src"], rel["dst"], rel["kind"])
+        if reason:
+            return {"task_id": rel["src"], "why": f"{what} was not restored: {reason}"}
+        R.restore(conn, rel["id"])
+    conn.execute("UPDATE tasks SET edited_at = ? WHERE id IN (?, ?)", (now_iso(), rel["src"], rel["dst"]))
+    return None
