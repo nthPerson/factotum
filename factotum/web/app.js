@@ -452,9 +452,16 @@
       ${ui.pickOpen ? `<div class="pick"><input id="chat-pick" value="${esc(draft.pick)}" placeholder="A task number, or words from its name" aria-label="Find a task to attach" autocomplete="off">
         <div class="hits">${hits.map(x => { const d = fmtDue(x.due); return `<button data-pick="${x.id}"><span class="code">Task-${x.id}</span> <span class="nm">${esc(x.name)}</span><span class="chip proj">${esc(x.project || '—')}</span>${d ? `<span class="chip">${d.label}</span>` : ''}</button>`; }).join('') || (draft.pick.trim() ? '<div class="hint">No open task matches.</div>' : '')}</div></div>` : ''}`;
   }
+  // What a chat prompt can ask about: mail and calendar only when their input is on (settings not loaded yet: all three).
+  function chatTopics() {
+    const eff = settings && settings.effective;
+    const t = ['tasks'].concat(!eff || eff['sources.mail.enabled'] ? ['mail'] : [], !eff || eff['sources.calendar.enabled'] ? ['calendar'] : []);
+    return 'your ' + (t.length > 1 ? t.slice(0, -1).join(', ') + ' or ' + t[t.length - 1] : t[0]);
+  }
   function composer() {
     const ids = attachedIds(), inChat = ui.tab === 'chat';
-    const ph = inChat ? (TOUCH() ? 'Ask about your tasks, mail or calendar' : 'Ask about your tasks, mail or calendar · Enter sends, Shift+Enter starts a new line')
+    const ask = inChat ? 'Ask about ' + chatTopics() : '';
+    const ph = inChat ? (TOUCH() ? ask : ask + ' · Enter sends, Shift+Enter starts a new line')
       : PHONE() ? 'done 389 · push 364 fri · or ask Claude' : 'Command: done 389 392 · push 364 fri · nodue 364 · top 23 · longterm 38 · or ask Claude in plain words';
     const box = `<div class="cmd"><textarea id="cmd" class="grow" rows="1" placeholder="${ph}" aria-label="Prompt or command">${esc(draft.cmd)}</textarea><button class="btn primary" id="cmd-go" ${inChat && chat.busy ? 'disabled' : ''}>Send</button></div>`;
     if (inChat) return `<div class="composer">${chatAttach()}${box}</div>`;       // no row hints and no bulk bar here: there are no rows
@@ -600,9 +607,9 @@
       { key: 'today:week', title: 'Rest of the week', rows: by(x => dueDays(x) > 1 && dueDays(x) <= 7) }] };
   }
   function renderToday() {
-    const { open, groups } = todayGroups();
+    const { groups } = todayGroups();      // snoozed rows are not in these groups but are open: Timeline lists them
     return summaryHtml() + composer() + groups.map(group).join('') +
-      (!open.length ? noTasksHtml() : groups.some(g => g.rows.length) ? '' : '<div class="empty">Nothing is due today or this week. Every open task is on Timeline.</div>') +
+      (!openOnes().length ? noTasksHtml() : groups.some(g => g.rows.length) ? '' : '<div class="empty">Nothing is due today or this week. Every open task is on Timeline.</div>') +
       `<div class="note">Soft dates that slipped, new items, and fading backlog are not here. They wait in <b>Review</b> so this screen stays short.</div>`;
   }
   const RECENT_CAP = 30;
