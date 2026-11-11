@@ -738,3 +738,29 @@ label.pprop { cursor: pointer; }
 .pending .plist .chip { background: var(--surface); color: var(--fg); white-space: normal; }
 .pending .pact { display: flex; gap: 8px; }
 .hint.warn { color: var(--warn); }
+
+/* ---------- Find any task and the task picker (stage 6, frame 7) ---------- */
+.find { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px; margin-bottom: 14px; display: flex; flex-direction: column; gap: 10px; }
+.find input, .picker input { width: 100%; font: inherit; font-size: 15px; padding: 10px 12px; min-height: 44px; border: 1px solid var(--accent); border-radius: var(--radius); background: var(--surface); color: var(--fg); }
+.find .hits, .picker .hits { display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+.picker .hits:empty { display: none; }
+.find .hit { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; gap: 4px 10px; align-items: center; padding: 8px 10px; border-top: 1px solid var(--line); }
+.find .hit:first-child { border-top: 0; }
+.find .hit .code { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.find .hit .nm { min-width: 0; overflow-wrap: anywhere; }
+.find .hit.closed .nm { text-decoration: line-through; color: var(--muted); }
+.find .hit .chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.find .hit .acts { display: flex; gap: 6px; align-items: center; }
+.find .hit .outcome { grid-column: 2 / -1; font-size: 12px; color: var(--muted); }
+.find .hint { padding: 8px 10px; margin: 0; }
+.picker .hits button { display: flex; gap: 8px; align-items: center; text-align: left; font: inherit; background: none; border: 0; border-top: 1px solid var(--line); color: var(--fg); padding: 8px 10px; cursor: pointer; min-width: 0; }
+.picker .hits button:first-child { border-top: 0; }
+.picker .hits button:hover, .picker .hits button:focus-visible { background: var(--accent-soft); }
+.picker .hits .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.picker .hits .hint { padding: 8px 10px; margin: 0; }
+@media (max-width: 700px) {
+  .handbar #find-open { flex: 1; min-height: 44px; }
+  .find .hit { grid-template-columns: auto minmax(0, 1fr); }
+  .find .hit .chips, .find .hit .acts, .find .hit .outcome { grid-column: 1 / -1; }
+  .find .hit .acts .btn { min-height: 44px; }
+}

@@ -20,7 +20,8 @@
   // What is being typed, kept outside the DOM: every render() rebuilds the panel (a chat turn's status
   // line re-renders it every second), and a long prompt must survive that with its caret.
   const draft = { cmd: '', ask: '', askFor: null, pick: '', outcome: '', askToday: '', askTask: '', askTaskFor: null,
-                  newLine: '', newKey: newKey() };      // the New task line, and the key its next add carries (stage 6)
+                  newLine: '', newKey: newKey(),
+                  findQ: '', picks: {} };      // Find any task's box; the shared task picker's boxes by slot (stage 6)      // the New task line, and the key its next add carries (stage 6)
   let asking = null;        // {id, name} of the task whose outcome the toast asks (ripples (stage 5): the outcome question)
   try { draft.cmd = sessionStorage.getItem('factotum.cmd') || ''; sessionStorage.removeItem('factotum.cmd'); } catch (_) {}   // kept by reloadKeepingDraft
   const TOUCH = () => window.matchMedia('(hover: none)').matches;
@@ -42,7 +43,8 @@
              page: null, pageScroll: 0, pageMore: false, pageLater: false,      // the task page: its id, the list's scroll, a phone's More and Later open
              bulkMore: false,      // the phone's short bar shows its second line (back to false when nothing is selected)
              askTask: null,        // the opened task whose conversation shows (stage 6; one at a time)
-             newOpen: false };     // the New task line is open (stage 6; a desktop's list tabs)
+             newOpen: false,
+             findOpen: false };      // Find any task is open (stage 6)     // the New task line is open (stage 6; a desktop's list tabs)
   try { ui.tab = parseAddress().tab; } catch (_) {}
   try { const r = localStorage.getItem('factotum.rail'); if (r === '0' || r === '1') ui.railOpen = r === '1'; } catch (_) {}
   try { const s = JSON.parse(localStorage.getItem('factotum.staged') || '[]'); staged = new Map(s); } catch (_) {}
@@ -336,6 +338,7 @@
   async function load() {
     const was = sumBusy();
     data = await api('/api/tasks?status=open');
+    find.cache.clear(); if (find.done) find.done.clear();      // a search answered before this load may be out of date
     detailGen++; detailCache.forEach(d => { d.stale = true; });      // an opened task keeps what it shows until its new answer arrives
     try { pending = (await api('/api/proposals')).proposals; } catch (_) { pending = []; }
     try { summary = await api('/api/summary'); } catch (_) { summary = null; }
@@ -354,9 +357,9 @@
   // Focus in an empty draft-backed box does not count: its text lives in `draft` and render() puts the
   // focus and caret back, so a reload of the lists loses nothing (a box left focused and empty would
   // otherwise keep the lists stale on every return). render() uses the same list, through isDraftBox.
-  const DRAFT_BOXES = ['cmd', 'rv-ask', 'chat-pick', 'rv-note', 'today-ask', 'task-ask', 'new-line'];
+  const DRAFT_BOXES = ['cmd', 'rv-ask', 'chat-pick', 'rv-note', 'today-ask', 'task-ask', 'new-line', 'find-q', 'pick-link', 'pick-merge', 'pick-sheet'];
   function typingNow() {
-    if ([draft.cmd, draft.ask, draft.pick, draft.outcome, draft.askToday, draft.askTask, draft.newLine, ui.rvNote.text].some(s => (s || '').trim())) return true;
+    if ([draft.cmd, draft.ask, draft.pick, draft.outcome, draft.askToday, draft.askTask, draft.newLine, ui.findOpen ? draft.findQ : '', ...Object.values(draft.picks), ui.rvNote.text].some(s => (s || '').trim())) return true;
     if (ui.remOpen !== null || ui.dueOpen !== null || chat.busy) return true;
     const a = document.activeElement;
     return !!(a && a.matches('input, textarea, select') && a.closest('#panel') && !isDraftBox(a.id));
@@ -1326,10 +1329,12 @@
   function attachedIds() { return ui.sel.size ? [...ui.sel] : (ui.tab !== 'chat' && ui.focus ? [ui.focus] : []); }
   function grow(el) { el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight + 2, 260) + 'px'; }
   // Open tasks matching what is typed in Chat's "attach a task" box: a number, or every word of the name.
-  function pickMatches() {
-    const q = draft.pick.trim().toLowerCase(); if (!q) return [];
+  function pickMatches() { return matchOpen(draft.pick, ui.sel); }
+  // Open tasks matching a typed number or words, leaving out `exclude` (shared with the task picker, stage 6).
+  function matchOpen(text, exclude) {
+    const q = (text || '').trim().toLowerCase(); if (!q) return [];
     const num = /^(task[-\s]?)?\d+$/.test(q) ? q.replace(/\D/g, '') : null, words = q.split(/\s+/);
-    return openOnes().filter(x => !ui.sel.has(x.id) && (num ? String(x.id).startsWith(num) : words.every(w => (x.name + ' ' + (x.project || '')).toLowerCase().includes(w))))
+    return openOnes().filter(x => !exclude.has(x.id) && (num ? String(x.id).startsWith(num) : words.every(w => (x.name + ' ' + (x.project || '')).toLowerCase().includes(w))))
       .sort((a, b) => num ? (String(b.id) === num) - (String(a.id) === num) || a.id - b.id : (b.score || 0) - (a.score || 0)).slice(0, 8);     // the exact number first
   }
   function chatAttach() {
@@ -1355,7 +1360,7 @@
     const box = `<div class="cmd"><textarea id="cmd" class="grow" rows="1" placeholder="${ph}" aria-label="Prompt or command">${esc(draft.cmd)}</textarea><button class="btn primary" id="cmd-go" ${inChat && chat.busy ? 'disabled' : ''}>Send</button></div>`;
     if (inChat) return `<div class="composer">${chatAttach()}${box}</div>`;       // no row hints and no bulk bar here: there are no rows
     const phone = PHONE();      // a tap opens the task page there; the tick box selects
-    return `${handBarHtml()}${ui.newOpen && !phone ? newLineHtml() : ''}<div class="composer"><div class="attach">${ids.length ? 'Attached: ' + ids.map(id => `<span class="chip">Task-${id}</span>`).join('') : phone ? 'Nothing attached · tick a row to attach it' : 'Nothing attached · tap a row to attach it'}</div>
+    return `${handBarHtml()}${findHtml()}${ui.newOpen && !phone ? newLineHtml() : ''}<div class="composer"><div class="attach">${ids.length ? 'Attached: ' + ids.map(id => `<span class="chip">Task-${id}</span>`).join('') : phone ? 'Nothing attached · tick a row to attach it' : 'Nothing attached · tap a row to attach it'}</div>
       ${box}<div data-add-prev="cmd">${addPreviewHtml('cmd')}</div>
       <p class="hint keys">Tap a row to select it (the bulk bar appears) · <kbd>j</kbd><kbd>k</kbd> move · <kbd>d</kbd> done · <kbd>x</kbd> drop · <kbd>s</kbd> snooze · <kbd>t</kbd> top · <kbd>l</kbd> long-term · <kbd>e</kbd> details · double-click a row for details · <kbd>Esc</kbd> deselect</p>
       <p class="hint touch">${phone ? 'Tap a row to open it · tick the box to select it' : 'Tap a row to select it · double-tap or ▸ for details'}</p></div>
@@ -2433,6 +2438,106 @@
     document.getElementById('tray-discard-sel').onclick = () => discardStaged(sel());
   }
 
+  // ---------- by hand (stage 6): finding any task ----------
+  // GET /api/search over every status. Answers are cached per query until the next load(); a query is asked
+  // 250 ms after the last keystroke. Find any task (`/`, or the button) lists the rows; the task picker (pickerHtml)
+  // is the box other places use to choose a task, open ones first and closed ones when the place allows.
+  const find = { cache: new Map(), found: null, timer: null, want: '' };
+  function searchTasks(q) {
+    q = q.trim();
+    if (!find.cache.has(q)) {
+      const p = api('/api/search?q=' + encodeURIComponent(q)).catch(() => ({ results: [], more: false }));
+      find.cache.set(q, p);
+    }
+    return find.cache.get(q);
+  }
+  // Ask for q after a pause; the answer is kept (for the picker, by query; for the finder, as `found`) and the page redrawn.
+  function wantSearch(q, asFound) {
+    q = q.trim(); clearTimeout(find.timer);
+    if (!q) { if (asFound) find.found = null; return; }
+    find.timer = setTimeout(async () => {
+      const res = await searchTasks(q);
+      find.done = find.done || new Map(); find.done.set(q, res);
+      if (asFound) { if (q !== draft.findQ.trim()) return; find.found = { q, res }; }
+      render();
+    }, 250);
+  }
+  const monthDay = iso => iso ? new Date(String(iso).length > 10 ? iso : iso + 'T12:00:00').toLocaleDateString([], { month: 'short', day: 'numeric' }) : '';
+  function statusChip(r) {
+    if (r.status === 'open') { const d = fmtDue(r.due); return `<span class="chip">open</span>${d ? `<span class="chip">${esc(d.label)}</span>` : ''}`; }
+    if (r.merged_into) return `<span class="chip">merged into Task-${r.merged_into}</span>`;
+    const when = monthDay(r.completed_at);
+    return `<span class="chip">${esc(r.status)}${when ? ' ' + esc(when) : ''}</span>`;
+  }
+  function findHtml() {
+    if (!ui.findOpen || !LIST_TABS.includes(ui.tab)) return '';
+    const f = find.found, q = draft.findQ.trim();
+    let rows = '';
+    if (q && f && f.q === q) {
+      rows = f.res.results.map(r => {
+        const closed = r.status !== 'open', st = staged.get(r.id);
+        const reopen = !closed ? '' : st && st.op === 'reopen' ? '<span class="chip staged">reopen staged</span>' : `<button class="btn small" data-find-reopen="${r.id}">Reopen</button>`;
+        return `<div class="hit${closed ? ' closed' : ''}"><span class="code">Task-${r.id}</span><span class="nm">${esc(r.name)}</span><span class="chips">${statusChip(r)}</span>
+          <span class="acts"><button class="btn small" data-find-open="${r.id}">Open</button>${reopen}</span>
+          ${closed && r.outcome ? `<div class="outcome">Outcome: ${esc(r.outcome)}</div>` : ''}</div>`;
+      }).join('') || '<div class="hint">No task matches.</div>';
+      if (f.res.more) rows += '<div class="hint">More match; add a word.</div>';
+    }
+    return `<div class="find"><input id="find-q" placeholder="A task number, or words from its name, open or closed" autocomplete="off" aria-label="Find any task" value="${esc(draft.findQ)}">${rows ? `<div class="hits">${rows}</div>` : ''}</div>`;
+  }
+  function openFind() {
+    ui.findOpen = true;
+    if (ui.page !== null || !LIST_TABS.includes(ui.tab)) go(LIST_TABS.includes(ui.tab) ? ui.tab : 'today'); else render();
+    const el = document.getElementById('find-q'); if (el) { el.focus({ preventScroll: true }); el.setSelectionRange(el.value.length, el.value.length); }
+  }
+  function closeFind() { ui.findOpen = false; render(); }
+  function wireFind(panel) {
+    const open = document.getElementById('find-open');
+    if (open) open.onclick = () => { if (ui.findOpen) closeFind(); else openFind(); };
+    const fq = document.getElementById('find-q');
+    if (fq) {
+      fq.oninput = () => { draft.findQ = fq.value; wantSearch(fq.value, true); };
+      fq.addEventListener('keydown', e => { if (e.key === 'Escape') { e.preventDefault(); closeFind(); } e.stopPropagation(); });
+      if (draft.findQ.trim() && !(find.found && find.found.q === draft.findQ.trim())) wantSearch(draft.findQ, true);      // a return to the list with text typed
+    }
+    panel.querySelectorAll('[data-find-open]').forEach(b => b.onclick = () => {
+      const id = +b.dataset.findOpen, r = ((find.found || { res: { results: [] } }).res.results.find(x => x.id === id));
+      if (r && r.status !== 'open') openPage(id); else goTask(id);
+    });
+    panel.querySelectorAll('[data-find-reopen]').forEach(b => b.onclick = () => act(+b.dataset.findReopen, 'reopen'));
+    panel.querySelectorAll('input[id^="pick-"]').forEach(inp => {
+      const slot = inp.id.slice(5);
+      inp.oninput = e => { draft.picks[slot] = inp.value; if (pickOpts[slot] && pickOpts[slot].closed) wantSearch(inp.value, false); if (!e.isComposing) render(); };
+      inp.addEventListener('keydown', e => {
+        if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); const h = pickHits(slot)[0]; if (h) takePick(slot, h.id); }
+        e.stopPropagation();
+      });
+    });
+    panel.querySelectorAll('[data-picker]').forEach(b => b.onclick = () => takePick(b.dataset.picker, +b.dataset.hit));
+  }
+  // The shared task picker: a box and at most 8 hits, open tasks first and then (when `closed`) closed ones. The
+  // caller sets pickers[slot] = (id) => …, run on a hit or on Enter (the first hit).
+  const pickers = {}, pickOpts = {};
+  function pickHits(slot) {
+    const o = pickOpts[slot] || { exclude: new Set() }, q = (draft.picks[slot] || '').trim(); if (!q) return [];
+    const open = matchOpen(q, o.exclude).map(x => ({ id: x.id, name: x.name, status: 'open', due: x.due }));
+    const have = new Set(open.map(x => x.id)), out = open.slice();
+    if (o.closed) {
+      const res = find.done && find.done.get(q);
+      if (res) for (const r of res.results) if (r.status !== 'open' && !o.exclude.has(r.id) && !have.has(r.id)) out.push(r);
+    }
+    return out.slice(0, 8);
+  }
+  function takePick(slot, id) { draft.picks[slot] = ''; if (pickers[slot]) pickers[slot](id); }
+  function pickerHtml(slot, opts) {
+    pickOpts[slot] = opts;
+    const q = (draft.picks[slot] || '').trim();
+    if (q && opts.closed && !(find.done && find.done.has(q))) wantSearch(q, false);
+    const hits = pickHits(slot);
+    return `<div class="picker"><input id="pick-${slot}" value="${esc(draft.picks[slot] || '')}" placeholder="${esc(opts.placeholder)}" aria-label="${esc(opts.placeholder)}" autocomplete="off">
+      <div class="hits">${hits.map(x => `<button data-picker="${slot}" data-hit="${x.id}"><span class="code">Task-${x.id}</span> <span class="nm">${esc(x.name)}</span>${statusChip(x)}</button>`).join('') || (q ? `<div class="hint">No ${opts.closed ? '' : 'open '}task matches.</div>` : '')}</div></div>`;
+  }
+
   // ---------- by hand (stage 6): New task ----------
   // One line (design §12.7, frame 6): `n` or New task opens it on a desktop's list tabs; a preview says how the line
   // will be filed and what each word means; Enter makes the task at once (POST /api/add, one batch: Undo drops it).
@@ -2446,8 +2551,9 @@
   }
   const LIST_TABS = ['today', 'timeline', 'projects'];
   function handBarHtml() {
-    if (PHONE()) return '';      // a phone has the round button (Task 12)
-    return `<div class="handbar"><button class="btn small" id="new-open" aria-expanded="${ui.newOpen}">+ New task <kbd>n</kbd></button></div>`;
+    const find = '<button class="btn small" id="find-open" aria-expanded="' + ui.findOpen + '">Find any task <kbd>/</kbd></button>';
+    if (PHONE()) return `<div class="handbar">${find}</div>`;      // a phone has the round button for New task (Task 12)
+    return `<div class="handbar"><button class="btn small" id="new-open" aria-expanded="${ui.newOpen}">+ New task <kbd>n</kbd></button>${find}</div>`;
   }
   function newLineHtml() {
     return `<div class="newline"><label class="lbl" for="new-line">New task</label>
@@ -2731,6 +2837,7 @@
     if (ui.tab === 'chat' && chat.scroll) { chat.scroll = false; window.scrollTo({ top: document.documentElement.scrollHeight }); }
     wirePlaces(panel);
     wireNew(panel);
+    wireFind(panel);
     placeReviewBar();
     const po = document.getElementById('chat-pick-open'); if (po) po.onclick = () => { ui.pickOpen = !ui.pickOpen; draft.pick = ''; render(); const el = document.getElementById('chat-pick'); if (el) el.focus(); };
     const pk = document.getElementById('chat-pick');
@@ -2957,11 +3064,13 @@
     if (e.key === 'Escape') {   // Esc: deselect everything; in Chat the selection is what a prompt carries, so it only closes the task picker
       lastTap = { id: null, at: 0 };
       if (ui.page !== null) history.back();      // the task page closes like the phone's Back
+      else if (ui.findOpen && LIST_TABS.includes(ui.tab)) { ui.findOpen = false; render(); }
       else if (ui.tab === 'chat') { if (ui.pickOpen) { ui.pickOpen = false; render(); } }
       else if (ui.sel.size) { ui.sel.clear(); render(); }
       if (e.target.matches('input, select, textarea')) e.target.blur(); return;
     }
     if (e.target.matches('input, select, textarea')) return;
+    if (e.key === '/' && !e.ctrlKey && !e.metaKey && !e.altKey && ui.page === null && LIST_TABS.includes(ui.tab)) { e.preventDefault(); openFind(); return; }
     if (ui.page !== null) return;      // the task page covers the tab: no key acts on what is under it
     // Before the returns below: Review has its own keys, and an empty list has no rows (and says "Press n").
     if (e.key === 'n' && !e.ctrlKey && !e.metaKey && !e.altKey && !PHONE()) { e.preventDefault(); openNewLine(); return; }
