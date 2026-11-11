@@ -463,10 +463,10 @@ fade chips, next reminder, project, due, effort, staged-change chip; the chevron
 Claude buttons). Top rail with drag. Composer on every tab with attached chips; grammar commands
 stage instantly, anything else opens Chat (phase 5): the Chat tab is a thread picker, the messages,
 the live status of the run, and under each answer the proposals as checkboxes ("Stage selected"),
-"Create task" for a proposed row, and the drafts with "Open in Mailbird". On a desktop a tap on a row or its checkbox selects it (no modifier);
-a double-tap opens its details; Esc clears the selection. On a phone (stage 1, below) a tap opens
-the task and only the tick box selects. The bulk bar
-floats at the bottom of the screen with any selection (it never shifts the list, so the second
+"Create task" for a proposed row, and the drafts with "Open in Mailbird". On a desktop a tap on a
+row or its checkbox selects it (no modifier); a double-tap opens its details; Esc clears the
+selection. On a phone (stage 1, below) a tap opens the task and only the tick box selects. The bulk
+bar floats at the bottom of the screen with any selection (it never shifts the list, so the second
 tap of a double-tap lands on the same row) and offers Done, Drop, Snooze, a due date to set or
 clear, Top and Long-term. Due dates can also be set or cleared from a row's
 details and from a Review card, staged beside the decision rather than replacing it; "Remove due
@@ -503,11 +503,15 @@ shown read-only ("This task is done." / "This task is dropped."); an unknown id 
 not exist." One thing sits at the bottom of a phone screen: the tray, or the short bar while rows
 are selected (the tray hides and comes back when the selection is cleared). A redirect, 401 or 403
 from `/api` shows "Sign in again" (a restarting server or a dead network never does). When the
-app comes back to the front the lists are reloaded unless something is typed (`typingNow()`), and
+app comes back to the front the lists are reloaded unless something is typed (`typingNow()`: text
+in a box, an open reminder or due-date form, a chat turn running, or focus in a box whose text a
+redraw would lose; focus in an empty command, Review or picker box does not count), and
 a new build is noticed by `X-Factotum-Build` on every `/api` response against
 `<meta name="factotum-build">` (the first 12 hex digits of SHA-1 over the mtimes of `index.html`,
 `app.js`, `app.css` and `manifest.webmanifest`): the page reloads itself, or shows "Update ready"
-while something is typed.
+while something is typed or changes are staged in the tray. A `/t/<id>` entry the app put in the
+history is marked (`history.state.page`), so a reload or self-update on a phone task page adds no
+second `/` beneath it.
 
 Phone layout (2026-11-02): under 700 px a row is title first (code and name on one line, wrapping)
 with its chips on a second line and the chevron as a real tap target; the tab strip scrolls
