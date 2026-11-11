@@ -345,3 +345,72 @@ def test_the_review_nudge_opens_review_in_the_app(conn, cfg):
     n = rec.app[0]
     assert n["path"] == "/review" and n["tag"] == "review" and n["actions"] == [] and n["urgency"] == "normal" and n["ttl"] == 14400
     assert n["title"] == rec.ntfy[0]["title"] and n["body"] == rec.ntfy[0]["body"]
+
+
+# --- Task 5: the device routes
+
+from fastapi.testclient import TestClient  # noqa: E402
+from factotum.api import create_app  # noqa: E402
+
+
+def _client(cfg, tmp_path):
+    app = create_app(cfg, db_path=str(tmp_path / "api.db"))
+    return app, TestClient(app)
+
+
+def _sub_body(endpoint="https://push.example/me", origin="https://f.example"):
+    ua = ec.generate_private_key(ec.SECP256R1())
+    return {"endpoint": endpoint, "keys": {"p256dh": W.b64u(W.public_bytes(ua)), "auth": W.b64u(os.urandom(16))},
+            "label": "Chrome on Linux", "origin": origin}, ua
+
+
+def test_the_page_gets_the_public_key_and_never_the_private_one(cfg, tmp_path):
+    app, c = _client(cfg, tmp_path)
+    r = c.get("/api/push"); j = r.json()
+    assert r.status_code == 200 and j["error"] is None and j["provider"] == "ntfy" and j["devices"] == []
+    secret = json.loads((tmp_path / "push-keys.json").read_text())["private"]
+    assert len(W.unb64u(j["public_key"])) == 65 and c.get("/api/push").json()["public_key"] == j["public_key"]
+    assert secret not in r.text and secret not in c.get("/api/settings").text and "push-keys" not in c.get("/api/settings").text
+
+
+def test_two_devices_are_two_rows_and_unsubscribe_removes_only_one(cfg, tmp_path):
+    app, c = _client(cfg, tmp_path)
+    c.get("/api/push")
+    b1, _ = _sub_body("https://push.example/phone"); b2, _ = _sub_body("https://push.example/desk")
+    assert c.post("/api/push/subscribe", json=b1).status_code == 200
+    j = c.post("/api/push/subscribe", json=b2).json()
+    assert [d["endpoint"] for d in j["devices"]] == ["https://push.example/phone", "https://push.example/desk"]
+    assert all("p256dh" not in d and "auth" not in d for d in j["devices"])
+    j = c.post("/api/push/unsubscribe", json={"endpoint": "https://push.example/phone"}).json()
+    assert [d["endpoint"] for d in j["devices"]] == ["https://push.example/desk"]
+    j = c.post("/api/push/unsubscribe", json={"id": j["devices"][0]["id"]}).json(); assert j["devices"] == []
+    assert c.post("/api/push/unsubscribe", json={}).status_code == 400
+
+
+def test_subscribe_refuses_what_is_not_a_device(cfg, tmp_path):
+    app, c = _client(cfg, tmp_path)
+    b, _ = _sub_body("http://push.example/x")
+    r = c.post("/api/push/subscribe", json=b)
+    assert r.status_code == 400 and r.json()["detail"] == "not a push service address"
+    b, _ = _sub_body(); b["keys"] = {}
+    assert c.post("/api/push/subscribe", json=b).status_code == 400
+    assert c.post("/api/push/subscribe", content=json.dumps(_sub_body()[0])).status_code == 415      # JSON only, as every /api write
+    (tmp_path / "push-keys.json").write_text("garbage")
+    r = c.post("/api/push/subscribe", json=_sub_body()[0])
+    assert r.status_code == 409 and "unreadable" in r.json()["detail"]
+    j = c.get("/api/push").json(); assert j["public_key"] is None and "unreadable" in j["error"]
+
+
+def test_send_a_test_to_this_device(cfg, tmp_path):
+    app, c = _client(cfg, tmp_path)
+    c.get("/api/push"); b, ua = _sub_body(); c.post("/api/push/subscribe", json=b)
+    got = []
+    app.state.push_transport = httpx.MockTransport(lambda req: (got.append(req), httpx.Response(201))[1])
+    j = c.post("/api/push/test", json={"endpoint": b["endpoint"]}).json()
+    assert j["ok"] is True and len(got) == 1
+    assert json.loads(W.decrypt(got[0].content, ua, W.unb64u(b["keys"]["auth"])))["notification"]["navigate"] == "https://f.example/settings"
+    app.state.push_transport = httpx.MockTransport(lambda req: httpx.Response(410))
+    j = c.post("/api/push/test", json={"endpoint": b["endpoint"]}).json()
+    assert j["ok"] is False and j["removed"] is True and j["error"] == "the push service no longer knows this device (410)"
+    assert c.get("/api/push").json()["devices"] == []
+    assert c.post("/api/push/test", json={"endpoint": b["endpoint"]}).status_code == 404
