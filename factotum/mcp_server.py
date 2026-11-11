@@ -26,7 +26,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from . import config as C, scoring
+from . import config as C, relations
 from .db import rows, one
 
 PROTOCOL = "2025-06-18"
@@ -246,12 +246,13 @@ def tasks_query(ctx: Context, args: dict) -> dict:
         where.append("(LOWER(name) LIKE ? OR LOWER(COALESCE(context, '')) LIKE ? OR LOWER(COALESCE(counterpart, '')) LIKE ?)"); params += [q, q, q]
     limit = _int(args, "limit", 40, 1, ROW_CAP)
     ts = rows(ctx.conn, f"SELECT * FROM tasks{' WHERE ' + ' AND '.join(where) if where else ''} ORDER BY id DESC LIMIT 400", tuple(params))
+    relations.scored(ctx.conn, ts, ctx.today, ctx.cfg)          # reads only: this connection is query_only
     out = []
     for t in ts:
         row = {k: t.get(k) for k in TASK_COLS}
         row["created_at"] = (t.get("created_at") or "")[:10]
         if t.get("status") == "open":
-            row["score"], _, _ = scoring.score(t, ctx.today, ctx.cfg)
+            row["score"] = t["score"]
         out.append(row)
     out.sort(key=lambda r: (0 if r.get("top_rank") else 1, r.get("top_rank") or 0, -(r.get("score") or 0), -r["id"]))
     return {"tasks": out[:limit], "total": len(ts)}
@@ -267,8 +268,8 @@ def task_get(ctx: Context, args: dict) -> dict:
     if not t:
         raise ToolError(f"no Task-{tid}")
     t["context"] = _cut(t.get("context"), 1500)
-    if t.get("status") == "open":
-        t["score"], t["priority"], t["score_reasons"] = scoring.score(t, ctx.today, ctx.cfg)
+    relations.scored(ctx.conn, [t], ctx.today, ctx.cfg)
+    t.pop("rel")                                                 # Task 14 shows the links as `linked`
     links = rows(ctx.conn, "SELECT kind, ref, label, account, created_at FROM links WHERE task_id = ? ORDER BY id DESC LIMIT 20", (tid,))
     rems = rows(ctx.conn, "SELECT id, fire_at, label, repeat, status FROM reminders WHERE task_id = ? AND status IN ('pending', 'snoozed') ORDER BY fire_at LIMIT 10", (tid,))
     ch = rows(ctx.conn, "SELECT c.field, c.old, c.new, b.applied_at, b.source FROM changes c JOIN batches b ON b.id = c.batch_id WHERE c.task_id = ? ORDER BY c.id DESC LIMIT 10", (tid,))

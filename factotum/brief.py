@@ -18,7 +18,7 @@ from datetime import date, datetime, timedelta
 from email.message import EmailMessage
 from html import escape
 
-from . import config as C, lifecycle, scoring
+from . import config as C, lifecycle, relations
 from .dates import parse_date
 from .db import rows
 
@@ -55,9 +55,7 @@ def _fmt_due(t: dict, today: date) -> str:
 
 
 def build(conn: sqlite3.Connection, cfg: dict, today: date, events: list[dict] | None = None, calendar_note: str | None = None, planner: dict | None = None) -> dict:
-    open_tasks = rows(conn, "SELECT * FROM tasks WHERE status = 'open'")
-    for t in open_tasks:
-        t["score"], t["priority"], _ = scoring.score(t, today, cfg)
+    open_tasks = relations.scored(conn, rows(conn, "SELECT * FROM tasks WHERE status = 'open'"), today, cfg)
     days = lambda t: (parse_date(t["due"]) - today).days if t.get("due") and parse_date(t["due"]) else None  # noqa: E731
     by_score = lambda ts: sorted(ts, key=lambda t: (-(t["score"] or 0), t["id"]))  # noqa: E731
     top = sorted((t for t in open_tasks if t.get("top_rank")), key=lambda t: t["top_rank"])

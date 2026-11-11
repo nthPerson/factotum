@@ -26,7 +26,7 @@ import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from . import batches, config as C, lifecycle, scoring
+from . import batches, config as C, lifecycle, relations
 from .db import add_link, add_mention, get_settings, log_run, now_iso, rows, upsert_task
 from .sync_file import _clean_task_fields
 
@@ -43,9 +43,7 @@ NON_PROVING = {"slack_mention"}       # anyone in a workspace can write "Task-42
 def bundle(conn: sqlite3.Connection, cfg: dict, today: date, events: list[dict] | None = None, now: datetime | None = None) -> dict:
     from . import reminders, summary
     from .mail_sweep import review_flags
-    open_tasks = rows(conn, "SELECT * FROM tasks WHERE status = 'open'")
-    for t in open_tasks:
-        t["score"], t["priority"], _ = scoring.score(t, today, cfg)
+    open_tasks = relations.scored(conn, rows(conn, "SELECT * FROM tasks WHERE status = 'open'"), today, cfg)
     ordered = sorted(open_tasks, key=lambda t: (0 if t.get("top_rank") else 1, t.get("top_rank") or 0, -(t["score"] or 0), t["id"]))
     cands = rows(conn, "SELECT e.*, t.name AS task_name FROM evidence e LEFT JOIN tasks t ON t.id = e.task_id WHERE e.judged_at IS NULL AND e.kind NOT IN ('proposal', 'mail_new', 'link_suggestion') ORDER BY e.id DESC LIMIT ?", (CAND_CAP,))[::-1]
     anns = get_settings(conn).get("state.canvas.announcements") or []

@@ -6,7 +6,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import date
 
+from . import scoring
 from .db import now_iso
 
 KINDS = ("part_of", "waits_on", "same_as")
@@ -17,6 +19,7 @@ WHY_MAX = 160
 WORDS = {"part_of": "part of", "waits_on": "waits on", "same_as": "same as"}
 CYCLE_DEPTH = 50
 SURVIVOR_HOPS = 5
+NEEDED_BY_DEPTH = 5                           # `needed_by` follows `frees` edges this many hops (design §7.1)
 # Suggested links (design §5.4): `evidence` rows, never `relations` rows. `any` is a pair Python found
 # without knowing the kind; `same_as` and `any` name an unordered pair, the others a directed one.
 SUGGEST_KINDS = ("same_as", "part_of", "waits_on", "any")
@@ -231,3 +234,115 @@ def change_value(rel: dict, task_id: int, other_name: str | None) -> dict:
     out = task_id == rel["src"]
     return {"relation_id": rel["id"], "kind": rel["kind"], "dir": "out" if out else "in",
             "other": rel["dst"] if out else rel["src"], "other_name": other_name, "why": rel["why"]}
+
+
+# --- derived facts (design §7.1): one step in front of scoring and the lifecycle -------------------
+
+def _cause_from(cause_json: str | None) -> int | None:
+    """The first id of a batch cause's `from`, or None."""
+    try:
+        cause = json.loads(cause_json or "")
+    except (TypeError, ValueError):
+        return None
+    src = cause.get("from") if isinstance(cause, dict) else None
+    first = src[0] if isinstance(src, list) and src else None
+    return first if type(first) is int else None
+
+
+def annotate(db: Db, tasks: list[dict]) -> list[dict]:
+    """Put every neighbour fact under `t["rel"]` (the plan's "task["rel"]" section), in place; returns
+    `tasks`. A dict needs only `id`. Reads the active links once, the rows they reach once, the ripple
+    batches once and the pending suggestions once; the rest is Python. Never writes (the MCP server's
+    connection is query_only)."""
+    if not tasks:
+        return tasks
+    ids = sorted({int(t["id"]) for t in tasks})
+    rels = [dict(r) for r in db.execute("SELECT id, src, dst, kind, created_at FROM relations WHERE removed_at IS NULL ORDER BY id")]
+    info = {r["id"]: dict(r) for r in db.execute(
+        "SELECT id, status, due, hard, completed_at, last_mention_at FROM tasks WHERE id IN "
+        "(SELECT src FROM relations WHERE removed_at IS NULL UNION SELECT dst FROM relations WHERE removed_at IS NULL)")}
+    touching: dict[int, list[dict]] = {}
+    waits: dict[int, list[int]] = {}           # x waits on these
+    frees: dict[int, list[int]] = {}           # these wait on x
+    steps: dict[int, list[int]] = {}
+    goal: dict[int, int] = {}
+    merged: dict[int, str] = {}
+    for r in rels:
+        s, d = r["src"], r["dst"]
+        touching.setdefault(s, []).append(r)
+        touching.setdefault(d, []).append(r)
+        if r["kind"] == "waits_on":
+            waits.setdefault(s, []).append(d)
+            frees.setdefault(d, []).append(s)
+        elif r["kind"] == "part_of":
+            steps.setdefault(d, []).append(s)
+            goal.setdefault(s, d)
+        elif r["kind"] == "same_as":
+            merged[d] = max(merged.get(d) or "", r["created_at"] or "")
+    is_open = lambda x: (info.get(x) or {}).get("status") == "open"                                 # noqa: E731
+    hard_due = lambda x: str(info[x]["due"])[:10] if is_open(x) and info[x].get("hard") and info[x].get("due") else None  # noqa: E731
+    activity = lambda x: tuple(str((info.get(x) or {}).get(k) or "")[:10] for k in ("last_mention_at", "completed_at"))  # noqa: E731  (a step's mention, close)
+
+    def needed_by(tid: int) -> tuple | None:
+        """(date, id, via): the earliest hard due date among the open tasks `tid` frees, breadth-first
+        through open tasks up to NEEDED_BY_DEPTH hops, and its goal's; ties to the lower id."""
+        cands, seen, frontier = [], {tid}, [tid]
+        for hop in range(1, NEEDED_BY_DEPTH + 1):
+            nxt = []
+            for x in frontier:
+                for y in frees.get(x, ()):
+                    if y in seen or not is_open(y):
+                        continue
+                    seen.add(y)
+                    nxt.append(y)
+                    if hard_due(y):
+                        cands.append((hard_due(y), y, "frees" if hop == 1 else "chain"))
+            frontier = nxt
+        g = goal.get(tid)
+        if g is not None and hard_due(g):
+            cands.append((hard_due(g), g, "goal"))
+        return min(cands) if cands else None
+
+    changed: dict[int, dict] = {}
+    for r in db.execute(
+            "SELECT c.task_id, b.id, b.applied_at, b.cause_json FROM changes c JOIN batches b ON b.id = c.batch_id JOIN tasks t ON t.id = c.task_id "
+            "WHERE b.cause_json IS NOT NULL AND b.undone_at IS NULL AND c.task_id IN (SELECT value FROM json_each(?)) "
+            "AND (t.neighbours_seen_at IS NULL OR b.applied_at > t.neighbours_seen_at) ORDER BY b.id", (json.dumps(ids),)):
+        changed[r["task_id"]] = {"by": _cause_from(r["cause_json"]), "at": r["applied_at"], "batch_id": r["id"]}
+    sugg = pending_suggestions(db, set(ids))
+
+    for t in tasks:
+        tid = int(t["id"])
+        closed = [{"id": x, "status": info[x]["status"], "at": info[x]["completed_at"]}
+                  for x in sorted(set(waits.get(tid, ()))) if x in info and not is_open(x)]
+        rel = {"links": [{"id": r["id"], "kind": r["kind"], "dir": "out" if r["src"] == tid else "in", "other": r["dst"] if r["src"] == tid else r["src"]}
+                         for r in touching.get(tid, ())],
+               "waits_on_open": sorted({x for x in waits.get(tid, ()) if is_open(x)}), "waits_on_closed": closed,
+               "frees_open": sorted({x for x in frees.get(tid, ()) if is_open(x)}),
+               "goal_id": goal.get(tid), "steps_open": sum(1 for x in steps.get(tid, ()) if is_open(x)), "steps_total": len(steps.get(tid, ())),
+               "needed_by": None, "needed_by_id": None, "needed_by_via": None, "freed_at": None, "freed_by": None,
+               "neighbour_activity_at": max((d for x in steps.get(tid, ()) for d in activity(x) if d), default=None),
+               "merged_at": merged.get(tid) or None, "changed": changed.get(tid), "suggestions": sugg.get(tid, [])}
+        nb = needed_by(tid)
+        if nb:
+            rel["needed_by"], rel["needed_by_id"], rel["needed_by_via"] = nb
+        if closed and not rel["waits_on_open"]:
+            last = max(closed, key=lambda c: (c["at"] or "", c["id"]))
+            rel["freed_at"], rel["freed_by"] = last["at"], last["id"]
+        t["rel"] = rel
+    return tasks
+
+
+def scored(db: Db, tasks: list[dict], today: date, cfg: dict, *, all_rows: bool = False) -> list[dict]:
+    """`annotate`, then score every open row (every row with `all_rows`) in place; returns `tasks`.
+    Every reader that ranks goes through here, so no surface scores without links (design §7.1)."""
+    annotate(db, tasks)
+    for t in tasks:
+        if all_rows or t.get("status") == "open":
+            t["score"], t["priority"], t["score_reasons"] = scoring.score(t, today, cfg)
+    return tasks
+
+
+def score_one(task: dict, today: date, cfg: dict) -> tuple[int, str, list[str]]:
+    """`scoring.score` for one row its caller already annotated (the Notion mirror's `properties`)."""
+    return scoring.score(task, today, cfg)

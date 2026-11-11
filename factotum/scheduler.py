@@ -27,7 +27,7 @@ import time
 import traceback
 from datetime import date, datetime, timedelta
 
-from . import batches, config as C, lifecycle, notify, reminders
+from . import batches, config as C, lifecycle, notify, relations, reminders
 from .db import get_settings, log_run, rows, set_setting
 
 RETRY_AFTER = timedelta(hours=1)
@@ -135,7 +135,8 @@ class Scheduler:
     # ---- the jobs --------------------------------------------------------------------------
 
     def _open(self) -> list[dict]:
-        return rows(self.conn, "SELECT * FROM tasks WHERE status = 'open'")
+        """Annotated: the nightly expire and the review push read the link facts (design §7.1)."""
+        return relations.annotate(self.conn, rows(self.conn, "SELECT * FROM tasks WHERE status = 'open'"))
 
     def _expire(self, ecfg: dict, today: date) -> str | None:
         due = lifecycle.expire(self._open(), today, ecfg)

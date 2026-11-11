@@ -38,7 +38,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
-from . import batches, commands, config as C, lifecycle, oauth, reminders, scoring, summary
+from . import batches, commands, config as C, lifecycle, oauth, relations, reminders, summary
 from .db import connect, get_settings, get_task, init_db, rows, seed_accounts, set_setting
 from .dates import parse_date
 
@@ -192,17 +192,18 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
     app.add_middleware(JsonOnlyMutations)
     app.add_middleware(BuildStamp)
 
-    def decorate(t: dict, today: date, ecfg: dict) -> dict:
-        s, pr, reasons = scoring.score(t, today, ecfg)
-        t["score"], t["priority"], t["score_reasons"] = s, pr, reasons
-        t["tier"] = lifecycle.tier(t)
-        t["longterm_effective"] = lifecycle.is_long_term(t, ecfg)
-        fa = lifecycle.fade_at(t, ecfg)
-        lc = lifecycle.last_call_at(t, ecfg)
-        t["fade_at"] = fa.isoformat() if fa else None
-        t["last_call_at"] = lc.isoformat() if lc else None
-        t["days_until_due"] = (parse_date(t["due"]) - today).days if t.get("due") and parse_date(t["due"]) else None
-        return t
+    def decorate_all(ts: list[dict], today: date, ecfg: dict) -> list[dict]:
+        """Annotated and scored (relations.scored, every status), then today's lifecycle keys."""
+        relations.scored(conn, ts, today, ecfg, all_rows=True)
+        for t in ts:
+            t["tier"] = lifecycle.tier(t)
+            t["longterm_effective"] = lifecycle.is_long_term(t, ecfg)
+            fa = lifecycle.fade_at(t, ecfg)
+            lc = lifecycle.last_call_at(t, ecfg)
+            t["fade_at"] = fa.isoformat() if fa else None
+            t["last_call_at"] = lc.isoformat() if lc else None
+            t["days_until_due"] = (parse_date(t["due"]) - today).days if t.get("due") and parse_date(t["due"]) else None
+        return ts
 
     @app.get("/api/tasks")
     def list_tasks(status: str = "open", project: str | None = None):
@@ -216,7 +217,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         if project:
             sql += (" AND" if params else " WHERE") + " project = ?"
             params += (project,)
-        out = [decorate(t, today, ecfg) for t in rows(conn, sql + " ORDER BY COALESCE(due, '9999'), id", params)]
+        out = decorate_all(rows(conn, sql + " ORDER BY COALESCE(due, '9999'), id", params), today, ecfg)
         links = rows(conn, "SELECT task_id, kind, ref, label, account FROM links")
         rem = rows(conn, "SELECT task_id, id, fire_at, label, repeat, status FROM reminders WHERE status IN ('pending','snoozed')")
         by_l: dict[int, list] = {}
@@ -226,6 +227,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         for r in rem:
             by_r.setdefault(r["task_id"], []).append(r)
         for t in out:
+            t.pop("rel", None)                                   # the payload gains a compact rel in Task 12
             t["links"] = by_l.get(t["id"], [])
             t["reminders"] = by_r.get(t["id"], [])
         return {"today": today.isoformat(), "tasks": out, "projects": C.project_names(ecfg),
@@ -236,7 +238,8 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         t = get_task(conn, task_id)
         if not t:
             raise HTTPException(404)
-        decorate(t, date.today(), eff_cfg())
+        decorate_all([t], date.today(), eff_cfg())
+        t.pop("rel", None)                                       # the payload gains rel in Task 13
         t["links"] = rows(conn, "SELECT * FROM links WHERE task_id = ?", (task_id,))
         t["reminders"] = rows(conn, "SELECT * FROM reminders WHERE task_id = ?", (task_id,))
         t["mentions_log"] = rows(conn, "SELECT * FROM mentions WHERE task_id = ? ORDER BY at DESC LIMIT 20", (task_id,))
@@ -298,10 +301,12 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         st = get_settings(conn)
         last = parse_date(st.get("state.last_review_at"))
         skip = {int(x) for x in (exclude or "").split(",") if x.strip().lstrip("-").isdigit()}
-        open_tasks = [decorate(t, today, ecfg) for t in rows(conn, "SELECT * FROM tasks WHERE status = 'open'") if t["id"] not in skip]
+        open_tasks = decorate_all([t for t in rows(conn, "SELECT * FROM tasks WHERE status = 'open'") if t["id"] not in skip], today, ecfg)
         from .mail_sweep import review_flags
         flags = review_flags(conn)
         full = lifecycle.build_review_queue(open_tasks, today, ecfg, last, flags_by_id=flags, cap=10**9)
+        for t in open_tasks:
+            t.pop("rel", None)                                   # the payload gains a compact rel in Task 12
         pending = rows(conn, "SELECT id, task_id, kind, ref, account, label, excerpt, at FROM evidence WHERE judged_at IS NULL ORDER BY id")
         by_task: dict[int, list] = {}
         for e in pending:

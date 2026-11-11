@@ -28,7 +28,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from . import config as C, scoring
+from . import config as C, relations
 from .db import rows
 
 NOTION = "https://api.notion.com/v1"
@@ -153,7 +153,7 @@ def properties(cfg: dict, t: dict, sch: dict[str, str], notes: list[str], today:
     pm = props_map(cfg)
     _TZ[:] = [ZoneInfo(str(C.get(cfg, "owner.timezone", "UTC")))]
     smap = dict(DEFAULT_STATUS_MAP, **(C.get(cfg, "sinks.notion_tasks_mirror.status_map", {}) or {}))
-    score, priority, _ = scoring.score(t, today, cfg) if t.get("status") == "open" else (t.get("score"), t.get("priority"), [])
+    score, priority, _ = relations.score_one(t, today, cfg) if t.get("status") == "open" else (t.get("score"), t.get("priority"), [])   # `sweep` annotated t
     values = {
         "title": t.get("name"), "status": smap.get(t.get("status"), t.get("status")), "project": t.get("project"), "area": t.get("area"),
         "due": t.get("due"), "hard": t.get("hard"), "effort": t.get("effort"), "source": t.get("source"), "source_key": t.get("source_key"),
@@ -197,7 +197,7 @@ def sweep(conn: sqlite3.Connection, cfg: dict, *, all_rows: bool = False, dry_ru
     pend = _pending(conn, all_rows, ids)
     if dry_run:
         return {"created": 0, "updated": 0, "failed": [], "pending": len(pend), "dry_run": True}
-    todo = pend[:cap]
+    todo = relations.annotate(conn, pend[:cap])
     if not todo:
         return {"created": 0, "updated": 0, "failed": [], "pending": 0}
     sch = schema(cfg, transport=transport)

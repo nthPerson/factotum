@@ -24,7 +24,7 @@ import time
 from datetime import date, datetime
 from pathlib import Path
 
-from . import batches, config as C, mcp_server, scoring
+from . import batches, config as C, mcp_server, relations
 from .claude import runner as R
 from .db import add_link, add_mention, get_task, log_run, now_iso, one, rows, upsert_task
 from .sync_file import _clean_task_fields
@@ -83,14 +83,13 @@ def mcp_servers(cfg: dict, run_dir: Path | str) -> dict:
 
 def attached_rows(conn: sqlite3.Connection, cfg: dict, ids: list[int], today: date) -> list[dict]:
     out = []
-    for tid in ids:
-        t = get_task(conn, tid)
-        if not t:
-            continue
+    ts = relations.scored(conn, [t for t in (get_task(conn, tid) for tid in ids) if t], today, cfg)
+    for t in ts:
+        tid = t["id"]
         row = {"task": f"Task-{tid}", "id": tid, **{k: t.get(k) for k in ("name", "project", "status", "due", "hard", "effort", "counterpart", "waiting_on", "why_now", "top_rank", "longterm", "source")},
                "context": (t.get("context") or "")[:1500] or None, "created_at": (t.get("created_at") or "")[:10]}
         if t.get("status") == "open":
-            row["score"], _, _ = scoring.score(t, today, cfg)
+            row["score"] = t["score"]
         row["links"] = rows(conn, "SELECT kind, ref, label, account FROM links WHERE task_id = ? ORDER BY id DESC LIMIT 10", (tid,))
         row["reminders"] = rows(conn, "SELECT fire_at, label, repeat FROM reminders WHERE task_id = ? AND status IN ('pending', 'snoozed') ORDER BY fire_at LIMIT 5", (tid,))
         out.append(row)

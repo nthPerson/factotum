@@ -20,7 +20,7 @@ import json
 import sys
 from datetime import date
 
-from . import batches, config as C, lifecycle, scoring
+from . import batches, config as C, lifecycle, relations
 from .db import connect, get_settings, init_db, rows
 
 
@@ -372,18 +372,17 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {e['start']:<16} {e['summary'] or '(no title)'}{'  · accepted' if e['self_status'] == 'accepted' else ''}")
         print(f"{len(evs)} events in the next 7 days")
     elif a.cmd == "score":
-        for t in rows(conn, "SELECT * FROM tasks WHERE status = 'open' ORDER BY COALESCE(due,'9999'), id"):
-            s, pr, why = scoring.score(t, today, ecfg)
-            print(f"{s:3d} {pr} Task-{t['id']:<4} {(t['project'] or '-')[:14]:<14} {t['name'][:60]:<60} {'; '.join(why)}")
+        for t in relations.scored(conn, rows(conn, "SELECT * FROM tasks WHERE status = 'open' ORDER BY COALESCE(due,'9999'), id"), today, ecfg):
+            print(f"{t['score']:3d} {t['priority']} Task-{t['id']:<4} {(t['project'] or '-')[:14]:<14} {t['name'][:60]:<60} {'; '.join(t['score_reasons'])}")
     elif a.cmd == "review":
         last = get_settings(conn).get("state.last_review_at")
-        q = lifecycle.build_review_queue(rows(conn, "SELECT * FROM tasks WHERE status = 'open'"), today, ecfg, None if not last else date.fromisoformat(last))
+        q = lifecycle.build_review_queue(relations.annotate(conn, rows(conn, "SELECT * FROM tasks WHERE status = 'open'")), today, ecfg, None if not last else date.fromisoformat(last))
         for i in q:
             t = i["task"]
             print(f"{i['primary']:16s} Task-{t['id']:<4} {t['name'][:70]}")
         print(f"{len(q)} items")
     elif a.cmd == "expire":
-        due = lifecycle.expire(rows(conn, "SELECT * FROM tasks WHERE status = 'open'"), today, ecfg)
+        due = lifecycle.expire(relations.annotate(conn, rows(conn, "SELECT * FROM tasks WHERE status = 'open'")), today, ecfg)
         for tid, st, why in due:
             print(f"{st:6s} Task-{tid}: {why}")
         if a.apply and due:
