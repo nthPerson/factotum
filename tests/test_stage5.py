@@ -468,3 +468,54 @@ def test_hanging_on_counts_open_tasks_that_wait_on_it_and_its_open_goal(conn):
     assert reminders.hanging_on(conn, 1) == 3
     batches.apply(conn, [{"op": "done", "task_id": 3}, {"op": "drop", "task_id": 4}], "ui", TODAY)
     assert reminders.hanging_on(conn, 1) == 1
+
+
+# --- Task 12: the Review card says what a ripple did; only a ripple writes as one; Review loads safely
+def test_a_client_batch_may_not_say_it_is_a_ripple(cfg, tmp_path):
+    client = TestClient(create_app(cfg, db_path=str(tmp_path / "a.db")))
+    c = client.app.state.conn
+    mk(c, 1); mk(c, 2); link(c, 2, 1, "waits_on")
+    r = client.post("/api/batches/apply", json={"source": "ripple", "changes": [{"op": "set", "task_id": 2, "fields": {"context": "x"}}]})
+    assert r.status_code == 400 and "ripple" in r.json()["detail"]
+    assert get_task(c, 2)["context"] != "x" and c.execute("SELECT COUNT(*) FROM batches WHERE source = 'ripple'").fetchone()[0] == 0
+
+
+def test_a_suggestion_card_says_who_made_it(cfg, tmp_path):
+    client = TestClient(create_app(cfg, db_path=str(tmp_path / "a.db")))
+    c = client.app.state.conn
+    for account, name in (("ripple", "Book the bench"), (None, "Order the reagent")):
+        c.execute("INSERT INTO evidence (task_id, kind, ref, account, label, excerpt, at) VALUES (NULL, 'proposal', ?, ?, ?, 'r', ?)",
+                  (json.dumps({"task_id": None, "op": "create", "fields": {"name": name}}), account, f"create: {name}", now_iso()))
+    c.commit()
+    by = {s["label"]: s["by"] for s in client.get("/api/review").json()["suggestions"]}
+    assert by == {"create: Book the bench": "ripple", "create: Order the reagent": None}
+
+
+def test_overlapping_review_loads_take_turns_and_all_answer(cfg, tmp_path, monkeypatch):
+    """One page load once sent several GET /api/review at once; each stamps and commits on the shared
+    connection, and two overlapping answered 500 ("cannot commit - no transaction is active")."""
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+    from factotum import suggestions
+    client = TestClient(create_app(cfg, db_path=str(tmp_path / "a.db")))
+    c = client.app.state.conn
+    for i in range(1, 6):
+        mk(c, i)
+    inside, most, guard = [0], [0], threading.Lock()
+    real = suggestions.session
+
+    def slow(*a, **kw):                      # the route's first write: hold it open long enough to overlap
+        with guard:
+            inside[0] += 1
+            most[0] = max(most[0], inside[0])
+        try:
+            time.sleep(0.05)
+            return real(*a, **kw)
+        finally:
+            with guard:
+                inside[0] -= 1
+    monkeypatch.setattr(suggestions, "session", slow)
+    with ThreadPoolExecutor(6) as ex:
+        codes = list(ex.map(lambda _: client.get("/api/review").status_code, range(6)))
+    assert codes == [200] * 6 and most[0] == 1

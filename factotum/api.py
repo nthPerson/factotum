@@ -404,6 +404,8 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
 
     @app.post("/api/batches/apply")
     def apply_batch(body: ApplyBody):
+        if body.source == ripple.RUN_KIND:          # only ripple.apply writes as a ripple: a client's would never queue one, and History would call it a ripple
+            raise HTTPException(400, "source 'ripple' is written only by a ripple run")
         changes = [{k: v for k, v in c.items() if k not in ("source_key", "created_source")} for c in body.changes]   # the page never chooses either
         try:
             with chat._CREATE_LOCK:                  # a chat create staged here and its Create button never make two
@@ -460,11 +462,19 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         and the ripple batches that landed after batch `after` (the page polls this after an Apply)."""
         return ripple.status(conn, eff_cfg(), scheduler=getattr(app.state, "scheduler", None) is not None, after=after)
 
+    review_lock = threading.Lock()
+
     @app.get("/api/review")
     def review(exclude: str | None = None):
         """One page of the review queue. `exclude` is a comma-separated list of task ids the client
         has already decided on (staged in the tray, not yet applied), so the next page skips them.
-        `total` is the whole eligible set after exclusion; `items` is the first `cap` of it."""
+        `total` is the whole eligible set after exclusion; `items` is the first `cap` of it.
+        Two at once take turns: each writes (the day's suggestions, the offered stamp) and commits on
+        the shared connection, and two commits interleaved there answered 500."""
+        with review_lock:
+            return _review(exclude)
+
+    def _review(exclude: str | None):
         today = date.today()
         ecfg = eff_cfg()
         st = get_settings(conn)
@@ -502,7 +512,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         # Planner creates with no task (an announcement, a hunch) and Slack mentions naming no task:
         # suggestion cards with Create / Dismiss.
         cards = [{"id": e["id"], "kind": e["kind"], "label": e["label"], "reason": e["excerpt"], "at": e["at"], "fields": _suggestion_fields(ecfg, e), "mail": _suggestion_mail(e),
-                  "links": _suggestion_links(e)} for e in pending if e["task_id"] is None and e["kind"] in SUGGESTION_KINDS]
+                  "links": _suggestion_links(e), "by": "ripple" if e["account"] == ripple.ACCOUNT else None} for e in pending if e["task_id"] is None and e["kind"] in SUGGESTION_KINDS]
         others = task_briefs({l["other"] for c in cards for l in c["links"]})
         for c in cards:                                          # a mail suggestion's link, made when Create is pressed
             c["links"] = [dict(l, other_name=(others.get(l["other"]) or {}).get("name")) for l in c["links"]]
