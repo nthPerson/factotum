@@ -42,7 +42,14 @@
   const PHONE = () => window.matchMedia('(max-width: 700px)').matches;
   const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const byId = id => data.tasks.find(t => t.id === id);
-  const api = (path, opts) => fetch(path, Object.assign({ headers: { 'Content-Type': 'application/json' } }, opts)).then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
+  // An expired sign-in answers an /api request with a redirect to the login page on another origin; with
+  // redirect: 'manual' the page sees it as an opaqueredirect. A 401 or 403 counts the same (/api sends
+  // none of the three). A restarting server (502) or no network (fetch rejects) is not a sign-out.
+  const expired = r => r.type === 'opaqueredirect' || r.status === 401 || r.status === 403;
+  const api = (path, opts) => fetch(path, Object.assign({ headers: { 'Content-Type': 'application/json' }, redirect: 'manual' }, opts)).then(r => {
+    if (expired(r)) { signedOut(); throw new Error('signed out'); }
+    if (!r.ok) throw new Error(r.status); return r.json();
+  });
 
   function view(t) {
     const st = staged.get(t.id), due = staged.get(t.id + ':due');
@@ -293,6 +300,17 @@
     const u = document.getElementById('undo');
     if (u) u.onclick = async () => { await api(`/api/batches/${lastBatch}/undo`, { method: 'POST' }); lastBatch = null; el.classList.remove('on'); await load(); };
   }
+  // The sign-in has expired (see `expired`): a full-screen "Sign in again" over the whole app, whose
+  // button reloads at the same address. The tray is in localStorage, so it survives the reload. The rest
+  // of the app is made inert so nothing behind the screen can be reached with Tab.
+  function signedOut() {
+    const el = document.getElementById('signedout');
+    if (!el.hidden) return;
+    el.hidden = false;
+    for (const c of document.querySelector('.app').children) if (c !== el) c.inert = true;
+    document.getElementById('signin').focus();
+  }
+  document.getElementById('signin').onclick = () => location.reload();
 
   // ---------- rendering ----------
   function render() {
@@ -722,7 +740,8 @@
     render();
     let result = null, error = null;
     try {
-      const resp = await fetch('/api/chat/turn', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ thread_id: threadId, text, attached, canned }) });
+      const resp = await fetch('/api/chat/turn', { method: 'POST', headers: { 'Content-Type': 'application/json' }, redirect: 'manual', body: JSON.stringify({ thread_id: threadId, text, attached, canned }) });
+      if (expired(resp)) { signedOut(); throw new Error('signed out'); }
       if (!resp.ok) throw new Error('HTTP ' + resp.status);
       const reader = resp.body.getReader(); const dec = new TextDecoder(); let buf = '';
       for (;;) {
@@ -1190,6 +1209,7 @@
   document.getElementById('tabs').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; go(b.dataset.tab); });
   window.addEventListener('popstate', applyAddress);
   document.addEventListener('keydown', e => {
+    if (!document.getElementById('signedout').hidden) return;      // signed out: no key acts on the app behind the screen
     if (e.key === 'Escape') {   // Esc: deselect everything; in Chat the selection is what a prompt carries, so it only closes the task picker
       lastTap = { id: null, at: 0 };
       if (ui.page !== null) history.back();      // the task page closes like the phone's Back

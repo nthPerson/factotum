@@ -244,6 +244,13 @@ body.tray-open main { padding-bottom: 60vh; }
 .toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(70px + env(safe-area-inset-bottom, 0px)); z-index: 7; background: var(--fg); color: var(--bg); padding: 8px 14px; border-radius: 999px; font-size: 13px; display: none; align-items: center; gap: 12px; }
 .toast.on { display: flex; }
 .toast button { font: inherit; background: none; border: 0; color: var(--accent-soft); cursor: pointer; text-decoration: underline; }
+/* Signed out (stage 1): covers the whole app until "Sign in again" reloads it at the same address. */
+.signedout { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; background: var(--bg); padding: max(24px, env(safe-area-inset-top)) 16px; }
+.signedout[hidden] { display: none; }      /* without it display: grid beats the hidden attribute */
+.signedout .box { width: 100%; max-width: 420px; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 24px; text-align: center; }
+.signedout h2 { margin: 0 0 8px; font-size: 20px; font-weight: 600; }
+.signedout p { margin: 0 0 20px; color: var(--muted); text-wrap: pretty; }
+@media (max-width: 700px) { .signedout .btn { width: 100%; min-height: 44px; font-size: 15px; } }
 .proj-group { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; margin-bottom: 10px; overflow: hidden; }
 .proj-group > button { width: 100%; text-align: left; font: inherit; background: none; border: 0; color: var(--fg); padding: 10px 12px; display: flex; align-items: center; gap: 10px; cursor: pointer; }
 .proj-group > button .n { font-family: var(--mono); font-size: 12px; color: var(--muted); }
