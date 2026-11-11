@@ -811,3 +811,36 @@ body.sheet-on .toast { z-index: 10; bottom: auto; top: calc(12px + env(safe-area
 .sheet .sclaude { display: flex; flex-direction: column; gap: 6px; border-top: 1px solid var(--line); padding-top: 12px; }
 .sheet .sclaude .btn { font-size: 15px; min-height: 50px; border-radius: 10px; width: 100%; }
 .sheet .sclaude .hint { margin: 0; text-align: center; }
+/* An opened task is its editor (app.js editorHtml, frame 7): labelled fields, Due and Project side by side, the
+   effort taps, the hard deadline, who; then the task's own staged line. On a phone one column, 16px and 44px. */
+.editor { display: grid; gap: 12px; min-width: 0; }
+.editor .edf { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.editor .edl { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; }
+.editor input[type=text], .editor input[type=date], .editor select, .editor textarea { font: inherit; font-size: 13px; width: 100%; min-width: 0; min-height: 34px;
+  padding: 6px 10px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); color: var(--fg); box-sizing: border-box; }
+.editor textarea { resize: vertical; line-height: 1.45; }
+.editor .edname { font-weight: 500; }
+.editor input[type=text]:focus, .editor input[type=date]:focus, .editor select:focus, .editor textarea:focus { border-color: var(--accent); outline: 1px solid var(--accent); outline-offset: 0; }
+.editor .row2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: end; }
+.editor .edeff { display: inline-flex; align-self: flex-start; gap: 2px; padding: 3px; border-radius: 8px; background: var(--line); }
+.editor .edeff button { font: inherit; font-family: var(--mono); font-size: 12px; min-width: 38px; min-height: 30px; padding: 4px 10px; border: 0; border-radius: 6px; background: none; color: var(--fg); cursor: pointer; }
+.editor .edeff button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); font-weight: 600; box-shadow: 0 0 0 1px var(--accent); }
+.editor .edhard { display: flex; align-items: center; gap: 8px; font-size: 13px; min-height: 36px; cursor: pointer; }
+.editor .edhard input { width: 16px; height: 16px; margin: 0; flex: none; accent-color: var(--accent); }
+.editor .edhard:has(input:disabled) { color: var(--muted); cursor: default; }
+.editor .edwho { display: flex; gap: 6px; min-width: 0; }
+.editor .edwho select { width: auto; flex: none; }
+.editor [data-edstaged]:empty { display: none; }
+.edstaged { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 10px; border-radius: var(--radius); background: var(--accent-soft); }
+.edstaged .edwords { flex: 1; min-width: 12em; font-size: 13px; overflow-wrap: anywhere; }
+.edstaged .edwords b { font-weight: 600; }
+@media (max-width: 700px) {
+  .editor .row2 { grid-template-columns: minmax(0, 1fr); }
+  .editor input[type=text], .editor input[type=date], .editor select, .editor textarea { font-size: 16px; min-height: 44px; padding: 8px 12px; }
+  .editor .edeff { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); align-self: stretch; }
+  .editor .edeff button { min-height: 44px; }
+  .editor .edhard { min-height: 44px; font-size: 14px; }
+  .editor .edhard input { width: 20px; height: 20px; }
+  .edstaged .edwords { flex-basis: 100%; }
+  .edstaged .btn { flex: 1; min-height: 44px; }
+}

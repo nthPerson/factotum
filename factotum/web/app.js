@@ -21,7 +21,8 @@
   // line re-renders it every second), and a long prompt must survive that with its caret.
   const draft = { cmd: '', ask: '', askFor: null, pick: '', outcome: '', askToday: '', askTask: '', askTaskFor: null,
                   newLine: '', newKey: newKey(), newName: '',      // newName: the phone sheet's "What needs doing" (stage 6)
-                  findQ: '', picks: {} };      // Find any task's box; the shared task picker's boxes by slot (stage 6)      // the New task line, and the key its next add carries (stage 6)
+                  findQ: '', picks: {},      // Find any task's box; the shared task picker's boxes by slot (stage 6)      // the New task line, and the key its next add carries (stage 6)
+                  edit: {} };      // the editor's typed text by task id: {name?, context?, who?} until it is staged (stage 6)
   let asking = null;        // {id, name} of the task whose outcome the toast asks (ripples (stage 5): the outcome question)
   try { draft.cmd = sessionStorage.getItem('factotum.cmd') || ''; sessionStorage.removeItem('factotum.cmd'); } catch (_) {}   // kept by reloadKeepingDraft
   const TOUCH = () => window.matchMedia('(hover: none)').matches;
@@ -45,7 +46,8 @@
              askTask: null,        // the opened task whose conversation shows (stage 6; one at a time)
              newOpen: false,
              sheet: null,          // the phone's New task sheet when open: {due, pick, project, effort, links, hit, linking} (stage 6)
-             findOpen: false };      // Find any task is open (stage 6)     // the New task line is open (stage 6; a desktop's list tabs)
+             findOpen: false,      // Find any task is open (stage 6)     // the New task line is open (stage 6; a desktop's list tabs)
+             edWho: {} };          // the editor's "is for" / "waiting on" choice by task id, kept only while its field is empty (stage 6)
   try { ui.tab = parseAddress().tab; } catch (_) {}
   try { const r = localStorage.getItem('factotum.rail'); if (r === '0' || r === '1') ui.railOpen = r === '1'; } catch (_) {}
   try { const s = JSON.parse(localStorage.getItem('factotum.staged') || '[]'); staged = new Map(s); } catch (_) {}
@@ -80,12 +82,13 @@
   });
 
   // A task as it will be after Apply: its staged decision and date, and its links with the staged link
-  // changes and suggestion verdicts drawn in (overlayRel). Never mutates `data`.
+  // changes and suggestion verdicts drawn in (overlayRel), and the editor's staged edits (stage 6). Never mutates `data`.
   function view(t) {
     const st = staged.get(t.id), due = staged.get(t.id + ':due'), rel = overlayRel(t);
+    const edits = EDIT_FIELDS.map(f => staged.get(editKey(t.id, f))).filter(Boolean);
     const merged = [...staged.values()].some(s => s.op === 'merge' && s.task_id === t.id);
-    if (!st && !due && !rel && !merged) return t;
-    const v = Object.assign({}, t, due ? due.fields : {}, st ? st.fields : {});
+    if (!st && !due && !rel && !merged && !edits.length) return t;
+    const v = Object.assign({}, t, due ? due.fields : {}, ...edits.map(e => e.fields), st ? st.fields : {});
     if (rel) v.rel = rel;
     if (merged) v.status = 'dropped';      // a staged merge: the duplicate leaves the lists
     if (!st) return v;
@@ -361,6 +364,7 @@
   const DRAFT_BOXES = ['cmd', 'rv-ask', 'chat-pick', 'rv-note', 'today-ask', 'task-ask', 'new-line', 'find-q', 'pick-link', 'pick-merge', 'pick-sheet', 'new-name'];
   function typingNow() {
     if ([draft.cmd, draft.ask, draft.pick, draft.outcome, draft.askToday, draft.askTask, draft.newLine, draft.newName, ui.findOpen ? draft.findQ : '', ...Object.values(draft.picks), ui.rvNote.text].some(s => (s || '').trim())) return true;
+    if (Object.keys(draft.edit).some(id => edTyped(+id))) return true;      // an editor field typed in and not staged yet
     if (ui.remOpen !== null || ui.dueOpen !== null || chat.busy) return true;
     const a = document.activeElement;
     return !!(a && a.matches('input, textarea, select') && a.closest('#panel') && !isDraftBox(a.id));
@@ -454,14 +458,18 @@
   }
   // An attribute edit (due date) is staged under "<id>:due", beside the task's decision if any. `extra` may
   // carry `expect` and `note` (both sent with the change) and `ev` (a suggestion's evidence id, never sent);
-  // a key whose value is undefined is left out.
-  function stageExtra(key, task_id, op, fields, label, extra = {}) {
+  // a key whose value is undefined is left out. `quiet` (the editor, stage 6) stages without a render.
+  function stageExtra(key, task_id, op, fields, label, extra = {}, quiet = false) {
     const more = Object.fromEntries(Object.entries(extra || {}).filter(([, v]) => v !== undefined));
     staged.set(key, { task_id, op, fields, label, ...more });
     try { localStorage.setItem('factotum.staged', JSON.stringify([...staged])); } catch (_) {}
-    render();
+    if (!quiet) render();
   }
-  function stageDue(id, due) { stageExtra(id + ':due', id, 'set', { due: due || null }, due ? 'due ' + due : 'due date removed'); toast((due ? 'Due date staged' : 'Removal of the due date staged') + ' · press Apply in the tray to save it'); }
+  // `quiet` (the editor, stage 6): no render and no toast; the editor redraws what is around its fields itself.
+  function stageDue(id, due, quiet = false) {
+    stageExtra(id + ':due', id, 'set', { due: due || null }, due ? 'due ' + due : 'due date removed', {}, quiet);
+    if (!quiet) toast((due ? 'Due date staged' : 'Removal of the due date staged') + ' · press Apply in the tray to save it');
+  }
   function dueForm(id, current) {
     const st = staged.get(id + ':due');
     if (st) return `<span class="chip staged">${esc(st.label)}</span><button class="btn small" data-due-clear="${id}">Undo</button>`;
@@ -1247,7 +1255,7 @@
     const p = document.getElementById('panel');
     const fns = { today: renderToday, timeline: renderTimeline, projects: renderProjects, review: renderReview, chat: renderChat, log: renderLog, settings: renderSettings };
     const held = heldDraftBox(p);
-    taskPlacesDrawn.clear();
+    taskPlacesDrawn.clear(); editorsDrawn.clear();
     p.innerHTML = ui.page !== null ? taskPageHtml() : starterHtml() + pendingHtml() + fns[ui.tab]();
     restoreDraftBox(held);
     p.querySelectorAll('textarea.grow').forEach(grow);
@@ -1404,7 +1412,7 @@
         <input type="checkbox" id="ck-${x.id}" aria-label="Select" ${ui.sel.has(x.id) ? 'checked' : ''}>
         <div class="title"><span class="code">Task-${x.id}</span> <span class="name">${esc(x.name)}</span></div>
         <button class="chev" aria-label="Details" data-chev="${x.id}"></button>
-        <div class="meta">${chipsHtml(x, extraChip)}</div>
+        <div class="meta"${extraChip ? ` data-extra="${esc(extraChip)}"` : ''}>${chipsHtml(x, extraChip)}</div>
       </div>
       <div class="details">${ui.open.has(x.id) ? detailsHtml(x) : ''}</div></div>`;
   }
@@ -1426,14 +1434,15 @@
       d ? `<span class="chip due ${dueCls} ${x.hard ? 'hard' : ''}" data-due="${x.id}" title="${x.hard ? 'Hard deadline' : 'Soft date'} · click to cycle">${d.label}</span>` : `<span class="chip due" data-due="${x.id}" title="No date · click to set">no date</span>`,
       `<span class="chip eff">${esc(x.effort || '?')}</span>`,
       st ? `<span class="chip staged">${esc(st.label)}</span>` : '',
+      stagedCountHtml(x.id),
     ].join('');
   }
   // What an opened row shows, in two columns: Where this stands, Linked tasks, Came from the same place and
   // the facts (score, why now, source, links, lifecycle, reminders); History beside them; then, for an open
   // task, its actions. The task page lays out the same parts (taskPageHtml). The two [data-…] containers
-  // fill when the task's own payload arrives (detailCache).
+  // fill when the task's own payload arrives (detailCache). An open task's left column starts with its editor (stage 6).
   function detailsHtml(x) {
-    return `<div class="dgrid"><div class="dcol">${whereHtml(x)}<div data-dlinks="${x.id}">${detailAsyncHtml(x.id)}</div>${factsHtml(x)}</div>
+    return `<div class="dgrid"><div class="dcol">${isOpenRow(x.id) && !editorsDrawn.has(x.id) ? editorHtml(x) : whereHtml(x)}<div data-dlinks="${x.id}">${detailAsyncHtml(x.id)}</div>${factsHtml(x)}</div>
         <div class="dcol" data-dhist="${x.id}">${historyHtml(x.id)}</div></div>${x.status !== 'open' ? '' : actionsHtml(x)}${taskPlaceHtml(x.id)}`;
   }
   function factsHtml(x) {
@@ -1492,7 +1501,7 @@
     const pagebar = closed || !phone ? '' : `<div class="pagebar">${later}<button data-page="done">Done</button><button data-page="later" aria-expanded="${ui.pageLater}">Later</button><button data-page="more" aria-expanded="${ui.pageMore}">More</button></div>`;
     return `<div class="taskpage${pagebar ? ' barred' : ''}" data-id="${id}">${bar}<h2>${esc(x.name)}</h2><div class="meta">${chipsHtml(x)}</div>
       ${closed ? `<div class="closedline"><p>This task is ${esc(srv.status)}.</p>${reopen}</div>` : ''}
-      <div class="details"><div class="dgrid"><div class="dcol">${whereHtml(x)}<div data-dlinks="${id}">${detailAsyncHtml(id)}</div>${factsHtml(x)}</div>
+      <div class="details"><div class="dgrid"><div class="dcol">${isOpenRow(id) ? editorHtml(x) : whereHtml(x)}<div data-dlinks="${id}">${detailAsyncHtml(id)}</div>${factsHtml(x)}</div>
         <div class="dcol" data-dhist="${id}">${historyHtml(id)}</div></div>${acts}${taskPlaceHtml(id)}</div>${pagebar}</div>`;
   }
   // A Later on the page's pinned bar: the task leaves the lists until the day, like the Review card's Later.
@@ -2843,6 +2852,184 @@
   document.getElementById('fab-new').onclick = () => openSheet();
   document.getElementById('sheet-back').onclick = closeSheet;
 
+  // ---------- by hand (stage 6): editing in place ----------
+  // The opened task is its editor (design §12.8, frame 7): name, where it stands, due and hard deadline, project,
+  // effort, and who it is for or who is awaited. Each field stages under its own key (`<id>:edit-<field>`; the date
+  // under 4b's `<id>:due`), so edits sit beside the task's decision and each other and show on the row before Apply
+  // (view); a text edit carries the text it started from (textExpect), so a newer text is never written over. Typed
+  // text lives in draft.edit until it is staged, on Enter (Ctrl+Enter in the text) or on leaving the field; a value
+  // equal to the server's removes its key instead. Staging redraws what is around the fields (editRefresh), never
+  // the fields, so the focus moving on to the next field is kept. A closed task stays read-only (whereHtml).
+  const EDIT_FIELDS = ['name', 'context', 'project', 'effort', 'hard', 'who'];
+  const EFFORTS = ['XS', 'S', 'M', 'L'];
+  function editKey(id, f) { return `${id}:edit-${f}`; }
+  const isOpenRow = id => { const t = byId(id); return !!(t && t.status === 'open'); };      // the server's word, as on the task page
+  const editorsDrawn = new Set();      // a row Timeline lists twice (a section and Recently added) gets one editor; the other copy reads
+  // Every staged key that names the task: its decision, `<id>:…`, a link at either end, a verdict on its evidence.
+  function keysFor(id) {
+    const out = new Set(), sid = String(id);
+    for (const [k, s] of staged) {
+      const ks = String(k);
+      if (ks === sid || ks.startsWith(sid + ':')) out.add(ks);
+      else if (ks.startsWith('rel:')) { const p = ks.split(':'); if (p[1] === sid || p[3] === sid) out.add(ks); }
+      else if (ks.startsWith('e:') && s && s.task_id === id) out.add(ks);
+    }
+    return out;
+  }
+  // The row's "N changes staged", when something besides its decision is staged (N counts them all).
+  function stagedCountHtml(id) {
+    const ks = keysFor(id);
+    if (!ks.size || (ks.size === 1 && ks.has(String(id)))) return '';
+    return `<span class="chip staged">${ks.size} change${ks.size === 1 ? '' : 's'} staged</span>`;
+  }
+  // Who: one field and a choice; "is for" writes `counterpart`, "waiting on" writes `waiting_on`.
+  const WHO_COL = { for: 'counterpart', waiting: 'waiting_on' };
+  const whoKindOf = x => x.waiting_on ? 'waiting' : 'for';
+  const edKind = x => ui.edWho[x.id] || whoKindOf(x);
+  const edDraft = id => (draft.edit[id] = draft.edit[id] || {});
+  const edHas = (id, f) => !!(draft.edit[id] && f in draft.edit[id]);
+  function edForget(id, f) { const d = draft.edit[id]; if (!d) return; delete d[f]; if (!Object.keys(d).length) delete draft.edit[id]; }
+  // What a field shows: the text typed, else the value with the staged edits laid over (x is view(t)).
+  function edValue(x, f) {
+    if (edHas(x.id, f)) return draft.edit[x.id][f];
+    const v = f === 'who' ? x[WHO_COL[edKind(x)]] : x[f];
+    return v == null ? '' : String(v);
+  }
+  // The server's value of a typed field (who: of the column the choice names).
+  function edServer(id, f) {
+    const t = byId(id); if (!t) return '';
+    const v = f === 'who' ? t[WHO_COL[edKind(view(t))]] : t[f];
+    return v == null ? '' : String(v);
+  }
+  // Something typed in an editor field differs from the server's value (typingNow).
+  function edTyped(id) {
+    const d = draft.edit[id]; if (!d || !byId(id)) return false;
+    return Object.keys(d).some(f => d[f] !== edServer(id, f));
+  }
+  function editorHtml(x) {
+    const id = x.id, kind = edKind(x), due = x.due ? String(x.due).slice(0, 10) : '';
+    editorsDrawn.add(id);
+    const projects = (data.projects || []).slice(); if (x.project && !projects.includes(x.project)) projects.push(x.project);      // a project the config no longer lists still shows
+    const field = (label, inner) => `<label class="edf"><span class="edl">${label}</span>${inner}</label>`;
+    return `<section class="editor" data-editor="${id}">
+      ${field('Name', `<input id="ed-name-${id}" class="edname" type="text" autocomplete="off" enterkeyhint="done" value="${esc(edValue(x, 'name'))}">`)}
+      ${field('Where this stands', `<textarea id="ed-context-${id}" class="grow" rows="4">${esc(edValue(x, 'context'))}</textarea>`)}
+      <div class="row2">
+        ${field('Due', `<input id="ed-due-${id}" type="date" value="${esc(due)}">`)}
+        ${field('Project', `<select id="ed-project-${id}"><option value="">No project</option>${projects.map(p => `<option value="${esc(p)}" ${p === x.project ? 'selected' : ''}>${esc(p)}</option>`).join('')}</select>`)}
+      </div>
+      <div class="row2">
+        <div class="edf"><span class="edl" id="ed-effl-${id}">Effort</span><div class="edeff" role="group" aria-labelledby="ed-effl-${id}">${EFFORTS.map(v => `<button type="button" data-ed-effort="${id}" data-v="${v}" aria-pressed="${x.effort === v}">${v}</button>`).join('')}</div></div>
+        <label class="edhard"${due ? '' : ' title="Set a due date first"'}><input type="checkbox" id="ed-hard-${id}" ${x.hard && due ? 'checked' : ''} ${due ? '' : 'disabled'}>Hard deadline: something breaks if this is late</label>
+      </div>
+      <div class="edf"><label class="edl" for="ed-who-${id}">Who is this for, or who are you waiting on</label>
+        <div class="edwho"><select id="ed-whokind-${id}" aria-label="Is this task for them, or are you waiting on them">${[['for', 'is for'], ['waiting', 'waiting on']].map(([v, l]) => `<option value="${v}" ${v === kind ? 'selected' : ''}>${l}</option>`).join('')}</select><input id="ed-who-${id}" type="text" autocomplete="off" enterkeyhint="done" value="${esc(edValue(x, 'who'))}"></div></div>
+      <div data-edstaged="${id}">${edStagedHtml(id)}</div>
+    </section>`;
+  }
+  // The task's own staged line: everything staged that names it, with Discard and Apply for just those.
+  function edWordsHtml(id) {
+    const ks = keysFor(id), labels = [...staged].filter(([k]) => ks.has(String(k))).map(([, s]) => s.label);
+    return `<b>Staged:</b> ${esc(labels.join(', '))}.`;
+  }
+  function edStagedHtml(id) {
+    if (!keysFor(id).size) return '';
+    return `<div class="edstaged"><span class="edwords">${edWordsHtml(id)}</span><button class="btn small" data-ed-discard="${id}">Discard</button><button class="btn small primary" data-ed-apply="${id}">Apply</button></div>`;
+  }
+  // null, '', 0 and false are all "nothing"; true is 1 (hard).
+  const edNorm = v => v == null || v === '' || v === 0 || v === false ? null : v === true ? 1 : v;
+  // One edit into the tray, or out of it when every value is the server's again; then the page around the fields.
+  function stageEdit(id, f, fields, label, extra) {
+    const t = byId(id); if (!t) return;
+    const key = editKey(id, f);
+    if (Object.entries(fields).every(([k, v]) => edNorm(t[k]) === edNorm(v))) { staged.delete(key); persistStaged(); }
+    else stageExtra(key, id, 'set', fields, label, extra, true);
+    editRefresh(id);
+  }
+  function edName(id, el) {
+    if (!edHas(id, 'name')) return;      // nothing typed since it was last staged
+    edForget(id, 'name');
+    const v = el.value.trim(), t = byId(id);
+    if (!v) { el.value = t ? view(t).name : ''; toast('A task needs a name · the name is as it was'); return; }
+    if (el.value !== v) el.value = v;
+    stageEdit(id, 'name', { name: v }, `name “${cut60(v)}”`, { expect: textExpect(id, { name: v }) });
+  }
+  function edContext(id, el) {
+    if (!edHas(id, 'context')) return;
+    edForget(id, 'context');
+    const v = el.value.trim();
+    if (el.value !== v) { el.value = v; grow(el); }
+    stageEdit(id, 'context', { context: v }, 'text rewritten', { expect: textExpect(id, { context: v }) });
+  }
+  // A choice that differs from where the server keeps the name moves the text: the other column is emptied.
+  function edWho(id, text, kind) {
+    const t = byId(id); if (!t) return;
+    edForget(id, 'who'); delete ui.edWho[id];
+    const v = String(text || '').trim() || null, waiting = kind === 'waiting';
+    const fields = { [WHO_COL[kind]]: v };
+    if (kind !== whoKindOf(t)) fields[WHO_COL[waiting ? 'for' : 'waiting']] = null;
+    stageEdit(id, 'who', fields, v ? (waiting ? 'waiting on ' + v : 'for ' + v) : (waiting ? 'no longer waiting' : 'for nobody named'));
+  }
+  // The date through 4b's stageDue; the server's date again takes the key out. No date means no hard deadline.
+  function edDue(id, el) {
+    const t = byId(id); if (!t) return;
+    const v = el.value || null, server = t.due ? String(t.due).slice(0, 10) : null, key = id + ':due';
+    const was = staged.has(key) ? (staged.get(key).fields || {}).due || null : server;
+    if (v === was) return;      // the change and the blur that follows it
+    if (v === server) { staged.delete(key); persistStaged(); } else stageDue(id, v, true);
+    if (!v) { staged.delete(editKey(id, 'hard')); persistStaged(); }
+    editRefresh(id);
+  }
+  // The parts of the page that show the task, redrawn in place: the tray, the Top list, the row's name and chips (or the
+  // task page's), the editor's staged line (its buttons kept when it only changes words, so a press on one that set off
+  // this redraw still lands), and the fields that follow others (hard needs a date; the effort taps).
+  function editRefresh(id) {
+    renderTray(); bottomRule(); placePageBar();
+    renderRail(); wireRail();
+    const t = byId(id); if (!t) return;
+    const x = view(t);
+    document.querySelectorAll(`#panel .row[data-id="${id}"] > .main .name, #panel .taskpage[data-id="${id}"] > h2`).forEach(el => { el.textContent = x.name; });
+    document.querySelectorAll(`#panel .row[data-id="${id}"] > .main > .meta, #panel .taskpage[data-id="${id}"] > .meta`).forEach(el => {
+      el.innerHTML = chipsHtml(x, el.dataset.extra || ''); wireBadges(el); wireDueChips(el);
+    });
+    document.querySelectorAll(`#panel [data-edstaged="${id}"]`).forEach(el => {
+      const words = el.querySelector('.edwords');
+      if (words && keysFor(id).size) words.innerHTML = edWordsHtml(id);
+      else { el.innerHTML = edStagedHtml(id); wireEdStaged(el); }
+    });
+    const due = !!x.due;
+    document.querySelectorAll(`#panel #ed-hard-${id}`).forEach(h => { h.disabled = !due; h.checked = !!(x.hard && due); h.parentElement.title = due ? '' : 'Set a due date first'; });
+    document.querySelectorAll(`#panel [data-ed-effort="${id}"]`).forEach(b => b.setAttribute('aria-pressed', String(b.dataset.v === x.effort)));
+  }
+  function wireEdStaged(root) {
+    root.querySelectorAll('[data-ed-discard]').forEach(b => b.onclick = () => { const id = +b.dataset.edDiscard; delete ui.edWho[id]; discardStaged(keysFor(id)); });
+    root.querySelectorAll('[data-ed-apply]').forEach(b => b.onclick = () => applyAll(keysFor(+b.dataset.edApply)));
+  }
+  const enterKey = e => e.key === 'Enter' && !e.isComposing && e.keyCode !== 229;
+  function wireEditors(root) {
+    root.querySelectorAll('[data-editor]').forEach(ed => {
+      const id = +ed.dataset.editor, $ = s => ed.querySelector(`#ed-${s}-${id}`);
+      const nm = $('name'), cx = $('context'), who = $('who'), kind = $('whokind'), due = $('due'), proj = $('project'), hard = $('hard');
+      // Text boxes: typed text into draft.edit; staged on Enter (Ctrl+Enter in the text) and on leaving the box. A box
+      // redrawn with its typed text fires no `change` on leaving, so `blur` stages too (each is a no-op once staged).
+      const box = (el, f, commit, enter) => {
+        el.oninput = () => { edDraft(id)[f] = el.value; if (el.tagName === 'TEXTAREA') grow(el); };
+        el.addEventListener('keydown', e => { if (e.key === 'Escape') return; if (enter(e)) { e.preventDefault(); commit(); } e.stopPropagation(); });
+        el.onchange = el.onblur = commit;
+      };
+      box(nm, 'name', () => edName(id, nm), enterKey);
+      box(cx, 'context', () => edContext(id, cx), e => enterKey(e) && (e.ctrlKey || e.metaKey));
+      box(who, 'who', () => { if (edHas(id, 'who')) edWho(id, who.value, kind.value); }, enterKey);
+      kind.onchange = () => { if (who.value.trim()) edWho(id, who.value, kind.value); else ui.edWho[id] = kind.value; };
+      due.onchange = due.onblur = () => edDue(id, due);
+      due.addEventListener('keydown', e => e.stopPropagation());
+      proj.onchange = () => { const v = proj.value || null; stageEdit(id, 'project', { project: v }, v ? 'project ' + v : 'no project'); };
+      hard.onchange = () => { const on = hard.checked ? 1 : 0; stageEdit(id, 'hard', { hard: on }, on ? 'hard deadline' : 'soft date'); };
+      ed.querySelectorAll('[data-ed-effort]').forEach(b => b.onclick = () => stageEdit(id, 'effort', { effort: b.dataset.v }, 'effort ' + b.dataset.v));
+      wireEdStaged(ed);
+    });
+  }
+
   // ---------- wiring ----------
   // A text box that grows: Enter sends (Shift+Enter is a new line); on a touch keyboard Enter is a new line and the button sends.
   function typing(el, key, send) {
@@ -2854,6 +3041,16 @@
     const big = document.querySelector('#panel .review .card .big'); if (!big) return;
     const tray = document.getElementById('tray');
     big.style.bottom = PHONE() && tray.classList.contains('on') ? tray.offsetHeight + 'px' : '';
+  }
+  // A due chip's click cycles the date: tomorrow, Friday, in a week, none (the panel's, and a row's chips redrawn in place).
+  function wireDueChips(root) {
+    root.querySelectorAll('[data-due]').forEach(c => c.addEventListener('click', () => {
+      const id = +c.dataset.due; if (!byId(id)) return;      // a closed task's page: its date is not for changing
+      const x = view(byId(id));
+      const order = [isoPlus(1), nextFri(), isoPlus(7), null];
+      const i = order.indexOf(x.due ? x.due.slice(0, 10) : null);
+      act(id, 'due', order[(i + 1) % order.length]);
+    }));
   }
   function wire() {
     const panel = document.getElementById('panel');
@@ -2889,13 +3086,7 @@
     placePageBar();
     wireBadges(panel);
     panel.querySelectorAll('[data-act]').forEach(b => b.addEventListener('click', () => act(+b.dataset.id, b.dataset.act)));
-    panel.querySelectorAll('[data-due]').forEach(c => c.addEventListener('click', () => {
-      const id = +c.dataset.due; if (!byId(id)) return;      // a closed task's page: its date is not for changing
-      const x = view(byId(id));
-      const order = [isoPlus(1), nextFri(), isoPlus(7), null];
-      const i = order.indexOf(x.due ? x.due.slice(0, 10) : null);
-      act(id, 'due', order[(i + 1) % order.length]);
-    }));
+    wireDueChips(panel);
     panel.querySelectorAll('[data-bulk]').forEach(b => b.addEventListener('click', () => {
       const k = b.dataset.bulk; if (k === 'clear') { ui.sel.clear(); render(); return; }
       const d = k === 'setdue' ? (document.getElementById('bulk-date') || {}).value : null;
@@ -3005,6 +3196,7 @@
     wirePlaces(panel);
     wireNew(panel);
     wireFind(panel);
+    wireEditors(panel);
     placeReviewBar();
     const po = document.getElementById('chat-pick-open'); if (po) po.onclick = () => { ui.pickOpen = !ui.pickOpen; draft.pick = ''; render(); const el = document.getElementById('chat-pick'); if (el) el.focus(); };
     const pk = document.getElementById('chat-pick');
