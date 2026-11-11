@@ -53,8 +53,27 @@ best match, and when two rows are equally plausible change neither and explain i
 Every instruction carries "evidence": the spoken sentence, verbatim. A dropped or done task keeps
 its history; do not also list it under tasks.
 
+# 4b. Links between tasks
+Three kinds: "part_of" (`from` is one step toward the goal `to`), "waits_on" (`from` cannot
+sensibly be done before `to` is done), "same_as" (`from` is the same task as `to`, created twice).
+`from` and `to` are tasks this recording creates ("tasks[<index>]") or rows in §5 (their Task id);
+a finished task in §5b may be a `to` and nothing else.
+  stated: the owner, the person recording, said it ("I can't send the form until the chair
+  answers", "this is part of the committee paperwork"): "stated": true and "evidence": the spoken
+  sentence, verbatim. Someone else saying it is not stated.
+  inferred: you think so and nobody said it: "stated": false and "why": one line. The owner
+  confirms it with one tap.
+At most 5 links. Do not link tasks only because they came from this recording or involve the same
+person: that is already shown.
+
 # 5. Open tasks (id | project | due | name), the only rows you may reference by id
 {{open_tasks}}
+
+# 5b. Recently finished tasks (id | project | closed | name): reference only
+A follow-up may point at finished work: these ids may be the `to` of a "part_of" or "same_as" link,
+never of "waits_on" (a finished task holds nothing up), never of an instruction, an update, a
+reminder or an event.
+{{closed_tasks}}
 
 # 6. Reminders and calendar
 A task created here can carry a reminder: {"task_ref": "tasks[<index>]", "fire_at": …, "label": …}.
@@ -106,6 +125,8 @@ code fence, no prose. Shape:
   "instructions": [ { "op": "done", "task_id": 364, "fields": {}, "evidence": "…" } ],
   "reminders": [ { "task_ref": "tasks[0]", "task_id": null, "fire_at": "2026-11-02T14:00", "label": "…", "repeat": null } ],
   "calendar": [ { "title": "…", "start": "…", "end": null, "description": "…", "task_ref": null, "task_id": null } ],
+  "links": [ { "from": "tasks[0]", "kind": "waits_on", "to": "tasks[1]", "stated": true, "evidence": "…" },
+             { "from": 388, "kind": "part_of", "to": 412, "stated": false, "why": "…" } ],
   "unresolved": [ "…" ]
 }
 Empty lists are fine. meeting_date is set only when type is "Meeting". Keep body_md under 6000 characters.
