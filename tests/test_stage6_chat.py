@@ -77,3 +77,65 @@ def test_the_turn_route_finds_the_place_and_refuses_a_second_turn_while_one_runs
     assert p["thread"]["id"] == fresh["thread_id"] and p["thread"]["origin"] == "review" and len(p["messages"]) == 2 and p["busy"] is False
     assert c.get("/api/chat/place", params={"origin": "today"}).json()["thread"] is None
     assert c.get("/api/chat/place", params={"origin": "nope"}).status_code == 400
+
+
+# --- Task 5: everything a reply proposes can be staged together
+
+STEPS = {"reply_md": "Two steps.", "proposals": [
+    {"op": "create", "fields": {"name": "Fill the form", "project": "Personal", "ref": "s1", "links": [{"kind": "part_of", "other": 5}]}, "label": "New: Fill the form"},
+    {"op": "link", "task_id": 6, "fields": {"kind": "waits_on", "other": "s1", "why": "needs the form"}, "label": "6 waits on the form"},
+    {"op": "link", "task_id": 6, "fields": {"kind": "waits_on", "other": "s9"}, "label": "bad ref"},
+    {"op": "unlink", "task_id": 6, "fields": {"kind": "waits_on", "other": "s1"}, "label": "unlink by ref"}]}
+
+
+def _steps(conn, cfg, tmp_path, monkeypatch):
+    monkeypatch.setattr(chat, "RUNS_DIR", tmp_path / "runs")
+    mk(conn, 5, name="Goal"); mk(conn, 6, name="Send it")
+    tid = chat.new_thread(conn, None, "review", 5)
+    return chat.turn(conn, cfg, tid, "steps?", [6], today=TODAY, runner=_runner(STEPS))
+
+
+def test_a_link_may_point_at_a_create_in_the_same_reply(conn, cfg, tmp_path, monkeypatch):
+    res = _steps(conn, cfg, tmp_path, monkeypatch)
+    assert [(p["op"], p["task_id"], p["fields"].get("other")) for p in res["proposals"]] == [("create", None, None), ("link", 6, "s1")]
+    assert res["rejected"] == ["bad ref: no create in this reply has ref 's9'", "unlink by ref: both tasks must be named by their integer ids"]
+
+
+def test_staged_creates_and_links_apply_as_one_batch_labelled_chat(cfg, tmp_path, monkeypatch):
+    app = api.create_app(cfg, db_path=str(tmp_path / "t.db"))
+    c, conn = TestClient(app), app.state.conn
+    res = _steps(conn, cfg, tmp_path, monkeypatch)
+    m = res["message_id"]
+    out = c.post("/api/batches/apply", json={"source": "review", "changes": [
+        {"op": "keep", "task_id": 5, "fields": {}},
+        {"op": "create", "task_id": None, "fields": {"name": "forged"}, "from_chat": {"message_id": m, "index": 0}},
+        {"op": "link", "task_id": 6, "fields": {"kind": "waits_on", "other": f"m{m}-0"}}]}).json()
+    new = out["created"][0]
+    t = one(conn, "SELECT name, source, source_key FROM tasks WHERE id = ?", (new,))
+    assert out["skipped"] == [] and (t["name"], t["source"], t["source_key"]) == ("Fill the form", "Chat", f"chat:{m}:0")
+    assert {(new, 5, "part_of"), (6, new, "waits_on")} <= active_rels(conn)
+    stored = chat.messages(conn, res["thread_id"])[-1]["proposals"][0]
+    assert stored["applied"] and stored["task_id"] == new and stored["batch_id"] == out["batch_id"]
+    c.post(f"/api/batches/{out['batch_id']}/undo", json={})
+    assert one(conn, "SELECT status FROM tasks WHERE id = ?", (new,))["status"] == "dropped" and (6, new, "waits_on") not in active_rels(conn)
+    assert one(conn, "SELECT last_reviewed_at FROM tasks WHERE id = 5")["last_reviewed_at"] is None
+
+
+def test_a_staged_create_already_made_by_its_create_button_is_not_made_twice(cfg, tmp_path, monkeypatch):
+    app = api.create_app(cfg, db_path=str(tmp_path / "t.db"))
+    c, conn = TestClient(app), app.state.conn
+    res = _steps(conn, cfg, tmp_path, monkeypatch)
+    made = chat.create_from_proposal(conn, cfg, res["message_id"], 0, TODAY)
+    out = c.post("/api/batches/apply", json={"source": "ui", "changes": [
+        {"op": "create", "task_id": None, "fields": {}, "from_chat": {"message_id": res["message_id"], "index": 0}},
+        {"op": "link", "task_id": 6, "fields": {"kind": "waits_on", "other": f"m{res['message_id']}-0"}}]}).json()
+    assert out["created"] == [] and out["skipped"] == [] and (6, made, "waits_on") in active_rels(conn)
+    assert c.post("/api/batches/apply", json={"changes": [{"op": "create", "fields": {}, "from_chat": {"message_id": res["message_id"], "index": 1}}]}).status_code == 400
+    assert c.post("/api/batches/apply", json={"changes": [{"op": "create", "fields": {}, "from_chat": {"message_id": 999999, "index": 0}}]}).status_code == 400
+
+
+def test_the_page_cannot_choose_a_created_source(cfg, tmp_path):
+    app = api.create_app(cfg, db_path=str(tmp_path / "t.db"))
+    out = TestClient(app).post("/api/batches/apply", json={"changes": [{"op": "create", "fields": {"name": "Mine"}, "created_source": "Chat", "source_key": "x"}]}).json()
+    t = one(app.state.conn, "SELECT source, source_key FROM tasks WHERE id = ?", (out["created"][0],))
+    assert t["source"] == "Manual" and t["source_key"] != "x"

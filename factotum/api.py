@@ -374,11 +374,15 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
 
     @app.post("/api/batches/apply")
     def apply_batch(body: ApplyBody):
-        changes = [{k: v for k, v in c.items() if k != "source_key"} for c in body.changes]   # the page never chooses one
+        changes = [{k: v for k, v in c.items() if k not in ("source_key", "created_source")} for c in body.changes]   # the page never chooses either
         try:
-            return batches.apply(conn, changes, body.source, date.today())
+            with chat._CREATE_LOCK:                  # a chat create staged here and its Create button never make two
+                changes = chat.resolve_staged(conn, eff_cfg(), changes)
+                res = batches.apply(conn, changes, body.source, date.today())
+                chat.mark_staged(conn, changes, res)
         except ValueError as e:
             raise HTTPException(400, str(e))
+        return res
 
     @app.post("/api/batches/{batch_id}/undo")
     def undo_batch(batch_id: int):

@@ -22,6 +22,7 @@ task and its links undo together. Everything rejected is kept on the message so 
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import sys
 import threading
@@ -292,6 +293,17 @@ def _clean_proposals(conn: sqlite3.Connection, cfg: dict, data: dict, seen: dict
             continue
         elif op in ("link", "unlink", "merge"):
             other = fields.get("into") if op == "merge" else fields.get("other")
+            if op == "link" and type(tid) is int and isinstance(other, str):   # an existing task linked to a create in this reply
+                if other not in ref_owner:
+                    rejected.append(f"{label}: no create in this reply has ref {other!r}"); continue
+                if tid not in known:
+                    rejected.append(f"{label}: Task-{tid} was not attached or read in this turn"); continue
+                kind = fields.get("kind")
+                if kind not in relations.LINK_KINDS:
+                    rejected.append(f"{label}: kind must be part_of or waits_on, not {kind!r}"); continue
+                why = _why(fields.get("why"))          # the new task does not exist yet: the batch checks the rules when it is made
+                kept.append({"op": op, "task_id": tid, "fields": dict({"kind": kind, "other": other}, **({"why": why} if why else {})),
+                             "label": label, "evidence": evidence, "applied": False}); continue
             if type(tid) is not int or type(other) is not int:            # True is an int in Python, and Task-1 is somebody's task
                 rejected.append(f"{label}: both tasks must be named by their integer ids"); continue
             x = next((i for i in (tid, other) if i not in known), None)
@@ -476,3 +488,89 @@ def _create_from_proposal(conn: sqlite3.Connection, cfg: dict, message_id: int, 
     conn.execute("UPDATE chat_messages SET proposals_json = ? WHERE id = ?", (json.dumps(props, default=str), message_id))
     conn.commit()
     return tid
+
+
+# ---- proposals staged in the tray ---------------------------------------------------------------
+
+TRAY_REF_RE = re.compile(r"^m(\d+)-(\d+)$")
+
+
+def tray_ref(message_id: int, index: int) -> str:
+    """A chat create's ref in the tray, scoped to its message: two replies that both say `s1` never
+    meet in one batch (a create would be skipped as a second `s1`, a link would land on the wrong task)."""
+    return f"m{message_id}-{index}"
+
+
+def _staged_proposals(conn: sqlite3.Connection, ref, cache: dict) -> tuple[int, int, list[dict]]:
+    """`from_chat` → (message id, index, that message's stored proposals); raises ValueError unless it names a create."""
+    ref = ref if isinstance(ref, dict) else {}
+    m, i = ref.get("message_id"), ref.get("index")
+    if type(m) is not int or type(i) is not int:
+        raise ValueError("from_chat names no create proposal")
+    if m not in cache:
+        cache[m] = _loads((one(conn, "SELECT proposals_json FROM chat_messages WHERE id = ?", (m,)) or {}).get("proposals_json"), [])
+    props = cache[m]
+    if not (0 <= i < len(props)) or not isinstance(props[i], dict) or props[i].get("op") != "create":
+        raise ValueError("from_chat names no create proposal")
+    return m, i, props
+
+
+def _made(conn: sqlite3.Connection, v):
+    """A tray ref `m<m>-<i>` whose create already exists (Create was pressed, or an earlier batch) → that task's id."""
+    mt = TRAY_REF_RE.match(v) if isinstance(v, str) else None
+    ex = mt and one(conn, "SELECT id FROM tasks WHERE source_key = ?", (f"chat:{mt.group(1)}:{mt.group(2)}",))
+    return int(ex["id"]) if ex else v
+
+
+def resolve_staged(conn: sqlite3.Connection, cfg: dict, changes: list[dict]) -> list[dict]:
+    """The tray's changes, with every chat create (`from_chat: {message_id, index}`) replaced by the
+    stored, validated proposal (the page's fields are ignored), keyed `chat:<m>:<i>` like Create and
+    labelled Source Chat; one Create already made is left out, and every tray ref to a made task
+    becomes its id. Raises ValueError when `from_chat` names no stored create."""
+    cache: dict[int, list[dict]] = {}
+    out = []
+    for ch in changes:
+        if isinstance(ch, dict) and "from_chat" in ch:
+            m, i, props = _staged_proposals(conn, ch["from_chat"], cache)
+            key = f"chat:{m}:{i}"
+            if one(conn, "SELECT id FROM tasks WHERE source_key = ?", (key,)):
+                continue                                     # Create was pressed: the task exists
+            pf = props[i].get("fields") or {}
+            f = _clean_task_fields(cfg, pf)
+            f["ref"] = tray_ref(m, i)
+            sib = {(q.get("fields") or {}).get("ref"): j for j, q in enumerate(props)
+                   if isinstance(q, dict) and q.get("op") == "create" and (q.get("fields") or {}).get("ref")}
+            links = [dict(ln, other=tray_ref(m, sib[ln["other"]]) if isinstance(ln.get("other"), str) and ln["other"] in sib else ln.get("other"))
+                     for ln in pf.get("links") or [] if isinstance(ln, dict)]
+            if links:
+                f["links"] = links
+            ch = {"op": "create", "fields": f, "source_key": key, "created_source": "Chat", "from_chat": {"message_id": m, "index": i}}
+        if isinstance(ch, dict):                             # a tray ref to a task already made becomes its id (copies: the caller's list is left as it was)
+            ch = dict(ch)
+            if "task_id" in ch:
+                ch["task_id"] = _made(conn, ch["task_id"])
+            if isinstance(ch.get("fields"), dict):
+                f = ch["fields"] = dict(ch["fields"])
+                if "other" in f:
+                    f["other"] = _made(conn, f["other"])
+                if isinstance(f.get("links"), list):
+                    f["links"] = [dict(ln, other=_made(conn, ln.get("other"))) if isinstance(ln, dict) else ln for ln in f["links"]]
+        out.append(ch)
+    return out
+
+
+def mark_staged(conn: sqlite3.Connection, changes: list[dict], res: dict) -> None:
+    """After the batch: each chat create it made marks its stored proposal applied, with the task and the batch (its Undo)."""
+    for ch in changes:
+        fc = ch.get("from_chat") if isinstance(ch, dict) and ch.get("op") == "create" else None
+        if not fc:
+            continue
+        ex = one(conn, "SELECT id FROM tasks WHERE source_key = ?", (ch.get("source_key"),))
+        if not ex or ex["id"] not in res.get("created", []):
+            continue                                         # not made by this batch: its batch is not this one
+        m = one(conn, "SELECT proposals_json FROM chat_messages WHERE id = ?", (fc["message_id"],))
+        props = _loads((m or {}).get("proposals_json"), [])
+        i = fc["index"]
+        props[i] = dict(props[i], applied=True, task_id=ex["id"], batch_id=res["batch_id"])
+        conn.execute("UPDATE chat_messages SET proposals_json = ? WHERE id = ?", (json.dumps(props, default=str), fc["message_id"]))
+    conn.commit()
