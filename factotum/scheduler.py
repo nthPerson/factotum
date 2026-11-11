@@ -159,7 +159,7 @@ class Scheduler:
         base = str(C.get(ecfg, "server.public_url", "")).rstrip("/")
         first = "; ".join(i["task"]["name"][:40] for i in queue[:3])
         self.push(ecfg, f"Review: {n} item{'' if n == 1 else 's'}", f"{n} item{'' if n == 1 else 's'} waiting: {first}" + (" …" if n > 3 else ""),
-                  click=f"{base}/#review", tags=["clipboard"])
+                  click=f"{base}/review", tags=["clipboard"])
         return f"{n} items"
 
     def _brief(self, ecfg: dict, today: date) -> str | None:

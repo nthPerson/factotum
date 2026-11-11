@@ -122,7 +122,7 @@ def build(conn: sqlite3.Connection, cfg: dict, today: date, events: list[dict] |
     T.append(f"\n{foot}")
     html = (f'<!doctype html><html><body style="font:14px/1.45 -apple-system,Segoe UI,Roboto,sans-serif;color:#1a1a1a;max-width:640px;margin:0 auto;padding:16px">'
             f'<h2 style="margin:0 0 4px;font-size:18px">{escape(subject)}</h2>'
-            f'<p style="margin:0 0 8px;color:#777;font-size:12px">{escape(foot)}' + (f' <a href="{escape(base)}/#review" style="color:#2a6">Open Review</a>' if base else '') + '</p>'
+            f'<p style="margin:0 0 8px;color:#777;font-size:12px">{escape(foot)}' + (f' <a href="{escape(base)}/review" style="color:#2a6">Open Review</a>' if base else '') + '</p>'
             + "".join(H) +
             f'<p style="margin-top:22px;color:#999;font-size:11px">Sent by Factotum. Replies are not read; decisions go through the app' + (f' at <a href="{escape(base)}" style="color:#999">{escape(base)}</a>' if base else '') + '.</p></body></html>')
     return {"subject": subject, "text": "\n".join([subject] + T), "html": html}

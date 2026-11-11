@@ -31,7 +31,7 @@
   function setFold(key, shut) { folds[key] = !!shut; try { localStorage.setItem('factotum.folds', JSON.stringify(folds)); } catch (_) {} }
   let ui = { tab: 'today', focus: null, sel: new Set(), open: new Set(), reviewIdx: 0, laterOpen: false, datePick: false, trayOpen: false, trayOff: new Set(), reviewPaused: false, rvNote: { id: null, text: '' }, remOpen: null, dueOpen: null, rvReply: null,
              railOpen: !window.matchMedia('(max-width: 860px)').matches, chatDrawer: false };
-  try { const h = location.hash.replace('#', ''); if (TABS.includes(h)) ui.tab = h; } catch (_) {}
+  try { ui.tab = parseAddress().tab; } catch (_) {}
   try { const r = localStorage.getItem('factotum.rail'); if (r === '0' || r === '1') ui.railOpen = r === '1'; } catch (_) {}
   try { const s = JSON.parse(localStorage.getItem('factotum.staged') || '[]'); staged = new Map(s); } catch (_) {}
   for (const [k, v] of staged) { if (!v || typeof v !== 'object') staged.delete(k); else if (v.task_id == null) v.task_id = typeof k === 'number' ? k : parseInt(k, 10); }  // trays saved before entries carried task_id
@@ -75,6 +75,33 @@
   function startOfDay(d) { const x = new Date(d); x.setHours(0, 0, 0, 0); return x; }
   function fmtWhen(iso) { const d = new Date(iso); return d.toLocaleDateString([], { weekday: 'short' }) + ' ' + d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); }
   function daysTo(iso) { return Math.round((startOfDay(new Date(iso + 'T12:00:00')) - startOfDay(TODAY())) / 86400000); }
+
+  // ---------- addresses (stage 1) ----------
+  // Today is /, every other tab /<tab>, a task /t/<id>. A tab change is a history entry, so the
+  // browser's Back and Forward move between tabs; an old /#<tab> link or /today is rewritten in place.
+  function addressOf(tab) { return tab === 'today' ? '/' : '/' + tab; }
+  function parseAddress() {
+    const p = location.pathname;
+    const t = /^\/t\/(\d+)$/.exec(p);
+    if (t) return { tab: 'today', task: +t[1], legacy: false };
+    if (p === '/') { const h = location.hash.replace('#', ''); return TABS.includes(h) ? { tab: h, task: null, legacy: true } : { tab: 'today', task: null, legacy: false }; }
+    const name = p.slice(1);
+    return { tab: TABS.includes(name) ? name : 'today', task: null, legacy: false };
+  }
+  function setAddress(path, replace) {
+    if (location.pathname + location.hash === path) return;
+    if (replace) history.replaceState(null, '', path); else history.pushState(null, '', path);
+  }
+  function go(tab) { ui.tab = tab; ui.laterOpen = false; setAddress(addressOf(tab)); render(); }
+  // Once after the first load (no event), and on every popstate (with it). A task address opens the
+  // task's row where a list shows it and leaves that tab's address in place of /t/<id>.
+  function applyAddress(ev) {
+    const a = parseAddress();
+    if (a.task !== null) { jumpTo(a.task, true, true); setAddress(addressOf(ui.tab), true); return; }
+    ui.tab = a.tab; ui.laterOpen = false;
+    setAddress(addressOf(a.tab), true);      // a legacy /#<tab> or /today becomes the tab's path; otherwise nothing
+    render();
+  }
 
   // ---------- loading ----------
   let pending = [];           // batches a skill staged (/api/proposals): Apply or Dismiss, above every tab
@@ -303,7 +330,9 @@
   function groupsOf(tab) {
     return tab === 'today' ? todayGroups().groups : tab === 'timeline' ? timelineGroups() : tab === 'projects' ? projectGroups().map(([p, rows]) => ({ key: 'projects:' + p, rows })) : [];
   }
-  function jumpTo(id, expand) {
+  // `replace` (only when opening at /t/<id>) swaps the address instead of pushing the tab's: a /timeline
+  // pushed above /t/<id> would let Back return there, jump and push again, so Back could never leave.
+  function jumpTo(id, expand, replace = false) {
     const tabs = [ui.tab, 'today', 'timeline'].filter((t, i, a) => ['today', 'timeline', 'projects'].includes(t) && a.indexOf(t) === i);
     let hit = null;
     for (const tab of tabs) { const g = groupsOf(tab).find(g => g.rows.some(r => r.id === id)); if (g) { hit = { tab, key: g.key }; break; } }
@@ -311,7 +340,7 @@
     const from = ui.tab;
     if (folded(hit.key, hit.tab === 'projects')) setFold(hit.key, false);
     ui.tab = hit.tab; ui.focus = id; if (expand) ui.open.add(id);
-    if (from !== hit.tab) location.hash = hit.tab;
+    if (from !== hit.tab) setAddress(addressOf(hit.tab), replace);
     render();
     const el = document.querySelector(`#panel .row[data-id="${id}"]`);
     if (el) { el.scrollIntoView({ block: 'center', behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' }); el.classList.add('flash'); }
@@ -613,7 +642,7 @@
   }
   function reviewAsk(id) {
     const live = chat.busy && chat.from && chat.from.review === id ? `<div class="hint"><span class="spin"></span> ${esc((chat.live || {}).status || 'Working…')}</div>` : '';
-    const reply = ui.rvReply && ui.rvReply.id === id ? `<div class="rvreply">${md(ui.rvReply.text)}${ui.rvReply.note ? `<div class="hint">${esc(ui.rvReply.note)}</div>` : ''}<div class="hint"><a href="#chat" data-goto-chat="${ui.rvReply.thread}">Open in Chat</a></div></div>` : '';
+    const reply = ui.rvReply && ui.rvReply.id === id ? `<div class="rvreply">${md(ui.rvReply.text)}${ui.rvReply.note ? `<div class="hint">${esc(ui.rvReply.note)}</div>` : ''}<div class="hint"><a href="/chat" data-goto-chat="${ui.rvReply.thread}">Open in Chat</a></div></div>` : '';
     if (draft.askFor !== id) { draft.ask = ''; draft.askFor = id; }      // a new card starts with an empty box
     return `<div class="cmd rvask"><textarea id="rv-ask" class="grow" rows="1" placeholder="Ask Claude about this task — e.g. “add that the first pass is done”; its proposals stage with this decision" aria-label="Ask Claude">${esc(draft.ask)}</textarea><button class="btn small" id="rv-ask-go" ${chat.busy ? 'disabled' : ''}>Ask</button></div>${TOUCH() ? '' : '<div class="hint keysonly">Enter sends · Shift+Enter starts a new line</div>'}${live}${reply}`;
   }
@@ -622,7 +651,8 @@
   async function sendChat(text, canned, attached, from) {
     if (chat.busy) { toast('A chat turn is already running'); return; }
     chat.busy = true; chat.live = { status: 'Starting…', texts: [] }; chat.from = from || null; chat.scroll = !from;
-    if (!from) { ui.tab = 'chat'; location.hash = 'chat'; if (!chat.threads) { try { const r = await api('/api/chat/threads'); chat.threads = r.threads; } catch (_) { chat.threads = []; } } }
+    // the threads first: go() renders, and a Chat render with no threads loads them and the current thread's messages over this turn's
+    if (!from) { if (!chat.threads) { try { const r = await api('/api/chat/threads'); chat.threads = r.threads; } catch (_) { chat.threads = []; } } go('chat'); }
     const threadId = from ? null : chat.current;    // a Review question starts its own thread
     if (!from) chat.messages = [...chat.messages, { role: 'user', text: text || (canned === 'search_mail' ? 'Search related emails' : 'Draft a reply'), attached }];
     render();
@@ -977,7 +1007,7 @@
     const lq = document.getElementById('log-quiet'); if (lq) lq.onchange = () => { logQuiet = lq.checked; try { localStorage.setItem('factotum.logquiet', logQuiet ? '1' : '0'); } catch (_) {} render(); };
     const lm = document.getElementById('log-more'); if (lm) lm.onclick = () => { logLimit = Math.min(200, logLimit + 70); loadLog(); };
     panel.querySelectorAll('[data-tl]').forEach(r => r.addEventListener('click', e => { if (e.target.closest('button, a')) return; const k = r.dataset.tl; logOpen.has(k) ? logOpen.delete(k) : logOpen.add(k); render(); }));
-    panel.querySelectorAll('[data-goto-chat]').forEach(a => a.onclick = e => { e.preventDefault(); chat.current = +a.dataset.gotoChat; chat.threads = null; ui.tab = 'chat'; location.hash = 'chat'; render(); });
+    panel.querySelectorAll('[data-goto-chat]').forEach(a => a.onclick = e => { e.preventDefault(); chat.current = +a.dataset.gotoChat; chat.threads = null; go('chat'); });
     const cmd = document.getElementById('cmd'), cmdGo = document.getElementById('cmd-go');
     const cmdSend = () => {
       const v = draft.cmd.trim(); if (!v) return;
@@ -1086,7 +1116,8 @@
     catch (e) { toast('Save failed: ' + e.message); }
   }
 
-  document.getElementById('tabs').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; ui.tab = b.dataset.tab; ui.laterOpen = false; location.hash = ui.tab; render(); });
+  document.getElementById('tabs').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; go(b.dataset.tab); });
+  window.addEventListener('popstate', applyAddress);
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape') {   // Esc: deselect everything; in Chat the selection is what a prompt carries, so it only closes the task picker
       lastTap = { id: null, at: 0 };
@@ -1108,5 +1139,5 @@
   });
   window.addEventListener('resize', () => { const bar = document.querySelector('header.bar'); if (bar) document.documentElement.style.setProperty('--bar-h', bar.offsetHeight + 'px'); });
   document.addEventListener('visibilitychange', () => { if (!document.hidden && ui.tab === 'today') { clearTimeout(sumTimer); pollSummary(); } });
-  load().then(loadSettings).catch(e => { document.getElementById('panel').innerHTML = `<div class="empty">Could not load /api/tasks: ${esc(e.message)}</div>`; });
+  load().then(() => { applyAddress(); return loadSettings(); }).catch(e => { document.getElementById('panel').innerHTML = `<div class="empty">Could not load /api/tasks: ${esc(e.message)}</div>`; });
 })();

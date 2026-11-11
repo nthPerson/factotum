@@ -122,7 +122,7 @@ form{{display:flex;gap:12px;margin-top:20px}} button{{font:inherit;padding:10px 
 <ul><li>use {tools} Factotum tools: read your tasks, reminders, mail, calendar, Slack and Discord</li>
 <li>{"create and change your tasks directly: each call is one batch you can undo in Factotum's Log. Nobody taps Apply first, so something it read in the same chat (a mail, a Slack message) can steer what it writes; Settings → Connections switches this to staging" if direct else "stage task changes that appear in Factotum's tray for you to Apply or Dismiss — it never changes a task itself"}</li>
 <li>nothing is ever sent on your behalf</li></ul>
-<p class="who">Signed in as {escape(who)} · revoke any time in Settings → Connections at <a href="{escape(base)}/#settings">{escape(base)}</a>.</p>
+<p class="who">Signed in as {escape(who)} · revoke any time in Settings → Connections at <a href="{escape(base)}/settings">{escape(base)}</a>.</p>
 <form method="post" action="{escape(base)}/oauth/authorize">{hidden}<button type="submit" name="decision" value="deny" class="deny">Deny</button><button type="submit" name="decision" value="allow">Allow</button></form>
 </main></body></html>"""
 
