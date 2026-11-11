@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo
 
 from . import batches, config as C, notify, relations
 from .dates import parse_date
-from .db import now_iso, rows
+from .db import get_settings, now_iso, rows, set_setting
 
 SNOOZE = timedelta(hours=1)
 TOKEN_TTL = timedelta(hours=24)
@@ -132,6 +132,51 @@ def fire(conn: sqlite3.Connection, cfg: dict, now_local: datetime, push, device_
         conn.commit()   # per reminder: a failure on the next push must not roll this one back into pending (it was delivered)
         sent.append({"reminder_id": r["id"], "task_id": r["task_id"], "msg_id": msg_id, "task_name": r["task_name"],
                      "errors": errors, "app": results.get("app")})
+    return sent
+
+
+def free_now(conn: sqlite3.Connection, cfg: dict, today, push, device_push=None) -> list[dict]:
+    """"Task-N is free now": a hard-dated open task whose last open blocker was done today, once per
+    (task, blocker, day). The first call on a database only remembers what is already true. A task
+    whose blocker was dropped, faded or lapsed is never announced. Marked sent only when a provider
+    delivered; returns what was sent."""
+    base = str(C.get(cfg, "server.public_url", "http://127.0.0.1:8750")).rstrip("/")
+    chosen = notify.providers(cfg)
+    day = today.isoformat()
+    cands = []
+    for t in relations.annotate(conn, rows(conn, "SELECT * FROM tasks WHERE status = 'open' AND hard = 1 AND due IS NOT NULL AND due != '' ORDER BY id")):
+        rel = t["rel"]
+        if rel["waits_on_open"] or not rel["freed_by"] or str(rel["freed_at"] or "")[:10] != day:
+            continue
+        if not any(c["id"] == rel["freed_by"] and c["status"] == "done" for c in rel["waits_on_closed"]):
+            continue
+        cands.append((f"{t['id']}:{rel['freed_by']}:{day}", t, rel["freed_by"]))
+    seen = get_settings(conn).get("state.free_now.sent")
+    if seen is None:
+        set_setting(conn, "state.free_now.sent", [k for k, _, _ in cands])
+        conn.commit()
+        return []
+    seen = list(seen)
+    sent = []
+    for key, t, by in cands:
+        if key in seen:
+            continue
+        title = f"Task-{t['id']} is free now"
+        d = parse_date(t.get("due"))
+        body = f"{t['name']} · Task-{by} is done" + (f" · due {d.strftime('%b')} {d.day}" if d else "")
+        sends = []
+        if "ntfy" in chosen:
+            sends.append(("ntfy", lambda: push(cfg, title, body, click=f"{base}/t/{t['id']}", tags=["white_check_mark"])))
+        if "app" in chosen and device_push is not None:
+            sends.append(("app", lambda: device_push(conn, cfg, {"title": title, "body": body, "path": f"/t/{t['id']}", "tag": f"free-{t['id']}",
+                                                               "actions": [], "urgency": "high", "ttl": 86400, "data": {"task_id": t["id"]}})))
+        delivered, _results, errors = notify.send_each(sends)
+        if not delivered:
+            continue
+        seen.append(key)
+        set_setting(conn, "state.free_now.sent", seen[-200:])
+        conn.commit()
+        sent.append({"task_id": t["id"], "freed_by": by, "task_name": t["name"], "errors": errors})
     return sent
 
 

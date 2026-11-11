@@ -329,3 +329,68 @@ def test_a_ripple_create_card_makes_a_ripple_task(cfg, tmp_path):
     eid = c.execute("SELECT id FROM evidence").fetchone()[0]
     tid = client.post(f"/api/review/suggestions/{eid}/create", json={}).json()["task_id"]
     assert get_task(c, tid)["source"] == "Ripple"
+
+
+# --- Task 10: free now
+def _free(conn, hard=1, due="2026-11-05"):
+    mk(conn, 1, name="Get the data"); mk(conn, 2, name="Deliver the units", hard=hard, due=due); link(conn, 2, 1, "waits_on")
+
+
+def test_a_hard_dated_task_freed_today_is_announced_once(conn, cfg):
+    import copy
+    from factotum import reminders
+    c = copy.deepcopy(cfg); C.set_(c, "notify.ntfy.topic", "t"); C.set_(c, "notify.provider", "both")
+    pushed, devices = [], []
+    push = lambda cfg, title, body, **k: pushed.append((title, body, k.get("click"))) or "m1"      # noqa: E731
+    dev = lambda conn, cfg, notice: devices.append(notice) or {"sent": 1}                         # noqa: E731
+    _free(conn)
+    assert reminders.free_now(conn, c, TODAY, push, dev) == [] and pushed == []
+    batches.apply(conn, [{"op": "done", "task_id": 1}], "ui", TODAY)
+    sent = reminders.free_now(conn, c, TODAY, push, dev)
+    assert [s["task_id"] for s in sent] == [2] and pushed[0][0] == "Task-2 is free now" and pushed[0][2].endswith("/t/2")
+    assert "Task-1 is done" in pushed[0][1] and devices[0]["path"] == "/t/2" and devices[0]["actions"] == [] and devices[0]["tag"] == "free-2"
+    assert reminders.free_now(conn, c, TODAY, push, dev) == []
+
+
+@pytest.mark.parametrize("hard, due", [(0, "2026-11-05"), (1, None)])
+def test_a_task_without_a_hard_date_is_never_announced(conn, cfg, hard, due):
+    import copy
+    from factotum import reminders
+    c = copy.deepcopy(cfg); C.set_(c, "notify.ntfy.topic", "t")
+    pushed = []
+    _free(conn, hard, due); reminders.free_now(conn, c, TODAY, lambda *a, **k: pushed.append(a) or "m")
+    batches.apply(conn, [{"op": "done", "task_id": 1}], "ui", TODAY)
+    assert reminders.free_now(conn, c, TODAY, lambda *a, **k: pushed.append(a) or "m") == [] and pushed == []
+
+
+def test_still_waiting_or_freed_another_day_is_not_announced(conn, cfg):
+    import copy
+    from factotum import reminders
+    c = copy.deepcopy(cfg); C.set_(c, "notify.ntfy.topic", "t")
+    _free(conn); mk(conn, 3); link(conn, 2, 3, "waits_on")
+    reminders.free_now(conn, c, TODAY, lambda *a, **k: "m")
+    batches.apply(conn, [{"op": "done", "task_id": 1}], "ui", TODAY)
+    assert reminders.free_now(conn, c, TODAY, lambda *a, **k: "m") == []
+    batches.apply(conn, [{"op": "done", "task_id": 3}], "ui", TODAY)
+    assert reminders.free_now(conn, c, TODAY + timedelta(days=1), lambda *a, **k: "m") == []
+
+
+def test_a_notice_nobody_received_is_tried_again(conn, cfg):
+    import copy
+    from factotum import reminders
+    c = copy.deepcopy(cfg); C.set_(c, "notify.ntfy.topic", "t")
+    _free(conn); reminders.free_now(conn, c, TODAY, lambda *a, **k: "m")
+    batches.apply(conn, [{"op": "done", "task_id": 1}], "ui", TODAY)
+    assert reminders.free_now(conn, c, TODAY, lambda *a, **k: None) == []
+    assert [s["task_id"] for s in reminders.free_now(conn, c, TODAY, lambda *a, **k: "m")] == [2]
+
+
+def test_the_scheduler_logs_free_now_like_a_reminder(conn, cfg):
+    import copy
+    c = copy.deepcopy(cfg); C.set_(c, "notify.ntfy.topic", "t")
+    _free(conn)
+    s = Scheduler(c, conn, push=lambda *a, **k: "m", device_push=lambda *a, **k: {"sent": 0})
+    s.tick(datetime(2026, 11, 1, 12, 0))
+    batches.apply(conn, [{"op": "done", "task_id": 1}], "ui", TODAY)
+    s.tick(datetime(2026, 11, 1, 12, 1))
+    assert "free now: Task-2 Deliver the units" in [r["summary"] for r in conn.execute("SELECT summary FROM runs WHERE kind = 'reminder'")]

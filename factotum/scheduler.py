@@ -59,6 +59,7 @@ class Scheduler:
         ecfg = C.effective(self.cfg, st)
         did: list[str] = []
         self._reminders(ecfg, now, did)
+        self._free_now(ecfg, now, did)
         self._daily("expire", C.get(ecfg, "lifecycle.expire_time", "03:30"), now, st, did, lambda: self._expire(ecfg, today))
         if C.value(ecfg, "notify.morning_brief.enabled") and self.mailer:
             self._daily("morning_brief", C.get(ecfg, "notify.morning_brief.time", "06:30"), now, st, did, lambda: self._brief(ecfg, today))
@@ -107,6 +108,25 @@ class Scheduler:
             log_run(self.conn, "reminder", int((time.monotonic() - started) * 1000), ok=True, summary=summary)
             self.conn.commit()   # the Log tab reads through another connection; a row left in this transaction is invisible
             did.append(f"reminders: {summary}")
+
+    def _free_now(self, ecfg: dict, now: datetime, did: list[str]) -> None:
+        if not notify.ready(self.conn, ecfg):
+            return
+        started = time.monotonic()
+        try:
+            sent = reminders.free_now(self.conn, ecfg, now.date(), self.push, device_push=self.device_push)
+        except Exception as e:
+            self.conn.rollback()
+            if not self._rem_error_at or now - self._rem_error_at > RETRY_AFTER:
+                self._rem_error_at = now
+                log_run(self.conn, "reminder", int((time.monotonic() - started) * 1000), ok=False, error=f"{type(e).__name__}: {e}"[:500])
+                self.conn.commit()
+            return
+        if sent:
+            summary = "free now: " + ", ".join(f"Task-{s['task_id']} {s['task_name']}"[:60] for s in sent)
+            log_run(self.conn, "reminder", int((time.monotonic() - started) * 1000), ok=True, summary=summary)
+            self.conn.commit()
+            did.append(summary)
 
     def _daily(self, name: str, hhmm: str | None, now: datetime, st: dict, did: list[str], fn) -> None:
         if not hhmm or now.strftime("%H:%M") < str(hhmm):
