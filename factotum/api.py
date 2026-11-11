@@ -825,6 +825,8 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         async def get_response(self, path, scope):
             r = await super().get_response(path, scope)
             r.headers["Cache-Control"] = "no-cache, must-revalidate"
+            if path.endswith(".webmanifest"):        # the host's mime table decides otherwise
+                r.headers["content-type"] = "application/manifest+json"
             return r
 
     app.mount("/static", NoCacheStatic(directory=str(WEB)), name="static")

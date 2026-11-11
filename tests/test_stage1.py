@@ -78,3 +78,50 @@ def test_a_planner_that_failed_is_not_retried_with_the_brief(conn, cfg):
     s = _brief_sched(cfg, conn, mailer, SimpleNamespace(run=boom))
     s.tick(datetime(2026, 11, 2, 6, 31)); s.tick(datetime(2026, 11, 2, 7, 40))
     assert len(runs) == 1 and len(sent) == 1 and "claude down" in sent[0]
+
+
+# --- Task 4: the installable app
+
+def _png_size(b: bytes) -> tuple[int, int]:
+    assert b[:8] == b"\x89PNG\r\n\x1a\n"
+    return struct.unpack(">II", b[16:24])
+
+
+def test_the_page_head_installs_the_app(cfg, tmp_path):
+    r = TestClient(api.create_app(cfg, db_path=str(tmp_path / "a.db"))).get("/")
+    t = r.text
+    assert '<link rel="manifest" href="/static/manifest.webmanifest" crossorigin="use-credentials">' in t
+    assert '<link rel="apple-touch-icon" sizes="180x180" href="data:image/png;base64,' in t
+    assert '<meta name="apple-mobile-web-app-title" content="Factotum">' in t
+    assert t.count('name="theme-color"') == 2
+    assert "SPIKE" not in t
+    uri = t.split('rel="apple-touch-icon" sizes="180x180" href="data:image/png;base64,')[1].split('"')[0]
+    data = base64.b64decode(uri)
+    assert data == (api.WEB / "icon-180.png").read_bytes()
+    assert _png_size(data) == (180, 180)
+
+
+def test_the_manifest_and_its_icons_are_served(cfg, tmp_path):
+    c = TestClient(api.create_app(cfg, db_path=str(tmp_path / "a.db")))
+    r = c.get("/static/manifest.webmanifest")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("application/manifest+json")
+    m = r.json()
+    assert (m["name"], m["start_url"], m["scope"], m["display"]) == ("Factotum", "/", "/", "standalone")
+    purposes = set()
+    for icon in m["icons"]:
+        g = c.get(icon["src"])
+        assert g.status_code == 200 and g.headers["content-type"].startswith("image/png")
+        w, h = icon["sizes"].split("x")
+        assert _png_size(g.content) == (int(w), int(h))
+        purposes |= set(icon.get("purpose", "any").split())
+    assert {"any", "maskable"} <= purposes
+
+
+def test_the_icon_tool_draws_valid_icons():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("make_icons", C.ROOT / "tools" / "make_icons.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    for n in (180, 192, 512):
+        assert _png_size(mod.png(n)) == (n, n)
