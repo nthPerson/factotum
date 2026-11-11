@@ -270,6 +270,47 @@ span.lb { cursor: default; }      /* stepsChip: the same look, not a link */
 .details dd { margin: 2px 0 0; }
 .details .links a { color: var(--accent); text-decoration: none; margin-right: 12px; }
 .details .actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; grid-column: 1 / -1; }
+/* An opened task (app.js detailsHtml, frame 3): Where this stands, Linked tasks, Came from the same place and the
+   facts on the left; History on the right. */
+.details .dgrid { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr); gap: 24px; padding-top: 10px; }
+@media (max-width: 700px) { .details .dgrid { grid-template-columns: minmax(0, 1fr); } }      /* the phone task page: one column until its own layout (Task 7) */
+.details .dcol { min-width: 0; display: flex; flex-direction: column; gap: 14px; }
+.details .dcol > [data-dlinks] { display: flex; flex-direction: column; gap: 14px; }
+.details .dcol > [data-dlinks]:empty { display: none; }
+.details .dcol dt:first-child { margin-top: 0; }
+.dsec { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.dsec h4, .details .hhead h4 { margin: 0; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; }
+.dsec .ctx { margin: 0; white-space: pre-line; overflow-wrap: anywhere; }
+.details .rewritten, .dsec .near { margin: 0; font-size: 12px; color: var(--muted); }
+.details .rewritten { margin-top: -8px; }      /* it reads as the last line of Where this stands */
+.details .tref { font-family: var(--mono); font-size: 12px; color: var(--accent); }
+.lk { display: grid; grid-template-columns: 74px minmax(0, 1fr); gap: 10px; align-items: start; padding: 9px 10px; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; color: var(--fg); text-decoration: none; }
+.lk:hover { border-color: var(--accent); }
+.lk .k { font-size: 11px; font-weight: 600; color: var(--accent); padding-top: 2px; }
+.lk .b { display: flex; flex-direction: column; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
+.lk .name { font-weight: 500; }
+.lk .s { font-size: 12px; color: var(--muted); }
+.lk.closed .k, .lk.closed .s { color: var(--ok); }
+.lk.closed .name { font-weight: 400; color: var(--muted); text-decoration: line-through; }
+.details .hhead { display: flex; align-items: center; gap: 8px; }
+.details .hhead .hint, .details [data-dhist] > .hint { margin: 0; }
+.hlist { background: var(--surface); border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.hitem { padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; background: var(--surface); }
+.hitem + .hitem { border-top: 1px solid var(--line); }
+.hitem .hh { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.hitem .when { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.hitem .who { font-size: 11px; padding: 2px 8px; border-radius: 999px; background: var(--surface-2); color: var(--muted); font-weight: 500; }
+.hitem .who.you { background: var(--accent-soft); color: var(--accent); }
+.hitem .who.chg { background: var(--top-soft); color: var(--top); }
+.hitem .hl { overflow-wrap: anywhere; }
+.hitem .why { color: var(--muted); }
+.hitem .hdiff { display: grid; grid-template-columns: 48px minmax(0, 1fr); gap: 4px 8px; font-size: 12px; background: var(--bg); border-radius: 6px; padding: 8px 10px; }
+.hitem .hdiff > span { overflow-wrap: anywhere; white-space: pre-line; }
+.hitem .hdiff .bl { color: var(--crit); font-weight: 600; }
+.hitem .hdiff .bv { color: var(--muted); }
+.hitem .hdiff .al { color: var(--ok); font-weight: 600; }
+.hitem.undone .hl, .hitem.undone .hdiff, .hitem.undone .who { opacity: .6; }
+.details [data-hist-more] { align-self: flex-start; }
 /* The phone task page (app.js taskPageHtml): a task full-screen in place of the tab, the bar and the Top list hidden. */
 @media (max-width: 700px) {
   body.page-on header.bar, body.page-on aside.rail { display: none; }

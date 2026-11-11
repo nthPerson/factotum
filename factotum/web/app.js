@@ -325,6 +325,7 @@
   async function load() {
     const was = sumBusy();
     data = await api('/api/tasks?status=open');
+    detailGen++; detailCache.forEach(d => { d.stale = true; });      // an opened task keeps what it shows until its new answer arrives
     try { pending = (await api('/api/proposals')).proposals; } catch (_) { pending = []; }
     try { summary = await api('/api/summary'); } catch (_) { summary = null; }
     document.getElementById('today-label').textContent = '· ' + TODAY().toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
@@ -853,6 +854,169 @@
     return gs;
   }
 
+  // ---------- the opened task (stage 4b): linked tasks, provenance, History ----------
+  // GET /api/tasks/<id> is asked only for a task that is open on screen (a desktop row, the page's task) and
+  // kept by id. load() marks every entry stale and what is shown stays until the new answer arrives. On
+  // arrival the page re-renders, or, while something is typed (typingNow), only the two containers the
+  // answer fills are swapped in place, so the box being typed in is never redrawn.
+  const detailCache = new Map();     // id → the payload (+ stale: true after a load()), {id, missing: true} on 404, or {id, failed: <message>}
+  const detailBusy = new Set();      // ids whose request is in flight
+  let detailGen = 0;                 // bumped by load(): an answer to a request sent before it arrives stale
+  async function loadDetail(id, before) {
+    if (detailBusy.has(id)) return;
+    detailBusy.add(id);
+    const gen = detailGen, more = before != null;
+    let d;
+    try {
+      const got = await api(`/api/tasks/${id}` + (more ? '?before=' + before : ''));
+      const had = detailCache.get(id);
+      d = more && had && had.history
+        ? Object.assign({}, got, { history: { entries: had.history.entries.concat(got.history.entries), more: got.history.more, next_before: got.history.next_before } })
+        : got;
+      const t = byId(id); if (t && t.rel) t.rel.changed = null;      // the server just stamped it: the "updated by" badge goes
+    } catch (e) {
+      if (e.message === 'signed out' || more) {       // signed out has its own screen; a failed Earlier keeps what is shown
+        detailBusy.delete(id);
+        if (more && e.message !== 'signed out') toast('Could not load earlier History: ' + e.message);
+        return;
+      }
+      d = e.message === '404' ? { id, missing: true } : { id, failed: e.message };
+    }
+    detailBusy.delete(id);
+    if (gen !== detailGen) d.stale = true;
+    detailCache.set(id, d);
+    typingNow() ? swapDetail(id) : render();
+  }
+  // Called at the end of render(): fetch what an opened row or the page needs and has not got (or got before a load()).
+  function ensureDetails() {
+    const ids = PHONE() ? [] : [...ui.open].filter(id => document.querySelector(`#panel .row.open[data-id="${id}"]`));
+    if (ui.page !== null) ids.push(ui.page);
+    for (const id of ids) { const d = detailCache.get(id); if ((!d || d.stale) && !detailBusy.has(id)) loadDetail(id); }
+  }
+  const tref = n => `<a class="tref" href="/t/${n}" data-open-task="${n}">Task-${n}</a>`;
+  const linkTasks = s => esc(s).replace(/Task-(\d+)/g, (_, n) => tref(n));
+  // A date or a timestamp as "Nov 10", in this browser's zone (a date alone is read at noon).
+  const monDay = iso => { const s = String(iso || ''); if (!s) return ''; const d = new Date(s.length > 10 ? s : s + 'T12:00:00'); return isNaN(d) ? '' : d.toLocaleDateString([], { month: 'short', day: 'numeric' }); };
+  const histWhen = iso => { const d = new Date(iso || ''); if (isNaN(d)) return ''; const p = n => String(n).padStart(2, '0'); return `${monDay(iso)} ${p(d.getHours())}:${p(d.getMinutes())}`; };
+  function whereHtml(x) {
+    return `<section class="dsec"><h4>Where this stands</h4><p class="ctx">${x.context ? esc(x.context) : 'Nothing written yet.'}</p></section>`;
+  }
+  // The content of [data-dlinks]: what only the task's own payload knows. Nothing before it arrives.
+  function detailAsyncHtml(id) {
+    const d = detailCache.get(id);
+    if (!d || d.missing || d.failed) return '';
+    return rewrittenHtml(d) + linkedListHtml(d) + nearbyHtml(d);
+  }
+  // When the text was last rewritten by a run another task set off. An undone rewrite is not the text any more.
+  function rewrittenHtml(d) {
+    const e = ((d.history || {}).entries || []).find(e => e.field === 'context' && !e.undone);
+    const from = e && e.cause && Array.isArray(e.cause.from) ? e.cause.from[0] : null;
+    if (!Number.isInteger(from)) return '';
+    return `<p class="rewritten">Rewritten ${esc(monDay(e.at))} after ${tref(from)}. Earlier versions are in History.</p>`;
+  }
+  const LINK_KIND = { part_of: { out: 'part of', in: 'step' }, waits_on: { out: 'waits on', in: 'frees' }, same_as: { out: 'merged into', in: 'merged from' } };
+  function linkedListHtml(d) {
+    const rs = d.relations || [];
+    if (!rs.length) return '';
+    return `<section class="dsec"><h4>Linked tasks</h4>${rs.map(r => {
+      const o = r.other || {}, closed = o.status !== 'open';
+      const kind = r.kind === 'waits_on' && r.dir === 'out' && closed ? 'waited on' : (LINK_KIND[r.kind] || {})[r.dir] || r.kind;
+      let state;
+      if (closed) state = `${o.status}${o.completed_at ? ' ' + monDay(o.completed_at) : ''}${o.outcome ? ': ' + o.outcome : ''}`;
+      else {
+        const g = byId(o.id), due = fmtDue(o.due), steps = g && g.rel && g.rel.steps_total > 0 ? g.rel : null;
+        state = 'open' + (steps ? `, ${steps.steps_total - (steps.steps_open || 0)} of ${steps.steps_total} steps done` : '') + (due ? `, due ${due.label}` : '');
+      }
+      return `<a class="lk${closed ? ' closed' : ''}" href="/t/${o.id}" data-open-task="${o.id}"><span class="k">${esc(kind)}</span><span class="b"><span><span class="code">Task-${o.id}</span> <span class="name">${esc(o.name)}</span></span><span class="s">${esc(state)}</span></span></a>`;
+    }).join('')}</section>`;
+  }
+  // Provenance (design §4): tasks that share a recording or a mail thread, one line per place; never a link.
+  function nearbyHtml(d) {
+    const places = new Map();
+    for (const n of d.nearby || []) {
+      const k = n.via + '\n' + (n.label || '');
+      if (!places.has(k)) places.set(k, { via: n.via, label: n.label, ids: [] });
+      places.get(k).ids.push(n.id);
+    }
+    if (!places.size) return '';
+    const lines = [...places.values()].map(p => `Same ${esc(p.via)}${p.label ? ` “${esc(p.label)}”` : ''} as ${p.ids.map(tref).join(', ')}.`);
+    lines[lines.length - 1] += ' Shown for context, not a link.';
+    return `<section class="dsec"><h4>Came from the same place</h4>${lines.map(l => `<p class="near">${l}</p>`).join('')}</section>`;
+  }
+  // Who made a change, from its batch's source.
+  const WHO = { ui: 'you', review: 'you', command: 'you', automation: 'automatic', planner: 'planner', plaud: 'a recording', mail: 'mail', canvas: 'Canvas',
+    connector: 'a connector', skill: 'Claude Code', chat: 'chat', ntfy: 'a reminder', import: 'import' };
+  function whoText(e) {
+    if (e.source === 'ripple') { const f = e.cause && Array.isArray(e.cause.from) ? e.cause.from[0] : null; return { text: Number.isInteger(f) ? `ripple from Task-${f}` : 'ripple', cls: 'chg' }; }
+    const text = WHO[e.source] || String(e.source || '');
+    return { text, cls: text === 'you' ? 'you' : '' };
+  }
+  const HIST_QUIET = new Set(['completed_at', 'closed_by', 'due_is_datetime', 'last_reviewed_at', 'close_on_sent_to']);
+  const textOf = v => v == null ? '' : String(v);
+  const isAppend = e => textOf(e.new) !== '' && textOf(e.new).startsWith(textOf(e.old));
+  // One History line, as HTML (task numbers are links). A link entry names the other task, seen from this one.
+  const LINK_SAID = {
+    'out waits_on': ['Now waits on {T}.', 'No longer waits on {T}.'], 'in waits_on': ['Now frees {T}.', 'No longer frees {T}.'],
+    'out part_of': ['Linked as part of {T}.', 'No longer part of {T}.'], 'in part_of': ['{T} linked as a step.', '{T} is no longer a step.'],
+    'out same_as': ['Merged into {T}.', 'No longer merged into {T}.'], 'in same_as': ['{T} merged into this task.', '{T} is no longer merged into this task.'] };
+  const VERDICT_SAID = { applied: 'Suggestion accepted.', dismissed: 'Suggestion dismissed.', reviewed: 'Suggestion seen.', staged: 'Suggestion staged.' };
+  function historyWords(e, selfId) {
+    const v = e.new, o = e.old;
+    if (e.field === 'link') {
+      const l = (v != null ? v : o) || {}, said = LINK_SAID[`${l.dir} ${l.kind}`];
+      if (said && Number.isInteger(l.other) && l.other !== selfId) return said[v != null ? 0 : 1].replace('{T}', tref(l.other));
+    }
+    if (e.field === 'context') return isAppend(e) ? `Note added: “${esc(textOf(v).slice(textOf(o).length).trim())}”` : 'Text rewritten.';
+    if (e.field === 'name') return 'Renamed.';
+    if (e.field === 'outcome') return `Outcome: “${esc(textOf(v))}”`;
+    if (e.field === 'evidence' && VERDICT_SAID[(v || {}).verdict]) return VERDICT_SAID[v.verdict];
+    if (e.field === 'created') return 'Created.';
+    const s = fieldSaid(e);
+    return esc(s.charAt(0).toUpperCase() + s.slice(1) + '.');
+  }
+  function diffHtml(e) {
+    if (!['context', 'name', 'why_now'].includes(e.field) || isAppend(e)) return '';
+    const val = v => textOf(v) ? esc(textOf(v)) : '<span class="code">none</span>';
+    return `<div class="hdiff"><span class="bl">before</span><span class="bv">${val(e.old)}</span><span class="al">after</span><span class="av">${val(e.new)}</span></div>`;
+  }
+  // The content of [data-dhist]: one entry per batch, newest first, with its Undo.
+  function historyHtml(id) {
+    const d = detailCache.get(id);
+    const head = '<div class="hhead"><h4>History</h4><span class="spacer"></span><span class="hint">how this task got to where it is</span></div>';
+    if (!d) return head + '<p class="hint">Loading History…</p>';
+    if (d.missing || d.failed) return head + `<p class="hint">Could not load History (${esc(d.missing ? '404' : d.failed)}).</p>`;
+    const h = d.history || { entries: [] }, groups = [];
+    for (const e of h.entries) { const g = groups[groups.length - 1]; if (g && g[0].batch_id === e.batch_id) g.push(e); else groups.push([e]); }
+    const items = groups.map(g => {
+      const e0 = g[0], who = whoText(e0), shown = g.filter(e => !HIST_QUIET.has(e.field));
+      const undo = e0.undone ? '<span class="chip">undone</span>'
+        : `<button class="btn small" data-hist-undo="${e0.batch_id}">${e0.batch_tasks > 1 ? `Undo all ${e0.batch_changes} changes made together` : 'Undo'}</button>`;
+      const lines = shown.length ? shown.map(e => `<div class="hl">${historyWords(e, id)}${e.note ? ` <span class="why">Why: ${linkTasks(e.note)}</span>` : ''}</div>${diffHtml(e)}`).join('')
+        : '<div class="hl">Reviewed, kept as it is.</div>';
+      return `<div class="hitem${e0.undone ? ' undone' : ''}"><div class="hh"><span class="when">${esc(histWhen(e0.at))}</span><span class="who ${who.cls}">${esc(who.text)}</span><span class="spacer"></span>${undo}</div>${lines}</div>`;
+    }).join('');
+    return head + (items ? `<div class="hlist">${items}</div>` : '<p class="hint">Nothing has changed since it was created.</p>')
+      + (h.more ? `<button class="btn small" data-hist-more="${id}">Earlier</button>` : '');
+  }
+  function swapDetail(id) {
+    document.querySelectorAll(`#panel [data-dlinks="${id}"]`).forEach(el => { el.innerHTML = detailAsyncHtml(id); wireDetail(el); });
+    document.querySelectorAll(`#panel [data-dhist="${id}"]`).forEach(el => { el.innerHTML = historyHtml(id); wireDetail(el); });
+  }
+  function wireDetail(root) {
+    root.querySelectorAll('[data-open-task]').forEach(a => a.onclick = e => { e.preventDefault(); goTask(+a.dataset.openTask); });
+    root.querySelectorAll('[data-hist-undo]').forEach(b => b.onclick = async () => {
+      const id = +b.closest('[data-dhist]').dataset.dhist;
+      b.disabled = true;
+      let res;
+      try { res = await undoBatch(+b.dataset.histUndo); } catch (e) { b.disabled = false; toast('Undo failed: ' + e.message); return; }
+      toast(undoSaid(res));
+      const d = detailCache.get(id); if (d) d.stale = true;
+      logData = null;
+      await load();
+    });
+    root.querySelectorAll('[data-hist-more]').forEach(b => b.onclick = () => { const id = +b.dataset.histMore, d = detailCache.get(id); if (d && d.history) loadDetail(id, d.history.next_before); });
+  }
+
   // ---------- rendering ----------
   function render() {
     document.body.classList.toggle('page-on', ui.page !== null);      // before measuring: the page hides the bar on a phone
@@ -871,6 +1035,7 @@
     renderRemind();
     renderTray();
     wire();
+    ensureDetails();
   }
   function starterHtml() {
     if (!(settings && settings.starter)) return '';
@@ -1001,8 +1166,7 @@
         <button class="chev" aria-label="Details" data-chev="${x.id}"></button>
         <div class="meta">${chipsHtml(x, extraChip)}</div>
       </div>
-      <div class="details">
-        ${detailsHtml(x)}</div></div>`;
+      <div class="details">${ui.open.has(x.id) ? detailsHtml(x) : ''}</div></div>`;
   }
   // A task's chips (Top, long-term, date, effort, what is staged…): the row's .meta and the task page's.
   function chipsHtml(x, extraChip) {
@@ -1024,8 +1188,10 @@
       st ? `<span class="chip staged">${esc(st.label)}</span>` : '',
     ].join('');
   }
-  // What an opened row shows (score, why now, context, source, links, lifecycle, reminders) and, for
-  // an open task, its actions: the row's .details and the task page's.
+  // What an opened row shows, in two columns: Where this stands, Linked tasks, Came from the same place and
+  // the facts (score, why now, source, links, lifecycle, reminders); History beside them; then, for an open
+  // task, its actions. The row's .details and the task page's. The two [data-…] containers fill when the
+  // task's own payload arrives (detailCache).
   function detailsHtml(x) {
     const links = (x.links || []).map(l => {
       if (l.kind === 'plaud_note') return `<a href="https://web.plaud.ai/file/${esc(l.ref)}" target="_blank" rel="noopener" title="${esc(l.label || '')}">Plaud</a>`;
@@ -1036,13 +1202,14 @@
       return `<a href="${esc(l.ref)}" target="_blank" rel="noopener">${esc(l.label || l.kind)}</a>`;
     }).join('');
     const srcLink = x.source_link ? `<a href="${esc(x.source_link)}" target="_blank" rel="noopener">${x.source === 'Plaud' ? 'Plaud note' : x.source === 'Canvas' ? 'Canvas' : 'Source'}</a>` : '';
-    return `<dl><dt>Score</dt><dd>${x.score} · ${x.priority} · ${esc((x.score_reasons || []).join(' · '))}</dd>
-            <dt>Why now</dt><dd>${esc(x.why_now) || '<span class="code">none yet</span>'}</dd>
-            <dt>Context</dt><dd>${esc(x.context) || '<span class="code">none</span>'}</dd></dl>
+    return `<div class="dgrid"><div class="dcol">${whereHtml(x)}<div data-dlinks="${x.id}">${detailAsyncHtml(x.id)}</div>
+        <dl><dt>Score</dt><dd>${x.score} · ${x.priority} · ${esc((x.score_reasons || []).join(' · '))}</dd>
+            <dt>Why now</dt><dd>${esc(x.why_now) || '<span class="code">none yet</span>'}</dd></dl>
         <dl><dt>Source</dt><dd>${esc(x.source || '?')}${x.account ? ' · ' + esc(x.account) : ''} · ${x.mentions} mention${x.mentions === 1 ? '' : 's'} · created ${esc((x.created_at || '').slice(0, 10))}${x.legacy_status ? ' · was ' + esc(x.legacy_status) : ''}</dd>
             <dt>Links</dt><dd class="links">${srcLink}${links || (srcLink ? '' : '<span class="code">none</span>')}</dd>
             <dt>Lifecycle</dt><dd>${x.tier}${x.fade_at ? ' · fades ' + x.fade_at : ''}${x.last_call_at ? ' · last call ' + x.last_call_at : ''}${x.snoozed_until ? ' · snoozed until ' + x.snoozed_until : ''}</dd>
-            <dt>Reminders</dt><dd>${(x.reminders || []).map(r => `<span class="chip rem">${fmtWhen(r.fire_at)}${r.repeat ? ' · ' + esc(r.repeat) : ''} ${esc(r.label || '')}</span>`).join(' ') || '<span class="code">none</span>'}</dd></dl>${x.status !== 'open' ? '' : `
+            <dt>Reminders</dt><dd>${(x.reminders || []).map(r => `<span class="chip rem">${fmtWhen(r.fire_at)}${r.repeat ? ' · ' + esc(r.repeat) : ''} ${esc(r.label || '')}</span>`).join(' ') || '<span class="code">none</span>'}</dd></dl></div>
+        <div class="dcol" data-dhist="${x.id}">${historyHtml(x.id)}</div></div>${x.status !== 'open' ? '' : `
         <div class="actions">
           <button class="btn small" data-act="done" data-id="${x.id}">Done</button>
           <button class="btn small" data-act="drop" data-id="${x.id}">Drop</button>
@@ -1054,6 +1221,7 @@
           <span class="spacer"></span>
           <button class="btn small" data-chat-canned="search_mail" data-id="${x.id}" title="A chat turn: finds the threads about this task and offers to link them">✉ Search related emails</button>
           <button class="btn small" data-chat-canned="draft_reply" data-id="${x.id}" title="A chat turn: saves a reply draft in Mailbird, never sends">✉ Draft reply</button>
+          <button class="btn small" data-chat-canned="related" data-id="${x.id}" title="A chat turn: finds the tasks this one belongs with and offers to link them">Ask Claude what else is related</button>
         </div>`}`;
   }
   // ---------- the phone task page (stage 1) ----------
@@ -1310,6 +1478,7 @@
     if (draft.askFor !== id) { draft.ask = ''; draft.askFor = id; }      // a new card starts with an empty box
     return `<div class="cmd rvask"><textarea id="rv-ask" class="grow" rows="1" placeholder="Ask Claude about this task — e.g. “add that the first pass is done”; its proposals stage with this decision" aria-label="Ask Claude">${esc(draft.ask)}</textarea><button class="btn small" id="rv-ask-go" ${chat.busy ? 'disabled' : ''}>Ask</button></div>${TOUCH() ? '' : '<div class="hint keysonly">Enter sends · Shift+Enter starts a new line</div>'}${live}${reply}`;
   }
+  const CANNED_SAID = { search_mail: 'Search related emails', draft_reply: 'Draft a reply', related: 'What else is related?' };      // a canned turn's own bubble
   // One turn: POST, then read the server-sent events until done. From a Review card (`from.review`)
   // the tab stays put and the proposals about that task are staged straight into the tray.
   async function sendChat(text, canned, attached, from) {
@@ -1318,7 +1487,7 @@
     // the threads first: go() renders, and a Chat render with no threads loads them and the current thread's messages over this turn's
     if (!from) { if (!chat.threads) { try { const r = await api('/api/chat/threads'); chat.threads = r.threads; } catch (_) { chat.threads = []; } } ui.page = null; go('chat'); }
     const threadId = from ? null : chat.current;    // a Review question starts its own thread
-    if (!from) chat.messages = [...chat.messages, { role: 'user', text: text || (canned === 'search_mail' ? 'Search related emails' : 'Draft a reply'), attached }];
+    if (!from) chat.messages = [...chat.messages, { role: 'user', text: text || CANNED_SAID[canned] || canned, attached }];
     render();
     let result = null, error = null;
     try {
@@ -1396,31 +1565,32 @@
     if (items.length > 2 && items.every(i => i.label === items[0].label)) return `${items.length} tasks · ${items[0].label}`;
     return items.slice(0, 3).map(i => (i.id ? `Task-${i.id} ` : 'suggestion ') + i.label).join(' · ') + (items.length > 3 ? ` · +${items.length - 3} more` : '');
   }
+  // One changed field in words, lower case ("due Nov 3 → Nov 5", "note added: “…”"): the Log's digest and History.
+  function fieldSaid(c) {
+    const short = v => { const t = String(v); return t.length > 16 && /^\d{4}-\d\d-\d\dT/.test(t) ? t.slice(0, 16).replace('T', ' ') : t; };
+    const cut = (t, n) => { t = String(t).replace(/\s+/g, ' ').trim(); return t.length > n ? t.slice(0, n - 1) + '…' : t; };
+    const o = c.old, v = c.new;
+    if (c.field === 'status') return v === 'open' ? 'reopened' : String(v);
+    if (c.field === 'created') return 'created';
+    if (c.field === 'due') return v ? (o ? `due ${short(o)} → ${short(v)}` : `due ${short(v)}`) : 'due date removed';
+    if (c.field === 'snoozed_until') return v ? `later, back ${short(v)}` : 'back from later';
+    if (c.field === 'reminder') return 'reminder ' + (v && v.fire_at ? short(v.fire_at) : 'set') + (v && v.repeat ? ' · ' + v.repeat : '');
+    if (c.field === 'top_rank') return v ? (o ? `Top ${o} → ${v}` : 'pinned to Top') : 'unpinned';
+    if (c.field === 'longterm') return v ? 'long-term' : 'not long-term';
+    if (c.field === 'hard') return v ? 'hard deadline' : 'soft date';
+    if (c.field === 'waiting_on') return v ? 'waiting on ' + cut(v, 50) : 'no longer waiting';
+    if (c.field === 'close_on_sent_since') return v ? 'closes when the mail is sent' : 'sent-mail watch ended';
+    if (c.field === 'evidence') return 'evidence #' + ((v || {}).evidence_id || '?') + ' ' + ((v || {}).verdict || '');
+    if (c.field === 'context' || c.field === 'why_now') { const added = o && v && String(v).startsWith(String(o)) ? String(v).slice(String(o).length) : v;
+      return (c.field === 'context' ? (o ? 'note added: ' : 'context: ') : 'why now: ') + '“' + cut(added == null ? '' : added, 180) + '”'; }
+    return c.field.replace(/_/g, ' ') + ' ' + (v === null || v === undefined ? 'cleared' : '→ ' + cut(typeof v === 'object' ? JSON.stringify(v) : v, 60));
+  }
   // An opened batch in the Timeline: one line per task saying what happened to it, in words. The
   // bookkeeping that rides along (completed_at, closed_by, last_reviewed_at) is left to the Changes view.
   function batchDigest(b) {
     const QUIET = new Set(['completed_at', 'closed_by', 'due_is_datetime', 'last_reviewed_at', 'close_on_sent_to']);
-    const short = v => { const t = String(v); return t.length > 16 && /^\d{4}-\d\d-\d\dT/.test(t) ? t.slice(0, 16).replace('T', ' ') : t; };
-    const cut = (t, n) => { t = String(t).replace(/\s+/g, ' ').trim(); return t.length > n ? t.slice(0, n - 1) + '…' : t; };
-    const say = c => {
-      const o = c.old, v = c.new;
-      if (c.field === 'status') return v === 'open' ? 'reopened' : String(v);
-      if (c.field === 'created') return 'created';
-      if (c.field === 'due') return v ? (o ? `due ${short(o)} → ${short(v)}` : `due ${short(v)}`) : 'due date removed';
-      if (c.field === 'snoozed_until') return v ? `later, back ${short(v)}` : 'back from later';
-      if (c.field === 'reminder') return 'reminder ' + (v && v.fire_at ? short(v.fire_at) : 'set') + (v && v.repeat ? ' · ' + v.repeat : '');
-      if (c.field === 'top_rank') return v ? (o ? `Top ${o} → ${v}` : 'pinned to Top') : 'unpinned';
-      if (c.field === 'longterm') return v ? 'long-term' : 'not long-term';
-      if (c.field === 'hard') return v ? 'hard deadline' : 'soft date';
-      if (c.field === 'waiting_on') return v ? 'waiting on ' + cut(v, 50) : 'no longer waiting';
-      if (c.field === 'close_on_sent_since') return v ? 'closes when the mail is sent' : 'sent-mail watch ended';
-      if (c.field === 'evidence') return 'evidence #' + ((v || {}).evidence_id || '?') + ' ' + ((v || {}).verdict || '');
-      if (c.field === 'context' || c.field === 'why_now') { const added = o && v && String(v).startsWith(String(o)) ? String(v).slice(String(o).length) : v;
-        return (c.field === 'context' ? (o ? 'note added: ' : 'context: ') : 'why now: ') + '“' + cut(added == null ? '' : added, 180) + '”'; }
-      return c.field.replace(/_/g, ' ') + ' ' + (v === null || v === undefined ? 'cleared' : '→ ' + cut(typeof v === 'object' ? JSON.stringify(v) : v, 60));
-    };
     const per = new Map();
-    for (const c of b.changes) { const k = c.task_id || 'e'; if (!per.has(k)) per.set(k, { id: c.task_id, name: c.task_name, said: [], quiet: 0 }); const g = per.get(k); QUIET.has(c.field) ? g.quiet++ : g.said.push(say(c)); }
+    for (const c of b.changes) { const k = c.task_id || 'e'; if (!per.has(k)) per.set(k, { id: c.task_id, name: c.task_name, said: [], quiet: 0 }); const g = per.get(k); QUIET.has(c.field) ? g.quiet++ : g.said.push(fieldSaid(c)); }
     return [...per.values()].map(g => `<div class="logc dg">${g.id ? `<span class="code">Task-${g.id}</span> <span class="name">${esc(g.name || '')}</span>` : '<span class="code">suggestion</span>'}
       <span class="what">${g.said.length ? g.said.map(esc).join(' · ') : 'reviewed, kept as it is'}</span></div>`).join('') || '<div class="hint">No field changed.</div>';
   }
@@ -1638,6 +1808,7 @@
     wireReminders(panel); wireDue(panel);
     panel.querySelectorAll('[data-undo]').forEach(b => b.onclick = async () => { const res = await undoBatch(+b.dataset.undo); await load(); logData = null; toast(undoSaid(res)); render(); });
     panel.querySelectorAll('[data-chat-canned]').forEach(b => b.onclick = () => sendChat('', b.dataset.chatCanned, [+b.dataset.id]));
+    wireDetail(panel);
     panel.querySelectorAll('[data-chat-stage]').forEach(b => b.onclick = () => {
       const mid = +b.dataset.chatStage; const m = chat.messages.find(x => x.id === mid); if (!m) return;
       let n = 0; panel.querySelectorAll(`[data-chat-prop="${mid}"]`).forEach(ck => { if (ck.checked && stageProposal(m.proposals[+ck.dataset.i], mid, +ck.dataset.i)) n++; });
