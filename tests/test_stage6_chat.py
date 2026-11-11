@@ -169,6 +169,23 @@ def test_a_staged_create_already_made_by_its_create_button_is_not_made_twice(cfg
     assert c.post("/api/batches/apply", json={"changes": [{"op": "create", "fields": {}, "from_chat": {"message_id": 999999, "index": 0}}]}).status_code == 400
 
 
+def test_a_tray_that_resolves_to_nothing_writes_no_batch(cfg, tmp_path, monkeypatch):
+    app = api.create_app(cfg, db_path=str(tmp_path / "t.db"))
+    c, conn = TestClient(app), app.state.conn
+    res = _steps(conn, cfg, tmp_path, monkeypatch)
+    made = chat.create_from_proposal(conn, cfg, res["message_id"], 0, TODAY)
+    before = one(conn, "SELECT COUNT(*) AS n FROM batches")["n"]
+    monkeypatch.setattr(batches, "apply", lambda *a, **k: pytest.fail("batches.apply called with nothing to apply"))
+    out = c.post("/api/batches/apply", json={"source": "review", "changes": [
+        {"op": "create", "fields": {}, "from_chat": {"message_id": res["message_id"], "index": 0}}]}).json()
+    assert out == {"batch_id": None, "applied": 0, "skipped": [], "created": [], "refs": {}, "ripple_queued": []}
+    assert one(conn, "SELECT COUNT(*) AS n FROM batches")["n"] == before
+    conn.execute("UPDATE tasks SET status = 'dropped', closed_by = 'undo' WHERE id = ?", (made,)); conn.commit()
+    out = c.post("/api/batches/apply", json={"changes": [{"op": "create", "fields": {}, "from_chat": {"message_id": res["message_id"], "index": 0}}]}).json()
+    assert out["batch_id"] is None and out["skipped"][0]["task_id"] == made      # the reason still reaches the toast
+    assert one(conn, "SELECT COUNT(*) AS n FROM batches")["n"] == before
+
+
 def test_a_staged_create_is_linked_to_the_mail_threads_it_cites_like_create(cfg, tmp_path, monkeypatch):
     app = api.create_app(cfg, db_path=str(tmp_path / "t.db"))
     c, conn = TestClient(app), app.state.conn

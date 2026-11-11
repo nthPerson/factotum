@@ -411,6 +411,8 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
             with chat._CREATE_LOCK:                  # a chat create staged here and its Create button never make two
                 left_out: list[dict] = []
                 changes = chat.resolve_staged(conn, eff_cfg(), changes, left_out)
+                if not changes:                      # every entry was a create made already: no empty batch row, no Undo for nothing
+                    return {"batch_id": None, "applied": 0, "skipped": left_out, "created": [], "refs": {}, "ripple_queued": []}
                 res = batches.apply(conn, changes, body.source, date.today())
                 res["skipped"] = left_out + res["skipped"]
                 chat.mark_staged(conn, changes, res)
