@@ -125,7 +125,8 @@ def _create(conn, cur, ch: dict, batch_id: int, source: str, today: date, undo: 
         except ValueError as e:
             skipped.append({"task_id": None, "why": f"{name[:40]}: watch not set: {e}"})
     now = now_iso()
-    tid = upsert_task(conn, dict(vals, status="open", source=created_source(source), source_key=source_key or f"batch:{batch_id}:{len(created)}", hard=vals.get("hard", 0),
+    # `created_source`, like `source_key`, is set by Python callers only (the API strips both)
+    tid = upsert_task(conn, dict(vals, status="open", source=ch.get("created_source") or created_source(source), source_key=source_key or f"batch:{batch_id}:{len(created)}", hard=vals.get("hard", 0),
                                  mentions=1, last_mention_at=today.isoformat(), created_at=now, edited_at=now))
     # `new` keeps who the create named: an address a direct batch introduced is not a contact (mcp_server.known_recipients)
     cur.execute("INSERT INTO changes (batch_id, task_id, field, old, new) VALUES (?, ?, 'created', NULL, ?)",
