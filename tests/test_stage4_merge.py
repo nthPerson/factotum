@@ -313,3 +313,90 @@ def test_the_planner_and_review_cards_do_not_read_link_suggestions(conn, cfg, tm
     app = api.create_app(cfg, db_path=str(tmp_path / "t.db"))
     items = {i["task"]["id"]: i for i in TestClient(app).get("/api/review").json()["items"]}
     assert [e["kind"] for e in items[1]["evidence"]] == ["thread_updated"]
+
+
+# --- stage review fix wave: a reopened duplicate is its own task again
+
+def _reopen(conn, tid):
+    return batches.apply(conn, [{"op": "reopen", "task_id": tid}], "ui", TODAY)
+
+
+def test_an_instruction_naming_a_reopened_duplicate_acts_on_it(conn, cfg):
+    mk(conn, 1); mk(conn, 2)
+    _merge(conn, 1, 2)
+    r = _reopen(conn, 1)
+    assert active_rels(conn) == set() and relations.survivor(conn, 1) == 1                   # the reopen took its same_as with it
+    assert one(conn, "SELECT COUNT(*) AS n FROM changes WHERE batch_id = ? AND field = 'link'", (r["batch_id"],))["n"] == 2
+    t = relations.annotate(conn, [one(conn, "SELECT * FROM tasks WHERE id = 1")])[0]
+    assert relations.short(t) == "" and relations.annotate(conn, [{"id": 2}])[0]["rel"]["merged_at"] is None
+    res = sync_file.apply_result(conn, cfg, REC, {"tasks": [], "instructions": [{"op": "done", "task_id": 1, "evidence": "Task-1 is done"}],
+                                                  "reminders": [], "calendar": [], "unresolved": []}, TODAY)
+    assert res["unresolved"] == [] and res["applied"] == 1
+    assert one(conn, "SELECT status FROM tasks WHERE id = 1")["status"] == "done"
+    assert one(conn, "SELECT status FROM tasks WHERE id = 2")["status"] == "open"
+
+
+def test_undo_of_the_reopen_puts_the_merge_back_unless_it_was_merged_again(conn):
+    mk(conn, 1); mk(conn, 2); mk(conn, 3)
+    _merge(conn, 1, 2)
+    r = _reopen(conn, 1)
+    u = batches.undo(conn, r["batch_id"])
+    assert u["skipped"] == [] and active_rels(conn) == {(1, 2, "same_as")}
+    assert (one(conn, "SELECT status, closed_by FROM tasks WHERE id = 1")["closed_by"], relations.survivor(conn, 1)) == ("merge", 2)
+    r = _reopen(conn, 1)
+    _merge(conn, 1, 3)                                                     # re-merged elsewhere since the reopen
+    assert active_rels(conn) == {(1, 3, "same_as")}
+    u = batches.undo(conn, r["batch_id"])
+    assert active_rels(conn) == {(1, 3, "same_as")} and relations.survivor(conn, 1) == 3
+    assert any("was merged into Task-3 since" in s["why"] for s in u["skipped"])
+
+
+def test_a_merge_into_a_reopened_duplicate_is_allowed_and_a_re_merge_records_its_own_same_as(conn):
+    mk(conn, 1); mk(conn, 2); mk(conn, 5)
+    _merge(conn, 1, 2); _reopen(conn, 1)
+    assert relations.merge_target_problem(conn, 1) is None
+    res = _merge(conn, 5, 1)
+    assert res["skipped"] == [] and (5, 1, "same_as") in active_rels(conn)
+    res = _merge(conn, 1, 2)                                               # the same pair again, after the reopen
+    assert res["skipped"] == [] and active_rels(conn) == {(5, 2, "same_as"), (1, 2, "same_as")}
+    new = json.loads(one(conn, "SELECT new FROM changes WHERE batch_id = ? AND task_id = 2 AND field = 'link' AND new LIKE '%\"other\": 1,%'", (res["batch_id"],))["new"])
+    assert new["kind"] == "same_as" and "moved" in new
+
+
+def test_survivor_ignores_a_same_as_left_on_an_open_row_and_a_merge_clears_it(conn):
+    mk(conn, 1); mk(conn, 2); mk(conn, 3)
+    relations.add(conn, 1, 2, "same_as", None, "test", None); conn.commit()        # old data: a reopen that left the row behind
+    assert relations.survivor(conn, 1) == 1 and relations.merge_target_problem(conn, 1) is None
+    res = _merge(conn, 1, 3)
+    assert res["skipped"] == [] and active_rels(conn) == {(1, 3, "same_as")}
+    batches.undo(conn, res["batch_id"])
+    assert active_rels(conn) == {(1, 2, "same_as")} and one(conn, "SELECT status FROM tasks WHERE id = 1")["status"] == "open"
+
+
+def test_merge_refuses_a_target_a_merge_dropped_whose_same_as_is_gone(conn):
+    mk(conn, 1); mk(conn, 2); mk(conn, 5)
+    _merge(conn, 1, 2)
+    conn.execute("UPDATE relations SET removed_at = 'x' WHERE kind = 'same_as'"); conn.commit()
+    res = _merge(conn, 5, 1)
+    assert res["applied"] == 0 and res["skipped"][0]["why"] == "Task-1 was merged away; reopen it first, or merge into another task"
+    assert one(conn, "SELECT status FROM tasks WHERE id = 5")["status"] == "open"
+
+
+def test_a_re_synced_merged_create_lends_the_survivor_no_calendar_event(conn, cfg):
+    upsert_task(conn, task(id=1, name="Email Max the slides", source="Plaud", source_key="plaud:of_aa:1")); mk(conn, 2, name="Send Max the deck")
+    _merge(conn, 1, 2)
+    data = {"tasks": [{"op": "create", "name": "Email Max the slides", "source_key": "plaud:of_aa:1"}], "instructions": [], "reminders": [],
+            "calendar": [{"title": "Slides", "start": "2026-11-04T09:00", "task_ref": "tasks[0]"}], "unresolved": []}
+    res = sync_file.apply_result(conn, cfg, REC, data, TODAY, calendar=lambda ev: {"id": "ev1", "link": "https://calendar/ev1"})
+    assert res["events"] == 1 and one(conn, "SELECT calendar_event FROM tasks WHERE id = 2")["calendar_event"] is None
+    assert one(conn, "SELECT task_id FROM links WHERE kind = 'calendar' AND ref = 'ev1'")["task_id"] == 2
+
+
+def test_import_duplicate_never_cards_a_closed_row_as_the_one_that_goes(conn):
+    mk(conn, 1, created_at="2026-09-01T00:00:00+00:00", status="done", completed_at="2026-10-01"); mk(conn, 2, created_at="2026-10-20T00:00:00+00:00")
+    assert relations.import_duplicate(conn, 2, 1) == "same_as"             # the open loser stays; the closed owner (older) is the one that is over
+    assert active_rels(conn) == {(1, 2, "same_as")} and not rows(conn, "SELECT 1 FROM evidence WHERE kind = 'link_suggestion'")
+    mk(conn, 3); mk(conn, 4)
+    assert relations.import_duplicate(conn, 3, 4) == "suggested"
+    assert relations.import_duplicate(conn, 4, 3) == "skipped"             # the card is waiting already: nothing written
+    assert one(conn, "SELECT COUNT(*) AS n FROM evidence WHERE kind = 'link_suggestion'")["n"] == 1

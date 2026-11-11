@@ -460,3 +460,45 @@ def test_nothing_the_user_or_the_agent_reads_says_blocked_or_dependency():
     texts += [t["description"] for t in M.TOOLS] + [M.OPS_HELP] + list(lifecycle.REVIEW_LABELS.values()) + [lifecycle.REASON_TEXTS[k] for k in lifecycle.REASON_TEXTS]
     for t in texts:
         assert not re.search(r"\bblocked\b|\bdependenc", t, re.I), t[:120]
+
+
+def test_a_merge_into_a_reopened_duplicate_passes_the_validator(cfg, tmp_path):
+    c = _db(tmp_path, 3)
+    batches.apply(c, [{"op": "merge", "task_id": 1, "fields": {"into": 2}}], "ui", TODAY)
+    v = lambda *chs: M._validate_changes(_ctx(cfg, tmp_path), list(chs))                   # noqa: E731
+    merge = {"op": "merge", "task_id": 3, "fields": {"into": 1}}
+    assert v(merge)[1] == ["#0: Task-1 was itself merged into Task-2; merge into Task-2"]
+    batches.apply(c, [{"op": "reopen", "task_id": 1}], "ui", TODAY)
+    assert v(merge) == ([merge], [], [])
+
+
+def test_two_create_clicks_at_once_make_one_task_and_no_empty_batch(conn, cfg, monkeypatch):
+    import threading
+    import time
+    from factotum import chat
+    mid = _chat_msg(conn, [{"op": "create", "task_id": None, "fields": {"name": "Once"}, "label": "create Once", "evidence": [], "applied": False}])
+    real = batches.apply
+    monkeypatch.setattr(chat.batches, "apply", lambda *a, **k: (time.sleep(0.2), real(*a, **k))[1])     # widen the window between the check and the write
+    n0 = conn.execute("SELECT COUNT(*) FROM batches").fetchone()[0]
+    out = []
+    ts = [threading.Thread(target=lambda: out.append(chat.create_from_proposal(conn, cfg, mid, 0, TODAY))) for _ in range(2)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert len(out) == 2 and out[0] == out[1]
+    assert conn.execute("SELECT COUNT(*) FROM batches").fetchone()[0] == n0 + 1
+
+
+def test_create_returns_the_task_another_process_made_meanwhile(conn, cfg, monkeypatch):
+    from factotum import chat
+    from factotum.db import upsert_task
+    from stage4_helpers import task
+    mid = _chat_msg(conn, [{"op": "create", "task_id": None, "fields": {"name": "Once"}, "label": "create Once", "evidence": [], "applied": False}])
+    real = batches.apply
+
+    def racing(c, changes, *a, **k):                                       # the CLI made it between the check and the write
+        upsert_task(c, task(id=77, name="Once", source="Chat", source_key=f"chat:{mid}:0")); c.commit()
+        return real(c, changes, *a, **k)
+    monkeypatch.setattr(chat.batches, "apply", racing)
+    assert chat.create_from_proposal(conn, cfg, mid, 0, TODAY) == 77

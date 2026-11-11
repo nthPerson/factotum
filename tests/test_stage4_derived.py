@@ -367,3 +367,9 @@ def test_words_says_each_link_fact():
     assert relations.words({"id": 1}) == "" and relations.words({"rel": {}}) == ""
     rel = {"waits_on_open": [9, 10], "frees_open": [12, 14], "goal_id": 380, "steps_open": 2, "steps_total": 5, "needed_by": "2026-11-06"}
     assert relations.words({"rel": rel}) == "waits on Task-9, Task-10 · frees Task-12, 14 · part of Task-380 · 2 of 5 steps open · needed for Nov 6"
+
+
+def test_steps_done_clears_after_a_keep_when_no_step_carries_an_activity_date(cfg):
+    t = task(project="FAMAIL", last_mention_at=TODAY.isoformat(), last_reviewed_at=None, rel=_lrel(steps_total=2, steps_open=0, neighbour_activity_at=None))
+    assert lifecycle.review_reasons(t, TODAY, cfg, None) == ["steps_done", "new"]
+    assert lifecycle.review_reasons(dict(t, last_reviewed_at="2026-10-30"), TODAY, cfg, None) == []

@@ -764,7 +764,7 @@ def _extra_fields(fields: dict) -> dict:
 
 
 MAX_CHANGES, MAX_REMINDERS, NAME_MAX = 40, 10, 80
-ROWS_PER_OP = {"done": 4, "drop": 4, "reopen": 3, "watch_sent": 2, "unwatch_sent": 2,     # status, completed_at, closed_by, top_rank …
+ROWS_PER_OP = {"done": 4, "drop": 4, "reopen": 5, "watch_sent": 2, "unwatch_sent": 2,     # status, completed_at, closed_by, top_rank …; a reopen also removes a same_as (2)
                "link": 2, "unlink": 2, "merge": 2, "add_note": 1}                         # a link writes one row on each task
 
 
@@ -943,9 +943,9 @@ def _validate_changes(ctx: Context, changes, direct: bool = False) -> tuple[list
                 continue
             if into == tid:
                 rejected.append(f"#{i}: a task cannot be merged into itself"); continue
-            s = relations.survivor(ctx.conn, into)
-            if s != into:
-                rejected.append(f"#{i}: Task-{into} was itself merged into Task-{s}; merge into Task-{s}"); continue
+            reason = relations.merge_target_problem(ctx.conn, into)    # the same check `batches._merge` makes
+            if reason:
+                rejected.append(f"#{i}: {reason}"); continue
             kept.append({"task_id": tid, "op": "merge", "fields": {"into": into}}); continue
         if type(tid) is not int:                             # True is an int in Python, and Task-1 is somebody's task
             rejected.append(f"#{i}: task_id must be an integer, not {tid!r}"); continue

@@ -322,11 +322,10 @@ def _merge(conn, cur, ch: dict, batch_id: int, source: str, today: date, undo: l
     if dup["status"] != "open":
         skipped.append({"task_id": goes, "why": f"Task-{goes} is not open ({dup['status']}); only an open task can be merged away"})
         return False
-    if surv["status"] == "dropped" and surv.get("closed_by") == "merge":
-        s = cur.execute("SELECT dst FROM relations WHERE src = ? AND kind = 'same_as' AND removed_at IS NULL ORDER BY id DESC LIMIT 1", (keep,)).fetchone()
-        if s:
-            skipped.append({"task_id": goes, "why": f"Task-{keep} was itself merged into Task-{s['dst']}; merge into Task-{s['dst']}"})
-            return False
+    reason = R.merge_target_problem(cur, keep)
+    if reason:
+        skipped.append({"task_id": goes, "why": reason})
+        return False
     moved = {"links": 0, "reminders": 0, "tasks": 0}
     for ln in cur.execute("SELECT id, kind, ref FROM links WHERE task_id = ? ORDER BY id", (goes,)).fetchall():
         if cur.execute("SELECT 1 FROM links WHERE task_id = ? AND kind = ? AND ref = ?", (keep, ln["kind"], ln["ref"])).fetchone():
@@ -340,7 +339,13 @@ def _merge(conn, cur, ch: dict, batch_id: int, source: str, today: date, undo: l
         moved["reminders"] += 1
     for rel in [dict(r) for r in cur.execute("SELECT * FROM relations WHERE (src = ? OR dst = ?) AND removed_at IS NULL ORDER BY id", (goes, goes)).fetchall()]:
         if rel["kind"] == "same_as" and rel["src"] == goes:
-            continue                                         # where the duplicate itself went before a reopen; on the survivor it would say the survivor went there
+            # Where the duplicate went before a reopen that left the row behind (data from before
+            # reopen removed it): stale, since the duplicate is open. Removed here, never moved (on the
+            # survivor it would say the survivor went there), so the merge below records its own.
+            R.remove(cur, rel["id"], batch_id)
+            _link_changes(cur, batch_id, rel, added=False)
+            undo.append({"relation_id": rel["id"], "undo": "restore"})
+            continue
         other = rel["dst"] if rel["src"] == goes else rel["src"]
         src, dst = (keep, rel["dst"]) if rel["src"] == goes else (rel["src"], keep)
         R.remove(cur, rel["id"], batch_id)                   # first, so the old row does not count against its own move
@@ -361,10 +366,9 @@ def _merge(conn, cur, ch: dict, batch_id: int, source: str, today: date, undo: l
     if dup.get("due") and not surv.get("due"):
         _write_fields(cur, surv, {"due": dup["due"], "due_is_datetime": dup.get("due_is_datetime"), "hard": dup.get("hard")}, batch_id, undo)
     _write_fields(cur, dup, {"status": "dropped", "completed_at": today.isoformat(), "closed_by": "merge", "top_rank": None}, batch_id, undo)
-    if not R.find(cur, goes, keep, "same_as"):
-        rid = R.add(cur, goes, keep, "same_as", f.get("why"), source, batch_id)
-        _link_changes(cur, batch_id, dict(cur.execute("SELECT * FROM relations WHERE id = ?", (rid,)).fetchone()), added=True, extra={keep: {"moved": moved}})
-        undo.append({"relation_id": rid, "undo": "remove"})
+    rid = R.add(cur, goes, keep, "same_as", f.get("why"), source, batch_id)          # any older same_as of the duplicate was removed above
+    _link_changes(cur, batch_id, dict(cur.execute("SELECT * FROM relations WHERE id = ?", (rid,)).fetchone()), added=True, extra={keep: {"moved": moved}})
+    undo.append({"relation_id": rid, "undo": "remove"})
     _judge_suggestions(conn, cur, goes, keep, batch_id, undo, skipped)
     return True
 
@@ -428,7 +432,21 @@ def _apply_one(conn, cur, ch: dict, batch_id: int, source: str, today: date, clo
             if k in fields and _norm_text(task.get(k)) != _norm_text(want):
                 skipped.append({"task_id": task["id"], "why": f"Task-{task['id']} {k} changed since this edit was staged; not applied"})
                 return False
-    return _write_fields(cur, task, fields, batch_id, undo)
+    wrote = _write_fields(cur, task, fields, batch_id, undo)
+    if wrote and ch.get("op") == "reopen" and task.get("status") != "open":
+        _unmerge(cur, task["id"], batch_id, undo)
+    return wrote
+
+
+def _unmerge(cur, task_id: int, batch_id: int, undo: list) -> None:
+    """A reopened task is a task of its own again: its `same_as` rows (where a merge or the import
+    sent it) are removed in the same batch, so nothing that names it is redirected to the row it was
+    merged into, and nothing reads it as merged any more. What the merge moved stays on the survivor;
+    the batch's undo restores the rows."""
+    for rel in [dict(r) for r in cur.execute("SELECT * FROM relations WHERE src = ? AND kind = 'same_as' AND removed_at IS NULL ORDER BY id", (task_id,)).fetchall()]:
+        R.remove(cur, rel["id"], batch_id)
+        _link_changes(cur, batch_id, rel, added=False)
+        undo.append({"relation_id": rel["id"], "undo": "restore"})
 
 
 def _write_fields(cur, task: dict, fields: dict, batch_id: int, undo: list) -> bool:

@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
+import threading
 import time
 from datetime import date, datetime
 from pathlib import Path
@@ -355,10 +356,20 @@ def turn(conn: sqlite3.Connection, cfg: dict, thread_id: int, text: str, attache
             "rejected": rejected, "cost_usd": res.cost_usd, "duration_ms": ms, "session_id": res.session_id}
 
 
+_CREATE_LOCK = threading.Lock()
+
+
 def create_from_proposal(conn: sqlite3.Connection, cfg: dict, message_id: int, index: int, today: date) -> int:
     """The user clicked Create on a stored proposal: one batch keyed `chat:<message>:<index>`, so a
     second click changes nothing and one Undo takes back the task and its links. A link to another
-    proposal's ref is made only once that task exists (create it first). Cited mail threads become links."""
+    proposal's ref is made only once that task exists (create it first). Cited mail threads become links.
+    Two clicks at once (the API runs routes on a thread pool over one connection) are taken one after
+    the other, so the second finds the task the first made instead of writing an empty batch."""
+    with _CREATE_LOCK:
+        return _create_from_proposal(conn, cfg, message_id, index, today)
+
+
+def _create_from_proposal(conn: sqlite3.Connection, cfg: dict, message_id: int, index: int, today: date) -> int:
     m = one(conn, "SELECT * FROM chat_messages WHERE id = ?", (message_id,))
     props = _loads((m or {}).get("proposals_json"), [])
     if not m or not (0 <= int(index) < len(props)) or props[index].get("op") != "create":
@@ -385,6 +396,9 @@ def create_from_proposal(conn: sqlite3.Connection, cfg: dict, message_id: int, i
     res = batches.apply(conn, [{"op": "create", "fields": f, "source_key": key}], "chat", today)
     skipped += res["skipped"]
     if not res["created"]:
+        ex = one(conn, "SELECT id FROM tasks WHERE source_key = ?", (key,))
+        if ex:                                       # made meanwhile by another process (the CLI): that task is the answer
+            return int(ex["id"])
         raise ValueError("; ".join(s["why"] for s in res["skipped"]) or "nothing was created")
     tid = res["created"][0]
     for e in p.get("evidence") or []:

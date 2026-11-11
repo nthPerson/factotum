@@ -99,7 +99,9 @@ def review_reasons(task: dict, today: date, cfg: dict, last_review_at: date | No
     if any(c.get("status") in ("dropped", "faded", "lapsed") and (not reviewed or (parse_date(c.get("at")) or date.min) > reviewed) for c in closed):
         out.append("blocker_gone")
     activity = parse_date(rel.get("neighbour_activity_at"))
-    if rel.get("steps_total", 0) > 0 and rel.get("steps_open", 0) == 0 and not (reviewed and activity and reviewed >= activity):
+    # A decision on or after the steps' last activity answers it; with no activity date on any step
+    # (closed rows that carry none), any decision does, or Keep could never clear the card.
+    if rel.get("steps_total", 0) > 0 and rel.get("steps_open", 0) == 0 and not (reviewed and (activity is None or reviewed >= activity)):
         out.append("steps_done")
     if rel.get("changed"):
         out.append("linked_changed")

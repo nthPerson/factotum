@@ -171,6 +171,7 @@ def apply_result(conn: sqlite3.Connection, cfg: dict, rec: dict, data: dict, tod
     updated: list[int] = []
     touched: list[int] = []
     by_index: dict[int, int | None] = {}
+    merged_idx: set[int] = set()       # creates that resolved to a merge survivor: they lend it no field
     changes: list[dict] = []
     undated = 0
     n = 0
@@ -231,7 +232,7 @@ def apply_result(conn: sqlite3.Connection, cfg: dict, rec: dict, data: dict, tod
             # Merged away since: the mention, the recording link and its reminders go to the survivor,
             # and nothing else does (the run's guesses never overwrite the survivor's name or date).
             tid = relations.survivor(conn, int(existing[0]))
-            touched.append(tid); by_index[i] = tid
+            touched.append(tid); by_index[i] = tid; merged_idx.add(i)
             continue
         if existing:   # the same recording synced twice: update, never a twin
             tid = int(existing[0])
@@ -330,7 +331,9 @@ def apply_result(conn: sqlite3.Connection, cfg: dict, rec: dict, data: dict, tod
         dest = _dest(tid)
         if dest:
             add_link(conn, dest, "calendar", str(made.get("id")), label=str(ev["title"])[:120])
-            if made.get("link"):
+            # The event of a re-synced create that was merged away is linked to the survivor, never
+            # written into its fields (design §6: nothing is copied over).
+            if made.get("link") and not (ev.get("task_ref") and _ref_index(ev.get("task_ref")) in merged_idx):
                 changes.append({"task_id": dest, "op": "set", "fields": {"calendar_event": made["link"]}})
     res = batches.apply(conn, changes, source, today, closed_by="voice") if changes else {"batch_id": None, "applied": 0, "skipped": []}
     for s in res["skipped"]:

@@ -84,6 +84,10 @@ def check(db: Db, src: int, dst: int, kind: str) -> str | None:
             return f"Task-{dst} is the goal of Task-{src}; a task cannot wait on its own goal"
         if waits_cycle(db, src, dst):
             return f"Task-{dst} already waits on Task-{src}, directly or through other tasks; that would make a loop"
+    elif kind == "same_as":
+        g = _one(db, f"SELECT dst FROM relations WHERE src = ? AND dst <> ? AND kind = 'same_as' AND {active} LIMIT 1", (src, dst))
+        if g:
+            return f"Task-{src} was merged into Task-{g['dst']} since"
     for x in (src, dst):
         n = db.execute(f"SELECT COUNT(*) FROM relations WHERE kind = ? AND (src = ? OR dst = ?) AND {active}", (kind, x, x)).fetchone()[0]
         if n >= MAX_PER_KIND:
@@ -140,15 +144,30 @@ def _kept(ra: dict, rb: dict) -> dict:
 def survivor(db: Db, task_id: int) -> int:
     """Where a merged duplicate went: follows active `same_as` rows from `src` to `dst`, up to
     SURVIVOR_HOPS, stopping on a repeat; `task_id` itself when it was never merged away (design §6
-    "From then on…")."""
+    "From then on…"). A hop is taken only from a CLOSED row: a duplicate reopened since is a task of
+    its own again, and what names it must act on it, never on the row it was once merged into."""
     seen, cur = {task_id}, task_id
     for _ in range(SURVIVOR_HOPS):
-        r = db.execute("SELECT dst FROM relations WHERE src = ? AND kind = 'same_as' AND removed_at IS NULL ORDER BY id DESC LIMIT 1", (cur,)).fetchone()
+        r = db.execute("SELECT r.dst FROM relations r JOIN tasks t ON t.id = r.src WHERE r.src = ? AND r.kind = 'same_as' AND r.removed_at IS NULL "
+                       "AND t.status <> 'open' ORDER BY r.id DESC LIMIT 1", (cur,)).fetchone()
         if not r or r[0] in seen:
             break
         cur = r[0]
         seen.add(cur)
     return cur
+
+
+def merge_target_problem(db: Db, keep: int) -> str | None:
+    """Why `keep` cannot be the task a merge keeps, or None: it was merged away itself (name where it
+    went), or it is a row a merge dropped whose `same_as` is gone. `batches._merge` and the MCP
+    validator both ask here, so a proposal that validates is one the batch takes."""
+    s = survivor(db, keep)
+    if s != keep:
+        return f"Task-{keep} was itself merged into Task-{s}; merge into Task-{s}"
+    row = _one(db, "SELECT status, closed_by FROM tasks WHERE id = ?", (keep,))
+    if row and row["status"] == "dropped" and row["closed_by"] == "merge":
+        return f"Task-{keep} was merged away; reopen it first, or merge into another task"
+    return None
 
 
 def _suggestion_rows(db: Db, a: int, b: int, judged: bool) -> list[dict]:
@@ -216,20 +235,24 @@ def pending_suggestions(db: Db, ids: set[int] | None = None) -> dict[int, list[d
 
 
 def import_duplicate(db: Db, loser: int, owner: int) -> str:
-    """A row the importer found sharing another row's source key (design §5.3). A closed loser was a
-    duplicate that is over: `same_as` the owner, source `import`. An open one becomes a merge card,
-    never a link (a `same_as` between two open rows would send mentions away from an open task).
-    Returns "same_as", "suggested" or "skipped" (a row is missing, or the two are one)."""
+    """A row the importer found sharing another row's source key (design §5.3). A closed row is a
+    duplicate that is over: `same_as` the other, source `import` (the loser when both are closed, else
+    whichever of the two is closed, so the card never names a closed row as the one that goes). Two
+    open rows become a merge card, never a link (a `same_as` between two open rows would send mentions
+    away from an open task). Returns "same_as", "suggested" or "skipped" (a row is missing, the two are
+    one, or a card was not written: the pair was judged or one is waiting already)."""
     status = {r["id"]: r["status"] for r in db.execute("SELECT id, status FROM tasks WHERE id IN (?, ?)", (loser, owner)).fetchall()}
     if loser == owner or len(status) < 2:
         return "skipped"
-    if status[loser] != "open":
-        if not find(db, loser, owner, "same_as"):
-            add(db, loser, owner, "same_as", IMPORT_WHY, "import", None)
+    if status[loser] != "open" or status[owner] != "open":
+        goes, keep = (loser, owner) if status[loser] != "open" else (owner, loser)
+        if find(db, keep, goes, "same_as"):
+            return "skipped"                          # the other way round already (a loop would follow nowhere)
+        if not find(db, goes, keep, "same_as"):
+            add(db, goes, keep, "same_as", IMPORT_WHY, "import", None)
         return "same_as"
     keep, goes = default_survivor(db, loser, owner)
-    suggest(db, "same_as", goes, keep, IMPORT_WHY, "import")
-    return "suggested"
+    return "suggested" if suggest(db, "same_as", goes, keep, IMPORT_WHY, "import") else "skipped"
 
 
 def migration_1(conn: sqlite3.Connection) -> None:
