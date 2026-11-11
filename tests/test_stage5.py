@@ -450,7 +450,9 @@ def _reminded_with(cfg, tmp_path, links):
 
 def test_a_task_that_only_waits_on_another_is_not_asked(cfg, tmp_path):
     client, c, tok = _reminded_with(cfg, tmp_path, [(1, 2, "waits_on"), (3, 1, "part_of")])     # 1 waits on 2; 3 is a step of 1
-    assert "How did it turn out?" not in client.get(f"/r/{tok}", params={"a": "done"}).text
+    r = client.get(f"/r/{tok}", params={"a": "done"})
+    assert r.status_code == 200 and "marked done" in r.text          # the Done page itself, not an error page
+    assert "How did it turn out?" not in r.text
 
 
 def test_a_step_of_an_open_goal_is_asked(cfg, tmp_path):
