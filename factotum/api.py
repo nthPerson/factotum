@@ -205,20 +205,33 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
             t["days_until_due"] = (parse_date(t["due"]) - today).days if t.get("due") and parse_date(t["due"]) else None
         return ts
 
+    def ship_rel(t: dict) -> None:
+        """Replace an annotated row's `rel` with the compact one the API ships, or drop the key when it says nothing."""
+        rel = relations.compact(t.pop("rel", None) or {})
+        if rel is not None:
+            t["rel"] = rel
+
+    def task_briefs(ids: set[int]) -> dict[int, dict]:
+        """The few keys the page shows of a task it names but did not load, in one query."""
+        if not ids:
+            return {}
+        return {r["id"]: r for r in rows(conn, "SELECT id, name, status, due, completed_at, outcome FROM tasks WHERE id IN (SELECT value FROM json_each(?))",
+                                         (json.dumps(sorted(ids)),))}
+
     @app.get("/api/tasks")
     def list_tasks(status: str = "open", project: str | None = None):
         today = date.today()
         ecfg = eff_cfg()
-        sql = "SELECT * FROM tasks"
-        params: tuple = ()
+        where, params = [], ()
         if status != "all":
-            sql += " WHERE status = ?"
-            params = (status,)
+            where.append("status = ?")
+            params += (status,)
         if project:
-            sql += (" AND" if params else " WHERE") + " project = ?"
+            where.append("project = ?")
             params += (project,)
-        out = decorate_all(rows(conn, sql + " ORDER BY COALESCE(due, '9999'), id", params), today, ecfg)
-        links = rows(conn, "SELECT task_id, kind, ref, label, account FROM links")
+        cond = " WHERE " + " AND ".join(where) if where else ""
+        out = decorate_all(rows(conn, "SELECT * FROM tasks" + cond + " ORDER BY COALESCE(due, '9999'), id", params), today, ecfg)
+        links = rows(conn, f"SELECT task_id, kind, ref, label, account FROM links WHERE kind != 'task' AND task_id IN (SELECT id FROM tasks{cond})", params)
         rem = rows(conn, "SELECT task_id, id, fire_at, label, repeat, status FROM reminders WHERE status IN ('pending','snoozed')")
         by_l: dict[int, list] = {}
         for l in links:
@@ -226,12 +239,19 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         by_r: dict[int, list] = {}
         for r in rem:
             by_r.setdefault(r["task_id"], []).append(r)
+        named: set[int] = set()
         for t in out:
-            t.pop("rel", None)                                   # the payload gains a compact rel in Task 12
+            ship_rel(t)
             t["links"] = by_l.get(t["id"], [])
             t["reminders"] = by_r.get(t["id"], [])
-        return {"today": today.isoformat(), "tasks": out, "projects": C.project_names(ecfg),
-                "top_cap": C.get(ecfg, "lifecycle.top_cap", 7)}
+            rel = t.get("rel") or {}
+            named.update(x["other"] for x in rel.get("links") or [])
+            named.update(x["other"] for x in rel.get("suggestions") or [])
+            if (rel.get("changed") or {}).get("by") is not None:
+                named.add(rel["changed"]["by"])
+        neighbours = task_briefs(named - {t["id"] for t in out})
+        return {"today": today.isoformat(), "tasks": out, "neighbours": {str(k): v for k, v in neighbours.items()},
+                "projects": C.project_names(ecfg), "top_cap": C.get(ecfg, "lifecycle.top_cap", 7)}
 
     @app.get("/api/tasks/{task_id}")
     def get_one(task_id: int):
@@ -305,8 +325,12 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         from .mail_sweep import review_flags
         flags = review_flags(conn)
         full = lifecycle.build_review_queue(open_tasks, today, ecfg, last, flags_by_id=flags, cap=10**9)
+        names = {k: v["name"] for k, v in task_briefs({s["other"] for i in full for s in i["task"]["rel"]["suggestions"]}).items()}
+        for i in full:                                           # from the full rel (a text may name a closed task it waited on)
+            i["texts"] = lifecycle.reason_texts(i["task"], i["reasons"])
+            i["link_suggestions"] = [dict(s, other_name=names.get(s["other"])) for s in i["task"]["rel"]["suggestions"]]
         for t in open_tasks:
-            t.pop("rel", None)                                   # the payload gains a compact rel in Task 12
+            ship_rel(t)
         pending = rows(conn, "SELECT id, task_id, kind, ref, account, label, excerpt, at FROM evidence WHERE judged_at IS NULL ORDER BY id")
         by_task: dict[int, list] = {}
         for e in pending:

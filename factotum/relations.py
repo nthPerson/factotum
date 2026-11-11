@@ -348,6 +348,17 @@ def score_one(task: dict, today: date, cfg: dict) -> tuple[int, str, list[str]]:
     return scoring.score(task, today, cfg)
 
 
+COMPACT_KEYS = ("links", "waits_on_open", "frees_open", "goal_id", "steps_open", "steps_total", "needed_by", "needed_by_id", "needed_by_via", "changed", "suggestions")
+
+
+def compact(rel: dict, keep_empty: bool = False) -> dict | None:
+    """What the API ships of an annotated `rel`: COMPACT_KEYS only. None when there is nothing to say
+    (no links, no suggestions, nothing changed), unless `keep_empty`."""
+    if not keep_empty and not rel.get("links") and not rel.get("suggestions") and rel.get("changed") is None:
+        return None
+    return {k: rel.get(k) for k in COMPACT_KEYS}
+
+
 def words(t: dict) -> str:
     """An annotated row's link facts for a prompt, `" · "`-joined; "" when it has none."""
     rel = t.get("rel") or {}
