@@ -112,7 +112,7 @@ def parse(text: str, today: date) -> list[dict] | None:
 # "monday" in the name. When a kind appears twice the last one wins. A part that is refused stays in
 # the name, and `refused` says why.
 
-ADD_RE = re.compile(r"^\s*(?:(?:add|new)\s+|\+\s*)", re.I)
+ADD_RE = re.compile(r"^\s*(?:(?:add|new)(?:\s+|$)|\+\s*)", re.I)    # a bare "add" / "new" is a verb with no name, like a bare "+"
 
 _WEEKDAY_WORDS = {"mon", "monday", "tue", "tues", "tuesday", "wed", "weds", "wednesday", "thu", "thur", "thurs",
                   "thursday", "fri", "friday", "sat", "saturday", "sun", "sunday"}

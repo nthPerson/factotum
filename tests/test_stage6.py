@@ -256,3 +256,24 @@ def test_a_bang_after_a_two_word_date_is_the_hard_mark():
     assert r["name"] == "Pay rent" and r["fields"]["due"] == "2026-11-13" and r["fields"]["hard"] == 1 and r["refused"] == []
     r = P("add Plan next week!")
     assert r["name"] == "Plan" and r["fields"]["due"] == P("add Plan next week")["fields"]["due"] and r["fields"]["hard"] == 1
+
+
+def test_a_bare_verb_is_a_missing_name_like_a_bare_plus():
+    want = P("+")
+    assert want["name"] == "" and want["refused"] == [{"words": "", "why": "a task needs a name"}]
+    for line in ("add", "new", "New ", "ADD", "add  "):
+        for verb in (True, False):
+            r = P(line, verb=verb)
+            assert r["name"] == "" and r["refused"] == want["refused"], (line, verb)
+    for line in ("newsletter draft", "address the reviewer"):
+        assert P(line, verb=False)["name"] == line
+
+
+def test_a_bare_verb_writes_nothing(cfg, tmp_path):
+    client, conn = _client(cfg, tmp_path)
+    n = one(conn, "SELECT COUNT(*) AS n FROM tasks")["n"]
+    plus = client.post("/api/add", json={"text": "+", "key": "kplus0001"})
+    for t in ("add", "new", "New "):
+        r = client.post("/api/add", json={"text": t, "key": "kbare" + str(len(t)) + "xx"})
+        assert (r.status_code, r.json()) == (plus.status_code, plus.json())
+    assert one(conn, "SELECT COUNT(*) AS n FROM tasks")["n"] == n
