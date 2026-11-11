@@ -1,0 +1,82 @@
+# Factotum starter settings.
+#
+# Factotum runs on this file when config/factotum.yaml does not exist, and says so: one line in the
+# service log and a banner in the app. Nothing here belongs to anyone: no name, no addresses, this
+# machine's time zone, three projects of equal weight, and every input, output, notification and
+# paid Claude run switched off. To make Factotum your own, copy config/factotum.example.yaml (the
+# reference: every key, explained) to config/factotum.yaml, edit it, and restart Factotum.
+# Do not set Factotum up by editing this file; an update replaces it.
+
+owner:
+  name: ""
+  timezone: ""                  # empty = this machine's time zone
+  emails: []
+
+taxonomy:
+  areas: [Work, Personal]
+  projects:
+    - { name: Work,     area: Work,     weight: medium, description: "Work and study: anything done for a job, a course or a team." }
+    - { name: Personal, area: Personal, weight: medium, description: "Personal life: home, health, errands, money, plans." }
+    - { name: Other,    area: Personal, weight: medium, description: "Anything that fits neither of the others." }
+  efforts: [XS, S, M, L]
+  tie_breakers: ""
+  note_types:
+    - { name: Meeting, description: a conversation with more than one participant }
+    - { name: Note,    description: a memo, an idea or a note to self }
+  note_tags:
+    - { name: Task,      description: contains actionable to-dos }
+    - { name: Follow-up, description: contains items to circle back on }
+
+lifecycle:
+  fade_days: 21
+  fade_warn_days: 3
+  last_call_days: 7
+  top_cap: 7
+  review_cap: 15
+  expire_time: "03:30"
+  resurrect_on_mention: true
+
+scoring:
+  project_weights: { high: 15, medium: 5, low: 0 }
+  hard: { overdue: 100, today: 90, d2: 80, d7: 60, d14: 40, later: 20 }
+  soft_penalty: 15
+  soft_overdue: { start: 70, decay_per_day: 5, floor: 25 }
+  undated: 15
+  undated_longterm: 10
+  mention_bonus: 5
+  mention_cap: 15
+  owed_bonus: 10
+  quick_win: { efforts: [XS, S], within_days: 3, bonus: 5 }
+  start_now: { efforts: [L], within_days: 7, bonus: 10 }
+  manual: { P0_floor: 85, P1_floor: 65, P3_cap: 40 }
+  bands: { P0: 80, P1: 60, P2: 35 }
+  links: { enabled: true, waiting_cap: 30, waiting_exempt_days: 2, frees_bonus: 5, frees_bonus_cap: 15, inherit_hard_dates: true }
+
+sources:
+  plaud:    { enabled: false }
+  canvas:   { enabled: false }
+  mail:     { enabled: false, suggest: { enabled: false } }
+  slack:    { enabled: false }
+  discord:  { enabled: false }
+  calendar: { enabled: false }
+
+sinks:
+  notion_notes:        { enabled: false }
+  notion_tasks_mirror: { enabled: false }
+
+notify:
+  ntfy: { enabled: false, topic: "" }
+  review_time: "19:30"
+  snooze_presets: ["30m", "1h", "tomorrow 9am"]
+  morning_brief: { enabled: false, time: "06:30", to: "" }
+
+claude:
+  planner: { enabled: false }
+  summary: { auto: false, auto_minutes: 10 }
+
+server:
+  host: 127.0.0.1
+  port: 8750
+  public_url: ""
+  mcp_writes: stage
+  oauth: { enabled: false }

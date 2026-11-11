@@ -1,6 +1,7 @@
 # secrets and per-install config
 .env
 config/factotum.yaml
+push-keys.json
 config/google-credentials.json
 config/google-token.json
 

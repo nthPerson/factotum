@@ -62,6 +62,49 @@ def test_a_data_migration_backs_up_first_with_the_backup_api(conn, tmp_path):
     assert conn.execute("SELECT name FROM tasks WHERE id = 1").fetchone()[0] == "after"
 
 
+def _tables(c) -> set[str]:
+    return {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+
+
+def _pre_4a(c) -> None:
+    """Take a database back to how it was before stage 4a: no relations, none of 4a's columns, user_version 0."""
+    c.execute("DROP TABLE relations")
+    for t, col in (("tasks", "outcome"), ("tasks", "neighbours_seen_at"), ("batches", "cause_json"), ("changes", "note")):
+        c.execute(f"ALTER TABLE {t} DROP COLUMN {col}")
+    c.execute("PRAGMA user_version = 0")
+    c.commit()
+
+
+def test_a_fresh_database_has_both_stages_tables_at_the_latest_version(conn):
+    assert {"relations", "push_subscriptions"} <= _tables(conn)
+    assert schema_version(conn) == max(m.version for m in db.VERSIONED)
+
+
+@pytest.mark.parametrize("had_push", [False, True], ids=["before-stage-2", "with-push-subscriptions"])
+def test_an_existing_database_migrates_with_or_without_push_subscriptions(tmp_path, had_push):
+    path = tmp_path / "old.db"
+    c = connect(path)
+    init_db(c)
+    mk(c, 1, status="dropped"); mk(c, 2)
+    _pre_4a(c)
+    if had_push:
+        c.execute("INSERT INTO push_subscriptions (endpoint, p256dh, auth, label, origin, created_at) VALUES ('https://push.example/1', 'k', 'a', 'Phone', 'https://app.example', 'now')")
+    else:
+        c.execute("DROP TABLE push_subscriptions")
+    c.execute("INSERT INTO links (task_id, kind, ref, created_at) VALUES (1, 'task', '2', 'now')")   # the importer's duplicate row
+    c.commit()
+    c.close()
+    c = connect(path)
+    init_db(c)
+    assert {"relations", "push_subscriptions"} <= _tables(c)
+    assert schema_version(c) == max(m.version for m in db.VERSIONED)
+    assert active_rels(c) == {(1, 2, "same_as")} and not rows(c, "SELECT * FROM links WHERE kind = 'task'")
+    assert len(list((tmp_path / "backups").glob("*.db"))) == 1
+    assert [r["label"] for r in rows(c, "SELECT label FROM push_subscriptions")] == (["Phone"] if had_push else [])
+    init_db(c)                                                         # a second start changes nothing
+    assert schema_version(c) == max(m.version for m in db.VERSIONED) and len(list((tmp_path / "backups").glob("*.db"))) == 1
+
+
 def test_a_failing_migration_rolls_back_and_raises(conn):
     conn.execute("PRAGMA user_version = 0")
     mk(conn, 1, name="keep")

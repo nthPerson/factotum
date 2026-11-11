@@ -440,7 +440,7 @@ def run(conn: sqlite3.Connection, cfg: dict, *, subject: str | None, received: s
     summary = apply_result(conn, cfg, rec, data, today, calendar=cal, allowed_ids=allowed)
     note_url = None
     note_err = None
-    if C.get(cfg, "sinks.notion_notes.enabled", True):
+    if C.value(cfg, "sinks.notion_notes.enabled"):
         notes = notes or (lambda cfg, rec, note, transcript, **kw: __import__("factotum.notion_notes", fromlist=["upsert"]).upsert(cfg, rec, note, transcript, **kw))
         page_ids = [r["notion_page_id"] for r in rows(conn, f"SELECT notion_page_id FROM tasks WHERE id IN ({','.join('?' * len(summary['task_ids']))}) AND notion_page_id IS NOT NULL", tuple(summary["task_ids"]))] if summary["task_ids"] else []
         extra = []

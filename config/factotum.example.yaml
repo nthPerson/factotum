@@ -1,101 +1,70 @@
-# Factotum configuration — copy to config/factotum.yaml and edit.
+# Factotum configuration: the reference.
 #
-# This file is the whole "shape" of one person's workflow: their projects and weights, which
-# inputs are on, which sinks are on, when to be reminded. Secrets never go here; they go in
-# .env (see .env.example). Values under `lifecycle`, `notify` and the `enabled` flags can also be
-# changed from the Settings tab, which stores overrides in the database; the Settings tab names
-# this file so a new user knows where the defaults live.
+# This file documents every key Factotum reads. It is a reference, not a setup: Factotum never
+# loads it unless FACTOTUM_CONFIG names it. To make Factotum your own, copy it to
+# config/factotum.yaml, replace the placeholders (Your Name, you@example.com, example.edu,
+# YOUR_DATABASE_ID …), switch on what you have set up, and restart Factotum. Without
+# config/factotum.yaml Factotum runs on config/factotum.starter.yaml (no name, no addresses,
+# everything off) and says so.
+#
+# - Secrets never go here; they go in .env (see .env.example and docs/SETUP.md §8).
+# - A comment that names "Settings → <section>" means the Settings tab has a control for that key.
+#   A change made there is stored in the database and wins over this file from then on, so edit
+#   such a key in Settings once it has been touched there. Every other key is changed only here
+#   (restart Factotum after editing). `python -m factotum effective` prints each Settings key's
+#   value and where it comes from (docs/SETUP.md §18).
+# - Values marked `# taste` are preferences with no right answer: start with these, change them
+#   when they feel wrong.
+# - "§N" below is a section of docs/SETUP.md, which sets up the integration the key belongs to.
 
 owner:
-  name: Robert
-  timezone: America/Los_Angeles
-  # addresses that identify the owner (used by the mail sweep to recognise sent replies)
-  emails:
-    - rashe7414@sdsu.edu
-    - robertashe2.0@gmail.com
-    - nthperson.dev@gmail.com
+  name: "Your Name"             # whose setup this is; for your reference (nothing reads it yet)
+  timezone: ""                  # an IANA zone such as Europe/Paris; empty = this machine's time zone. Every daily time below is in it
+  # addresses that identify you: the mail sweep recognises your sent replies by them, and the
+  # connector's consent page (§16) lets in only these
+  emails: [you@example.com, you@example.edu]
 
 taxonomy:
-  areas: [Personal, Academics, Work, Research]
-  # weight: high | medium | low  (see scoring.project_weights)
+  areas: [Personal, Academics, Work, Research]   # every project belongs to one; a recording's note and tasks carry it
+  # Projects a recording, a mail or a Canvas item can file under. The sync run reads each
+  # description to decide where something goes, so say what belongs in a project and, where two
+  # are close, what does not.
+  # weight: high | medium | low (points in scoring.project_weights); never_fade: true = its undated
+  # tasks never fade (lifecycle.fade_days does not apply)
   projects:
-    - name: BDA M.S.
+    - name: Course 101
       area: Academics
       weight: high
-      never_fade: true
-      description: "SDSU Big Data Analytics M.S. degree ADMIN only: program of study, electives approval, advising, candidacy, BDA 600 capstone / BDA 799A thesis logistics, graduation. Course content goes to the course; thesis research goes to its research project."
-    - name: GEOG 582
-      area: Academics
-      weight: high
-      description: "Fall 2026 course Intro to GIS Programming (Atsushi Nara): GIS programming, spatial Python, ArcPy/QGIS/GDAL/GeoPandas, this course's lectures, assignments, projects."
-    - name: COMPE 510
-      area: Academics
-      weight: high
-      description: "Fall 2026 course Machine Learning for Engineers (Dr. Junfei Xie): lectures, assignments, exams, study sessions. Course content files here even though it is also the SCIBER-CT ARX course."
-    - name: BDA 696
-      area: Academics
-      weight: high
-      description: "Fall 2026 course Process & Model Big Data (Ryan Lafler): pipelines, SQL/Spark-style processing, modeling at scale, the group project."
-    - name: SCIBER-CT
-      area: Academics
-      weight: high
-      never_fade: true
-      description: "SCIBER-CT, pronounced \"cyber city\": SDSU's NSF Research Traineeship (NRT) graduate certificate; Robert is an inaugural-cohort NRT Fellow. Program matters only: certificate course planning, ARX framework, workshops, Summer 2027 internship, hackathon, symposium, cohort sessions, stipend/PaymentWorks, CITI training, travel, Max (program manager), Dr. Haririan/Akhavian as director."
-    - name: DiCE Lab
-      area: Research
-      weight: high
-      description: "Data-informed Construction Engineering Lab (Dr. Akhavian, SDSU), the lab's OWN work: lab meetings, robotics, AR/VR/XR, data collection, field testing, human-robot collaboration in construction."
-    - name: Caltrans
-      area: Research
-      weight: high
-      description: "Driver-distraction research: outdoor advertising displays, the driving simulator."
-    - name: Evidential Deep Learning
+      description: "One course this term: its lectures, assignments, quizzes, exams and study sessions. Degree paperwork goes to Thesis, not here."
+    - name: Thesis
       area: Research
       weight: high
       never_fade: true
-      description: "Construction digital twins, dynamic digital twin, evidential deep learning for construction, Scan-to-BIM."
-    - name: FAMAIL
+      description: "The thesis: research questions, experiments, writing, the committee and the defense. Lab duties that are not thesis work go to Lab work."
+    - name: Lab work
       area: Research
-      weight: low
-      description: "Fairness-aware (multi-agent) imitation learning research: GAIL, KDD paper, fairness metrics, trajectory editing, FATE."
-    - name: ZIP Launchpad
-      area: Work
-      weight: high
-      description: "SDSU's ZIP Launchpad startup incubator program: cohort workshops, mentors, Lavin Seed Fund, startup-week events, the Car Sounds venture's program obligations."
-    - name: Car Sounds
-      area: Work
       weight: medium
-      description: "Vehicle audio data collection and automotive sound classification; the Car Sounds team and weekly syncs."
-    - name: LARK
-      area: Work
-      weight: medium
-      description: "Merchant card-processing statement analysis: interchange, downgrades, ISOs, proposals, the Sidekick AI assistant."
-    - name: Construction Diagram/Doc AI
+      description: "The lab's own work: lab meetings, shared equipment, data collection for others, onboarding. Your own research goes to Thesis."
+    - name: Side project
       area: Work
       weight: low
-      description: "Construction-document AI."
-    - name: Plaud Sync
-      area: Personal
-      weight: medium
-      description: "Work ON this automation itself: Factotum, the Plaud sync, the planner, prompts, watcher, Claude skills, Notion taxonomy and schema."
+      description: "A project of your own outside school: its product, code, users and partners."
     - name: Personal
       area: Personal
       weight: high
-      description: "Personal-life notes not tied to work, school or research: memos, health, insurance, errands, budgeting, home, travel, goals, reflections."
+      description: "Personal life not tied to work, school or research: health, insurance, errands, money, home, travel, goals."
     - name: Unknown
       area: Work
       weight: medium
-      description: "ONLY a work/academic/research note with no identifiable project. Never for a personal note: that is Personal."
-  efforts: [XS, S, M, L]
-  # Tie-breakers the sync run applies when a recording could file under two projects.
+      description: "ONLY work, school or research with no identifiable project. Never a personal note: that is Personal."
+  efforts: [XS, S, M, L]        # the effort sizes a task may carry; scoring.quick_win and scoring.start_now name them
+  # Tie-breakers the sync run applies when a recording could file under two projects (§9).
   tie_breakers: |
-    - Prefer the most specific project: construction digital twins are Evidential Deep Learning, not DiCE Lab.
-    - SCIBER-CT vs DiCE Lab: the traineeship program (coursework planning, cohort, admin, internship, hackathon) is SCIBER-CT; the lab's research is DiCE Lab. Dr. Akhavian leads both, so his presence decides nothing.
-    - A specific course's CONTENT (lectures, assignments, exams, study) is that course (GEOG 582, COMPE 510, BDA 696), Area Academics; only certificate-level matters are SCIBER-CT and only degree-level matters are BDA M.S.
-    - Thesis admin (committee, candidacy, BDA 600/799A, defense) is BDA M.S.; thesis research content is its research project.
-    - ZIP Launchpad vs Car Sounds: program obligations (workshops, mentors, funding) are ZIP Launchpad; the product and the data work are Car Sounds.
+    - Prefer the most specific project.
+    - Thesis vs Lab work: your own research questions, experiments and writing are Thesis; the lab's meetings and shared duties are Lab work, even when your advisor runs both.
+    - Course 101 vs Thesis: the course's content (lectures, assignments, exams, study) is Course 101; degree paperwork and the committee are Thesis.
     - If Area is Personal, Project is always Personal, never Unknown.
-  # Note page classification (the Notion notes sink's Type and Tags options).
+  # Note page classification (the Notion notes sink's Type and Tags options, §5).
   note_types:
     - { name: Meeting,    description: any multi-person meeting, call or group discussion; prefer Meeting whenever the transcript shows more than one genuine participant }
     - { name: Reminder,   description: a memo whose purpose is to manage the task list or calendar, or a short note-to-self }
@@ -113,126 +82,119 @@ taxonomy:
     - { name: Follow-up, description: contains items to circle back on }
     - { name: Personal,  description: contains goals or introspection }
 
-lifecycle:
-  fade_days: 21          # undated backlog fades after this many quiet days
-  fade_warn_days: 3      # shows in Review this many days before fading
-  last_call_days: 7      # hard deadlines this far past due get one Last call, then lapse
-  top_cap: 7             # soft cap on the Top rail
-  review_cap: 15         # max items per Review session
-  expire_time: "03:30"   # when the daily fade / lapse pass runs (local time); only rows Review has shown
-  resurrect_on_mention: true
+lifecycle:                      # Settings → Review and lifecycle has a control for every key here but the last two
+  fade_days: 21                 # taste: undated backlog fades after this many quiet days (a new mention resets the clock)
+  fade_warn_days: 3             # taste: a task shows in Review this many days before it fades
+  last_call_days: 7             # taste: hard deadlines this far past due get one Last call in Review, then lapse
+  top_cap: 7                    # taste: soft cap on the Top rail
+  review_cap: 15                # taste: max items per Review session
+  expire_time: "03:30"          # when the daily fade / lapse pass runs (local time); it touches only rows Review has shown
+  resurrect_on_mention: true    # documents today's behaviour: a new mention brings a faded task back (the code does not read this yet)
 
-scoring:
-  project_weights: { high: 15, medium: 5, low: 0 }
-  hard: { overdue: 100, today: 90, d2: 80, d7: 60, d14: 40, later: 20 }
-  soft_penalty: 15
-  soft_overdue: { start: 70, decay_per_day: 5, floor: 25 }
-  undated: 15
-  undated_longterm: 10
-  mention_bonus: 5
-  mention_cap: 15
-  owed_bonus: 10
-  quick_win: { efforts: [XS, S], within_days: 3, bonus: 5 }
-  start_now: { efforts: [L], within_days: 7, bonus: 10 }
-  manual: { P0_floor: 85, P1_floor: 65, P3_cap: 40 }
-  bands: { P0: 80, P1: 60, P2: 35 }
-  links:                       # what a link between tasks does to the score (design §7.2)
+scoring:                        # taste: every number in this block. Priority is computed from these; Settings has no control for them yet
+  project_weights: { high: 15, medium: 5, low: 0 }   # points a project's weight adds
+  hard: { overdue: 100, today: 90, d2: 80, d7: 60, d14: 40, later: 20 }   # a hard deadline's points by how near it is
+  soft_penalty: 15              # a soft (non-hard) date scores this much less than a hard one as near
+  soft_overdue: { start: 70, decay_per_day: 5, floor: 25 }   # a missed soft date: starts here, loses points each day, never below the floor
+  undated: 15                   # an undated task
+  undated_longterm: 10          # an undated task marked long-term
+  mention_bonus: 5              # each mention after the first adds this…
+  mention_cap: 15               # …up to this
+  owed_bonus: 10                # a task with a counterpart, or one waiting on someone
+  quick_win: { efforts: [XS, S], within_days: 3, bonus: 5 }    # small tasks due soon
+  start_now: { efforts: [L], within_days: 7, bonus: 10 }       # large tasks that must start now to finish in time
+  manual: { P0_floor: 85, P1_floor: 65, P3_cap: 40 }           # a priority you set by hand keeps the score within these
+  bands: { P0: 80, P1: 60, P2: 35 }                            # score → priority band; below P2 is P3
+  links:                        # what a link between two tasks does to the score (design §7.2); false = every score is what it was before links
     enabled: true
-    waiting_cap: 30            # a task that waits on an open task scores at most this…
-    waiting_exempt_days: 2     # …unless its own hard due date is within this many days or past
-    frees_bonus: 5             # per open task it frees
-    frees_bonus_cap: 15
-    inherit_hard_dates: true   # a task that frees a hard-dated task (or a step of a hard-dated goal) is scored as if due then
+    waiting_cap: 30             # a task that waits on an open task scores at most this…
+    waiting_exempt_days: 2      # …unless its own hard due date is within this many days or already past
+    frees_bonus: 5              # points per open task it frees…
+    frees_bonus_cap: 15         # …up to this
+    inherit_hard_dates: true    # a task that frees a hard-dated task (or a step of a hard-dated goal) is scored as if due then; the date is never written to it
 
 sources:
-  plaud:
-    enabled: true
-    trigger_account: nthperson.dev@gmail.com   # IMAP creds in .env
+  plaud:                        # Plaud recordings (§2 the plaud CLI, §9 the trigger mail)
+    enabled: false              # Settings → Inputs. On = every recording is one headless Claude run (≈ $0.15, at most claude.budgets_usd.sync_file) that writes tasks and, with the notes sink, a Notion page
+    trigger_account: you@example.com   # the mailbox Plaud's "AutoFlow" mail arrives in, for your reference; the one watched is IMAP_USER in .env (§9)
     from_filter: plaud.ai                       # IMAP search narrowing (substring)
     sender: no-reply@plaud.ai                   # the parsed From must equal this, and the mail must carry…
     auth_server: mx.google.com                  # …this server's Authentication-Results with DKIM/DMARC pass for its domain
-    subject_prefix: "[Plaud-AutoFlow]"
+    subject_prefix: "[Plaud-AutoFlow]"          # the subject the trigger mail starts with
     cli: plaud                                  # @plaud-ai/cli; give the absolute path (`which plaud`): the service has systemd's minimal PATH
     extraction:
-      max_undated_per_recording: 3
-  canvas:
-    enabled: true
-    base_url: https://sdsu.instructure.com
-    days_back: 7
-    days_ahead: 90
-    sweep_minutes: 60             # how often items are pulled and submitted ones closed
-    course_map: { GEOG582: GEOG 582, COMPE510: COMPE 510, BDA696: BDA 696, SCIBER-CT: SCIBER-CT }
-    effort_by_type: { Quiz: S, Discussion: S, Assignment: M, Project: L }
-    skip_title_prefixes: ["Attendance:"]
-    skip_context_patterns: ["*Arts & Letters*", "*EOP, Outreach*", "*Student Tech*"]
-  mail:
-    enabled: true
-    provider: mailbird            # mailbird | none
+      max_undated_per_recording: 3              # undated tasks one recording may create; the rest are dropped
+  canvas:                       # Canvas LMS (§10); CANVAS_TOKEN in .env
+    enabled: false              # Settings → Inputs. On = Canvas is read every sweep; new items become hard-deadline tasks and submitted ones close. No Claude run, no cost
+    base_url: https://canvas.example.edu   # your school's Canvas address
+    days_back: 7                # items due this many days ago are still read (to close what was submitted)
+    days_ahead: 90              # and this far ahead
+    sweep_minutes: 60           # Settings → Inputs: how often items are pulled and submitted ones closed
+    course_map: { COURSE101: Course 101 }   # a course whose Canvas name starts with this code (spaces ignored) → the project its items file under
+    effort_by_type: { Quiz: S, Discussion: S, Assignment: M, Project: L }   # the effort a new item gets by its Canvas type
+    skip_title_prefixes: ["Attendance:"]    # items whose title starts with one of these never become tasks
+    skip_context_patterns: ["*Example Department*"]   # courses / groups whose name matches (glob) are never read
+  mail:                         # mail through Mailbird's MCP server, read-only (§3, §10); MAILBIRD_TOKEN in .env
+    enabled: false              # Settings → Inputs. On = monitored accounts are read every sweep: replies flip Waiting, sent replies close tasks. Sends nothing, no Claude run
+    provider: mailbird          # mailbird | none
     url: https://127.0.0.1:52000/mcp
-    tls_verify: false             # Mailbird uses a self-signed certificate on loopback
-    sweep_minutes: 20
-    suggest:                      # tasks suggested from mail (SPEC §8.5): new Inbox mail about no task is read by one light Claude
-      enabled: true               # run and what the owner has to do becomes a suggestion card in Review. Settings → Inputs.
-      minutes: 30                 # that run happens only when there is new mail, and no more often than this
-      backfill_days: 3            # the first pass over a mailbox also takes mail of the last days that is still unread
-      only_unread: false          # true = mail already read is never a candidate
-      max_per_sweep: 20
+    tls_verify: false           # Mailbird uses a self-signed certificate on loopback; never turn verification off for any other URL
+    sweep_minutes: 20           # Settings → Inputs: how often mail is swept
+    lookback_days: 3            # how far the first pass over an account looks back
+    max_per_sweep: 60           # conversations read per folder per pass
+    suggest:                    # tasks suggested from mail (SPEC §8.5)
+      enabled: false            # Settings → Inputs. On = new Inbox mail about no task is read by one light Claude run (≈ $0.14 per batch) and what you have to do becomes a suggestion card in Review
+      minutes: 30               # Settings → Inputs: that run happens only when there is new mail, and no more often than this
+      backfill_days: 3          # the first pass over a mailbox also takes mail of the last days that is still unread
+      only_unread: false        # true = mail already read is never a candidate
+      max_per_sweep: 20         # candidates kept per sweep
       skip_senders: ["*noreply*", "*no-reply*", "*no_reply*", "*donotreply*", "*do-not-reply*", "*newsletter*", "*mailer-daemon*",
-                     "*notifications@*", "*notification@*", "*marketing@*", "*news@*", "*digest@*"]   # never candidates (allow / deny above still apply)
-    # accounts are managed in Settings → Accounts (table `accounts`); these seed it on first run
+                     "*notifications@*", "*notification@*", "*marketing@*", "*news@*", "*digest@*"]   # never candidates (allow / deny below still apply)
+    # Accounts are managed in Settings → Email accounts (table `accounts`); this list seeds that table
+    # once, the first time Factotum starts on this file. Roles: monitor (the sweep reads it),
+    # brief_recipient, plaud_trigger.
     seed_accounts:
-      - { address: rashe7414@sdsu.edu,      display: SDSU,     roles: [monitor] }
-      - { address: robertashe2.0@gmail.com, display: Personal, roles: [monitor, brief_recipient] }
-      - { address: nthperson.dev@gmail.com, display: Dev,      roles: [monitor, plaud_trigger] }
-    allow: ["*@sdsu.edu", "*@*.sdsu.edu", "*@instructure.com", "*@*.instructure.com", "*"]
-    deny:
-      - "sdsuathletics@engage.ticketmaster.com"
-      - "*San Diego State Athletics*"
-      - "police@comms.sdsu.edu"
-      - "*Student Health Services*"
-      - "sdsubookstore@comms.sdsu.edu"
-      - "whp@comms.sdsu.edu"
-      - "vpforsacd@comms.sdsu.edu"
-      - "president@comms.sdsu.edu"
-      - "awongnickerson@comms.sdsu.edu"
-      - "gradlife-sdsu.edu@shared1.ccsend.com"
-      - "*Arts & Letters Homeroom*"
-  slack:
-    enabled: false                # Chat and the skills can search and read; never post. Toggle in Settings.
-    sweep_minutes: 20             # the mention sweep: @-mentions of you since the last pass become Review items (Settings can override)
-    lookback_days: 2              # how far the first pass of a workspace looks back
-    max_channels: 40              # joined channels read per workspace per pass (one page of history each)
-    workspaces:                   # one entry per workspace; the token lives in .env under the name token_env gives;
-                                  # `project` is where a task created from a mention files; `channels: [..]` limits the sweep
-      - { name: DiCE Lab,   token_env: SLACK_TOKEN_DICE,      project: DiCE Lab }
-      - { name: Car Sounds, token_env: SLACK_TOKEN_CARSOUNDS, project: Car Sounds }
-      - { name: LARK dev,   token_env: SLACK_TOKEN_LARK,      project: LARK }
-  discord:
-    enabled: false                # one bot (DISCORD_BOT_TOKEN in .env) invited to each server below; read-only
-    guilds:                       # server ids: Discord → User Settings → Advanced → Developer Mode, then right-click the server → Copy Server ID
-      - { name: LARK dev, id: "000000000000000000" }
-  calendar:
-    enabled: false                # turn on in Settings once credentials exist (docs/SETUP.md §6)
-    provider: google              # google | none
+      - { address: you@example.edu, display: School,   roles: [monitor] }
+      - { address: you@example.com, display: Personal, roles: [monitor, brief_recipient, plaud_trigger] }
+    allow: ["*@example.edu", "*@*.example.edu", "*@instructure.com", "*@*.instructure.com", "*"]   # senders the sweep looks at (glob on address or display name)
+    deny:                       # senders it never looks at, even when allowed
+      - "newsletter@example.edu"
+      - "*Example Athletics*"
+  slack:                        # Slack, read-only (§12)
+    enabled: false              # Settings → Inputs. On = Chat and the skills can search and read; the sweep turns @-mentions of you into Review items. Never posts, no Claude run
+    sweep_minutes: 20           # Settings → Inputs: the mention sweep's interval
+    lookback_days: 2            # how far the first pass of a workspace looks back
+    max_channels: 40            # joined channels read per workspace per pass (one page of history each)
+    workspaces:                 # one entry per workspace; the token lives in .env under the name token_env gives;
+                                # `project` is where a task created from a mention files; `channels: [..]` limits the sweep
+      - { name: Example Lab, token_env: SLACK_TOKEN_EXAMPLE, project: Lab work }
+  discord:                      # Discord, read-only (§13)
+    enabled: false              # Settings → Inputs. On = Chat can list channels and read recent messages; one bot (DISCORD_BOT_TOKEN in .env) invited to each server below
+    guilds:                     # server ids: Discord → User Settings → Advanced → Developer Mode, then right-click the server → Copy Server ID
+      - { name: Example server, id: "000000000000000000" }
+  calendar:                     # Google Calendar, read-only (§6)
+    enabled: false              # Settings → Inputs. On = passed events are checked and the next days shown in the brief; needs the credentials below
+    provider: google            # google | none
     credentials_file: config/google-credentials.json   # OAuth "Desktop app" client, downloaded from Google Cloud
     token_file: config/google-token.json               # written by `python -m factotum google-auth`
-    calendar_id: primary
-    days_ahead: 14
-    sweep_minutes: 30             # how often passed events are checked and the look-ahead refreshed
+    calendar_id: primary        # Settings → Inputs
+    days_ahead: 14              # how far ahead events are read
+    sweep_minutes: 30           # Settings → Inputs: how often passed events are checked and the look-ahead refreshed
 
 sinks:
-  notion_notes:
-    enabled: true
-    # 🎙️ Plaud Synced Notes — database id and data source id (both appear in Notion URLs / API)
-    database_id: 61e12e128c7f473b94f22641d8a36260
-    data_source_id: bbc6c9aa-a96b-4501-a41a-8bd1b5a75866
-    source_link_prefix: https://web.plaud.ai/file/
-  notion_tasks_mirror:
-    enabled: true                 # one-way mirror of every task row; never read back. Toggle in Settings.
-    sweep_minutes: 10             # how often rows edited since the last pass are pushed (Settings can override)
-    database_id: b1c52e69d3924aea8962bee32440ffbe
-    data_source_id: be0b1624-4ea6-43dd-acc2-3a828a8ab07e
-    # property names in the Notion Tasks database, in case a user's differ
+  notion_notes:                 # one Notion page per recording (§5); NOTION_TOKEN in .env
+    enabled: false              # Settings → Outputs. On = every synced recording writes a page into the database below
+    database_id: YOUR_DATABASE_ID          # the notes database (from its Notion URL)
+    data_source_id: YOUR_DATA_SOURCE_ID    # its data source (Notion → the database's ⋯ → Manage data sources → Copy data source ID)
+    source_link_prefix: https://web.plaud.ai/file/   # a note's Source Link is this plus the recording id
+    # property names in the notes database, in case yours differ
+    properties: { title: Name, date: Date, source_link: Source Link, area: Area, type: Type, project: Project, tags: Tags, meeting_date: Meeting Date, tasks: Tasks }
+  notion_tasks_mirror:          # a one-way copy of every task row in Notion (§5); never read back
+    enabled: false              # Settings → Outputs. On = every task row edited since the last pass is written to the database below
+    sweep_minutes: 10           # Settings → Outputs: how often rows edited since the last pass are pushed
+    database_id: YOUR_TASKS_DATABASE_ID
+    data_source_id: YOUR_TASKS_DATA_SOURCE_ID
+    # property names in the Notion Tasks database, in case yours differ
     properties:
       title: Name
       task_id: Task ID
@@ -254,39 +216,41 @@ sinks:
       waiting_on: Waiting On
       calendar_event: Calendar Event
       notes_relation: Notes
-    status_map: { open: Next, done: Done, dropped: Dropped, faded: Dropped, lapsed: Dropped }
+    status_map: { open: Next, done: Done, dropped: Dropped, faded: Dropped, lapsed: Dropped }   # Factotum status → the Notion Status option
 
 notify:
-  ntfy:
-    enabled: true
+  ntfy:                         # push notifications through ntfy (§4); NTFY_TOKEN in .env
+    enabled: false              # Settings → Outputs. On = reminders and the review push are sent to the topic below; anyone who knows the topic can read them
     server: https://ntfy.sh
-    topic: ""                     # e.g. factotum-7f3a9c2e (docs/SETUP.md §4); token in .env
-    tap_opens_app: false          # a reminder tap shows the message and its Snooze / Done / Open buttons in ntfy; true = jump straight to the app
-  review_time: "19:30"
-  snooze_presets: ["30m", "1h", "tomorrow 9am"]
-  morning_brief:
-    enabled: true
-    time: "06:30"
-    to: robertashe2.0+planner@gmail.com
+    topic: ""                   # Settings → Outputs; e.g. factotum-7f3a9c2e (a random, unguessable name)
+    tap_opens_app: false        # a reminder tap shows the message and its Snooze / Done / Open buttons in ntfy; true = jump straight to the app
+  review_time: "19:30"          # taste: the daily review push. Settings → Review and lifecycle
+  snooze_presets: ["30m", "1h", "tomorrow 9am"]   # the Snooze choices on a reminder
+  morning_brief:                # one mail a day over SMTP (SMTP_* in .env, or the IMAP_* account; §8, §10)
+    enabled: false              # Settings → Outputs. On = one mail every morning to the address below; with claude.planner.enabled it costs one planner run
+    time: "06:30"               # taste: when the brief is sent. Settings → Outputs
+    to: you@example.com         # Settings → Outputs
 
-claude:
-  binary: claude                # absolute path (`which claude`) for the same reason; `factotum claude-check` says which
-  models: { sync_file: sonnet, today_summary: sonnet, mail_triage: sonnet, planner_morning: sonnet, chat_turn: sonnet, check: haiku }
-  budgets_usd: { sync_file: 1.00, today_summary: 0.30, mail_triage: 0.40, planner_morning: 0.75, chat_turn: 0.60, check: 0.05 }
-  planner: { enabled: true }   # the morning brief's verdict and proposals; off = the plain brief
-  summary: { auto: true, auto_minutes: 10 }   # the Today tab's summary: rewritten by one light run when it goes stale (a row it is about changed,
-                                # or something became urgent), at most this often; off = a badge and the Refresh button only. Settings → Claude.
-  timeouts_s: { sync_file: 600, today_summary: 180, mail_triage: 240, planner_morning: 480, chat_turn: 240 }
+claude:                         # headless `claude -p` runs (§2 for the CLI; `factotum claude-check` tests the login)
+  binary: claude                # absolute path (`which claude`): the service has systemd's minimal PATH
+  models: { sync_file: sonnet, today_summary: sonnet, mail_triage: sonnet, planner_morning: sonnet, chat_turn: sonnet, check: haiku }   # the model per run kind
+  budgets_usd: { sync_file: 1.00, today_summary: 0.30, mail_triage: 0.40, planner_morning: 0.75, chat_turn: 0.60, check: 0.05 }   # the most one run may spend; chat_turn: Settings → Claude
+  planner: { enabled: false }   # Settings → Claude. On = one Claude run before the brief (≈ $0.10, at most budgets_usd.planner_morning): the verdict, why-now lines and proposals; off = the plain brief
+  summary: { auto: false, auto_minutes: 10 }   # Settings → Claude. auto on = the Today tab's summary is rewritten by one light run (≈ $0.18) when it goes stale,
+                                # at most every auto_minutes; off = a badge and the Refresh button only
+  timeouts_s: { sync_file: 600, today_summary: 180, mail_triage: 240, planner_morning: 480, chat_turn: 240 }   # seconds before a run is stopped
+  # max_turns: { sync_file: 40 }   # turns a run kind may take; 40 for every kind not named
 
 server:
-  host: 127.0.0.1
+  host: 127.0.0.1               # where the app listens; keep it on loopback behind the tunnel (§7)
   port: 8750
-  public_url: https://factotum.nthperson.dev
-  mcp_writes: stage             # what a skill or connector may do with tasks: `stage` = a batch waits in the tray for Apply;
-                                # `apply` = apply_changes writes at once (still one undoable batch in the Log). Settings → Connections.
+  public_url: https://factotum.example.com   # the address the tunnel serves (§7); links in pushes and the brief, and the connector's address, use it
+  mcp_writes: stage             # Settings → Connections. What a skill or connector may do with tasks: `stage` = a batch waits in the tray for Apply;
+                                # `apply` = apply_changes writes at once (still one undoable batch in the Log)
   mcp_apply_hourly_cap: 100     # direct changes (apply mode) allowed per hour; beyond it Claude must stage
-  oauth:                        # claude.ai / Claude Desktop custom connector: Factotum is its own OAuth server (docs/SETUP.md §16)
-    enabled: false              # Settings → Connections toggles it; the consent page lists what the connector may do
+  # mcp_http_tools: [mail_draft_new]   # extra tools for /mcp (§14): a list, or "all"; absent = the read tools and stage_changes only
+  oauth:                        # claude.ai / Claude Desktop custom connector: Factotum is its own OAuth server (§16)
+    enabled: false              # Settings → Connections. On = a connector you approve can read your tasks, mail and calendar through /mcp at public_url
     consent_gate: cloudflare_access   # the consent page verifies Cloudflare Access's signed assertion (team + aud below) and needs an owner.emails address; `none` only on a port nobody else reaches
     access_team: ""             # the Zero Trust team name: the <team> in https://<team>.cloudflareaccess.com
     access_aud: ""              # the Access application's Audience (AUD) tag: Zero Trust → Access → Applications → Factotum → Overview

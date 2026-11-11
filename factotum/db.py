@@ -133,6 +133,15 @@ CREATE TABLE IF NOT EXISTS oauth_tokens (
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY, value_json TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS push_subscriptions (    -- one row per device that turned app notifications on (stage 2)
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  endpoint TEXT NOT NULL UNIQUE,                  -- the push service's address for this device
+  p256dh TEXT NOT NULL, auth TEXT NOT NULL,       -- the device's public key and secret, base64url as the browser gives them
+  label TEXT NOT NULL,                            -- "iPhone", "Chrome on Windows"
+  origin TEXT NOT NULL,                           -- the app's origin on that device; a notification's links are built on it
+  created_at TEXT NOT NULL,
+  last_success_at TEXT, last_failure_at TEXT, last_error TEXT
+);
 """
 
 TASK_FIELDS = [
@@ -313,10 +322,21 @@ def set_setting(conn: sqlite3.Connection, key: str, value: Any) -> None:
     conn.execute("INSERT INTO settings (key, value_json) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json", (key, json.dumps(value)))
 
 
-def seed_accounts(conn: sqlite3.Connection, seed: list[dict]) -> None:
+def seed_accounts(conn: sqlite3.Connection, seed: list[dict]) -> int:
+    """Insert the user's file's accounts once per database (`state.accounts_seeded`), so a table
+    emptied on purpose stays empty. A table that already has rows is marked and left alone; an
+    empty seed list does not use the seeding up. Returns the rows inserted."""
+    if get_settings(conn).get("state.accounts_seeded"):
+        return 0
+    mark = lambda: set_setting(conn, "state.accounts_seeded", datetime.now(timezone.utc).isoformat(timespec="seconds"))
     if conn.execute("SELECT COUNT(*) FROM accounts").fetchone()[0]:
-        return
+        mark(); conn.commit()
+        return 0
+    n = 0
     for a in seed or []:
-        conn.execute("INSERT OR IGNORE INTO accounts (address, display, enabled, roles_json) VALUES (?, ?, 1, ?)",
-                     (a["address"], a.get("display"), json.dumps(a.get("roles", []))))
+        n += conn.execute("INSERT OR IGNORE INTO accounts (address, display, enabled, roles_json) VALUES (?, ?, 1, ?)",
+                          (a["address"], a.get("display"), json.dumps(a.get("roles", [])))).rowcount
+    if n:
+        mark()
     conn.commit()
+    return n

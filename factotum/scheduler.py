@@ -4,7 +4,7 @@ the review time or turning the brief off takes effect at the next tick.
 
     reminders       every tick: fire due rows (reminders.fire) when ntfy is configured
     review_push     once a day at notify.review_time; quiet when reviewed today or the queue is empty
-    morning_brief   once a day at notify.morning_brief.time when enabled (brief.send)
+    morning_brief   once a day at notify.morning_brief.time when switched on (off when the key is absent) (brief.send)
     expire          once a day at lifecycle.expire_time (03:30): fade / lapse what Review has shown
     calendar_sweep  every sources.calendar.sweep_minutes when the calendar is on
     slack_sweep     every sources.slack.sweep_minutes when Slack is on: @-mentions of the user into evidence
@@ -12,7 +12,7 @@ the review time or turning the brief off takes effect at the next tick.
                     one light run that turns it into Review suggestions, no more often than sources.mail.suggest.minutes
     notion_mirror   every sinks.notion_tasks_mirror.sweep_minutes when the mirror is on: rows edited since the last pass
     refresh         when the Today tab asked (`state.refresh.requested`): every enabled sweep now, then the planner
-    today_summary   when the Today summary is stale (summary.get) and claude.summary.auto is on: one light run,
+    today_summary   when the Today summary is stale (summary.get) and claude.summary.auto is switched on (off when the key is absent): one light run,
                     no more often than claude.summary.auto_minutes
 
 Daily jobs are "at or after HH:MM, once per day", so a service that was down at 06:30 still sends
@@ -55,7 +55,7 @@ class Scheduler:
         did: list[str] = []
         self._reminders(ecfg, now, did)
         self._daily("expire", C.get(ecfg, "lifecycle.expire_time", "03:30"), now, st, did, lambda: self._expire(ecfg, today))
-        if C.get(ecfg, "notify.morning_brief.enabled", True) and self.mailer:
+        if C.value(ecfg, "notify.morning_brief.enabled") and self.mailer:
             self._daily("morning_brief", C.get(ecfg, "notify.morning_brief.time", "06:30"), now, st, did, lambda: self._brief(ecfg, today))
         self._daily("review_push", C.get(ecfg, "notify.review_time", "19:30"), now, st, did, lambda: self._review_push(ecfg, today, st))
         if C.get(ecfg, "sources.calendar.enabled") and self.calendar:
@@ -160,14 +160,14 @@ class Scheduler:
         base = str(C.get(ecfg, "server.public_url", "")).rstrip("/")
         first = "; ".join(i["task"]["name"][:40] for i in queue[:3])
         self.push(ecfg, f"Review: {n} item{'' if n == 1 else 's'}", f"{n} item{'' if n == 1 else 's'} waiting: {first}" + (" …" if n > 3 else ""),
-                  click=f"{base}/#review", tags=["clipboard"])
+                  click=f"{base}/review", tags=["clipboard"])
         return f"{n} items"
 
     def _brief(self, ecfg: dict, today: date) -> str | None:
         """The planner is a paid run and a failed send retries hourly, so its result is kept for the day."""
         from . import brief
         pres = None
-        if self.planner is not None and C.get(ecfg, "claude.planner.enabled", True):
+        if self.planner is not None and C.value(ecfg, "claude.planner.enabled"):
             kept = get_settings(self.conn).get("state.brief.planner")
             if isinstance(kept, dict) and kept.get("day") == today.isoformat() and isinstance(kept.get("result"), dict):
                 pres = kept["result"]
@@ -234,7 +234,7 @@ class Scheduler:
                     parts.append(f"mail triage failed ({type(e).__name__}: {str(e)[:80]})")
             res = None
             try:
-                if self.planner is not None and C.get(ecfg, "claude.planner.enabled", True):
+                if self.planner is not None and C.value(ecfg, "claude.planner.enabled"):
                     res = self.planner.run(self.conn, ecfg, now.date(), calendar=self.calendar)
                     if res.get("ok"):
                         parts.append(f"planner: {res.get('line') or res.get('verdict') or 'ran'}")
@@ -288,7 +288,7 @@ class Scheduler:
         last one is older than claude.summary.auto_minutes, otherwise when it is. Yesterday's summary,
         or none at all, waits for the morning: the brief's planner writes it, and this covers a
         deployment with no brief or a planner that failed."""
-        if self.summary is None or not C.get(ecfg, "claude.summary.auto", True):
+        if self.summary is None or not C.value(ecfg, "claude.summary.auto"):
             return
         today = now.date()
         s = self.summary.get(self.conn, today)

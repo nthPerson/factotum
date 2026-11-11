@@ -8,6 +8,9 @@
   let data = { tasks: [], projects: [], today: new Date().toISOString().slice(0, 10), top_cap: 7 };
   let review = null;        // /api/review payload
   let settings = null;      // /api/settings payload
+  // Settings changed but not saved yet: key → the value captured when its control changed; '#accounts' → true
+  // when the accounts table changed. A save sends only these, so a value nobody touched stays the file's.
+  const settingsDirty = new Map();
   let connectors = null;    // /api/connectors payload (Settings → Connections)
   let staged = new Map();   // task id -> {op, fields, label}
   let lastBatch = null;
@@ -17,6 +20,7 @@
   // What is being typed, kept outside the DOM: every render() rebuilds the panel (a chat turn's status
   // line re-renders it every second), and a long prompt must survive that with its caret.
   const draft = { cmd: '', ask: '', askFor: null, pick: '' };
+  try { draft.cmd = sessionStorage.getItem('factotum.cmd') || ''; sessionStorage.removeItem('factotum.cmd'); } catch (_) {}   // kept by reloadKeepingDraft
   const TOUCH = () => window.matchMedia('(hover: none)').matches;
   let logView = 'all', logQuiet = false, logLimit = 60, logOpen = new Set();
   try { const v = localStorage.getItem('factotum.logview'); if (['timeline', 'changes', 'runs', 'all'].includes(v)) logView = v; logQuiet = localStorage.getItem('factotum.logquiet') === '1'; } catch (_) {}
@@ -30,8 +34,10 @@
   const folded = (key, dflt) => Object.prototype.hasOwnProperty.call(folds, key) ? !!folds[key] : !!dflt;
   function setFold(key, shut) { folds[key] = !!shut; try { localStorage.setItem('factotum.folds', JSON.stringify(folds)); } catch (_) {} }
   let ui = { tab: 'today', focus: null, sel: new Set(), open: new Set(), reviewIdx: 0, laterOpen: false, datePick: false, trayOpen: false, trayOff: new Set(), reviewPaused: false, rvNote: { id: null, text: '' }, remOpen: null, dueOpen: null, rvReply: null,
-             railOpen: !window.matchMedia('(max-width: 860px)').matches, chatDrawer: false };
-  try { const h = location.hash.replace('#', ''); if (TABS.includes(h)) ui.tab = h; } catch (_) {}
+             railOpen: !window.matchMedia('(max-width: 860px)').matches, chatDrawer: false,
+             page: null, pageTask: null, pageScroll: 0,      // the phone task page: its id, the row fetched when the list lacks it, the list's scroll
+             bulkMore: false };      // the phone's short bar shows its second line (back to false when nothing is selected)
+  try { ui.tab = parseAddress().tab; } catch (_) {}
   try { const r = localStorage.getItem('factotum.rail'); if (r === '0' || r === '1') ui.railOpen = r === '1'; } catch (_) {}
   try { const s = JSON.parse(localStorage.getItem('factotum.staged') || '[]'); staged = new Map(s); } catch (_) {}
   for (const [k, v] of staged) { if (!v || typeof v !== 'object') staged.delete(k); else if (v.task_id == null) v.task_id = typeof k === 'number' ? k : parseInt(k, 10); }  // trays saved before entries carried task_id
@@ -40,7 +46,23 @@
   const PHONE = () => window.matchMedia('(max-width: 700px)').matches;
   const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const byId = id => data.tasks.find(t => t.id === id);
-  const api = (path, opts) => fetch(path, Object.assign({ headers: { 'Content-Type': 'application/json' } }, opts)).then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
+  // An expired sign-in answers an /api request with a redirect to the login page on another origin; with
+  // redirect: 'manual' the page sees it as an opaqueredirect. A 401 or 403 counts the same (/api sends
+  // none of the three). A restarting server (502) or no network (fetch rejects) is not a sign-out.
+  const expired = r => r.type === 'opaqueredirect' || r.status === 401 || r.status === 403;
+  // The build stamp the page loaded with; every /api response carries the server's. When they differ a
+  // newer app is on the server, and the next return to the front reloads (onReturn).
+  const BUILD = (document.querySelector('meta[name="factotum-build"]') || {}).content || '';
+  let newBuild = false;
+  function noteBuild(r) { const b = r.headers.get('X-Factotum-Build') || ''; if (BUILD && b && b !== BUILD) newBuild = true; }
+  // A fetch that rejects (no network, a refused connection) is marked `network` so a caller can tell it
+  // from a fault in the page; its message is unchanged.
+  const netFail = e => { if (e && typeof e === 'object') e.network = true; throw e; };
+  const api = (path, opts) => fetch(path, Object.assign({ headers: { 'Content-Type': 'application/json' }, redirect: 'manual' }, opts)).catch(netFail).then(r => {
+    noteBuild(r);
+    if (expired(r)) { signedOut(); throw new Error('signed out'); }
+    if (!r.ok) throw new Error(r.status); return r.json();
+  });
 
   function view(t) {
     const st = staged.get(t.id), due = staged.get(t.id + ':due');
@@ -76,6 +98,43 @@
   function fmtWhen(iso) { const d = new Date(iso); return d.toLocaleDateString([], { weekday: 'short' }) + ' ' + d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); }
   function daysTo(iso) { return Math.round((startOfDay(new Date(iso + 'T12:00:00')) - startOfDay(TODAY())) / 86400000); }
 
+  // ---------- addresses (stage 1) ----------
+  // Today is /, every other tab /<tab>, a task /t/<id>. A tab change is a history entry, so the
+  // browser's Back and Forward move between tabs; an old /#<tab> link or /today is rewritten in place.
+  function addressOf(tab) { return tab === 'today' ? '/' : '/' + tab; }
+  function parseAddress() {
+    const p = location.pathname;
+    const t = /^\/t\/(\d+)$/.exec(p);
+    if (t) return { tab: 'today', task: +t[1], legacy: false };
+    if (p === '/') { const h = location.hash.replace('#', ''); return TABS.includes(h) ? { tab: h, task: null, legacy: true } : { tab: 'today', task: null, legacy: false }; }
+    const name = p.slice(1);
+    return { tab: TABS.includes(name) ? name : 'today', task: null, legacy: false };
+  }
+  // A task entry carries { page: true }: it was put there by the app, so a list address already lies
+  // beneath it. A reload or self-update on a phone task page sees the mark and adds nothing under it.
+  function setAddress(path, replace) {
+    if (location.pathname + location.hash === path) return;
+    const state = /^\/t\//.test(path) ? { page: true } : null;
+    if (replace) history.replaceState(state, '', path); else history.pushState(state, '', path);
+  }
+  function go(tab) { ui.tab = tab; ui.laterOpen = false; setAddress(addressOf(tab)); render(); }
+  // Once after the first load (no event), and on every popstate (with it). On a desktop a task address
+  // opens the task's row where a list shows it and leaves that tab's address in place of /t/<id>. On a
+  // phone it opens the task page; opened straight at /t/<id> (a reminder), / is put beneath it so the
+  // phone's Back lands on Today instead of leaving the app.
+  function applyAddress(ev) {
+    const a = parseAddress();
+    if (a.task !== null && PHONE()) {
+      if (!ev && !(history.state && history.state.page)) { setAddress('/', true); setAddress('/t/' + a.task); }
+      openTask(a.task, false); return;
+    }
+    if (a.task !== null) { jumpTo(a.task, true, true); setAddress(addressOf(ui.tab), true); return; }
+    ui.tab = a.tab; ui.laterOpen = false;
+    setAddress(addressOf(a.tab), true);      // a legacy /#<tab> or /today becomes the tab's path; otherwise nothing
+    if (ui.page !== null) { closeTask(); return; }      // Back from the task page
+    render();
+  }
+
   // ---------- loading ----------
   let pending = [];           // batches a skill staged (/api/proposals): Apply or Dismiss, above every tab
   async function load() {
@@ -93,20 +152,52 @@
     logData = null; if (ui.tab !== 'review') review = null;      // a Review session in progress keeps its page
     toast(last.ok ? 'Refreshed · ' + (last.line || '') : 'Refresh failed · ' + (last.line || ''));
   }
+  // Something is being typed: a draft or a Review note, an open reminder or due-date form (their values
+  // live only in the DOM), a chat turn running, or focus in a box of the panel (Settings, among others).
+  // Focus in an empty draft-backed box does not count: its text lives in `draft` and render() puts the
+  // focus and caret back, so a reload of the lists loses nothing (a box left focused and empty would
+  // otherwise keep the lists stale on every return). render() uses the same list.
+  const DRAFT_BOXES = ['cmd', 'rv-ask', 'chat-pick', 'rv-note'];
+  function typingNow() {
+    if ([draft.cmd, draft.ask, draft.pick, ui.rvNote.text].some(s => (s || '').trim())) return true;
+    if (ui.remOpen !== null || ui.dueOpen !== null || chat.busy) return true;
+    const a = document.activeElement;
+    return !!(a && a.matches('input, textarea, select') && a.closest('#panel') && !DRAFT_BOXES.includes(a.id));
+  }
+  // The app came back to the front. A newer build on the server reloads the page, or only says
+  // "Update ready" while something is typed or staged; otherwise the lists are reloaded, unless
+  // something is typed, when only the summary is polled so the box being typed in is not redrawn.
+  function onReturn() {
+    if (document.hidden || !document.getElementById('signedout').hidden) return;
+    if (newBuild) {
+      if (typingNow() || staged.size) document.getElementById('update').hidden = false;
+      else location.reload();
+      return;
+    }
+    if (typingNow()) { if (ui.tab === 'today') { clearTimeout(sumTimer); pollSummary(); } return; }
+    if (ui.tab === 'log') logData = null;
+    // A failed reload keeps what is on screen: a sign-out shows its own screen and no network is not a
+    // fault. Anything else (a server error, a bug in a redraw) is logged rather than lost.
+    load().catch(e => { if (!(e && (e.message === 'signed out' || e.network))) console.error('Reloading on return failed:', e); });
+  }
+  document.getElementById('update').onclick = () => reloadKeepingDraft();      // the tray is in localStorage: it survives
 
   // ---------- the Today summary (SPEC §8.4) ----------
   // The planner's verdict, kept by the server with what has changed since. Python decides "stale";
   // this only shows it. Refresh asks the scheduler for the sweeps and the planner, then polls.
   const sumBusy = () => !!(summary && summary.refresh && summary.refresh.state !== 'idle');
   function summaryHtml() {
-    if (!summary) return '<section class="summary" id="summary" hidden></section>';
+    // With no summary, the box shows only when something will write one: Refresh, the morning planner
+    // (inside the brief) or the automatic rewrite. With all three off it would promise what never comes.
+    const writer = !summary ? '' : summary.can_refresh ? 'Refresh writes one.' : summary.planner ? 'The morning planner writes one.' : summary.auto ? 'One is written automatically.' : '';
+    if (!summary || (!summary.summary && (!openOnes().length || !writer))) return '<section class="summary" id="summary" hidden></section>';
     const s = summary.summary, rf = summary.refresh || {}, busy = sumBusy(), stale = s ? s.stale || [] : [];
     const when = s && s.at ? new Date(s.at).toLocaleString([], s.day === data.today ? { hour: 'numeric', minute: '2-digit' } : { weekday: 'short', hour: 'numeric', minute: '2-digit' }) : '';
     const btn = summary.can_refresh ? `<button class="btn small" id="sum-refresh" ${busy ? 'disabled' : ''} title="Sweeps mail, Canvas, the calendar and Slack now, then runs the planner on what they found. About a minute.">${busy ? '<span class="spin"></span>Refreshing…' : '↻ Refresh'}</button>` : '';
     const reason = x => { const m = /^Task-(\d+) /.exec(x); return m ? `<a href="#" data-jump="${m[1]}">Task-${m[1]}</a> ${esc(x.slice(m[0].length))}` : esc(x); };
     return `<section class="summary ${stale.length ? 'stale' : ''}" id="summary">
       <div class="shead"><span class="lbl">Summary</span>${when ? `<span class="when">${esc(when)}${s.source === 'planner' ? ' · planner' : ''}</span>` : ''}${stale.length ? `<span class="chip stalechip">${stale.length === 1 && /^written /.test(stale[0]) ? esc(stale[0]) : `${stale.length} change${stale.length === 1 ? '' : 's'} since`}</span>` : ''}<span class="spacer"></span>${btn}</div>
-      ${s ? `<p class="stext">${esc(s.text)}</p>` : `<p class="hint">No summary yet. ${summary.can_refresh ? 'Refresh writes one.' : 'The morning planner writes one.'}</p>`}
+      ${s ? `<p class="stext">${esc(s.text)}</p>` : `<p class="hint">No summary yet. ${writer}</p>`}
       ${stale.length && !busy ? `<ul class="since">${stale.slice(0, 4).map(x => `<li>${reason(x)}</li>`).join('')}${stale.length > 4 ? `<li>and ${stale.length - 4} more</li>` : ''}</ul><p class="hint">${summary.auto ? 'A new summary is written automatically' + (summary.can_refresh ? '; Refresh does it now, with a sweep.' : '.') : 'Automatic rewriting is off (Settings → Claude)' + (summary.can_refresh ? '; Refresh writes a new one.' : '.')}</p>` : ''}
       ${busy ? `<p class="hint"><span class="spin"></span>${rf.state === 'requested' ? 'Starting…' : 'Sweeping mail, Canvas, the calendar and Slack, then the planner. About a minute.'}</p>` : ''}
       ${!busy && rf.last && !rf.last.ok ? `<p class="hint bad">The last refresh did not finish cleanly: ${esc(rf.last.line || '')}</p>` : ''}</section>`;
@@ -257,24 +348,48 @@
     const u = document.getElementById('undo');
     if (u) u.onclick = async () => { await api(`/api/batches/${lastBatch}/undo`, { method: 'POST' }); lastBatch = null; el.classList.remove('on'); await load(); };
   }
+  // The sign-in has expired (see `expired`): a full-screen "Sign in again" over the whole app, whose
+  // button reloads at the same address. The tray is in localStorage, so it survives the reload. The rest
+  // of the app is made inert so nothing behind the screen can be reached with Tab.
+  function signedOut() {
+    const el = document.getElementById('signedout');
+    if (!el.hidden) return;
+    el.hidden = false;
+    for (const c of document.querySelector('.app').children) if (c !== el) c.inert = true;
+    document.getElementById('signin').focus();
+  }
+  // A reload the app asks for (Sign in again, Update) keeps what is in the command box: it is put in
+  // sessionStorage, which survives the sign-in's round trip in this tab, and read back once on load.
+  function reloadKeepingDraft() {
+    try { if (draft.cmd.trim()) sessionStorage.setItem('factotum.cmd', draft.cmd); } catch (_) {}
+    location.reload();
+  }
+  document.getElementById('signin').onclick = reloadKeepingDraft;
 
   // ---------- rendering ----------
   function render() {
+    document.body.classList.toggle('page-on', ui.page !== null);      // before measuring: the page hides the bar on a phone
     const bar = document.querySelector('header.bar'); if (bar) document.documentElement.style.setProperty('--bar-h', bar.offsetHeight + 'px');
     renderRail();
     const p = document.getElementById('panel');
     const fns = { today: renderToday, timeline: renderTimeline, projects: renderProjects, review: renderReview, chat: renderChat, log: renderLog, settings: renderSettings };
-    const act = document.activeElement, held = act && ['cmd', 'rv-ask', 'chat-pick', 'rv-note'].includes(act.id) ? { id: act.id, a: act.selectionStart, b: act.selectionEnd } : null;
-    p.innerHTML = pendingHtml() + fns[ui.tab]();
+    const act = document.activeElement, held = act && DRAFT_BOXES.includes(act.id) ? { id: act.id, a: act.selectionStart, b: act.selectionEnd } : null;
+    if (ui.page !== null && !byId(ui.page) && !(ui.pageTask && ui.pageTask.id === ui.page)) fetchPageTask(ui.page);
+    p.innerHTML = ui.page !== null ? taskPageHtml() : starterHtml() + pendingHtml() + fns[ui.tab]();
     if (held) { const el = document.getElementById(held.id); if (el) { el.focus({ preventScroll: true }); try { el.setSelectionRange(held.a, held.b); } catch (_) {} } }
     p.querySelectorAll('textarea.grow').forEach(grow);
     document.querySelectorAll('#tabs button').forEach(b => { b.setAttribute('aria-selected', b.dataset.tab === ui.tab); if (b.dataset.tab === ui.tab && PHONE() && b.scrollIntoView) b.scrollIntoView({ block: 'nearest', inline: 'center' }); });
     document.getElementById('n-today').textContent = openOnes().filter(x => x.due && fmtDue(x.due).days <= 1).length || '';
     document.getElementById('n-review').textContent = review && (review.total || (review.suggestions || []).length) ? review.total + (review.suggestions || []).filter(x => !x.created).length : '';
-    document.getElementById('remind').innerHTML = settings && settings.effective['notify.review_time']
+    const eff = settings && settings.effective;
+    document.getElementById('remind').innerHTML = eff && eff['notify.review_time'] && eff['notify.ntfy.enabled'] && eff['notify.ntfy.topic']
       ? `<span>Review at</span><span class="pill">${esc(settings.effective['notify.review_time'])}</span>` : '';
     renderTray();
     wire();
+  }
+  function starterHtml() {
+    if (!(settings && settings.starter)) return '';
+    return `<div class="starter" role="status"><b>Starter settings in use.</b> <span>Factotum is running on config/factotum.starter.yaml, not a file of your own.</span> ${ui.tab !== 'settings' ? '<button class="btn small" data-starter-help>How to make it your own</button>' : ''}</div>`;
   }
   function pendingHtml() {
     if (!pending.length) return '';
@@ -303,7 +418,10 @@
   function groupsOf(tab) {
     return tab === 'today' ? todayGroups().groups : tab === 'timeline' ? timelineGroups() : tab === 'projects' ? projectGroups().map(([p, rows]) => ({ key: 'projects:' + p, rows })) : [];
   }
-  function jumpTo(id, expand) {
+  // `replace` (only when opening at /t/<id>) swaps the address instead of pushing the tab's: a /timeline
+  // pushed above /t/<id> would let Back return there, jump and push again, so Back could never leave.
+  function jumpTo(id, expand, replace = false) {
+    if (expand && PHONE()) { openTask(id); return; }      // a phone opens the task page instead (a Top tile's double-tap)
     const tabs = [ui.tab, 'today', 'timeline'].filter((t, i, a) => ['today', 'timeline', 'projects'].includes(t) && a.indexOf(t) === i);
     let hit = null;
     for (const tab of tabs) { const g = groupsOf(tab).find(g => g.rows.some(r => r.id === id)); if (g) { hit = { tab, key: g.key }; break; } }
@@ -311,7 +429,7 @@
     const from = ui.tab;
     if (folded(hit.key, hit.tab === 'projects')) setFold(hit.key, false);
     ui.tab = hit.tab; ui.focus = id; if (expand) ui.open.add(id);
-    if (from !== hit.tab) location.hash = hit.tab;
+    if (from !== hit.tab) setAddress(addressOf(hit.tab), replace);
     render();
     const el = document.querySelector(`#panel .row[data-id="${id}"]`);
     if (el) { el.scrollIntoView({ block: 'center', behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' }); el.classList.add('flash'); }
@@ -337,22 +455,41 @@
       ${ui.pickOpen ? `<div class="pick"><input id="chat-pick" value="${esc(draft.pick)}" placeholder="A task number, or words from its name" aria-label="Find a task to attach" autocomplete="off">
         <div class="hits">${hits.map(x => { const d = fmtDue(x.due); return `<button data-pick="${x.id}"><span class="code">Task-${x.id}</span> <span class="nm">${esc(x.name)}</span><span class="chip proj">${esc(x.project || '—')}</span>${d ? `<span class="chip">${d.label}</span>` : ''}</button>`; }).join('') || (draft.pick.trim() ? '<div class="hint">No open task matches.</div>' : '')}</div></div>` : ''}`;
   }
+  // What a chat prompt can ask about: mail and calendar only when their input is on (settings not loaded yet: all three).
+  function chatTopics() {
+    const eff = settings && settings.effective;
+    const t = ['tasks'].concat(!eff || eff['sources.mail.enabled'] ? ['mail'] : [], !eff || eff['sources.calendar.enabled'] ? ['calendar'] : []);
+    return 'your ' + (t.length > 1 ? t.slice(0, -1).join(', ') + ' or ' + t[t.length - 1] : t[0]);
+  }
   function composer() {
     const ids = attachedIds(), inChat = ui.tab === 'chat';
-    const ph = inChat ? (TOUCH() ? 'Ask about your tasks, mail or calendar' : 'Ask about your tasks, mail or calendar · Enter sends, Shift+Enter starts a new line')
+    const ask = inChat ? 'Ask about ' + chatTopics() : '';
+    const ph = inChat ? (TOUCH() ? ask : ask + ' · Enter sends, Shift+Enter starts a new line')
       : PHONE() ? 'done 389 · push 364 fri · or ask Claude' : 'Command: done 389 392 · push 364 fri · nodue 364 · top 23 · longterm 38 · or ask Claude in plain words';
     const box = `<div class="cmd"><textarea id="cmd" class="grow" rows="1" placeholder="${ph}" aria-label="Prompt or command">${esc(draft.cmd)}</textarea><button class="btn primary" id="cmd-go" ${inChat && chat.busy ? 'disabled' : ''}>Send</button></div>`;
     if (inChat) return `<div class="composer">${chatAttach()}${box}</div>`;       // no row hints and no bulk bar here: there are no rows
-    return `<div class="composer"><div class="attach">${ids.length ? 'Attached: ' + ids.map(id => `<span class="chip">Task-${id}</span>`).join('') : 'Nothing attached · tap a row to attach it'}</div>
+    const phone = PHONE();      // a tap opens the task page there; the tick box selects
+    return `<div class="composer"><div class="attach">${ids.length ? 'Attached: ' + ids.map(id => `<span class="chip">Task-${id}</span>`).join('') : phone ? 'Nothing attached · tick a row to attach it' : 'Nothing attached · tap a row to attach it'}</div>
       ${box}
       <p class="hint keys">Tap a row to select it (the bulk bar appears) · <kbd>j</kbd><kbd>k</kbd> move · <kbd>d</kbd> done · <kbd>x</kbd> drop · <kbd>s</kbd> snooze · <kbd>t</kbd> top · <kbd>l</kbd> long-term · <kbd>e</kbd> details · double-click a row for details · <kbd>Esc</kbd> deselect</p>
-      <p class="hint touch">Tap a row to select it · double-tap or ▸ for details</p></div>
-      <div class="bulk" id="bulk"><b id="bulk-n"></b> selected
+      <p class="hint touch">${phone ? 'Tap a row to open it · tick the box to select it' : 'Tap a row to select it · double-tap or ▸ for details'}</p></div>
+      ${phone ? shortBar() : `<div class="bulk" id="bulk"><b id="bulk-n"></b> selected
         <button class="btn small" data-bulk="done">Done</button><button class="btn small" data-bulk="drop">Drop</button>
         <button class="btn small" data-bulk="snooze">Snooze to tomorrow</button>
         <span class="remform"><input type="date" id="bulk-date" aria-label="Due date"><button class="btn small" data-bulk="setdue">Set due</button><button class="btn small" data-bulk="cleardue">Remove due date</button></span>
         <button class="btn small" data-bulk="top">Pin to Top</button><button class="btn small" data-bulk="longterm">Long-term</button>
-        <span class="spacer"></span><button class="btn small" data-bulk="clear">Clear</button></div>`;
+        <span class="spacer"></span><button class="btn small" data-bulk="clear">Clear</button></div>`}`;
+  }
+  // The phone's bulk bar: one line (Done, Drop, Snooze, More, ✕) that takes the tray's place at the
+  // bottom while rows are selected; More opens a second line with the rest of desktop's actions.
+  function shortBar() {
+    return `<div class="bulk short" id="bulk"><b id="bulk-n"></b>
+        <button class="btn small" data-bulk="done">Done</button><button class="btn small" data-bulk="drop">Drop</button><button class="btn small" data-bulk="snooze">Snooze</button>
+        <button class="btn small" id="bulk-more" aria-expanded="${ui.bulkMore}">More</button>
+        <span class="spacer"></span><button class="btn small" data-bulk="clear" aria-label="Clear selection">✕</button>
+        ${ui.bulkMore ? `<div class="bulk-more">
+          <span class="remform"><input type="date" id="bulk-date" aria-label="Due date"><button class="btn small" data-bulk="setdue">Set due</button><button class="btn small" data-bulk="cleardue">Remove due date</button></span>
+          <button class="btn small" data-bulk="top">Pin to Top</button><button class="btn small" data-bulk="longterm">Long-term</button></div>` : ''}</div>`;
   }
   // A section of rows with a heading that folds it: {key, title, rows, cls, tag}. A folded section
   // renders no rows, so j/k and the bulk bar only ever see what is on screen.
@@ -362,12 +499,24 @@
     return `<section class="group ${shut ? 'folded' : ''}"><h3 class="${g.cls || ''}"><button class="fold" data-fold="${esc(g.key)}" aria-expanded="${!shut}">${g.title}<span class="n">${g.rows.length}</span></button></h3>${shut ? '' : `<div class="rows">${g.rows.map(x => row(x, g.tag ? g.tag(x) : '')).join('')}</div>`}</section>`;
   }
   function row(x, extraChip) {
+    const cls = ['row', x.status === 'done' ? 'done' : '', x.status === 'dropped' ? 'drop' : '', ui.open.has(x.id) ? 'open' : '', ui.sel.has(x.id) ? 'sel' : '', ui.focus === x.id ? 'focus' : ''].join(' ');
+    return `<div class="${cls}" data-id="${x.id}">
+      <div class="main">
+        <input type="checkbox" id="ck-${x.id}" aria-label="Select" ${ui.sel.has(x.id) ? 'checked' : ''}>
+        <div class="title"><span class="code">Task-${x.id}</span> <span class="name">${esc(x.name)}</span></div>
+        <button class="chev" aria-label="Details" data-chev="${x.id}"></button>
+        <div class="meta">${chipsHtml(x, extraChip)}</div>
+      </div>
+      <div class="details">
+        ${detailsHtml(x)}</div></div>`;
+  }
+  // A task's chips (Top, long-term, date, effort, what is staged…): the row's .meta and the task page's.
+  function chipsHtml(x, extraChip) {
     const d = fmtDue(x.due);
     const st = staged.get(x.id);
     const dueCls = d ? (d.days < 0 ? 'crit' : d.days <= 1 ? 'warn' : '') : '';
     const fadeDays = x.fade_at ? daysTo(x.fade_at) : null;
-    const cls = ['row', x.status === 'done' ? 'done' : '', x.status === 'dropped' ? 'drop' : '', ui.open.has(x.id) ? 'open' : '', ui.sel.has(x.id) ? 'sel' : '', ui.focus === x.id ? 'focus' : ''].join(' ');
-    const chips = [
+    return [
       x.top_rank ? `<span class="chip top">Top ${topPos.get(x.id) || x.top_rank}</span>` : '',
       x.longterm_effective ? `<span class="chip lt">Long-term</span>` : '',
       x.close_on_sent_since ? `<span class="chip" title="Closes itself when a message to ${esc(x.close_on_sent_to || 'the watched address')} is sent">✉ closes on send</span>` : '',
@@ -379,6 +528,10 @@
       `<span class="chip eff">${esc(x.effort || '?')}</span>`,
       st ? `<span class="chip staged">${esc(st.label)}</span>` : '',
     ].join('');
+  }
+  // What an opened row shows (score, why now, context, source, links, lifecycle, reminders) and, for
+  // an open task, its actions: the row's .details and the task page's.
+  function detailsHtml(x) {
     const links = (x.links || []).map(l => {
       if (l.kind === 'plaud_note') return `<a href="https://web.plaud.ai/file/${esc(l.ref)}" target="_blank" rel="noopener" title="${esc(l.label || '')}">Plaud</a>`;
       if (l.kind === 'note_page') return `<a href="${esc(l.ref)}" target="_blank" rel="noopener" title="${esc(l.label || '')}">Note</a>`;
@@ -388,21 +541,13 @@
       return `<a href="${esc(l.ref)}" target="_blank" rel="noopener">${esc(l.label || l.kind)}</a>`;
     }).join('');
     const srcLink = x.source_link ? `<a href="${esc(x.source_link)}" target="_blank" rel="noopener">${x.source === 'Plaud' ? 'Plaud note' : x.source === 'Canvas' ? 'Canvas' : 'Source'}</a>` : '';
-    return `<div class="${cls}" data-id="${x.id}">
-      <div class="main">
-        <input type="checkbox" id="ck-${x.id}" aria-label="Select" ${ui.sel.has(x.id) ? 'checked' : ''}>
-        <div class="title"><span class="code">Task-${x.id}</span> <span class="name">${esc(x.name)}</span></div>
-        <button class="chev" aria-label="Details" data-chev="${x.id}"></button>
-        <div class="meta">${chips}</div>
-      </div>
-      <div class="details">
-        <dl><dt>Score</dt><dd>${x.score} · ${x.priority} · ${esc((x.score_reasons || []).join(' · '))}</dd>
+    return `<dl><dt>Score</dt><dd>${x.score} · ${x.priority} · ${esc((x.score_reasons || []).join(' · '))}</dd>
             <dt>Why now</dt><dd>${esc(x.why_now) || '<span class="code">none yet</span>'}</dd>
             <dt>Context</dt><dd>${esc(x.context) || '<span class="code">none</span>'}</dd></dl>
         <dl><dt>Source</dt><dd>${esc(x.source || '?')}${x.account ? ' · ' + esc(x.account) : ''} · ${x.mentions} mention${x.mentions === 1 ? '' : 's'} · created ${esc((x.created_at || '').slice(0, 10))}${x.legacy_status ? ' · was ' + esc(x.legacy_status) : ''}</dd>
             <dt>Links</dt><dd class="links">${srcLink}${links || (srcLink ? '' : '<span class="code">none</span>')}</dd>
             <dt>Lifecycle</dt><dd>${x.tier}${x.fade_at ? ' · fades ' + x.fade_at : ''}${x.last_call_at ? ' · last call ' + x.last_call_at : ''}${x.snoozed_until ? ' · snoozed until ' + x.snoozed_until : ''}</dd>
-            <dt>Reminders</dt><dd>${(x.reminders || []).map(r => `<span class="chip rem">${fmtWhen(r.fire_at)}${r.repeat ? ' · ' + esc(r.repeat) : ''} ${esc(r.label || '')}</span>`).join(' ') || '<span class="code">none</span>'}</dd></dl>
+            <dt>Reminders</dt><dd>${(x.reminders || []).map(r => `<span class="chip rem">${fmtWhen(r.fire_at)}${r.repeat ? ' · ' + esc(r.repeat) : ''} ${esc(r.label || '')}</span>`).join(' ') || '<span class="code">none</span>'}</dd></dl>${x.status !== 'open' ? '' : `
         <div class="actions">
           <button class="btn small" data-act="done" data-id="${x.id}">Done</button>
           <button class="btn small" data-act="drop" data-id="${x.id}">Drop</button>
@@ -414,9 +559,45 @@
           <span class="spacer"></span>
           <button class="btn small" data-chat-canned="search_mail" data-id="${x.id}" title="A chat turn: finds the threads about this task and offers to link them">✉ Search related emails</button>
           <button class="btn small" data-chat-canned="draft_reply" data-id="${x.id}" title="A chat turn: saves a reply draft in Mailbird, never sends">✉ Draft reply</button>
-        </div></div></div>`;
+        </div>`}`;
   }
+  // ---------- the phone task page (stage 1) ----------
+  // On a phone a tap opens a task full-screen, rendered into #panel in place of the tab (render()).
+  // An open task is drawn like its row, staged changes included; whether it is closed is the server's
+  // word (a staged Done keeps the actions, so the tray's Discard still makes sense). A task the open
+  // list lacks (closed, or closed since) is fetched once and shown read-only.
+  let pageFetch = null;       // the id whose /api/tasks/<id> is in flight
+  function fetchPageTask(id) {
+    if (pageFetch === id) return;
+    pageFetch = id;
+    api(`/api/tasks/${id}`).then(t => t, e => e.message === '404' ? { id, missing: true } : { id, failed: e.message })
+      .then(t => { if (pageFetch === id) pageFetch = null; if (ui.page !== id) return; ui.pageTask = t; render(); });
+  }
+  function taskPageHtml() {
+    const id = ui.page, pt = ui.pageTask && ui.pageTask.id === id ? ui.pageTask : null;
+    const bar = `<div class="pbar"><button class="btn" id="page-back">‹ Back</button><span class="code">Task-${id}</span></div>`;
+    const srv = byId(id) || (pt && !pt.missing && !pt.failed ? pt : null);
+    if (!srv) return `<div class="taskpage" data-id="${id}">${bar}<div class="empty">${!pt ? `Loading Task-${id}…` : pt.missing ? `Task-${id} does not exist.` : `Could not load Task-${id} (${esc(pt.failed)}).`}</div></div>`;
+    const closed = srv.status !== 'open';
+    const x = closed ? srv : Object.assign({}, view(srv), { status: srv.status });
+    return `<div class="taskpage" data-id="${id}">${bar}<h2>${esc(x.name)}</h2><div class="meta">${chipsHtml(x)}</div>
+      ${closed ? `<p class="closed">This task is ${esc(srv.status)}.</p>` : ''}<div class="details">${detailsHtml(x)}</div></div>`;
+  }
+  // On a phone the task page; elsewhere the task's row, expanded in place. `push` is false when the address is already /t/<id>.
+  function openTask(id, push = true) {
+    if (!PHONE()) { jumpTo(id, true); return; }
+    if (ui.page === null) ui.pageScroll = window.scrollY;      // the list's place; a page opened over a page keeps it
+    ui.page = id; ui.pageTask = null;
+    if (push) setAddress('/t/' + id);
+    render();                  // fetches the task when the open list lacks it
+    window.scrollTo(0, 0);
+  }
+  function closeTask() { ui.page = null; render(); window.scrollTo(0, ui.pageScroll); }
   const dueDays = x => x.due ? fmtDue(x.due).days : null;
+  // Shown wherever a list of open tasks would be, when there are none. Only says how tasks arrive today.
+  function noTasksHtml() {
+    return '<div class="empty"><b>No open tasks.</b> Tasks arrive from the inputs you switch on in Settings (Plaud recordings, Canvas), from suggestions you accept in Review (mail, Slack), and from Chat, where Claude can propose a task for you to create. Coming from a Notion tasks database? Run <code>python -m factotum import-notion --dry-run</code>, then <code>--apply</code> (docs/SETUP.md §5).</div>';
+  }
   function todayGroups() {
     const o = openOnes().filter(x => !(x.snoozed_until && x.snoozed_until > data.today));   // Later = hidden until its date
     const by = f => o.filter(f);
@@ -429,9 +610,9 @@
       { key: 'today:week', title: 'Rest of the week', rows: by(x => dueDays(x) > 1 && dueDays(x) <= 7) }] };
   }
   function renderToday() {
-    const { open, groups } = todayGroups();
+    const { groups } = todayGroups();      // snoozed rows are not in these groups but are open: Timeline lists them
     return summaryHtml() + composer() + groups.map(group).join('') +
-      (open.length ? '' : '<div class="empty">No open tasks. Run <code>python -m factotum import-notion --apply</code> or add some.</div>') +
+      (!openOnes().length ? noTasksHtml() : groups.some(g => g.rows.length) ? '' : '<div class="empty">Nothing is due today or this week. Every open task is on Timeline.</div>') +
       `<div class="note">Soft dates that slipped, new items, and fading backlog are not here. They wait in <b>Review</b> so this screen stays short.</div>`;
   }
   const RECENT_CAP = 30;
@@ -450,13 +631,14 @@
       { key: 'timeline:recent', title: 'Recently added · newest first', rows: o.slice().sort((a, b) => (b.created_at || '').localeCompare(a.created_at || '')).slice(0, RECENT_CAP),
         tag: x => `<span class="chip" title="Created ${esc(x.created_at || '')}">added ${x.created_at ? new Date(x.created_at).toLocaleDateString([], { month: 'short', day: 'numeric' }) : '?'}</span>` }];
   }
-  function renderTimeline() { return composer() + timelineGroups().map(group).join(''); }
+  function renderTimeline() { return composer() + (openOnes().length ? timelineGroups().map(group).join('') : noTasksHtml()); }
   function projectGroups() {
     const m = new Map();
     openOnes().forEach(x => { const k = x.project || '—'; if (!m.has(k)) m.set(k, []); m.get(k).push(x); });
     return [...m.entries()].sort((a, b) => b[1].length - a[1].length);
   }
   function renderProjects() {
+    if (!openOnes().length) return composer() + noTasksHtml();
     return composer() + projectGroups().map(([p, rows]) => {
       const fading = rows.filter(x => x.fade_at && daysTo(x.fade_at) <= 7).length;
       const due = rows.filter(x => x.due && fmtDue(x.due).days <= 7).length;
@@ -483,7 +665,8 @@
       const more = remaining > 0 ? `<p><button class="btn" id="review-more">Review another ${Math.min(review.cap, remaining)} of the remaining ${remaining}</button></p>` : '';
       const head = ui.reviewPaused ? (remaining ? 'Batch applied.' : 'Batch applied. Nothing left to review.') : total ? `${staged.size} decision${staged.size === 1 ? '' : 's'} staged.` : 'Nothing to review.';
       const body = ui.reviewPaused ? '' : total ? '<p>Apply them in the tray, or keep going.</p>' : '';
-      return `<div class="review"><div class="finish"><h2>${head}</h2>${body}${more}${review.last_review_at ? `<p class="hint">Last review: ${review.last_review_at}</p>` : ''}</div></div>`;
+      const what = !ui.reviewPaused && !total ? '<p class="hint">Review gathers what needs a decision: soft dates that slipped, new tasks, backlog about to fade, and suggestions from the inputs you switch on.</p>' : '';
+      return `<div class="review"><div class="finish"><h2>${head}</h2>${what}${body}${more}${review.last_review_at ? `<p class="hint">Last review: ${review.last_review_at}</p>` : ''}</div></div>`;
     }
     const { task: raw, reasons, primary, flags } = items[0];
     const x = view(raw);   // staged edits (a due date set on this card) show at once, not only after Apply
@@ -605,15 +788,20 @@
         ${chat.threads.length ? chat.threads.map(t => `<button class="thread ${t.id === chat.current ? 'cur' : ''}" data-thread="${t.id}"><span class="t">${esc(t.title || 'untitled')}</span><span class="d">${when(t)}</span></button>`).join('') : '<div class="hint">No threads yet.</div>'}
       </nav>`;
     const head = `<div class="chat-head"><button class="btn small" id="chat-threads-toggle" aria-label="Threads">☰ Threads</button><span class="cur">${cur ? esc(cur.title || 'untitled') : 'New thread'}</span>${cur ? `<span class="spacer"></span><button class="btn small" id="chat-delete" ${chat.busy ? 'disabled' : ''} title="Delete this thread and its messages. Nothing it applied is undone.">Delete thread</button>` : ''}</div>`;
-    const STARTERS = ['What should I work on next, and why?', 'What is overdue, and what could I drop?', 'Is there anything in my mail from this week that I have not dealt with?'];
+    const eff = settings && settings.effective;
+    const noMail = !!eff && !eff['sources.mail.enabled'];      // settings not loaded yet: today's text
+    const STARTERS = ['What should I work on next, and why?', 'What is overdue, and what could I drop?'].concat(noMail ? [] : ['Is there anything in my mail from this week that I have not dealt with?']);
+    const intro = noMail
+      ? `Ask about your tasks${eff['sources.calendar.enabled'] ? ', your calendar' : ''}. A prompt can carry tasks (＋ Attach a task below, or select rows on another tab) or none at all. Everything Claude proposes is staged into the tray; nothing changes until you Apply.`
+      : 'Ask about your tasks, your mail or your calendar. A prompt can carry tasks (＋ Attach a task below, or select rows on another tab) or none at all. Everything Claude proposes is staged into the tray; nothing changes until you Apply. Drafts it writes land in Mailbird and are never sent.';
     const body = chat.messages.length || chat.live ? chat.messages.map(messageHtml).join('') + liveHtml()
-      : `<div class="note">Ask about your tasks, your mail or your calendar. A prompt can carry tasks (＋ Attach a task below, or select rows on another tab) or none at all. Everything Claude proposes is staged into the tray; nothing changes until you Apply. Drafts it writes land in Mailbird and are never sent.</div>
+      : `<div class="note">${intro}</div>
          <div class="starters">${STARTERS.map((t, i) => `<button class="btn small" data-starter="${i}">${esc(t)}</button>`).join('')}</div>`;
     return `<div class="chat">${list}<div class="chat-main">${head}<div class="msgs" id="msgs">${body}</div>${composer()}</div><div class="backdrop ${ui.chatDrawer ? 'on' : ''}" id="chat-backdrop"></div></div>`;
   }
   function reviewAsk(id) {
     const live = chat.busy && chat.from && chat.from.review === id ? `<div class="hint"><span class="spin"></span> ${esc((chat.live || {}).status || 'Working…')}</div>` : '';
-    const reply = ui.rvReply && ui.rvReply.id === id ? `<div class="rvreply">${md(ui.rvReply.text)}${ui.rvReply.note ? `<div class="hint">${esc(ui.rvReply.note)}</div>` : ''}<div class="hint"><a href="#chat" data-goto-chat="${ui.rvReply.thread}">Open in Chat</a></div></div>` : '';
+    const reply = ui.rvReply && ui.rvReply.id === id ? `<div class="rvreply">${md(ui.rvReply.text)}${ui.rvReply.note ? `<div class="hint">${esc(ui.rvReply.note)}</div>` : ''}<div class="hint"><a href="/chat" data-goto-chat="${ui.rvReply.thread}">Open in Chat</a></div></div>` : '';
     if (draft.askFor !== id) { draft.ask = ''; draft.askFor = id; }      // a new card starts with an empty box
     return `<div class="cmd rvask"><textarea id="rv-ask" class="grow" rows="1" placeholder="Ask Claude about this task — e.g. “add that the first pass is done”; its proposals stage with this decision" aria-label="Ask Claude">${esc(draft.ask)}</textarea><button class="btn small" id="rv-ask-go" ${chat.busy ? 'disabled' : ''}>Ask</button></div>${TOUCH() ? '' : '<div class="hint keysonly">Enter sends · Shift+Enter starts a new line</div>'}${live}${reply}`;
   }
@@ -622,13 +810,15 @@
   async function sendChat(text, canned, attached, from) {
     if (chat.busy) { toast('A chat turn is already running'); return; }
     chat.busy = true; chat.live = { status: 'Starting…', texts: [] }; chat.from = from || null; chat.scroll = !from;
-    if (!from) { ui.tab = 'chat'; location.hash = 'chat'; if (!chat.threads) { try { const r = await api('/api/chat/threads'); chat.threads = r.threads; } catch (_) { chat.threads = []; } } }
+    // the threads first: go() renders, and a Chat render with no threads loads them and the current thread's messages over this turn's
+    if (!from) { if (!chat.threads) { try { const r = await api('/api/chat/threads'); chat.threads = r.threads; } catch (_) { chat.threads = []; } } ui.page = null; go('chat'); }
     const threadId = from ? null : chat.current;    // a Review question starts its own thread
     if (!from) chat.messages = [...chat.messages, { role: 'user', text: text || (canned === 'search_mail' ? 'Search related emails' : 'Draft a reply'), attached }];
     render();
     let result = null, error = null;
     try {
-      const resp = await fetch('/api/chat/turn', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ thread_id: threadId, text, attached, canned }) });
+      const resp = await fetch('/api/chat/turn', { method: 'POST', headers: { 'Content-Type': 'application/json' }, redirect: 'manual', body: JSON.stringify({ thread_id: threadId, text, attached, canned }) });
+      if (expired(resp)) { signedOut(); throw new Error('signed out'); }
       if (!resp.ok) throw new Error('HTTP ' + resp.status);
       const reader = resp.body.getReader(); const dec = new TextDecoder(); let buf = '';
       for (;;) {
@@ -785,12 +975,12 @@
     const e = settings.effective;
     const f = (key, label, sub, control) => `<div class="field"><label for="s-${key}">${label}<span class="sub">${sub}</span></label><div>${control}</div></div>`;
     const num = (key, min, max) => `<input type="number" id="s-${key}" data-key="${key}" value="${e[key] == null ? '' : e[key]}" min="${min}" max="${max}" ${Number.isInteger(min) ? '' : 'step="0.05"'}>`;
-    const bool = (key, dflt) => `<input type="checkbox" id="s-${key}" data-key="${key}" ${(e[key] == null ? dflt : e[key]) ? 'checked' : ''}>`;   // dflt: a key an older config file lacks
+    const bool = key => `<input type="checkbox" id="s-${key}" data-key="${key}" ${e[key] ? 'checked' : ''}>`;   // effective has every key, its default filled in by the server
     const text = (key, w) => `<input type="text" id="s-${key}" data-key="${key}" value="${esc(e[key] || '')}" style="width:${w || '100%'}">`;
     const time = key => `<input type="time" id="s-${key}" data-key="${key}" value="${esc(e[key] || '')}">`;
-    const accounts = (settings.accounts || []).map((a, i) => `<tr><td><input type="text" data-acc="${i}" data-f="address" value="${esc(a.address)}"></td><td><input type="text" data-acc="${i}" data-f="display" value="${esc(a.display || '')}" style="width:90px"></td><td><input type="text" data-acc="${i}" data-f="roles" value="${esc((a.roles || []).join(','))}" style="width:150px"></td><td><input type="checkbox" data-acc="${i}" data-f="enabled" ${a.enabled ? 'checked' : ''}></td><td><button class="btn small" data-accdel="${i}">×</button></td></tr>`).join('');
+    const accounts = (settings.accounts || []).map((a, i) => `<tr><td><input type="text" id="acc-${i}-address" data-acc="${i}" data-f="address" value="${esc(a.address)}"></td><td><input type="text" id="acc-${i}-display" data-acc="${i}" data-f="display" value="${esc(a.display || '')}" style="width:90px"></td><td><input type="text" id="acc-${i}-roles" data-acc="${i}" data-f="roles" value="${esc((a.roles || []).join(','))}" style="width:150px"></td><td><input type="checkbox" id="acc-${i}-enabled" data-acc="${i}" data-f="enabled" ${a.enabled ? 'checked' : ''}></td><td><button class="btn small" data-accdel="${i}">×</button></td></tr>`).join('');
     return `<div class="settings">
-      <div class="note">Overrides are stored in the database. Defaults and everything structural (projects, weights, sources, property names) live in <code>${esc(settings.config_file)}</code>; edit that file to adapt Factotum to another workflow.</div>
+      ${settings.starter ? `<div class="note starter-note"><b>These are the starter settings</b> (<code>config/factotum.starter.yaml</code>): no name, no addresses, every input and output off, no brief, no planner, no automatic summary, no notifications. To make Factotum your own, copy <code>config/factotum.example.yaml</code> to <code>config/factotum.yaml</code>, fill in your projects, your addresses and the integrations you use (docs/SETUP.md), and restart Factotum. A switch changed here is stored in the database and wins over the file.</div>` : `<div class="note">Overrides are stored in the database. Defaults and everything structural (projects, weights, sources, property names) live in <code>${esc(settings.config_file)}</code>; edit that file to adapt Factotum to another workflow.</div>`}
       <h3>Review and lifecycle</h3>
       ${f('notify.review_time', 'Review reminder', 'Daily push via ntfy (phase 2). Quiet if you already reviewed today.', time('notify.review_time'))}
       ${f('lifecycle.fade_days', 'Backlog fade', 'Undated items fade after this many quiet days. A new mention resets the clock.', num('lifecycle.fade_days', 7, 120) + ' days')}
@@ -802,7 +992,7 @@
       ${f('sources.plaud.enabled', 'Plaud recordings', 'IMAP trigger + plaud CLI (phase 3).', bool('sources.plaud.enabled'))}
       ${f('sources.canvas.enabled', 'Canvas', 'New items become hard-deadline tasks, submitted ones close.', bool('sources.canvas.enabled') + ' &nbsp; every ' + num('sources.canvas.sweep_minutes', 5, 1440) + ' min')}
       ${f('sources.mail.enabled', 'Email via Mailbird', 'Replies flip Waiting, sent mail closes reply tasks, invitations and confirmations feed the planner.', bool('sources.mail.enabled') + ' &nbsp; every ' + num('sources.mail.sweep_minutes', 5, 1440) + ' min')}
-      ${f('sources.mail.suggest.enabled', 'Tasks from mail', 'New mail that is about none of your tasks is read by one light Claude run, and what it leaves you to do becomes a suggestion card in Review. Nothing becomes a task without your Create. The run happens only when there is new mail.', bool('sources.mail.suggest.enabled', false) + ' &nbsp; at most every ' + `<input type="number" id="s-sources.mail.suggest.minutes" data-key="sources.mail.suggest.minutes" value="${Number(e['sources.mail.suggest.minutes']) || 30}" min="5" max="1440">` + ' min')}
+      ${f('sources.mail.suggest.enabled', 'Tasks from mail', 'New mail that is about none of your tasks is read by one light Claude run, and what it leaves you to do becomes a suggestion card in Review. Nothing becomes a task without your Create. The run happens only when there is new mail.', bool('sources.mail.suggest.enabled') + ' &nbsp; at most every ' + num('sources.mail.suggest.minutes', 5, 1440) + ' min')}
       ${f('sources.calendar.enabled', 'Google Calendar', 'Needs config/google-credentials.json (docs/SETUP.md §6).', bool('sources.calendar.enabled') + ' &nbsp; every ' + num('sources.calendar.sweep_minutes', 5, 1440) + ' min &nbsp; calendar id ' + text('sources.calendar.calendar_id', '160px'))}
       ${f('sources.slack.enabled', 'Slack', 'Chat can search and read the workspaces named in the config file (docs/SETUP.md §12); tokens in .env. The sweep turns @-mentions of you into Review items.', bool('sources.slack.enabled') + ' &nbsp; every ' + num('sources.slack.sweep_minutes', 5, 1440) + ' min')}
       ${f('sources.discord.enabled', 'Discord', 'Chat can list channels and read recent messages in the servers named in the config file (docs/SETUP.md §13).', bool('sources.discord.enabled'))}
@@ -816,7 +1006,7 @@
       ${f('notify.morning_brief.enabled', 'Morning brief', 'Email at this time: Top, due today, reminders.', bool('notify.morning_brief.enabled') + ' ' + time('notify.morning_brief.time') + ' to ' + text('notify.morning_brief.to', '240px'))}
       <h3>Claude</h3>
       ${f('claude.planner.enabled', 'Morning planner', 'One Claude run before the brief: the verdict, why-now lines and proposals. Off = the plain brief.', bool('claude.planner.enabled'))}
-      ${f('claude.summary.auto', 'Today summary', 'Rewritten by one light Claude run when a task it is about changes, something becomes urgent, or the day turns. Off: the Today tab still says what changed, and Refresh rewrites it.', bool('claude.summary.auto', true) + ' &nbsp; at most every ' + `<input type="number" id="s-claude.summary.auto_minutes" data-key="claude.summary.auto_minutes" value="${Number(e['claude.summary.auto_minutes']) || 10}" min="1" max="240">` + ' min')}
+      ${f('claude.summary.auto', 'Today summary', 'Rewritten by one light Claude run when a task it is about changes, something becomes urgent, or the day turns. Off: the Today tab still says what changed, and Refresh rewrites it.', bool('claude.summary.auto') + ' &nbsp; at most every ' + num('claude.summary.auto_minutes', 1, 240) + ' min')}
       ${f('claude.budgets_usd.chat_turn', 'Chat turn budget', 'Dollars a single chat turn may spend before Claude stops.', '$ ' + num('claude.budgets_usd.chat_turn', 0.05, 5) )}
       <h3>Connections</h3>
       ${f('server.oauth.enabled', 'claude.ai / Claude Desktop connector', `Factotum is the OAuth server behind <code>${esc(connectors ? connectors.url : '')}</code>: add that URL as a custom connector and approve it once on the consent page (docs/SETUP.md §16). What a connector may do with tasks is the next setting.`, bool('server.oauth.enabled'))}
@@ -857,20 +1047,24 @@
       // Two taps on the same row within 400 ms are a double-click: the first tap's selection flip
       // is undone and the details open. Tracked by hand because render() replaces the DOM node
       // between the two clicks, so the browser's dblclick event would not fire.
+      // On a phone a tap opens the task page and only the tick box selects.
       r.querySelector('.main').addEventListener('click', e => {
         if (e.target.closest('input, button, .chip.due')) return;
+        if (PHONE()) { openTask(id); return; }
         const now = Date.now();
         if (lastTap.id === id && now - lastTap.at < 400) { lastTap = { id: null, at: 0 }; ui.sel.has(id) ? ui.sel.delete(id) : ui.sel.add(id); ui.open.has(id) ? ui.open.delete(id) : ui.open.add(id); render(); return; }
         lastTap = { id, at: now }; toggleSel();
       });
       r.querySelector('input[type=checkbox]').addEventListener('change', toggleSel);
-      r.querySelector('[data-chev]').addEventListener('click', () => { ui.open.has(id) ? ui.open.delete(id) : ui.open.add(id); render(); });
+      r.querySelector('[data-chev]').addEventListener('click', () => { if (PHONE()) { openTask(id); return; } ui.open.has(id) ? ui.open.delete(id) : ui.open.add(id); render(); });
       r.querySelector('.main').setAttribute('draggable', 'true');
       r.querySelector('.main').addEventListener('dragstart', e => e.dataTransfer.setData('text/plain', String(id)));
     });
+    const pb = document.getElementById('page-back'); if (pb) pb.onclick = () => history.back();
     panel.querySelectorAll('[data-act]').forEach(b => b.addEventListener('click', () => act(+b.dataset.id, b.dataset.act)));
     panel.querySelectorAll('[data-due]').forEach(c => c.addEventListener('click', () => {
-      const id = +c.dataset.due; const x = view(byId(id));
+      const id = +c.dataset.due; if (!byId(id)) return;      // a closed task's page: its date is not for changing
+      const x = view(byId(id));
       const order = [isoPlus(1), nextFri(), isoPlus(7), null];
       const i = order.indexOf(x.due ? x.due.slice(0, 10) : null);
       act(id, 'due', order[(i + 1) % order.length]);
@@ -881,10 +1075,13 @@
       if (k === 'setdue' && !d) { toast('Pick a date'); return; }
       [...ui.sel].forEach(id => act(id, k, d)); ui.sel.clear(); render();
     }));
+    const bm = document.getElementById('bulk-more'); if (bm) bm.onclick = () => { ui.bulkMore = !ui.bulkMore; render(); };
+    if (!ui.sel.size) ui.bulkMore = false;      // the next selection starts with the short bar on one line
     const bulk = document.getElementById('bulk');
     if (bulk) {
       bulk.classList.toggle('on', ui.sel.size > 0); const n = document.getElementById('bulk-n'); if (n) n.textContent = ui.sel.size;
-      const tray = document.getElementById('tray'); bulk.style.bottom = tray.classList.contains('on') ? (tray.offsetHeight + 8) + 'px' : '';
+      // On a phone the tray slides away while rows are selected (app.css), so the bar sits at the bottom edge.
+      const tray = document.getElementById('tray'); bulk.style.bottom = !PHONE() && tray.classList.contains('on') ? (tray.offsetHeight + 8) + 'px' : '';
     }
     document.body.classList.toggle('bulk-on', ui.sel.size > 0 && !!bulk);      // Chat has no bulk bar: what is selected there is what a prompt carries
     panel.querySelectorAll('[data-proj]').forEach(b => b.addEventListener('click', () => { const k = 'projects:' + b.dataset.proj; setFold(k, !folded(k, true)); render(); }));
@@ -965,6 +1162,7 @@
     panel.querySelectorAll('[data-pick]').forEach(b => b.onclick = () => { ui.sel.add(+b.dataset.pick); draft.pick = ''; render(); const el = document.getElementById('chat-pick'); if (el) el.focus(); });
     panel.querySelectorAll('[data-detach]').forEach(b => b.onclick = () => { ui.sel.delete(+b.dataset.detach); render(); });
     const da = document.getElementById('chat-detach-all'); if (da) da.onclick = () => { ui.sel.clear(); render(); };
+    panel.querySelectorAll('[data-starter-help]').forEach(b => b.onclick = () => document.querySelector('#tabs button[data-tab="settings"]').click());
     panel.querySelectorAll('[data-starter]').forEach(b => b.onclick = () => { draft.cmd = b.textContent; render(); const el = document.getElementById('cmd'); if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); } });
     const cd = document.getElementById('chat-delete'); if (cd) cd.onclick = async () => {
       if (!confirm('Delete this thread and its messages? What it applied to your tasks stays as it is.')) return;
@@ -977,7 +1175,7 @@
     const lq = document.getElementById('log-quiet'); if (lq) lq.onchange = () => { logQuiet = lq.checked; try { localStorage.setItem('factotum.logquiet', logQuiet ? '1' : '0'); } catch (_) {} render(); };
     const lm = document.getElementById('log-more'); if (lm) lm.onclick = () => { logLimit = Math.min(200, logLimit + 70); loadLog(); };
     panel.querySelectorAll('[data-tl]').forEach(r => r.addEventListener('click', e => { if (e.target.closest('button, a')) return; const k = r.dataset.tl; logOpen.has(k) ? logOpen.delete(k) : logOpen.add(k); render(); }));
-    panel.querySelectorAll('[data-goto-chat]').forEach(a => a.onclick = e => { e.preventDefault(); chat.current = +a.dataset.gotoChat; chat.threads = null; ui.tab = 'chat'; location.hash = 'chat'; render(); });
+    panel.querySelectorAll('[data-goto-chat]').forEach(a => a.onclick = e => { e.preventDefault(); chat.current = +a.dataset.gotoChat; chat.threads = null; go('chat'); });
     const cmd = document.getElementById('cmd'), cmdGo = document.getElementById('cmd-go');
     const cmdSend = () => {
       const v = draft.cmd.trim(); if (!v) return;
@@ -995,9 +1193,23 @@
       if (!confirm('Revoke this connector? Its tokens stop working at once; it can connect again through the consent page.')) return;
       try { await api(`/api/connectors/${encodeURIComponent(b.dataset.connRevoke)}/revoke`, { method: 'POST' }); await loadSettings(); toast('Connector revoked'); } catch (e) { toast('Revoke failed: ' + e.message); }
     });
-    if (ui.tab === 'settings') panel.querySelectorAll('[data-key], [data-acc]').forEach(el => el.addEventListener('change', () => { clearTimeout(saveSettings.t); saveSettings.t = setTimeout(saveSettings, 300); }));
+    if (ui.tab === 'settings') {
+      // A change is captured at once (the map, not the DOM, is what a save reads), so leaving the tab
+      // inside the 300 ms still saves it, and a control nobody touched is never sent.
+      const later = () => { clearTimeout(saveSettings.t); saveSettings.t = setTimeout(saveSettings, 300); };
+      panel.querySelectorAll('[data-key]').forEach(el => el.addEventListener('change', () => {
+        const v = controlValue(el); if (v === undefined) return;
+        settingsDirty.set(el.dataset.key, v); later();
+      }));
+      panel.querySelectorAll('[data-acc]').forEach(el => el.addEventListener('change', () => {
+        const a = settings.accounts[+el.dataset.acc]; const f = el.dataset.f; if (!a) return;
+        if (f === 'roles') a.roles = el.value.split(',').map(s => s.trim()).filter(Boolean);
+        else if (f === 'enabled') a.enabled = el.checked; else a[f] = el.value;
+        settingsDirty.set('#accounts', true); later();
+      }));
+      panel.querySelectorAll('[data-accdel]').forEach(b => b.onclick = () => { settings.accounts.splice(+b.dataset.accdel, 1); settingsDirty.set('#accounts', true); render(); later(); });
+    }
     const accAdd = document.getElementById('acc-add'); if (accAdd) accAdd.onclick = () => { settings.accounts.push({ address: '', display: '', roles: ['monitor'], enabled: true }); render(); };
-    panel.querySelectorAll('[data-accdel]').forEach(b => b.onclick = () => { settings.accounts.splice(+b.dataset.accdel, 1); render(); });
     wireRail();
   }
   function wireRail() {
@@ -1056,7 +1268,16 @@
   }
   async function sendPrompt(text) {
     if (!text) return;
-    const res = await api('/api/commands', { method: 'POST', body: JSON.stringify({ text }) });
+    let res;
+    try { res = await api('/api/commands', { method: 'POST', body: JSON.stringify({ text }) }); }
+    catch (e) {
+      // Not sent (a restarting server, no network, a sign-out): the text goes back in the box, ahead of
+      // anything typed since, so nothing is lost. A sign-out has its own screen; its reload keeps the box.
+      draft.cmd = draft.cmd.trim() ? text + '\n' + draft.cmd : text;
+      render();
+      if (!(e && e.message === 'signed out')) toast('Not sent: the server did not answer');
+      return;
+    }
     if (res.is_command) {
       res.changes.forEach(c => stage(c.task_id, c.op, c.fields, c.op === 'set' ? Object.entries(c.fields).map(([k, v]) => `${k} ${v || 'cleared'}`).join(', ') : c.op));
       toast(`Staged ${res.changes.length} change${res.changes.length === 1 ? '' : 's'}`);
@@ -1066,35 +1287,69 @@
       sendChat(text, null, attachedIds());
     }
   }
+  // A Settings control's value as it would be saved; undefined for a number box that holds no number.
+  function controlValue(el) {
+    if (el.type === 'checkbox') return el.checked;
+    if (el.type === 'number') { const n = Number(el.value); return el.value === '' || Number.isNaN(n) ? undefined : n; }
+    return el.value;
+  }
+  // The save's render() rebuilds the panel from settings, and a change event comes only on blur, so the box
+  // being typed in next (Tab from one field to the next) would lose its text and focus: take them before the
+  // render, put them back after. Read just before the render, since typing goes on while the request runs.
+  function heldSettingsBox() {
+    const a = document.activeElement, panel = document.getElementById('panel');
+    if (!a || !a.id || !panel.contains(a) || !a.matches('input, textarea, select')) return null;
+    let s = null, e = null; try { s = a.selectionStart; e = a.selectionEnd; } catch (_) {}
+    return { id: a.id, value: a.value, typed: a.matches('textarea, input:not([type=checkbox]):not([type=radio])'), s, e };
+  }
+  function restoreSettingsBox(held) {
+    if (!held) return;
+    const el = document.getElementById(held.id); if (!el) return;
+    el.focus({ preventScroll: true });
+    // Focus first, then the text: set while focused, the box still counts it as changed, so leaving it fires change.
+    if (held.typed && el.value !== held.value) el.value = held.value;
+    if (held.s !== null) try { el.setSelectionRange(held.s, held.e); } catch (_) {}
+  }
+  // Sends what changed and nothing else: the dirty keys, and the accounts table only when an account changed.
   async function saveSettings() {
+    clearTimeout(saveSettings.t);
+    if (!settingsDirty.size) { toast('Nothing to save'); return; }
+    const snap = new Map(settingsDirty); settingsDirty.clear();
     const values = {};
-    document.querySelectorAll('#panel [data-key]').forEach(el => {
-      const k = el.dataset.key;
-      values[k] = el.type === 'checkbox' ? el.checked : el.type === 'number' ? Number(el.value) : el.value;
-      if (el.type === 'number' && (el.value === '' || Number.isNaN(values[k]))) delete values[k];
-    });
-    let accounts = settings.accounts.map((a, i) => ({ address: a.address, display: a.display, roles: a.roles, enabled: a.enabled }));
-    document.querySelectorAll('#panel [data-acc]').forEach(el => {
-      const a = accounts[+el.dataset.acc]; const f = el.dataset.f;
-      if (f === 'roles') a.roles = el.value.split(',').map(s => s.trim()).filter(Boolean);
-      else if (f === 'enabled') a.enabled = el.checked; else a[f] = el.value;
-    });
-    settings.accounts = accounts.map(a => Object.assign({}, a));
-    if (accounts.some(a => !String(a.address || '').trim())) accounts = null;   // a row still being typed: the server's table stays until it has an address
-    const active = document.activeElement && document.activeElement.dataset ? document.activeElement.id : null;
-    try { const kept = settings.accounts; settings = await api('/api/settings', { method: 'PUT', body: JSON.stringify({ values, accounts }) }); if (accounts === null) settings.accounts = kept; toast(accounts === null ? 'Settings saved · the new account row needs an address' : 'Settings saved'); render(); const el = active && document.getElementById(active); if (el) el.focus(); }
-    catch (e) { toast('Save failed: ' + e.message); }
+    for (const [k, v] of snap) if (k !== '#accounts') values[k] = v;
+    const body = { values };
+    let waiting = false;      // a row still being typed: the server's table stays until it has an address
+    if (snap.has('#accounts')) {
+      if (settings.accounts.some(a => !String(a.address || '').trim())) { waiting = true; settingsDirty.set('#accounts', true); }
+      else body.accounts = settings.accounts.map(a => ({ address: a.address, display: a.display, roles: a.roles, enabled: a.enabled }));
+    }
+    try {
+      const kept = settings.accounts;
+      settings = await api('/api/settings', { method: 'PUT', body: JSON.stringify(body) });
+      // The page's rows, a half-typed one included, over the server's; also when an account changed during the request.
+      if (!body.accounts || settingsDirty.has('#accounts')) settings.accounts = kept;
+      toast(waiting ? 'Settings saved · the new account row needs an address' : 'Settings saved');
+      const held = heldSettingsBox();
+      render(); restoreSettingsBox(held);
+    } catch (e) {
+      for (const [k, v] of snap) if (!settingsDirty.has(k)) settingsDirty.set(k, v);      // a newer change made meanwhile wins
+      toast('Save failed: ' + e.message);
+    }
   }
 
-  document.getElementById('tabs').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; ui.tab = b.dataset.tab; ui.laterOpen = false; location.hash = ui.tab; render(); });
+  document.getElementById('tabs').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; go(b.dataset.tab); });
+  window.addEventListener('popstate', applyAddress);
   document.addEventListener('keydown', e => {
+    if (!document.getElementById('signedout').hidden) return;      // signed out: no key acts on the app behind the screen
     if (e.key === 'Escape') {   // Esc: deselect everything; in Chat the selection is what a prompt carries, so it only closes the task picker
       lastTap = { id: null, at: 0 };
-      if (ui.tab === 'chat') { if (ui.pickOpen) { ui.pickOpen = false; render(); } }
+      if (ui.page !== null) history.back();      // the task page closes like the phone's Back
+      else if (ui.tab === 'chat') { if (ui.pickOpen) { ui.pickOpen = false; render(); } }
       else if (ui.sel.size) { ui.sel.clear(); render(); }
       if (e.target.matches('input, select, textarea')) e.target.blur(); return;
     }
     if (e.target.matches('input, select, textarea')) return;
+    if (ui.page !== null) return;      // the task page covers the tab: no key acts on what is under it
     if (ui.tab === 'review') { const map = { d: 'done', k: 'keep', s: 'later', x: 'drop', t: 'top', l: 'longterm' }; if (map[e.key]) { e.preventDefault(); reviewAct(map[e.key]); } return; }
     const visible = [...document.querySelectorAll('#panel .row')].map(r => +r.dataset.id); if (!visible.length) return;
     const i = visible.indexOf(ui.focus);
@@ -1107,6 +1362,6 @@
     e.preventDefault();
   });
   window.addEventListener('resize', () => { const bar = document.querySelector('header.bar'); if (bar) document.documentElement.style.setProperty('--bar-h', bar.offsetHeight + 'px'); });
-  document.addEventListener('visibilitychange', () => { if (!document.hidden && ui.tab === 'today') { clearTimeout(sumTimer); pollSummary(); } });
-  load().then(loadSettings).catch(e => { document.getElementById('panel').innerHTML = `<div class="empty">Could not load /api/tasks: ${esc(e.message)}</div>`; });
+  document.addEventListener('visibilitychange', onReturn);
+  load().then(() => { applyAddress(); return loadSettings(); }).catch(e => { document.getElementById('panel').innerHTML = `<div class="empty">Could not load /api/tasks: ${esc(e.message)}</div>`; });
 })();

@@ -92,9 +92,10 @@ messages/day, up to 3 action buttons, 4 KB body, cancel by sequence id.
    - Tasks (`b1c52e69d3924aea8962bee32440ffbe`)
    If the Tasks database is inline on the 📋 Planner page, connect the Planner page instead;
    connections inherit downward.
-3. The ids are already in `config/factotum.example.yaml` (`sinks.*`). Another user puts their
-   own database id and data source id there; the data source id is the `collection://…` value
-   the Notion MCP shows, or the `data_sources[0].id` from `GET /v1/databases/{id}`.
+3. The ids go in your own `config/factotum.yaml` (`sinks.*`); `config/factotum.example.yaml` has
+   placeholders (`YOUR_DATABASE_ID`) where they belong. Each database needs its database id and
+   its data source id; the data source id is the `collection://…` value the Notion MCP shows, or
+   the `data_sources[0].id` from `GET /v1/databases/{id}`.
 
 Check:
 ```bash
@@ -228,13 +229,14 @@ your three addresses → Save. Then App settings → enable "Instant Auth" is op
 
 Check: open https://factotum.nthperson.dev on the phone; you get the Access login, then the UI.
 The ntfy reminder actions are `view` links into this hostname, so the phone's browser session
-with Access is what authorises them.
+with Access is what authorises them. The reminder's Open opens the task itself (`/t/<id>`).
 
 ## 8. Secrets and the service
 
 ```bash
-cp .env.example .env && nano .env         # NOTION_TOKEN, MAILBIRD_TOKEN, NTFY_TOKEN, CANVAS_TOKEN, IMAP_*, SMTP_* (or leave empty to reuse IMAP), FACTOTUM_SECRET
-cp config/factotum.example.yaml config/factotum.yaml
+cp .env.example .env && nano .env         # only what you switch on: NOTION_TOKEN, MAILBIRD_TOKEN, NTFY_TOKEN, CANVAS_TOKEN, IMAP_*, SMTP_* (or leave empty to reuse IMAP)
+cp config/factotum.example.yaml config/factotum.yaml   # then replace the placeholders and switch on what you set up
+.venv/bin/python -m factotum effective     # what is in force and where each value comes from (§18)
 sudo cp deploy/factotum.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now factotum
 systemctl status factotum && curl -s http://127.0.0.1:8750/api/stats
@@ -242,6 +244,20 @@ journalctl -u factotum -f
 ```
 The unit runs the venv interpreter, as user robert, with `HOME=/home/robert` so headless Claude
 runs (phase 3+) inherit the interactive login and the user-scope MCP servers.
+
+Without `config/factotum.yaml` the service still starts, on the starter settings
+(`config/factotum.starter.yaml`: every input, output, notification and paid Claude run off): the app
+shows a "Starter settings in use." banner on every tab and `journalctl -u factotum` has one line
+saying so. `.venv/bin/python -m factotum effective` shows what is in force, key by key, and where each
+value comes from; before deploying a change to the code's defaults, diff it as §18 describes.
+
+At start-up the service brings the database to the latest schema (`PRAGMA user_version`); when a
+migration changes data (not only adds a table or column), it first writes a copy made with SQLite's
+backup API to a `backups/` folder beside the database (`data/backups/<name>-<UTC stamp>-before-v<N>.db`),
+which you may delete once the app runs well. The `scoring.links` block in your config sets what a link
+between two tasks does to their scores (a task waiting on another is capped, one that frees others gains
+points or inherits a hard date); its values are taste, and `enabled: false` scores every task as if no
+link existed.
 
 ## 9. The Plaud trigger and the cutover from plaud-sync (phase 3)
 
@@ -505,3 +521,47 @@ Factotum is its own OAuth server for `/mcp` (SPEC §15). Four steps, each once.
    once, each call one batch with an Undo in the Log. The same setting governs the skills in
    Claude Code. After changing it, reconnect the connector in claude.ai (or start a new chat) so
    it reloads the tool list. Upload the skills (§14) so those chats know the recipes.
+
+## 17. Installing the app on a phone and a desktop
+
+- **iPhone:** Safari, Share, Add to Home Screen. It opens full-screen. Notifications come in stage 2.
+- **Android:** Chrome, menu, Install app (not tested yet).
+- **Desktop Edge or Chrome:** the install icon in the address bar, or menu, Apps, Install.
+
+What was learned behind Cloudflare Access (design §13.1): the installed app asks for no second
+sign-in; the manifest needs the cookie (the page requests it with `use-credentials`); the iPhone
+fetches its icon without the cookie, so the icon is inlined in the page. When the Access session ends
+the app shows "Sign in again", so the session duration (§7) is how often that happens. The new
+paths `/t/*` and `/<tab>` sit under the same Access application and must not get a bypass policy.
+
+Updating needs nothing: the app reloads itself when it is next brought to the front.
+
+## 18. Deploying a change to defaults: `factotum effective`
+
+`.venv/bin/python -m factotum effective [KEY …] [--as-before]` prints two header lines (the config
+file in use, marked `(starter settings)` when it is the starter, and the database, `(none yet)` when
+there is none) and then one line per Settings key: the key, its value as JSON and where the value comes
+from: `settings` (the Settings tab froze it into the database; it wins over the file), `file`,
+`machine` (the time zone, taken from this computer), `default` (the code's) or `unset`. It only reads:
+the config file, and the database opened read-only (never created). `.env` is read only to find those
+two, and no `.env` value is printed. Three values (the ntfy topic, the brief's address, the calendar id)
+show as `set #<fingerprint>` or `empty`, so a diff still sees a change without the value on screen.
+`--as-before` reads absent keys the way the code did before 2026-11-10, when four switches (the
+morning brief, the planner, the automatic summary, the Notion notes) were on whenever the key was missing.
+
+The deploy check for stage 3, in the main checkout after the merge and BEFORE restarting the service
+(the running service is not affected by files changing, except `factotum/web/`):
+
+```bash
+cd /home/robert/factotum
+.venv/bin/python -m factotum effective --as-before > /tmp/effective-before.txt
+.venv/bin/python -m factotum effective > /tmp/effective-after.txt
+diff /tmp/effective-before.txt /tmp/effective-after.txt && echo identical
+```
+
+`identical` and a first line naming `config/factotum.yaml` (not `(starter settings)`) mean nothing
+changes for this install. Each line `diff` prints is a switch that was on only because its key was
+missing: add the key to `config/factotum.yaml` with the value from the before file (or switch it in
+Settings), run the two commands again, then restart (check `journalctl -u factotum -n 5` for a Claude
+run in flight first). Lines with origin `settings` are values the Settings tab froze into the database;
+they win over the file.

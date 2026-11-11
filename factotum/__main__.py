@@ -11,6 +11,7 @@
     python -m factotum google-auth [--manual]   # one-time Google consent (docs/SETUP.md §6)
     python -m factotum calendar-check   # print the next 7 days of events
     python -m factotum chat "text" [--attach 388 23] [--thread N] [--canned search_mail|draft_reply]   # one chat turn from the terminal
+    python -m factotum effective [KEY ...] [--as-before]   # each switch's value and origin; read-only, no secrets
     python -m factotum chat-check       # the MCP server over a pipe, then one tiny Claude run that calls a tool through it
 """
 from __future__ import annotations
@@ -25,6 +26,35 @@ from .db import connect, get_settings, init_db, rows
 
 
 SYSTEMD_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+
+def _effective(keys: list[str], as_before: bool) -> int:
+    """Print what each Settings key is and where it comes from. Reads the config file and the database
+    (opened read-only, never created); prints no secret."""
+    import hashlib
+    import sqlite3
+    cfg = C.load()
+    path = C.db_path()
+    exists = path.exists()
+    overrides: dict = {}
+    if exists:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        try:
+            overrides = get_settings(conn)
+        finally:
+            conn.close()
+    print(f"config file: {cfg['_path']}" + ("  (starter settings)" if cfg.get("_starter") else ""))
+    print(f"database:    {path}" + ("" if exists else "  (none yet)"))
+    defaults = C.OLD_DEFAULTS if as_before else C.DEFAULTS
+    for key in keys or C.REPORT_KEYS:
+        value, origin = C.explain(cfg, overrides, key, defaults)
+        if key in C.MASKED:
+            shown = "set #" + hashlib.sha256(json.dumps(value).encode()).hexdigest()[:8] if value else "empty"
+        else:
+            shown = json.dumps(value, ensure_ascii=False)
+        print(f"{key:<42} {shown:<26} {origin}")
+    return 0
 
 
 def _binary_note(name: str) -> str:
@@ -108,11 +138,16 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("connectors", help="the OAuth connectors (claude.ai, Claude Desktop) that registered against /mcp; --revoke CLIENT_ID")
     p.add_argument("--revoke", metavar="CLIENT_ID")
     p.add_argument("--arm", action="store_true", help="allow a never-granted connector to be approved for the next 10 minutes (the Settings button)")
+    p = sub.add_parser("effective", help="what each switch is and where it comes from (Settings, the config file, the code's default); read-only")
+    p.add_argument("keys", nargs="*")
+    p.add_argument("--as-before", action="store_true", help="absent keys as the code before 2026-11-10 read them; diff against the plain output when deploying")
     sub.add_parser("score")
     sub.add_parser("review")
     p = sub.add_parser("expire")
     p.add_argument("--apply", action="store_true")
     a = ap.parse_args(argv)
+    if a.cmd == "effective":
+        return _effective(a.keys, a.as_before)
 
     cfg = C.load()
     conn = connect(C.db_path())

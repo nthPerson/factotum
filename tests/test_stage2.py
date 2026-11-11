@@ -1,0 +1,237 @@
+import json, os, re, stat
+
+import httpx
+import pytest
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
+
+from factotum import app_push as AP
+from factotum import webpush as W
+
+
+# --- Task 1: encryption and VAPID
+
+RFC = dict(  # RFC 8291 Appendix A, checked against cryptography 50 on 2026-11-10
+    plaintext="V2hlbiBJIGdyb3cgdXAsIEkgd2FudCB0byBiZSBhIHdhdGVybWVsb24",
+    as_private="yfWPiYE-n46HLnH0KqZOF1fJJU3MYrct3AELtAQ-oRw",
+    as_public="BP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A8",
+    ua_private="q1dXpw3UpT5VOmu_cf_v6ih07Aems3njxI-JWgLcM94",
+    ua_public="BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4",
+    salt="DGv6ra1nlYgDCS1FRnbzlw",
+    auth="BTBZMqHH6r4Tts7J_aSIgg",
+    body="DGv6ra1nlYgDCS1FRnbzlwAAEABBBP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A_yl95bQpu6cVPTpK4Mqgkf1CXztLVBSt2Ks3oZwbuwXPXLWyouBWLVWGNWQexSgSxsj_Qulcy4a-fN",
+)
+_priv = lambda s: ec.derive_private_key(int.from_bytes(W.unb64u(s), "big"), ec.SECP256R1())   # noqa: E731
+
+
+def test_encrypt_matches_rfc_8291_appendix_a():
+    sp = _priv(RFC["as_private"])
+    assert W.b64u(W.public_bytes(sp)) == RFC["as_public"]
+    body = W.encrypt(W.unb64u(RFC["plaintext"]), W.unb64u(RFC["ua_public"]), W.unb64u(RFC["auth"]),
+                     salt=W.unb64u(RFC["salt"]), sender_private=sp)
+    assert W.b64u(body) == RFC["body"] and len(body) == 144
+    assert W.decrypt(body, _priv(RFC["ua_private"]), W.unb64u(RFC["auth"])) == W.unb64u(RFC["plaintext"])
+
+
+def test_encrypt_round_trips_with_fresh_keys_and_salt():
+    ua = ec.generate_private_key(ec.SECP256R1()); auth = os.urandom(16)
+    a = W.encrypt(b'{"x": 1}', W.public_bytes(ua), auth); b = W.encrypt(b'{"x": 1}', W.public_bytes(ua), auth)
+    assert a != b                                              # a new salt and sender key each time
+    assert W.decrypt(a, ua, auth) == b'{"x": 1}' and W.decrypt(b, ua, auth) == b'{"x": 1}'
+
+
+def test_encrypt_refuses_a_record_that_does_not_fit():
+    ua = ec.generate_private_key(ec.SECP256R1())
+    assert len(W.encrypt(b"x" * W.MAX_PLAINTEXT, W.public_bytes(ua), os.urandom(16))) == 4096
+    with pytest.raises(ValueError):
+        W.encrypt(b"x" * (W.MAX_PLAINTEXT + 1), W.public_bytes(ua), os.urandom(16))      # one byte over: the body would be 4097
+
+
+def test_vapid_header_is_a_signed_es256_jwt_for_the_push_service():
+    key = ec.generate_private_key(ec.SECP256R1())
+    h = W.vapid_header("https://push.example:8443/send/abc?x=1", key, "https://tasks.example.org", now=1_800_000_000)
+    m = re.fullmatch(r"vapid t=([\w-]+)\.([\w-]+)\.([\w-]+), k=([\w-]+)", h)
+    assert m and W.unb64u(m.group(4)) == W.public_bytes(key)
+    assert json.loads(W.unb64u(m.group(1))) == {"typ": "JWT", "alg": "ES256"}
+    claims = json.loads(W.unb64u(m.group(2)))
+    assert claims == {"aud": "https://push.example:8443", "exp": 1_800_000_000 + 12 * 3600, "sub": "https://tasks.example.org"}
+    sig = W.unb64u(m.group(3)); assert len(sig) == 64
+    der = encode_dss_signature(int.from_bytes(sig[:32], "big"), int.from_bytes(sig[32:], "big"))
+    key.public_key().verify(der, f"{m.group(1)}.{m.group(2)}".encode(), ec.ECDSA(hashes.SHA256()))   # raises if wrong
+    assert "sub" not in json.loads(W.unb64u(W.vapid_header("https://p.example/x", key, None).split("t=")[1].split(".")[1]))
+
+
+def test_send_posts_one_encrypted_record_with_the_push_headers():
+    seen = []
+    def handler(req):
+        seen.append(req); return httpx.Response(201)
+    ua = ec.generate_private_key(ec.SECP256R1()); auth = os.urandom(16); key = ec.generate_private_key(ec.SECP256R1())
+    r = W.send("https://push.example/send/abc", W.b64u(W.public_bytes(ua)), W.b64u(auth), b'{"hi": 1}', key,
+               sub=None, ttl=600, urgency="high", topic="task-12", transport=httpx.MockTransport(handler))
+    assert r.status_code == 201 and len(seen) == 1
+    q = seen[0]
+    assert q.method == "POST" and str(q.url) == "https://push.example/send/abc"
+    assert q.headers["Content-Encoding"] == "aes128gcm" and q.headers["Content-Type"] == "application/octet-stream"
+    assert q.headers["TTL"] == "600" and q.headers["Urgency"] == "high" and q.headers["Topic"] == "task-12"
+    assert q.headers["Authorization"].startswith("vapid t=")
+    assert W.decrypt(q.content, ua, auth) == b'{"hi": 1}'
+    W.send("https://push.example/x", W.b64u(W.public_bytes(ua)), W.b64u(auth), b"{}", key, sub=None, ttl=1, urgency="normal",
+           topic="not a valid topic!", transport=httpx.MockTransport(handler))
+    assert "Topic" not in seen[1].headers                        # a topic outside [A-Za-z0-9_-]{1,32} is left out
+
+
+# --- Task 2: the key pair and the devices table
+
+def _device(conn, endpoint="https://push.example/d1", origin="https://f.example", label="Phone"):
+    ua = ec.generate_private_key(ec.SECP256R1()); auth = os.urandom(16)
+    did = AP.subscribe(conn, endpoint, W.b64u(W.public_bytes(ua)), W.b64u(auth), label, origin); conn.commit()
+    return did, ua, auth
+
+
+def test_the_key_pair_is_made_once_beside_the_database_and_kept_private(conn, tmp_path):
+    p = AP.key_path(conn)
+    assert p == tmp_path / "push-keys.json" and not p.exists()
+    with pytest.raises(AP.KeyFileError, match="missing"):
+        AP.keys(conn)
+    k1 = AP.keys(conn, create=True)
+    assert stat.S_IMODE(p.stat().st_mode) == 0o600
+    assert AP.keys(conn).public == k1.public == W.b64u(W.public_bytes(k1.private)) and len(W.unb64u(k1.public)) == 65
+    assert set(json.loads(p.read_text())) == {"private", "public", "created_at"}
+
+
+def test_a_missing_key_file_is_made_again_and_the_old_devices_go(conn):
+    AP.keys(conn, create=True); _device(conn); assert AP.device_count(conn) == 1
+    AP.key_path(conn).unlink()
+    with pytest.raises(AP.KeyFileError, match="missing"):
+        AP.keys(conn)                                            # the sender never makes a pair
+    assert AP.device_count(conn) == 1
+    AP.keys(conn, create=True)                                   # the page asking for the public key does
+    assert AP.device_count(conn) == 0                            # each was bound to the old key and can never work again
+
+
+def test_an_unreadable_key_file_is_never_overwritten(conn):
+    AP.key_path(conn).write_text("not json")
+    for create in (False, True):
+        with pytest.raises(AP.KeyFileError, match="unreadable"):
+            AP.keys(conn, create=create)
+    assert AP.key_path(conn).read_text() == "not json"
+
+
+def test_subscribe_validates_and_upserts_by_endpoint(conn):
+    did, _, _ = _device(conn, label="  Chrome on Windows  ")
+    row = AP.devices(conn)[0]
+    assert row["id"] == did and row["label"] == "Chrome on Windows" and row["origin"] == "https://f.example" and row["created_at"]
+    conn.execute("UPDATE push_subscriptions SET last_failure_at = 'x', last_error = 'y'")
+    again, _, _ = _device(conn, label="")                        # same endpoint, new keys
+    row2 = AP.devices(conn)[0]
+    assert again == did and AP.device_count(conn) == 1 and row2["label"] == "A device"
+    assert row2["created_at"] == row["created_at"] and row2["last_failure_at"] is None and row2["last_error"] is None
+    good = dict(endpoint="https://push.example/d2", p256dh=row2["p256dh"], auth=row2["auth"], label="x", origin="http://127.0.0.1:8751")
+    for change, msg in [({"endpoint": "http://push.example/d2"}, "not a push service address"),
+                        ({"endpoint": "https://10.0.0.5/d2"}, "not a push service address"),
+                        ({"endpoint": "https://localhost/d2"}, "not a push service address"),
+                        ({"p256dh": W.b64u(b"\x04" + b"\x01" * 64)}, "the device key is not a P-256 public key"),
+                        ({"auth": W.b64u(b"short")}, "the device secret must be 16 bytes"),
+                        ({"origin": "https://f.example/settings"}, "origin must be scheme://host\\[:port\\]")]:
+        with pytest.raises(ValueError, match=msg):
+            AP.subscribe(conn, **{**good, **change})
+    AP.subscribe(conn, **good); assert AP.device_count(conn) == 2   # http://127.0.0.1 is a fine origin (the dev instance)
+    assert AP.unsubscribe(conn, endpoint="https://push.example/d2") == 1 and AP.unsubscribe(conn, device_id=did) == 1
+    assert AP.device_count(conn) == 0 and AP.unsubscribe(conn, device_id=999) == 0
+
+
+# --- Task 3: the payload and sending
+
+NOTICE = {"title": "Call Reza", "body": "before the meeting · due Nov 5", "path": "/t/12", "tag": "task-12",
+          "actions": [{"action": "done", "title": "Done", "path": "/r/tok?a=done"}, {"action": "snooze", "title": "Snooze 1 h", "path": "/r/tok?a=snooze"}],
+          "urgency": "high", "ttl": 86400, "data": {"task_id": 12}}
+
+
+def _service(answers):
+    """A fake push service: answers[endpoint] is a status code or an exception; records (endpoint, request)."""
+    got = []
+    def handler(req):
+        got.append((str(req.url), req))
+        a = answers.get(str(req.url), 201)
+        if isinstance(a, Exception):
+            raise a
+        return httpx.Response(a, text="nope" if a >= 400 else "")
+    return got, httpx.MockTransport(handler)
+
+
+def test_the_payload_is_the_declarative_format_on_the_devices_origin():
+    p = json.loads(AP.payload(NOTICE, "https://f.example"))
+    assert p == {"web_push": 8030, "notification": {
+        "title": "Call Reza", "body": "before the meeting · due Nov 5", "navigate": "https://f.example/t/12", "tag": "task-12", "renotify": True,
+        "actions": [{"action": "done", "title": "Done", "navigate": "https://f.example/r/tok?a=done"},
+                    {"action": "snooze", "title": "Snooze 1 h", "navigate": "https://f.example/r/tok?a=snooze"}],
+        "data": {"task_id": 12}}}
+    bare = json.loads(AP.payload({**NOTICE, "actions": [], "data": None, "path": "/review", "tag": "review"}, "http://127.0.0.1:8751"))
+    assert "actions" not in bare["notification"] and "data" not in bare["notification"] and "mutable" not in bare
+    assert bare["notification"]["navigate"] == "http://127.0.0.1:8751/review"
+
+
+def test_a_payload_never_exceeds_the_limit_and_keeps_its_links():
+    big = {**NOTICE, "title": "T" * 5000, "body": "é" * 5000}
+    raw = AP.payload(big, "https://f.example")
+    n = json.loads(raw)["notification"]
+    assert len(raw) <= W.MAX_PLAINTEXT and n["navigate"] == "https://f.example/t/12" and n["tag"] == "task-12"
+    assert n["title"].startswith("TTT") and n["body"].endswith("…") and n["actions"][0]["navigate"].endswith("/r/tok?a=done")
+    huge = {**NOTICE, "title": "T" * 9000, "body": ""}
+    assert len(AP.payload(huge, "https://f.example")) <= W.MAX_PLAINTEXT
+
+
+def test_send_all_reaches_every_device_with_its_own_links(conn, cfg):
+    AP.keys(conn, create=True)
+    _, ua1, a1 = _device(conn, "https://push.example/d1", "https://f.example")
+    _, ua2, a2 = _device(conn, "https://push.example/d2", "http://127.0.0.1:8751")
+    got, t = _service({})
+    res = AP.send_all(conn, cfg, NOTICE, transport=t)
+    assert res == {"devices": 2, "sent": 2, "removed": 0, "failed": 0, "errors": []}
+    bodies = {u: json.loads(W.decrypt(r.content, ua, a)) for (u, r), ua, a in zip(got, (ua1, ua2), (a1, a2))}
+    assert bodies["https://push.example/d1"]["notification"]["navigate"] == "https://f.example/t/12"
+    assert bodies["https://push.example/d2"]["notification"]["navigate"] == "http://127.0.0.1:8751/t/12"
+    assert all(r.headers["Topic"] == "task-12" and r.headers["Urgency"] == "high" and r.headers["TTL"] == "86400" for _, r in got)
+    assert all(d["last_success_at"] for d in AP.devices(conn))
+
+
+def test_a_device_that_has_gone_is_removed_and_the_others_still_get_it(conn, cfg):
+    AP.keys(conn, create=True)
+    _device(conn, "https://push.example/gone"); _device(conn, "https://push.example/flaky"); _device(conn, "https://push.example/ok")
+    _, t = _service({"https://push.example/gone": 410, "https://push.example/flaky": 503})
+    res = AP.send_all(conn, cfg, NOTICE, transport=t)
+    assert res["sent"] == 1 and res["removed"] == 1 and res["failed"] == 1
+    left = {d["endpoint"]: d for d in AP.devices(conn)}
+    assert set(left) == {"https://push.example/flaky", "https://push.example/ok"}
+    assert left["https://push.example/flaky"]["last_error"] == "503 from push.example: nope"
+    conn.rollback()                                              # send_all committed its own rows
+    assert AP.device_count(conn) == 2
+
+
+def test_when_no_device_accepts_send_all_records_then_raises(conn, cfg):
+    AP.keys(conn, create=True); _device(conn, "https://push.example/a"); _device(conn, "https://push.example/b")
+    _, t = _service({"https://push.example/a": 404, "https://push.example/b": httpx.ConnectError("down")})
+    with pytest.raises(AP.NothingSent, match="could not reach push.example: ConnectError"):
+        AP.send_all(conn, cfg, NOTICE, transport=t)
+    conn.rollback()
+    assert [d["endpoint"] for d in AP.devices(conn)] == ["https://push.example/b"] and AP.devices(conn)[0]["last_failure_at"]
+
+
+def test_send_all_with_no_device_or_no_key_file(conn, cfg):
+    assert AP.send_all(conn, cfg, NOTICE) == {"devices": 0, "sent": 0, "removed": 0, "failed": 0, "errors": []}   # no key file needed
+    _device(conn)
+    got, t = _service({})
+    with pytest.raises(AP.KeyFileError, match="missing"):
+        AP.send_all(conn, cfg, NOTICE, transport=t)
+    assert got == [] and AP.devices(conn)[0]["last_failure_at"] is None      # nothing sent, nothing written
+
+
+def test_send_test_reaches_only_that_device(conn, cfg):
+    AP.keys(conn, create=True); _, ua, a = _device(conn, "https://push.example/me"); _device(conn, "https://push.example/other")
+    got, t = _service({})
+    out = AP.send_test(conn, cfg, "https://push.example/me", transport=t)
+    assert out["ok"] and [u for u, _ in got] == ["https://push.example/me"]
+    n = json.loads(W.decrypt(got[0][1].content, ua, a))["notification"]
+    assert n["title"] == "Factotum" and n["body"] == "Notifications work on this device." and n["navigate"] == "https://f.example/settings"
+    assert AP.send_test(conn, cfg, "https://push.example/nobody", transport=t) is None

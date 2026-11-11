@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 
 from factotum import api, batches, commands, config as C, reminders
 from factotum.db import get_settings, upsert_task
-from conftest import TODAY, _example_env_names, task
+from conftest import FIXTURE, TODAY, _example_env_names, task
 
 
 # --- Task 1: tests never read real secrets
@@ -14,7 +14,7 @@ from conftest import TODAY, _example_env_names, task
 def test_the_suite_never_sees_the_owners_environment():
     names = _example_env_names()
     assert {"NOTION_TOKEN", "MAILBIRD_TOKEN", "SMTP_PASSWORD", "FACTOTUM_DB"} <= names
-    C.load(C.ROOT / "config" / "factotum.example.yaml")          # would call load_dotenv(ROOT / ".env")
+    C.load(FIXTURE)          # would call load_dotenv(ROOT / ".env")
     assert not any(os.environ.get(n) for n in names)
     assert not any(k.startswith("SLACK_TOKEN_") for k in os.environ)
 
@@ -177,3 +177,18 @@ def test_a_reminders_open_goes_to_its_task(cfg, tmp_path):
     assert r.status_code in (302, 307) and r.headers["location"].endswith("/t/1")
     r = client.get(f"/r/{tok2}", params={"a": "done"})
     assert r.status_code == 200 and '/t/2"' in r.text and "Open Task-2" in r.text
+
+
+# --- Task 6: server links name real addresses
+
+def test_server_links_name_real_addresses(conn, cfg):
+    from datetime import date
+    from factotum import brief
+    from factotum.scheduler import Scheduler
+    upsert_task(conn, task(id=1, due=None, created_at="2026-10-30T00:00:00+00:00", last_mention_at="2026-10-30")); conn.commit()
+    html = brief.build(conn, cfg, TODAY)["html"]
+    base = str(C.get(cfg, "server.public_url")).rstrip("/")
+    assert base and f'{base}/review"' in html and "/#review" not in html
+    clicks = []
+    Scheduler(cfg, conn, push=lambda cfg, title, body, click=None, **k: clicks.append(click))._review_push(cfg, date(2026, 11, 1), {})
+    assert clicks and clicks[0].endswith("/review")

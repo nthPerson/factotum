@@ -5,7 +5,7 @@ from datetime import date
 
 from factotum import batches, config as C, lifecycle, relations, scoring
 from factotum.db import connect, now_iso, rows
-from conftest import task
+from conftest import FIXTURE, task
 from stage4_helpers import TODAY, link, mk
 
 
@@ -137,7 +137,7 @@ def test_every_surface_reads_annotated_rows(conn, cfg, tmp_path, monkeypatch, ca
     sch._expire(cfg, D)
     assert seen == [True], "scheduler._expire"
 
-    monkeypatch.setenv("FACTOTUM_CONFIG", str(C.ROOT / "config" / "factotum.example.yaml"))
+    monkeypatch.setenv("FACTOTUM_CONFIG", str(FIXTURE))
     monkeypatch.setenv("FACTOTUM_DB", str(path))
     capsys.readouterr()
     cli.main(["score"])
