@@ -266,12 +266,16 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
             raise HTTPException(404)
 
     # The Today summary (SPEC §8.4). Its clock is the owner's, like the scheduler's that writes it.
+    # `planner` says the morning planner will write one (it runs only inside the brief); with it, `auto`
+    # and `can_refresh` all false nothing will ever write one, and the page shows no Summary box.
     @app.get("/api/summary")
     def today_summary():
         ecfg = eff_cfg()
         now = reminders.local_now(ecfg)
         return {"summary": summary.get(conn, now.date()), "refresh": summary.refresh_state(conn, now),
-                "auto": bool(C.value(ecfg, "claude.summary.auto")), "can_refresh": getattr(app.state, "scheduler", None) is not None}
+                "auto": bool(C.value(ecfg, "claude.summary.auto")),
+                "planner": bool(C.value(ecfg, "notify.morning_brief.enabled") and C.value(ecfg, "claude.planner.enabled")),
+                "can_refresh": getattr(app.state, "scheduler", None) is not None}
 
     @app.post("/api/summary/refresh")
     def refresh_summary():

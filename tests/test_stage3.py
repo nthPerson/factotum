@@ -264,3 +264,16 @@ def test_the_example_is_a_reference_with_placeholders_only():
     lines = [l.strip() for l in text.splitlines()]
     for start in ("fade_days:", "fade_warn_days:", "last_call_days:", "top_cap:", "review_cap:", "scoring:", "review_time:", "time:"):
         assert "taste" in next(l for l in lines if l.startswith(start)), start
+
+
+# --- Task 9 review: no Summary box that promises a writer that is off
+
+def test_the_summary_says_whether_the_morning_planner_will_write_one(cfg, tmp_path):
+    _drop(cfg, "claude.planner.enabled", "notify.morning_brief.enabled", "claude.summary.auto")
+    client = TestClient(create_app(cfg, db_path=str(tmp_path / "api.db")))
+    r = client.get("/api/summary").json()
+    assert (r["planner"], r["auto"], r["can_refresh"]) == (False, False, False)     # the starter's case: nothing writes one, so no box
+    client.put("/api/settings", json={"values": {"claude.planner.enabled": True}})
+    assert client.get("/api/summary").json()["planner"] is False                     # the planner runs only inside the brief
+    client.put("/api/settings", json={"values": {"notify.morning_brief.enabled": True}})
+    assert client.get("/api/summary").json()["planner"] is True

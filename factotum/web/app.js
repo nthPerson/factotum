@@ -187,14 +187,17 @@
   // this only shows it. Refresh asks the scheduler for the sweeps and the planner, then polls.
   const sumBusy = () => !!(summary && summary.refresh && summary.refresh.state !== 'idle');
   function summaryHtml() {
-    if (!summary || (!summary.summary && !openOnes().length)) return '<section class="summary" id="summary" hidden></section>';
+    // With no summary, the box shows only when something will write one: Refresh, the morning planner
+    // (inside the brief) or the automatic rewrite. With all three off it would promise what never comes.
+    const writer = !summary ? '' : summary.can_refresh ? 'Refresh writes one.' : summary.planner ? 'The morning planner writes one.' : summary.auto ? 'One is written automatically.' : '';
+    if (!summary || (!summary.summary && (!openOnes().length || !writer))) return '<section class="summary" id="summary" hidden></section>';
     const s = summary.summary, rf = summary.refresh || {}, busy = sumBusy(), stale = s ? s.stale || [] : [];
     const when = s && s.at ? new Date(s.at).toLocaleString([], s.day === data.today ? { hour: 'numeric', minute: '2-digit' } : { weekday: 'short', hour: 'numeric', minute: '2-digit' }) : '';
     const btn = summary.can_refresh ? `<button class="btn small" id="sum-refresh" ${busy ? 'disabled' : ''} title="Sweeps mail, Canvas, the calendar and Slack now, then runs the planner on what they found. About a minute.">${busy ? '<span class="spin"></span>Refreshing…' : '↻ Refresh'}</button>` : '';
     const reason = x => { const m = /^Task-(\d+) /.exec(x); return m ? `<a href="#" data-jump="${m[1]}">Task-${m[1]}</a> ${esc(x.slice(m[0].length))}` : esc(x); };
     return `<section class="summary ${stale.length ? 'stale' : ''}" id="summary">
       <div class="shead"><span class="lbl">Summary</span>${when ? `<span class="when">${esc(when)}${s.source === 'planner' ? ' · planner' : ''}</span>` : ''}${stale.length ? `<span class="chip stalechip">${stale.length === 1 && /^written /.test(stale[0]) ? esc(stale[0]) : `${stale.length} change${stale.length === 1 ? '' : 's'} since`}</span>` : ''}<span class="spacer"></span>${btn}</div>
-      ${s ? `<p class="stext">${esc(s.text)}</p>` : `<p class="hint">No summary yet. ${summary.can_refresh ? 'Refresh writes one.' : 'The morning planner writes one.'}</p>`}
+      ${s ? `<p class="stext">${esc(s.text)}</p>` : `<p class="hint">No summary yet. ${writer}</p>`}
       ${stale.length && !busy ? `<ul class="since">${stale.slice(0, 4).map(x => `<li>${reason(x)}</li>`).join('')}${stale.length > 4 ? `<li>and ${stale.length - 4} more</li>` : ''}</ul><p class="hint">${summary.auto ? 'A new summary is written automatically' + (summary.can_refresh ? '; Refresh does it now, with a sweep.' : '.') : 'Automatic rewriting is off (Settings → Claude)' + (summary.can_refresh ? '; Refresh writes a new one.' : '.')}</p>` : ''}
       ${busy ? `<p class="hint"><span class="spin"></span>${rf.state === 'requested' ? 'Starting…' : 'Sweeping mail, Canvas, the calendar and Slack, then the planner. About a minute.'}</p>` : ''}
       ${!busy && rf.last && !rf.last.ok ? `<p class="hint bad">The last refresh did not finish cleanly: ${esc(rf.last.line || '')}</p>` : ''}</section>`;
