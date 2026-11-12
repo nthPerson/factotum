@@ -521,7 +521,7 @@ def test_the_routes_name_a_status_and_never_echo_what_a_push_service_said(cfg, t
     app.state.push_transport = httpx.MockTransport(lambda req: httpx.Response(500, text="root:x:0:0 internal page"))
     r = c.post("/api/push/test", json={"endpoint": b["endpoint"]})
     j = r.json()
-    assert j == {"id": j["id"], "ok": False, "status": 500, "removed": False, "error": "HTTP 500 from push.invalid"}
+    assert j == {"id": j["id"], "ok": False, "status": 500, "removed": False, "error": "HTTP 500 from push.invalid", "factotum_refused": False}
     assert "root:x" not in r.text and "root:x" not in c.get("/api/push").text
 
 

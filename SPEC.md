@@ -888,9 +888,14 @@ app with a device, as the provider allows). "This device" is in one of these sta
 - *Refused*: "The push service refused:" and why (the browser's subscribe failed, Factotum did not
   take the subscription, or this device's last push failed), with Try again (and Turn off when
   there is a subscription).
+- *Not sent by Factotum* (2026-11-11): "Factotum does not send to that address:" and why, when the
+  address is not one of the known push services (`app_push.endpoint_problem`) — Factotum's own
+  refusal, never the push service's. The server marks it `factotum_refused` on the subscribe 400, on a
+  test's answer and on each row of `GET /api/push` (whether Factotum would post to that address now).
 
 The devices table lists each row (label, "(this device)", added, last sent, the last failure when it
-is newer than the last success) with Remove on every other device.
+is newer than the last success) with Remove on every other device; on a phone each device is a block
+(its name, added, last sent, a failure only when there was one, Remove).
 
 **Links in the API (stage 4a; the page is stage 4b, below).** `GET /api/tasks` carries a compact `rel`
 per task (links, `waits_on_open`, `frees_open`, `goal_id`, steps open / total, `needed_by`, `changed`,

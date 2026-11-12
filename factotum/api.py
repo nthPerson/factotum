@@ -723,7 +723,9 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
             "public_key": public,
             "error": error,
             "provider": C.value(eff_cfg(), "notify.provider"),
-            "devices": [{k: v for k, v in d.items() if k not in hidden} for d in app_push.devices(conn)],
+            # factotum_refused: Factotum would not post to this address now, so a failure on it was its own refusal
+            "devices": [{**{k: v for k, v in d.items() if k not in hidden}, "factotum_refused": app_push.endpoint_problem(d["endpoint"], eff_cfg()) is not None}
+                        for d in app_push.devices(conn)],
         }
 
     @app.get("/api/push")
@@ -746,7 +748,8 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
             app_push.subscribe(conn, body.endpoint, p256dh, auth, body.label, body.origin, cfg=eff_cfg())
         except ValueError as e:
             conn.rollback()
-            return JSONResponse({"detail": str(e)}, status_code=400)
+            # the address is one Factotum does not post to (its own list), not a push service's answer: the page says which
+            return JSONResponse({"detail": str(e), "factotum_refused": app_push.endpoint_problem(body.endpoint, eff_cfg()) is not None}, status_code=400)
         conn.commit()
         return push_state()
 

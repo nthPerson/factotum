@@ -269,10 +269,11 @@ def deliver(device: dict, notice: dict, keys: Keys, cfg: dict, transport=None) -
     written by hand, is never posted to). The error is one of a fixed set of reasons with the status
     code: a push service's own answer is never repeated, so a request the server makes cannot be
     turned into a way to read what some other host says."""
-    out = {"id": device["id"], "ok": False, "status": None, "removed": False, "error": None}
+    out = {"id": device["id"], "ok": False, "status": None, "removed": False, "error": None, "factotum_refused": False}
     problem = endpoint_problem(device["endpoint"], cfg)
-    if problem:
+    if problem:                                           # Factotum's own refusal, not the push service's (the page says which)
         out["error"] = f"not sent: {problem}"
+        out["factotum_refused"] = True
         return out
     host = urlsplit(device["endpoint"]).hostname
     try:
@@ -358,7 +359,7 @@ def send_test(conn: sqlite3.Connection, cfg: dict, endpoint: str, *, transport=N
     try:
         k = keys(conn)
     except KeyFileError as e:
-        return {"id": device["id"], "ok": False, "status": None, "removed": False, "error": str(e)}
+        return {"id": device["id"], "ok": False, "status": None, "removed": False, "error": str(e), "factotum_refused": False}
     out = deliver(device, with_badge(conn, cfg, TEST_NOTICE), k, cfg, transport)
     record(conn, out)
     conn.commit()

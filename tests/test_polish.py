@@ -334,3 +334,37 @@ def test_the_done_page_puts_the_task_name_and_the_undo_line_apart():
     assert '>Call the bank</p>' in html
     assert '>Undo is in the Log tab.</p>' in html
     assert "Undo is in the Log tab." not in _page("Task-5 snoozed", "Call the bank", "", undo=False, task_id=5)
+
+
+# --- C6: Factotum's own refusal of a push address is told apart from a push service's -------------------
+
+def test_factotums_own_refusal_of_a_push_address_is_marked_as_such(cfg, tmp_path):
+    import os
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from factotum import app_push as AP, webpush as W
+    client, c = _app(cfg, tmp_path)
+    client.get("/api/push")
+
+    def body(endpoint):
+        ua = ec.generate_private_key(ec.SECP256R1())
+        return {"endpoint": endpoint, "keys": {"p256dh": W.b64u(W.public_bytes(ua)), "auth": W.b64u(os.urandom(16))},
+                "label": "Chrome on Linux", "origin": "https://f.example"}
+    r = client.post("/api/push/subscribe", json=body("https://intranet.corp/x"))           # not a known push service: Factotum's refusal
+    assert r.status_code == 400 and r.json()["factotum_refused"] is True and "intranet.corp" in r.json()["detail"]
+    b = body("https://push.invalid/x"); b["keys"]["auth"] = "AA"                               # a broken device secret: not about the address
+    r = client.post("/api/push/subscribe", json=b)
+    assert r.status_code == 400 and not r.json().get("factotum_refused")
+    assert client.post("/api/push/subscribe", json=body("https://push.invalid/ok")).status_code == 200
+    c.execute("UPDATE push_subscriptions SET endpoint = 'https://intranet.corp/admin' WHERE endpoint = 'https://push.invalid/ok'"); c.commit()
+    out = client.post("/api/push/test", json={"endpoint": "https://intranet.corp/admin"}).json()
+    assert out["ok"] is False and out["factotum_refused"] is True
+    dev = client.get("/api/push").json()["devices"][0]
+    assert dev["factotum_refused"] is True and dev["last_error"].startswith("not sent: ")
+    # a push service's own answer is not Factotum's refusal
+    import httpx
+    assert client.post("/api/push/subscribe", json=body("https://push.invalid/svc")).status_code == 200
+    client.app.state.push_transport = httpx.MockTransport(lambda req: httpx.Response(500))
+    out = client.post("/api/push/test", json={"endpoint": "https://push.invalid/svc"}).json()
+    assert out["ok"] is False and out["status"] == 500 and out["factotum_refused"] is False
+    devs = {d["endpoint"]: d for d in client.get("/api/push").json()["devices"]}
+    assert devs["https://push.invalid/svc"]["factotum_refused"] is False and devs["https://intranet.corp/admin"]["factotum_refused"] is True

@@ -80,6 +80,7 @@
       // The message stays the status (what every toast shows); a refusal's own words ride along as `detail`.
       const e = new Error(r.status); e.status = r.status;
       if (j && typeof j.detail === 'string') e.detail = j.detail;
+      if (j && j.factotum_refused === true) e.factotumRefused = true;      // Factotum's own refusal (a push address it does not post to)
       throw e;
     });
     return r.json();
@@ -191,7 +192,7 @@
 
   // Settings → Notifications: this device's subscription and the devices Factotum sends to.
   let pushInfo = null;      // the GET /api/push answer: the public key (or why there is none), the provider, the devices
-  let pushDev = { sub: null, busy: false, reason: '' };   // this browser's PushSubscription, a call in flight, a refusal from the last attempt
+  let pushDev = { sub: null, busy: false, reason: '', ours: false };   // this browser's PushSubscription, a call in flight, a refusal from the last attempt (ours: Factotum's own, not the push service's)
   let pushLoading = null;   // the loadPush() in flight, so a render during it does not start another
   const isIOS = () => /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
   const installed = () => window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
@@ -252,8 +253,8 @@
     if (!pushInfo) return v('loading');
     if (pushInfo.error) return v('server', pushInfo.error);
     if (Notification.permission === 'denied') return v('denied');
-    if (pushDev.reason) return v('refused', pushDev.reason);
-    if (failedLast(row)) return v('refused', row.last_error);
+    if (pushDev.reason) return v(pushDev.ours ? 'notsent' : 'refused', pushDev.reason);
+    if (failedLast(row)) return v(row.factotum_refused ? 'notsent' : 'refused', row.last_error);
     if (!pushDev.sub || !sameKey(pushDev.sub, pushInfo.public_key) || !row) return v('off');
     return v('on');
   }
@@ -285,6 +286,7 @@
       on: `<b>Notifications are on for this device.</b><div class="acts"><button class="btn" id="push-test">Send a test</button><button class="btn" id="push-off">Turn off</button></div>`
         + (['app', 'both'].includes(p) ? '' : '<p class="hint">Reminders go to ntfy only at the moment. Choose The app or Both in "Send reminders to" to get them here.</p>'),
       refused: `<b>The push service refused:</b> ${esc(reason)}<div class="acts">${on('Try again')}${pushDev.sub ? '<button class="btn" id="push-off">Turn off</button>' : ''}</div>`,
+      notsent: `<b>Factotum does not send to that address:</b> ${esc(String(reason).replace(/^not sent: /, ''))}<div class="acts">${on('Try again')}${pushDev.sub ? '<button class="btn" id="push-off">Turn off</button>' : ''}</div>`,
     }[state];
     return `<div class="field" id="push-device" data-state="${state}"><label>This device</label><div class="push-ctl">${control}</div></div>`;
   }
@@ -301,7 +303,7 @@
   // The permission is asked first, before any await: iOS asks only from inside the tap.
   async function pushOn() {
     const asked = Notification.permission === 'granted' ? Promise.resolve('granted') : Notification.requestPermission();
-    pushDev.busy = true; pushDev.reason = ''; render();
+    pushDev.busy = true; pushDev.reason = ''; pushDev.ours = false; render();
     try {
       const perm = await asked;
       if (perm === 'denied') return;      // the render below shows the denied state
@@ -314,7 +316,7 @@
       catch (e) { pushDev.reason = (e && (e.message || e.name)) || String(e); return; }
       pushDev.sub = sub;
       try { pushInfo = await api('/api/push/subscribe', { method: 'POST', body: JSON.stringify(Object.assign(sub.toJSON(), { label: deviceLabel(), origin: location.origin })) }); }
-      catch (e) { if (e.message !== 'signed out') pushDev.reason = 'Factotum did not take the subscription: ' + (e.detail || e.message); return; }
+      catch (e) { if (e.message !== 'signed out') { pushDev.ours = !!e.factotumRefused; pushDev.reason = (e.factotumRefused ? '' : 'Factotum did not take the subscription: ') + (e.detail || e.message); } return; }
       toast('Notifications are on for this device');
     } catch (e) {
       pushDev.reason = (e && (e.message || e.name)) || String(e);
@@ -327,8 +329,8 @@
     try {
       const out = await api('/api/push/test', { method: 'POST', body: JSON.stringify({ endpoint: pushDev.sub.endpoint }) });
       if (out.ok) toast('Test sent · it should appear in a few seconds');
-      else if (out.removed) pushDev.reason = 'it no longer knows this device. Turn notifications on again.';
-      else pushDev.reason = out.error || 'no reason given';
+      else if (out.removed) { pushDev.reason = 'it no longer knows this device. Turn notifications on again.'; pushDev.ours = false; }
+      else { pushDev.reason = out.error || 'no reason given'; pushDev.ours = !!out.factotum_refused; }
     } catch (e) { if (e.message !== 'signed out') toast('Test not sent: ' + e.message); }
     await loadPush();
   }
@@ -337,7 +339,7 @@
     try { pushInfo = await api('/api/push/unsubscribe', { method: 'POST', body: JSON.stringify({ endpoint: sub.endpoint }) }); }
     catch (e) { if (e.message !== 'signed out') toast('Not turned off: ' + e.message); return; }
     try { await sub.unsubscribe(); } catch (_) {}
-    pushDev.sub = null; pushDev.reason = '';
+    pushDev.sub = null; pushDev.reason = ''; pushDev.ours = false;
     toast('Notifications are off for this device'); render();
   }
   async function pushRemove(id) {
