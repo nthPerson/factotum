@@ -50,7 +50,8 @@ Moving from a Notion tasks database is `import-notion --dry-run` (a report, writ
 ## Adapting it to your own workflow
 
 Until `config/factotum.yaml` exists, Factotum runs on `config/factotum.starter.yaml`: no name, no
-addresses, three generic projects, and every input, output, notification and paid Claude run off;
+addresses, three generic projects, every input, output, notification and scheduled paid Claude run off,
+and two small runs on (ripples and filing: a few cents each, only after something you did, undoable);
 the app says so with a banner. `config/factotum.example.yaml` is the reference: every key,
 explained, with placeholders to replace. Everything person-specific is in two files:
 `config/factotum.yaml` (projects and weights, which inputs and outputs are on, reminder times,

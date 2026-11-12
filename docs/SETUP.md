@@ -248,7 +248,8 @@ The unit runs the venv interpreter, as user robert, with `HOME=/home/robert` so 
 runs (phase 3+) inherit the interactive login and the user-scope MCP servers.
 
 Without `config/factotum.yaml` the service still starts, on the starter settings
-(`config/factotum.starter.yaml`: every input, output, notification and paid Claude run off): the app
+(`config/factotum.starter.yaml`: every input, output, notification and scheduled paid Claude run off; ripples
+and filing on, each a few cents after something you did, §20 and §21): the app
 shows a "Starter settings in use." banner on every tab and `journalctl -u factotum` has one line
 saying so. `.venv/bin/python -m factotum effective` shows what is in force, key by key, and where each
 value comes from; before deploying a change to the code's defaults, diff it as §18 describes.

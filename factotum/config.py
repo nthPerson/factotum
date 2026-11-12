@@ -24,7 +24,7 @@ EXAMPLE_CONFIG = ROOT / "config" / "factotum.example.yaml"
 DEFAULT_CONFIG_PATHS = [USER_CONFIG, STARTER_CONFIG]
 
 STARTER_NOTE = ("factotum: no config/factotum.yaml, so starter settings in use (config/factotum.starter.yaml, which "
-                "switches every input, output and paid Claude run off; a Settings override in the database still wins). "
+                "switches every input, output and scheduled paid Claude run off, ripples and filing on; a Settings override in the database still wins). "
                 "Copy config/factotum.example.yaml to config/factotum.yaml to make it your own.")
 _starter_told = False
 
