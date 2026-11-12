@@ -8,7 +8,7 @@ description: Operate and troubleshoot the Factotum service (the task system that
 # Factotum — ops
 
 One service on the always-on machine: `factotum.service` runs the API, the UI and the scheduler
-thread from `/home/robert/factotum` with `.venv/bin/python` (never system Python). The repo's
+thread from the Factotum checkout (the unit's `WorkingDirectory`) with `.venv/bin/python` (never system Python). The repo's
 `CLAUDE.md` is the authoritative short reference; `docs/SETUP.md` is the host setup; `SPEC.md`
 the design. Read those before changing anything.
 
@@ -26,7 +26,7 @@ and an Undo are above it. Through the `factotum` MCP server, `task_get` shows on
 ## Checks, in the order they usually fail
 
 ```bash
-cd /home/robert/factotum
+cd ~/factotum                                 # the checkout: the unit's WorkingDirectory
 .venv/bin/python -m factotum claude-check     # the headless login (a dead refresh token dies in 400 ms, exit 1)
 .venv/bin/python -m factotum plaud-check      # the plaud CLI and the trigger mailbox
 .venv/bin/python -m factotum mail-check       # Mailbird reachable (Windows side, mirrored networking), accounts vs monitored
