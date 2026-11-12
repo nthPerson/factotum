@@ -144,7 +144,7 @@ REASON_TEXTS = {
 
 def reason_texts(task: dict, reasons: list[str]) -> dict[str, str]:
     """The card sentence for each link reason in `reasons` (others are left out)."""
-    from .relations import WORDS
+    from .relations import WORDS, side_word
     rel = task.get("rel") or {}
     out: dict[str, str] = {}
     for r in reasons:
@@ -165,7 +165,10 @@ def reason_texts(task: dict, reasons: list[str]) -> dict[str, str]:
             sug = (rel.get("suggestions") or [None])[0]
             if not sug:
                 continue
-            out[r] = REASON_TEXTS[r].format(word=WORDS.get(sug.get("kind"), "linked to"), other=sug["other"])
+            # read from this card's end: the goal of a part_of suggestion "has step", the task waited on "frees"
+            kind = sug.get("kind")
+            word = side_word(kind, sug.get("dir") or "out") if kind in ("part_of", "waits_on") else WORDS.get(kind, "linked to")
+            out[r] = REASON_TEXTS[r].format(word=word, other=sug["other"])
         else:
             out[r] = REASON_TEXTS[r]
     return out

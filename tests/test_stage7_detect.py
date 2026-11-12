@@ -268,3 +268,19 @@ def test_the_suggestions_number_is_a_settings_key_with_one_default_everywhere():
     assert "links.suggestions_per_review" in C.SETTINGS_KEYS and C.DEFAULTS["links.suggestions_per_review"] == 5
     for p in (C.EXAMPLE_CONFIG, C.STARTER_CONFIG, FIXTURE):
         assert C.get(yaml.safe_load(p.read_text()), "links.suggestions_per_review") == 5, p
+
+
+def test_a_cards_reason_line_reads_the_suggestion_from_its_own_end(conn):
+    # Task-1 part of Task-2 (2 is the goal); Task-3 waits on Task-4; Task-5 same as Task-6. Each end's
+    # Review line says the link as that task has it, as the card's question under it does.
+    from factotum import lifecycle
+    for i in range(1, 7):
+        mk(conn, i)
+    for kind, a, b in (("part_of", 1, 2), ("waits_on", 3, 4), ("same_as", 5, 6)):
+        assert suggestions.suggest_pair(conn, kind, a, b, "x", "text")
+    conn.commit()
+    tasks = relations.annotate(conn, [{"id": i} for i in range(1, 7)])
+    said = {t["id"]: lifecycle.reason_texts(t, ["link_suggested"])["link_suggested"] for t in tasks}
+    assert said == {1: "Suggested: part of Task-2?", 2: "Suggested: has step Task-1?",
+                    3: "Suggested: waits on Task-4?", 4: "Suggested: frees Task-3?",
+                    5: "Suggested: same as Task-6?", 6: "Suggested: same as Task-5?"}
