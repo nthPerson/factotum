@@ -207,3 +207,40 @@ def test_effective_fingerprints_a_masked_value_with_two_hex_characters(tmp_path,
     for k in ("notify.ntfy.topic", "notify.morning_brief.to"):
         assert lines[k][0] == "set" and re.fullmatch(r"#[0-9a-f]{2}", lines[k][1]), lines[k]
     assert lines["sources.calendar.calendar_id"][0] == "empty"
+
+
+# --- 10. what factotum/ imports is installed by requirements.txt on its own merits
+
+def _norm(name: str) -> str:
+    import re
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def test_every_third_party_import_is_in_requirements_or_a_direct_dependency_of_one_there():
+    """A distribution the code imports is named in requirements.txt, or is a direct requirement of one named
+    there (pydantic and starlette are fastapi's own API, google-auth is google-auth-oauthlib's). Anything
+    further away is installed only by luck: `cryptography` came in through google-auth-oauthlib → google-auth."""
+    import ast
+    import re
+    import sys
+    from importlib.metadata import packages_distributions, requires
+    named = {_norm(re.split(r"[\[<>=!~; ]", l.strip(), maxsplit=1)[0]) for l in (ROOT / "requirements.txt").read_text().splitlines()
+             if l.strip() and not l.startswith("#")}
+    direct = set(named)
+    for d in named:
+        for r in requires(d) or []:
+            if "extra ==" not in r:
+                direct.add(_norm(re.split(r"[\[<>=!~; (]", r, maxsplit=1)[0]))
+    dists = packages_distributions()
+    missing = {}
+    for path in (ROOT / "factotum").rglob("*.py"):
+        for n in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            mods = [a.name for a in n.names] if isinstance(n, ast.Import) else [n.module] if isinstance(n, ast.ImportFrom) and n.level == 0 else []
+            for m in mods:
+                top = m.split(".")[0]
+                if top in sys.stdlib_module_names or top == "factotum":
+                    continue
+                have = {_norm(d) for d in dists.get(top, [top])}
+                if not have & direct:
+                    missing.setdefault(top, set()).add(path.name)
+    assert missing == {}
