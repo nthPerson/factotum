@@ -251,3 +251,17 @@ def test_the_build_stamp_skips_a_missing_file_and_changes_when_it_appears(tmp_pa
     client = TestClient(create_app(cfg, db_path=str(tmp_path / "a.db")))
     r = client.get("/api/review/count")
     assert r.status_code == 200 and len(r.headers["x-factotum-build"]) == 12
+
+
+# --- A2: undo of a batch whose stored undo data is broken -----------------------------------------------
+
+@pytest.mark.parametrize("stored", ["{not json", "7", '"text"'])
+def test_undo_of_a_batch_with_broken_undo_data_answers_400_and_changes_nothing(cfg, tmp_path, stored):
+    client, c = _app(cfg, tmp_path)
+    mk(c, 1, name="Water the plants")
+    bid = client.post("/api/batches/apply", json={"source": "ui", "changes": [{"op": "done", "task_id": 1}]}).json()["batch_id"]
+    c.execute("UPDATE batches SET undo_json = ? WHERE id = ?", (stored, bid)); c.commit()
+    r = client.post(f"/api/batches/{bid}/undo", json={})
+    assert r.status_code == 400 and "undo" in r.json()["detail"]
+    assert c.execute("SELECT undone_at FROM batches WHERE id = ?", (bid,)).fetchone()[0] is None
+    assert c.execute("SELECT status FROM tasks WHERE id = 1").fetchone()[0] == "done" and not c.in_transaction

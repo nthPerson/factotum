@@ -441,6 +441,8 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
             return batches.undo(conn, batch_id)
         except batches.NoSuchBatch:
             raise HTTPException(404, "no such batch")
+        except batches.BrokenUndo as e:
+            raise HTTPException(400, str(e))
 
     # The Today summary (SPEC §8.4). Its clock is the owner's, like the scheduler's that writes it.
     # `planner` says the morning planner will write one (it runs only inside the brief); with it, `auto`

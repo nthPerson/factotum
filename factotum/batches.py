@@ -42,6 +42,20 @@ class NoSuchBatch(KeyError):
     """undo() of a batch id that does not exist (the API answers 404)."""
 
 
+class BrokenUndo(ValueError):
+    """undo() of a batch whose stored undo data is not a JSON list (the API answers 400; nothing is changed)."""
+
+
+def _entries(raw) -> list:
+    try:
+        entries = json.loads(raw or "[]")
+    except ValueError:
+        entries = None
+    if not isinstance(entries, list):
+        raise BrokenUndo("this batch's undo data cannot be read, so it cannot be undone; nothing was changed")
+    return entries
+
+
 def _next_top_rank(conn: sqlite3.Connection) -> int:
     r = conn.execute("SELECT COALESCE(MAX(top_rank), 0) FROM tasks WHERE status = 'open'").fetchone()[0]
     return int(r) + 1
@@ -572,10 +586,11 @@ def undo(conn: sqlite3.Connection, batch_id: int) -> dict:
         return {"batch_id": batch_id, "restored": 0, "skipped": [], "already": True, "ripples_undone": [], "ripples_kept": []}
     undone: list[int] = []
     kept: list[int] = []
+    entries = _entries(b["undo_json"])                           # before any write: broken data changes nothing
     try:
         if b["source"] != "ripple":                              # a ripple's own undo looks for nothing: a ripple never causes one
             _follow_ripples(conn, batch_id, undone, kept)        # before the cause's own entries: the ripple wrote after it
-        restored, skipped = _undo_entries(conn, json.loads(b["undo_json"] or "[]"))
+        restored, skipped = _undo_entries(conn, entries)
         conn.execute("UPDATE batches SET undone_at = ? WHERE id = ?", (now_iso(), batch_id))
         from . import ripple                                     # here, not at the top: ripple imports batches
         ripple.unqueue(conn, batch_id)                           # a ripple it queued that has not run never runs for it
@@ -599,8 +614,11 @@ def _follow_ripples(conn: sqlite3.Connection, batch_id: int, undone: list[int], 
             continue
         if not isinstance(cause, dict) or not isinstance(cause.get("batches"), list) or batch_id not in cause["batches"]:
             continue
-        entries = json.loads(r["undo_json"] or "[]")
-        if _in_place(conn, entries):
+        try:
+            entries = _entries(r["undo_json"])
+        except BrokenUndo:                                       # a ripple that cannot be undone is kept, and says its cause went
+            entries = None
+        if entries is not None and _in_place(conn, entries):
             _undo_entries(conn, entries)
             conn.execute("UPDATE batches SET undone_at = ? WHERE id = ?", (now_iso(), r["id"]))
             undone.append(r["id"])
