@@ -67,7 +67,7 @@ suggestions, the Log in words, "Free now" after a reminder's Done). Stage 5 (202
 rewrites their text as an undoable `ripple` batch and stages everything else on Review), the outcome
 question on close, "Task-N is free now", the Review block and Settings controls. Stage 6 (2026-11-11): in place and by hand (the conversation on a Review card,
 under the Today box and in an opened task; New task on Enter with its preview and the phone sheet; the editor; linking
-by hand; Find any task). Stage 7 (2026-11-11): suggested links (`factotum/suggestions.py`: twins, shared threads and "Task-N" in text as `link_suggestion` cards, one per pair ever, at most `links.suggestions_per_review` offered a day), links proposed by the planner, a recording and mail triage (`follow_thread`), and `factotum/filing.py`: a task made by hand is filed by one small no-tools run into dashed chips. Retiring the old Notion
+by hand; Find any task). Stage 7 (2026-11-11): suggested links (`factotum/suggestions.py`: twins, shared threads and "Task-N" in text as `link_suggestion` cards, one per pair ever, at most `links.suggestions_per_review` offered a day), links proposed by the planner, a recording and mail triage (`follow_thread`), and `factotum/filing.py`: a task made by hand is filed by one small no-tools run into dashed chips. Stage 8 (2026-11-11): app extras: the Review count on the installed app's icon (one read-only count, `review_queue`, for the tab, the icon and the pushes that are sent anyway; `notify.app.badge`) and long-press shortcuts to New task (`/new`) and Review. Retiring the old Notion
 pages and plaud-sync is the user's checklist (SETUP §15). Update this paragraph when something lands.
 
 ## Where things live
@@ -130,6 +130,7 @@ pages and plaud-sync is the user's checklist (SETUP §15). Update this paragraph
 | addresses, Back, the phone task page, the short bar, signed out, return and update | SPEC §9 | `web/app.js` (`parseAddress`, `setAddress`, `go`, `applyAddress`, `openTask`, `closeTask`, `taskPageHtml`, `signedOut`, `typingNow`, `onReturn`), `api.py` (`PAGE_TABS`, `STAMPED`, `build_stamp`, `BuildStamp`, `_index_html`) |
 | the starter, code defaults, absent means off, `effective` | SPEC §9 "Configuration", SETUP §18 | `factotum/config.py` (`STARTER_CONFIG`, `DEFAULTS`, `PAID_SWITCHES`, `value`, `explain`), `config/factotum.starter.yaml`, `__main__.py` (`_effective`), `web/app.js` (`starterHtml`, `settingsDirty`), `tests/test_stage3.py` (`_code_defaults`) |
 | notifications from the app: the key pair, devices, payload, sending, the worker, Settings → Notifications | design §14, SPEC §10 | `factotum/webpush.py` (`encrypt`, `vapid_header`, `send`), `factotum/app_push.py` (`keys`, `subscribe`, `payload`, `send_all`, `send_test`), `notify.py` (`providers`, `ready`), `reminders.py` (`notice`), `api.py` (`/api/push*`, `/sw.js`), `web/sw.js` (`shape`, `handlePush`, `handleClick`, `openApp`), `web/app.js` (`pushView`, `pushOn`, `followPath`, `reviewPushOn`) |
+| the Review count, the number on the app's icon, the shortcuts, `/new` | design §16, SPEC §9, §10 | `factotum/review_queue.py` (`queue`, `card_count`, `count`), `api.py` (`/api/review/count`, `SHORTCUT_PATHS`), `app_push.py` (`payload`, `with_badge`), `web/sw.js` (`badgeOf`, `setBadge`), `web/app.js` (`reviewShown`, `syncBadge`, `parseAddress`, `applyAddress`, `openNew`), `manifest.webmanifest` `shortcuts`, `tools/make_icons.py` (`shortcut`) |
 
 ## Commands
 
@@ -466,6 +467,20 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
   switch that did not exist before 2026-11-10 stays out of it and gets its own default test.
 - **A filing run is dequeued before it runs** (2026-11-11): a failed one is logged and not retried; `file-task` runs
   it again by hand.
+- **The Review count is `review_queue.count`, and it reads only** (2026-11-11): `GET /api/review` writes (the
+  day's suggestion session, the `last_offered_at` stamp `expire` acts on), so it is never called for a number; a
+  new place that shows how many items wait on Review uses `review_queue`, never its own `build_review_queue` call.
+- **`app_badge` is a top-level integer in the declarative payload, never inside `notification`** (2026-11-11):
+  WebKit moved it out in 2025; a nested one crashed an update path. A wrong type makes Safari hand the push to
+  the worker, which still shows it.
+- **The count only rides on pushes that are sent anyway** (2026-11-11; `app_push.with_badge` in `send_all` and
+  `send_test`): never send a push to move the number; every push must show a notification.
+- **`notify.app.badge` is on when absent** (2026-11-11): it costs nothing and sends nothing, so it is not a paid
+  or mailing switch and not in `PAID_SWITCHES`.
+- **`/new` is replaced by `/` once New task is open** (2026-11-11); a sign-out keeps `/new` for the reload. A new
+  page address that is not a tab goes in `api.SHORTCUT_PATHS` and `parseAddress`.
+- **iOS ignores manifest `shortcuts`, and Chromium re-reads an installed app's manifest lazily** (2026-11-11): a
+  changed shortcut may need a reinstall to show.
 
 ## Gotchas carried over from plaud-sync (dates are when they were learned)
 

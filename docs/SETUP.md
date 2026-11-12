@@ -537,6 +537,10 @@ fetches its icon without the cookie, so the icon is inlined in the page. When th
 the app shows "Sign in again", so the session duration (§7) is how often that happens. The new
 paths `/t/*` and `/<tab>` sit under the same Access application and must not get a bypass policy.
 
+**Shortcuts.** Long-press the icon on Android, or right-click it in the taskbar / dock on a desktop (Edge,
+Chrome), for "New task" and "Review". An app installed before this deploy may show them only after the
+browser re-reads the manifest (up to a day or more) or after a reinstall; iOS has no such menu.
+
 Updating needs nothing: the app reloads itself when it is next brought to the front.
 
 ## 18. Deploying a change to defaults: `factotum effective`
@@ -606,6 +610,12 @@ notify.app.push_hosts …)", the browser uses another one: add that exact host n
 `localhost` is never accepted. A push service's own error text is not shown anywhere, only its status
 code (for example "HTTP 403 from fcm.googleapis.com").
 
+**The count on the icon.** The installed app's icon shows how many items wait on Review, the number beside
+"Review" in the app. Settings → Notifications → "Count on the app icon" turns it off (on when absent). It is kept
+current by the open app and carried by pushes that are sent anyway (a reminder, "Task-N is free now", the evening
+nudge, "Send a test"), inside their encryption. Nothing is ever sent just to change the number, so a closed app
+shows the count as of the last push or the last time it was open.
+
 **What was verified and what was not.** Verified offline (the test suite): the encryption against
 RFC 8291's own test vector, VAPID signatures, sending, removal on 404/410, trimming, the provider
 choice, the routes. Verified in a headless browser: the worker registers and controls the app, its
@@ -630,6 +640,22 @@ the declarative display on an iPhone, the notification icon behind the sign-in, 
 8. The review nudge opens Review.
 9. The icon on the notification (it sits behind the sign-in and may show a generic one).
 10. Delete the app from the iPhone: after the next reminder its row is gone from the devices list.
+11. iPhone, installed app with notifications allowed: the icon shows the same number as the Review tab; after a
+    Review session that empties it, the number goes when the app is next opened.
+12. iPhone, app closed: after a reminder or "Send a test", the icon's number is the current Review count (if it
+    does not change until the app is opened, this iOS version does not apply `app_badge` yet: note the iOS
+    version).
+13. Desktop Edge or Chrome, installed app: the taskbar / dock icon shows the number; Settings → Notifications →
+    untick "Count on the app icon": it goes.
+14. Android, installed app: long-press the icon: New task opens Today with New task; Review opens Review (no
+    number on the icon is expected).
+15. Desktop: right-click the installed app's taskbar / dock icon: the same two shortcuts.
+16. Reload after opening New task from a shortcut: Today opens without New task.
+
+Stage 8 (app extras): verified offline (the count's one definition, the payload, the switch, `/new`, the
+manifest and icons) and in a headless browser (stubbed badge calls, the worker's badge handling, `/new` at both
+sizes, Chromium's own manifest parse); not verified: any real icon number, any real shortcut menu, Safari's
+handling of `app_badge`.
 
 ## 20. Ripples: linked tasks brought up to date
 

@@ -1003,6 +1003,24 @@ second dashed badge; chips and × are at least 44 px where a finger lands. *The 
 before Create. *Settings* gains "Suggested links" (the number a day, under Review and lifecycle) and "Filing a
 task you add" (a switch under Claude).
 
+**App extras (stage 8 of the linked-tasks design, 2026-11-11).** The number beside Review comes from
+`GET /api/review/count` (`review_queue.count`, read-only: `GET /api/review` records the day's suggestion
+session and stamps `last_offered_at`, so it is never called for a number) from the first load until Review is
+loaded, then from the Review page, which leaves out what the tray already decided. The app's icon gets exactly
+the number the tab shows (`navigator.setAppBadge`; `clearAppBadge` at 0, when the sign-in has expired and when
+the switch is off; one call per change, not one per redraw). Settings → Notifications has "Count on the app
+icon" (`notify.app.badge`, on when absent: the count makes no run, sends no mail and no push of its own, so it
+is not one of the paid or mailing switches that absent turns off, §9 "Configuration"). The manifest has two
+`shortcuts`, "New task" (`/new`) and "Review" (`/review`), each with a 96 px icon drawn by `tools/make_icons.py`
+(`shortcut`). `/new` is a page address, not a tab: it opens Today with New task through the same opener as the
+`n` key, replaces the address with `/` (no history entry, so a reload opens Today plainly), and a sign-in on the
+way keeps it. The limits, as they are: iOS ignores manifest shortcuts. An iPhone shows the number only for the
+installed app and only once notifications are allowed for it. Chromium re-reads an installed app's manifest
+lazily, so new shortcuts may need a reinstall to appear. Firefox has no Badging API and Chrome on Android shows
+no number from it. On a desktop only the installed app shows the number, not a browser tab. The number is as
+fresh as the last time the app was open or the last push it received. Before Review is opened on a day the
+count may differ from Review's own by that day's link suggestions, which opening Review adds.
+
 ## 10. Reminders and push
 
 - The public ntfy.sh server caps delay at 3 days and 250 messages/day, so **the service owns the
@@ -1110,6 +1128,14 @@ pair, the devices, the payload and sending; `factotum/web/sw.js` is the worker.
   config says. `app_push.endpoint_problem` decides, at subscribe (a 400 that names the host and the
   key) and again before every send, so a row stored earlier or by hand is recorded as a failure and
   never posted to. The server must never be a way to make requests to an address a caller chose.
+- **The count on the icon** (stage 8, 2026-11-11). A push that is sent anyway carries `app_badge`, the
+  Review count, as a top-level integer of the declarative payload (WebKit moved it out of `notification` in
+  2025, and a nested one crashed an update path, so it is never nested and never a string). It is added in one
+  place, `app_push.with_badge`, called by `send_all` and `send_test`, and is absent when `notify.app.badge` is
+  off or the count fails (a count that raises never stops a push). Safari applies it without the worker; the
+  worker's `setBadge` does elsewhere; a message a Safari build cannot read declaratively is shown by the worker
+  instead, which sets the badge itself. Never a push for the number alone: every push shows a notification.
+  The evening review nudge counts what Review shows (`review_queue.queue`, plus the waiting suggestion cards).
 - **Routes.** `GET /api/push` (the public key, made on first ask, or why there is none; the
   provider; the devices without their keys), `POST /api/push/subscribe`, `/unsubscribe` (by
   endpoint or id), `/test`. A refusal is a 400, 404 or 409, never a 401 or 403.
@@ -1186,6 +1212,9 @@ public half, and `/api/settings` carries neither); a new key pair empties the de
 turn notifications on again. The payload is encrypted end to end for each device, so the push
 service carries a task's name and its token links without being able to read them; ntfy's topic
 readers can read both, which is why ntfy's topic must not be guessable (SETUP §4).
+
+The count on the app's icon (§9, §10) costs nothing: no run, no mail, no extra push; it travels encrypted inside
+pushes that are sent anyway.
 
 ## 14. Build order
 
