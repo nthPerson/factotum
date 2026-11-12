@@ -36,7 +36,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from html import escape
 from urllib.parse import urlparse
@@ -271,11 +271,17 @@ class BuildStamp:
 def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=None) -> FastAPI:
     cfg = cfg or C.load()
     conn = connect(db_path or C.db_path(), shared=True)      # one connection for every request thread: no statement cache (db.connect)
-    # The routes that write and commit on that connection outside a batch's own path take turns here: every GET
-    # that writes (Review's day and offered stamp, an opened task's neighbours stamp, the first push key pair, a
-    # reminder link's Done or Snooze) and a suggestion card's Create. Two commits interleaved on one connection
-    # answered 500 ("cannot commit - no transaction is active"). Never held across a network call.
-    commit_lock = threading.Lock()
+    # Every write on that connection takes turns here, from its first write to its commit or rollback: the
+    # request threads share ONE transaction, so one thread's commit committed another's half-written batch (a
+    # batch row with its changes and no undo data) and a rollback threw another's work away; Applies then
+    # answered 500 for writes that had landed. Every route that writes (batches.apply / undo, a commit, a
+    # helper that commits) and the chat turn's worker take it; tests/test_review_fixes.py fails a route that
+    # does not. Re-entrant, so a helper may take it again. Never held across a Claude run or a network call
+    # (a push, Mailbird): such a path commits, lets go, calls, and takes it again to write what came back.
+    # Lock order: turn_lock, then chat._CREATE_LOCK, then by_hand._ADD_LOCK, then commit_lock, always last;
+    # nothing takes one of the others while holding commit_lock. The scheduler has its own connection
+    # (SQLite's own locking serialises the two) and never takes it.
+    commit_lock = threading.RLock()
     init_db(conn)
     if not cfg.get("_starter"):
         seed_accounts(conn, C.get(cfg, "sources.mail.seed_accounts", []))
@@ -421,7 +427,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
     @app.post("/api/add")
     def add_task(body: AddBody):
         try:
-            res = by_hand.add(conn, eff_cfg(), text=body.text, fields=body.fields, key=body.key, today=date.today(), verb=body.verb)
+            res = by_hand.add(conn, eff_cfg(), text=body.text, fields=body.fields, key=body.key, today=date.today(), verb=body.verb, lock=commit_lock)
         except ValueError as e:
             raise HTTPException(400, str(e))
         sch = getattr(app.state, "scheduler", None)
@@ -435,7 +441,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
             raise HTTPException(400, "source 'ripple' is written only by a ripple run")
         changes = [{k: v for k, v in c.items() if k not in ("source_key", "created_source", "source_link", "account")} for c in body.changes]   # the page never chooses these
         try:
-            with chat._CREATE_LOCK:                  # a chat create staged here and its Create button never make two
+            with chat._CREATE_LOCK, commit_lock:     # a chat create staged here and its Create button never make two
                 left_out: list[dict] = []
                 changes = chat.resolve_staged(conn, eff_cfg(), changes, left_out)
                 if not changes:                      # every entry was a create made already: no empty batch row, no Undo for nothing
@@ -454,7 +460,8 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
     @app.post("/api/batches/{batch_id}/undo")
     def undo_batch(batch_id: int):
         try:
-            return batches.undo(conn, batch_id)
+            with commit_lock:
+                return batches.undo(conn, batch_id)
         except batches.NoSuchBatch:
             raise HTTPException(404, "no such batch")
         except batches.BrokenUndo as e:
@@ -481,9 +488,12 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         if sch is None:
             raise HTTPException(409, "this instance runs no scheduler (serve --no-scheduler), so nothing here can sweep")
         now = reminders.local_now(eff_cfg())
-        if summary.refresh_state(conn, now)["state"] == "idle":
-            summary.request_refresh(conn, now)
-            conn.commit()
+        with commit_lock:
+            idle = summary.refresh_state(conn, now)["state"] == "idle"
+            if idle:
+                summary.request_refresh(conn, now)
+                conn.commit()
+        if idle:
             sch.wake()
         return today_summary()
 
@@ -689,8 +699,9 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
 
     @app.post("/api/review/finish")
     def finish_review():
-        set_setting(conn, "state.last_review_at", date.today().isoformat())
-        conn.commit()
+        with commit_lock:
+            set_setting(conn, "state.last_review_at", date.today().isoformat())
+            conn.commit()
         return {"ok": True}
 
     @app.get("/api/settings")
@@ -740,30 +751,33 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         except app_push.KeyFileError as e:
             return JSONResponse({"detail": str(e)}, status_code=409)
         p256dh, auth = body.keys.get("p256dh"), body.keys.get("auth")
-        try:
-            if p256dh is None:
-                raise ValueError("the device key is not a P-256 public key")
-            if auth is None:
-                raise ValueError("the device secret must be 16 bytes")
-            app_push.subscribe(conn, body.endpoint, p256dh, auth, body.label, body.origin, cfg=eff_cfg())
-        except ValueError as e:
-            conn.rollback()
-            # the address is one Factotum does not post to (its own list), not a push service's answer: the page says which
-            return JSONResponse({"detail": str(e), "factotum_refused": app_push.endpoint_problem(body.endpoint, eff_cfg()) is not None}, status_code=400)
-        conn.commit()
+        ecfg = eff_cfg()
+        with commit_lock:
+            try:
+                if p256dh is None:
+                    raise ValueError("the device key is not a P-256 public key")
+                if auth is None:
+                    raise ValueError("the device secret must be 16 bytes")
+                app_push.subscribe(conn, body.endpoint, p256dh, auth, body.label, body.origin, cfg=ecfg)
+            except ValueError as e:
+                conn.rollback()
+                # the address is one Factotum does not post to (its own list), not a push service's answer: the page says which
+                return JSONResponse({"detail": str(e), "factotum_refused": app_push.endpoint_problem(body.endpoint, ecfg) is not None}, status_code=400)
+            conn.commit()
         return push_state()
 
     @app.post("/api/push/unsubscribe")
     def push_unsubscribe(body: UnsubscribeBody):
         if body.endpoint is None and body.id is None:
             return JSONResponse({"detail": "name a device"}, status_code=400)
-        app_push.unsubscribe(conn, endpoint=body.endpoint, device_id=body.id)
-        conn.commit()
+        with commit_lock:
+            app_push.unsubscribe(conn, endpoint=body.endpoint, device_id=body.id)
+            conn.commit()
         return push_state()
 
     @app.post("/api/push/test")
     def push_test(body: PushTestBody):
-        out = app_push.send_test(conn, eff_cfg(), body.endpoint, transport=app.state.push_transport)
+        out = app_push.send_test(conn, eff_cfg(), body.endpoint, transport=app.state.push_transport, lock=commit_lock)   # the push goes out unlocked
         if out is None:
             return JSONResponse({"detail": "This device is not subscribed"}, status_code=404)
         return out
@@ -779,15 +793,21 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
                     raise HTTPException(400, f"{k} is not a Settings key; it belongs in config/factotum.yaml, which does not exist yet: "
                                              "copy config/factotum.example.yaml to config/factotum.yaml, edit it and restart")
                 raise HTTPException(400, f"{k} is not a Settings key; edit {cfg.get('_path')} instead")
-            set_setting(conn, k, v)
-        if body.accounts is not None:
-            conn.execute("DELETE FROM accounts")
-            for a in body.accounts:
-                if not a.get("address"):
-                    continue
-                conn.execute("INSERT INTO accounts (address, display, enabled, roles_json) VALUES (?, ?, ?, ?)",
-                             (a["address"].strip(), a.get("display"), 1 if a.get("enabled", True) else 0, json.dumps(a.get("roles", []))))
-        conn.commit()
+        with commit_lock:                                    # every key checked above: nothing is written for a refused body
+            try:
+                for k, v in body.values.items():
+                    set_setting(conn, k, v)
+                if body.accounts is not None:
+                    conn.execute("DELETE FROM accounts")
+                    for a in body.accounts:
+                        if not a.get("address"):
+                            continue
+                        conn.execute("INSERT INTO accounts (address, display, enabled, roles_json) VALUES (?, ?, ?, ?)",
+                                     (a["address"].strip(), a.get("display"), 1 if a.get("enabled", True) else 0, json.dumps(a.get("roles", []))))
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
         return settings()
 
     @app.get("/api/stats")
@@ -859,9 +879,10 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
                 raise HTTPException(404, "no such thread")
             if thread_id in app.state.chat_busy:             # the turn would end by writing into a thread that is gone
                 raise HTTPException(409, "a turn is still running in this thread; delete it when it has answered")
-            conn.execute("DELETE FROM chat_messages WHERE thread_id = ?", (thread_id,))
-            conn.execute("DELETE FROM chat_threads WHERE id = ?", (thread_id,))
-            conn.commit()
+            with commit_lock:
+                conn.execute("DELETE FROM chat_messages WHERE thread_id = ?", (thread_id,))
+                conn.execute("DELETE FROM chat_threads WHERE id = ?", (thread_id,))
+                conn.commit()
         return {"deleted": thread_id}
 
     @app.post("/api/chat/turn")
@@ -882,9 +903,13 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
                 if body.origin != "today" and (task_id is None or not get_task(conn, task_id)):
                     raise HTTPException(404, "no such task")
                 found = None if body.fresh else chat.place_thread(conn, body.origin, task_id)
-                thread_id = found or chat.new_thread(conn, None, body.origin, task_id)
+                if not found:
+                    with commit_lock:
+                        found = chat.new_thread(conn, None, body.origin, task_id)
+                thread_id = found
             else:
-                thread_id = chat.new_thread(conn)
+                with commit_lock:
+                    thread_id = chat.new_thread(conn)
             if thread_id in app.state.chat_busy:
                 raise HTTPException(409, "Claude is still answering in this conversation")
             app.state.chat_busy.add(thread_id)
@@ -894,11 +919,13 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         def work():
             try:
                 res = chat.turn(conn, eff_cfg(), thread_id, body.text, body.attached, today=date.today(), canned=body.canned, runner=runner, on_event=q.put,
-                                 asked=(body.origin, body.task_id))      # the prompt says where it was asked (a card and a task share a thread)
+                                 asked=(body.origin, body.task_id),      # the prompt says where it was asked (a card and a task share a thread)
+                                 lock=commit_lock)                       # taken for each write, never across the run
                 q.put({"type": "done", "result": res} if res.get("ok") else {"type": "error", "error": res.get("error") or "run failed", "result": res})
             except Exception as e:   # noqa: BLE001 — the stream must end with a reason, never hang
                 try:
-                    conn.rollback()                          # a failed write must not leave this connection holding the write lock
+                    with commit_lock:
+                        conn.rollback()                      # a failed write must not leave this connection holding the write lock
                 except Exception:   # noqa: BLE001
                     pass
                 q.put({"type": "error", "error": f"{type(e).__name__}: {e}"})
@@ -923,7 +950,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
     @app.post("/api/chat/create")
     def chat_create(body: CreateBody):
         try:
-            tid = chat.create_from_proposal(conn, eff_cfg(), body.message_id, body.index, date.today())
+            tid = chat.create_from_proposal(conn, eff_cfg(), body.message_id, body.index, date.today(), lock=commit_lock)
         except ValueError as e:
             raise HTTPException(400, str(e))
         (m,) = rows(conn, "SELECT proposals_json FROM chat_messages WHERE id = ?", (body.message_id,))
@@ -971,6 +998,10 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
     def proposal_apply(pid: int):
         """A batch Claude staged (a skill, or the connector) becomes a real one by the user's tap:
         source `skill` or `connector` as staged, undoable like any other; a `create` in it makes its task now."""
+        with commit_lock:
+            return _proposal_apply(pid)
+
+    def _proposal_apply(pid: int) -> dict:
         from .db import now_iso
         p = _proposal(pid)
         # Claim it first: two quick taps must not apply it twice (a create would make a twin).
@@ -994,9 +1025,10 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
     @app.post("/api/proposals/{pid}/dismiss")
     def proposal_dismiss(pid: int):
         from .db import now_iso
-        _proposal(pid)
-        conn.execute("UPDATE proposals SET dismissed_at = ? WHERE id = ?", (now_iso(), pid))
-        conn.commit()
+        with commit_lock:
+            _proposal(pid)
+            conn.execute("UPDATE proposals SET dismissed_at = ? WHERE id = ?", (now_iso(), pid))
+            conn.commit()
         return {"ok": True}
 
     def _oauth_on() -> bool:
@@ -1128,11 +1160,14 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
     @app.post("/api/connectors/arm")
     def connectors_arm():
         """'Allow a new connector': for the next few minutes a never-granted client may reach the consent page."""
-        return {"armed_until": oauth.arm(conn)}
+        with commit_lock:
+            return {"armed_until": oauth.arm(conn)}
 
     @app.post("/api/connectors/{client_id:path}/revoke")
     def connector_revoke(client_id: str):                   # a CIMD client_id is a URL, slashes and all
-        if not oauth.revoke_client(conn, client_id):
+        with commit_lock:
+            revoked = oauth.revoke_client(conn, client_id)
+        if not revoked:
             raise HTTPException(404, "no such connector, or already revoked")
         return {"ok": True}
 
@@ -1236,13 +1271,15 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
                                   free=free, ask=ask))
 
     @app.post("/r/{token}/outcome")
-    async def reminder_outcome(token: str, request: Request):
+    def reminder_outcome(token: str, form: bytes = Body(b"")):
         """The optional outcome line after Done. Urlencoded form post outside /api; only a token whose
-        reminder was closed from its link (and is still inside the 24 h) is accepted."""
+        reminder was closed from its link (and is still inside the 24 h) is accepted. A plain def (the raw
+        body as bytes), so its batch runs on the thread pool under commit_lock, never on the event loop."""
         base = str(C.get(cfg, "server.public_url", "")).rstrip("/")
-        text = _form(await request.body()).get("outcome", "")
+        text = _form(form).get("outcome", "")
         try:
-            res = reminders.save_outcome(conn, eff_cfg(), token, text)
+            with commit_lock:
+                res = reminders.save_outcome(conn, eff_cfg(), token, text)
         except reminders.TokenError as e:
             return HTMLResponse(_page("Factotum", e.why, base), status_code=e.status)
         if not res["saved"]:

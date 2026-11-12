@@ -19,6 +19,7 @@ The server posts only to known push services (`PUSH_HOSTS`, `PUSH_SUFFIXES`, plu
 """
 from __future__ import annotations
 
+import contextlib
 import ipaddress
 import json
 import os
@@ -349,8 +350,9 @@ def send_all(conn: sqlite3.Connection, cfg: dict, notice: dict, *, transport=Non
     return res
 
 
-def send_test(conn: sqlite3.Connection, cfg: dict, endpoint: str, *, transport=None) -> dict | None:
-    """`TEST_NOTICE` to the one device with this endpoint; None when there is none."""
+def send_test(conn: sqlite3.Connection, cfg: dict, endpoint: str, *, transport=None, lock=None) -> dict | None:
+    """`TEST_NOTICE` to the one device with this endpoint; None when there is none. `lock` (the API's
+    commit_lock) is taken for the write after the push, never across it."""
     cur = conn.execute("SELECT * FROM push_subscriptions WHERE endpoint = ?", (endpoint,))
     row = cur.fetchone()
     if row is None:
@@ -361,6 +363,7 @@ def send_test(conn: sqlite3.Connection, cfg: dict, endpoint: str, *, transport=N
     except KeyFileError as e:
         return {"id": device["id"], "ok": False, "status": None, "removed": False, "error": str(e), "factotum_refused": False}
     out = deliver(device, with_badge(conn, cfg, TEST_NOTICE), k, cfg, transport)
-    record(conn, out)
-    conn.commit()
+    with lock or contextlib.nullcontext():
+        record(conn, out)
+        conn.commit()
     return out

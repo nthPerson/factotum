@@ -327,13 +327,16 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
   `test_every_surface_reads_annotated_rows`). A new reader that skips it ranks and fades without links,
   silently.
 - **Undo skips any field whose current value is not what that batch wrote and says so** (2026-11-10);
-  undo entries written before 2026-11-10 carry no `new` and are restored unchecked.
+  undo entries written before 2026-11-10 carry no `new` and are restored unchecked. When every entry is skipped
+  as changed since, nothing is written and the batch stays not undone (`undone: false`; review 2026-11-11: it
+  was marked undone with nothing restored, and could never be undone after the later batch was).
 - **A staged text edit carries `expect`; a note is `add_note`** (2026-11-10), appended at apply time.
   Never send a whole new `context` built from an old read.
 - **`relations` direction** (2026-11-10): `src part_of dst` (dst is the goal), `src waits_on dst`,
   `src same_as dst` (src was merged into dst). Soft-deleted, never DELETE.
 - **What lands on a merged duplicate goes to its survivor in three ways only** (2026-11-10): a
-  sync-file mention, a sync-file instruction, a Canvas close or due move. Fields are never copied, and a
+  sync-file mention, a sync-file instruction, a Canvas close or due move. Fields are never copied (the merge
+  itself gives the survivor only a due date (copied) and a sent-mail watch (moved), each when it has none: review 2026-11-11), and a
   merge writes no mention.
 - **A reopened duplicate is its own task again** (review 2026-11-11): `reopen` removes its outgoing
   `same_as` in the batch (`batches._unmerge`), and `relations.survivor` hops only from a closed row; with
@@ -374,15 +377,27 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
 - **A ripple may drop words the owner wrote** (2026-11-11): the first real dry-run removed "in person" from
   a sibling's sentence while adding where things stand. The prompt says to keep the owner's sentences and
   never soften a requirement (`test_the_prompt_says_to_keep_what_the_owner_wrote`); the guard checks only
-  links, `Task-N` and addresses, so History's Undo is the safety net.
+  links, `Task-N` and addresses, so History's Undo is the safety net. A text over `ripple.TEXT_CAP` (1500) is
+  shown cut and is never rewritten (review 2026-11-11: the rewrite replaced the whole text with what was built
+  from its first 1500 characters); its ripple is the dated note (`ripple.TOO_LONG`).
+- **A value a run may write back is JSON-escaped in its prompt, never HTML-escaped** (review 2026-11-11): the
+  ripple prompt `html.escape`d task text, and a rewrite that kept the owner's words wrote "Q&amp;A" into the
+  text (and an address with `&` came back changed, so the guard turned the rewrite into a note). `ripple._q` is
+  one JSON string with `<`, `>` and the line-break characters as JSON escapes, which a reader turns back.
 - **Never pipe the dev or service start script's output through `tail` / `head` when it leaves a server
   running** (2026-11-11): the pipe never closes and the command hangs. And `GET /api/review` is loaded once
   per page (the in-flight flag in `app.js`) because its `last_offered_at` stamp commits on the shared
   connection; two at once answered 500.
-- **A GET that writes takes `commit_lock`** (2026-11-11, `api.create_app`): Review's stamps, an opened task's
-  `neighbours_seen_at`, the first push key pair, a reminder link's Done / Snooze, and a suggestion card's Create;
-  two commits interleaved on the shared connection answered 500. A new route that commits outside
-  `batches.apply` takes it too (never across a network call); `GET /api/review/count` reads only and stays out.
+- **Every write on the API's shared connection takes `commit_lock`** (2026-11-11, `api.create_app`, an `RLock`):
+  from its first write to its commit or rollback — `batches.apply` / `undo`, every route that commits (GETs that
+  stamp included), a helper that commits (`by_hand.add`, `chat.create_from_proposal`, `chat.turn`, `app_push.send_test`
+  take it as `lock=`), and the chat turn's worker. The request threads share ONE transaction: one thread's commit
+  committed another's half-written batch (a batch row with no undo data) and a rollback threw another's work away;
+  Applies answered 500 for writes that had landed (review 2026-11-11). Never held across a Claude run or a network
+  call: commit, let go, call, take it again. Order: `turn_lock`, `chat._CREATE_LOCK`, `by_hand._ADD_LOCK`, then
+  `commit_lock` last. No `async def` route writes (it would run on the event loop). The scheduler has its own
+  connection and never takes it; `GET /api/review/count` reads only and stays out.
+  `tests/test_review_fixes.py::test_every_write_on_the_shared_connection_in_the_api_takes_commit_lock` fails a route that forgets.
 - **`expire` only touches rows Review has shown** (`last_offered_at`, stamped by `GET /api/review`).
   A row that was never on a Review page stays open however old it is; that is by design.
 - **The manifest must be requested with `crossorigin="use-credentials"`** (2026-11-10): otherwise Access

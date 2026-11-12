@@ -133,7 +133,7 @@ tasks(id, name, project, area, status,            -- open|done|dropped|faded|lap
       last_offered_at,             -- the last day a Review page showed the row; `expire` acts only on rows it has shown
       mirrored_at,                 -- when the Notion mirror last pushed the row (not an edit)
       close_on_sent_since, close_on_sent_to,   -- a sent-mail watch (`watch_sent`): close when mail to that address is sent after that time
-      outcome,                     -- one line, what came of it (done / drop may carry it; ≤ 300)
+      outcome,                     -- one line, what came of it (done / drop may carry it; ≤ 300; reopen clears it)
       neighbours_seen_at)          -- stamped when the task is opened or a Review decision is made; "a linked task changed" is measured from it
 reminders(id, task_id, fire_at, label, repeat, status, ntfy_seq, token, created_by)
           -- repeat: NULL|daily|weekdays|weekly|monthly; status: pending|sent|snoozed|done|cancelled
@@ -192,7 +192,9 @@ code the user types and says.
 order and `db.migrate` runs those above it. A migration that changes data declares `needs_backup(conn)`
 and gets a copy made with the SQLite backup API in `data/backups/` (next to the database,
 `<stem>-<UTC stamp>-before-v<N>.db`) before it runs. Migration 1 turns the importer's old `links` rows of
-kind `task` into `same_as` rows or merge suggestions and deletes them.
+kind `task` into `same_as` rows or merge suggestions and deletes them; each `same_as` row it writes is dated by
+the duplicate's own `completed_at` (else its `created_at`), never the day it runs, since that date is the
+survivor's `merged_at` fade anchor.
 
 ## 5. Task lifecycle
 
@@ -231,7 +233,10 @@ so two staged links that make a loop together skip the second); at most 20 links
 A reopened duplicate is a task of its own again: `reopen` removes its `same_as` in the same batch (undo
 restores it unless the row was merged elsewhere since), the redirect (`relations.survivor`) hops only from
 a closed row, and a merge refuses a target a merge dropped (`relations.merge_target_problem`, shared with
-the MCP validator).
+the MCP validator). A merge gives the survivor the duplicate's due date and its sent-mail watch
+(`close_on_sent_*`) only when it has none of its own (a watch not carried is said in `skipped`; the mail sweep
+reads watches on open tasks only, so one left on the dropped duplicate would never fire); the duplicate's
+`calendar_event` field stays with it (the event itself is a `calendar` link, which moves).
 **Closing never cascades**: closing a goal does not close its steps, closing the last step does not close
 the goal, closing a task does not close what waits on it; the effect is on Review and on scores.
 *Scoring* (`scoring.links`, `enabled` false is exactly the old arithmetic): a task that waits on an open
@@ -578,7 +583,7 @@ says ripples and filing wait (`runner.unavailable`, `state.claude.unavailable`).
 
 **What queues.** `batches.apply` calls `ripple.enqueue` for every source but `ripple` (a ripple never
 triggers a ripple), reading the batch's own `changes`: `status` open → done / dropped ("closed", unless the
-same batch merged it); `name`, `due`, `hard`, `outcome`; `context` when its normalised text differs
+same batch merged it); `name`, `due`, `hard`, `outcome` (not the one a reopen clears); `context` when its normalised text differs
 ("text"); a `same_as` link added with the survivor at its end ("merge"). Only for a task with at least one
 active link afterwards. Fade, lapse, reopen, `why_now`, effort and the rest never queue. The queue is the
 table `ripple_queue` (one row per changed task: `queued_at`, `now`, `last_batch_id`, the batches and what
@@ -594,8 +599,10 @@ older than 24 h is set aside unrun; with ripples off the scheduler empties the q
 
 **The input.** Per changed task: what changed as before → now, the outcome, any task merged into it. Per
 linked task (open only, at most 12: direct links first, then other steps of the same goal): its link, due
-date, who it waits on, name and text, each text cut to 1500 characters. Every value is one JSON string in
-the prompt and escaped (stranger text, §2).
+date, who it waits on, name and text, each text cut to 1500 characters (a cut text is marked so in the
+prompt). Every value is one JSON string in the prompt (stranger text, §2), with `<` and `>` and the
+characters a reader may take for a line break as JSON escapes; never HTML entities, so a rewrite that keeps
+the owner's words writes back exactly what the owner wrote.
 
 **The reply** is `{"ripples": [{"task_id", "effect": "none" | "text" | "propose", "context", "why",
 "proposals": [{"op", "fields", "reason"}]}]}`, one entry per linked task. A wrong shape anywhere (not that
@@ -607,6 +614,9 @@ with source `ripple`, through `batches.apply` with `expect` set to the text the 
 edited by hand meanwhile is skipped with the usual reason; a task closed or merged meanwhile is left alone.
 A rewrite that loses something (empty, too long, or it drops a web address or a `Task-N` the old text had)
 is refused and becomes an `add_note` ("Ripple from Task-N: why"), dated by the server, in the same batch;
+so does any rewrite of a text the run was shown cut (over 1500 characters: a rewrite would replace the whole
+text with what was built from its first part), History's line saying "the text is too long to rewrite safely,
+so a note was added";
 when the reason names an address the old text lacked, the note says fixed words instead, and History's line
 for the change has that address replaced by "[address left out]". A rewrite that loses nothing but adds an
 email or web address the old text did not have is not applied on its own (a ripple never brings an address
@@ -628,7 +638,10 @@ and named in the log line: `counterpart` or `waiting_on` (a ripple never copies 
 "batches": [causing batch ids], "what": {id: [what]}, "noted": [ids whose rewrite became a note]}`. Undoing a
 causing batch also undoes each of its ripple batches when every field the ripple wrote is still as it wrote
 it; otherwise the ripple batch stays whole and its cause gains `cause_undone_at`, which History and Review
-show. The owner can still undo it alone.
+show. The owner can still undo it alone. A ripple undone with one of its causes while its other causes
+still hold queues those causes again in the same transaction, so the next run brings the linked tasks up to
+date for what is still true (closing Task-1 and Task-2 rippled once; undoing Task-1's close must not leave
+Task-2's close unsaid).
 
 **Failure.** A failed run (no JSON, a wrong shape, the budget, the login) writes nothing; the group is tried
 twice, then set aside and logged; the job backs off an hour like every job; at most
@@ -922,8 +935,10 @@ per task (links, `waits_on_open`, `frees_open`, `goal_id`, steps open / total, `
 first, 30 a page, `before=<change id>`, each with source, cause, undone, note and, for a link, the other
 task); opening a task stamps `neighbours_seen_at`. Review items carry `texts` for the link reasons and
 `link_suggestions`. `POST /api/batches/{id}/undo` returns `restored` and `skipped` (a field the owner
-changed since, a link whose restore would loop or duplicate, each with a reason) and 404 only for a batch
-that does not exist. The Log carries each batch's `cause` and each change's `note`. The page is described next.
+changed since, a link whose restore would loop or duplicate, each with a reason), `undone`, and 404 only for
+a batch that does not exist. An undo that restored nothing because everything it wrote was changed since
+writes nothing (its ripples stay too) and leaves the batch not undone (`undone: false`), so it can be undone
+once the later change is. The Log carries each batch's `cause` and each change's `note`. The page is described next.
 
 **Links on the page (stage 4b, 2026-11-11).** A row carries one badge per kind, in this order:
 "do first: frees" / "frees" (teal), "waits on" (amber), "steps" (teal), "updated by" (purple), "part of"

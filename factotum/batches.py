@@ -183,7 +183,7 @@ def _resolve(conn: sqlite3.Connection, change: dict, today: date, closed_by: str
     elif op in ("fade", "lapse"):
         fields.update(status="faded" if op == "fade" else "lapsed", completed_at=today.isoformat(), closed_by=closed_by, top_rank=None)
     elif op == "reopen":
-        fields.update(status="open", completed_at=None, closed_by=None)
+        fields.update(status="open", completed_at=None, closed_by=None, outcome=None)    # how it ended is no longer true; undo restores it
     elif op == "pin_top":
         fields.setdefault("top_rank", _next_top_rank(conn))
     elif op == "unpin":
@@ -340,8 +340,8 @@ def _link_changes(cur, batch_id: int, rel: dict, added: bool, extra: dict[int, d
 def _merge(conn, cur, ch: dict, batch_id: int, source: str, today: date, undo: list, skipped: list) -> bool:
     """`merge`: the duplicate (`task_id`) goes into the survivor (`fields.into`), all in this batch.
     Its outside links, pending reminders and task links move to the survivor (a move a link rule
-    refuses stays on the duplicate and is said), the survivor takes a due date only when it has
-    none, and nothing else is copied; no mention is written. The duplicate is closed AFTER its links
+    refuses stays on the duplicate and is said), the survivor takes a due date and a sent-mail watch
+    only when it has none (a watch not carried is said), and nothing else is copied; no mention is written. The duplicate is closed AFTER its links
     move, so undo (newest first) reopens it before it restores a `waits_on` that points at it."""
     f = ch.get("fields") if isinstance(ch.get("fields"), dict) else {}
     goes, keep = _link_end(ch.get("task_id"), {})[0], _link_end(f.get("into"), {})[0]
@@ -402,7 +402,16 @@ def _merge(conn, cur, ch: dict, batch_id: int, source: str, today: date, undo: l
             moved["tasks"] += 1
     if dup.get("due") and not surv.get("due"):
         _write_fields(cur, surv, {"due": dup["due"], "due_is_datetime": dup.get("due_is_datetime"), "hard": dup.get("hard")}, batch_id, undo)
-    _write_fields(cur, dup, {"status": "dropped", "completed_at": today.isoformat(), "closed_by": "merge", "top_rank": None}, batch_id, undo)
+    # A sent-mail watch moves too: the mail sweep reads watches on open tasks only, so one left on the dropped
+    # duplicate would never fire. The survivor's own watch wins. Undo puts it back on the duplicate.
+    watch = {}
+    if dup.get("close_on_sent_since"):
+        if surv.get("close_on_sent_since"):
+            skipped.append({"task_id": goes, "why": f"Task-{goes}'s sent-mail watch was not carried: Task-{keep} has its own"})
+        else:
+            _write_fields(cur, surv, {"close_on_sent_since": dup["close_on_sent_since"], "close_on_sent_to": dup.get("close_on_sent_to")}, batch_id, undo)
+            watch = {"close_on_sent_since": None, "close_on_sent_to": None}
+    _write_fields(cur, dup, {"status": "dropped", "completed_at": today.isoformat(), "closed_by": "merge", "top_rank": None, **watch}, batch_id, undo)
     rid = R.add(cur, goes, keep, "same_as", f.get("why"), source, batch_id)          # any older same_as of the duplicate was removed above
     _link_changes(cur, batch_id, dict(cur.execute("SELECT * FROM relations WHERE id = ?", (rid,)).fetchone()), added=True, extra={keep: {"moved": moved}})
     undo.append({"relation_id": rid, "undo": "remove"})
@@ -578,12 +587,13 @@ def undo(conn: sqlite3.Connection, batch_id: int) -> dict:
     it caused are followed first (newest writes go first, so a field both wrote comes back whole), and
     a ripple it queued that has not run is taken out of the queue (`ripple.unqueue`), in the same
     transaction. Any error rolls back: the API shares one connection, and an open transaction holds
-    the write lock."""
+    the write lock. When nothing was restored and every entry was skipped as changed since, nothing is
+    written and the batch is not marked undone (`undone` False in the answer; it can be undone later)."""
     b = conn.execute("SELECT * FROM batches WHERE id = ?", (batch_id,)).fetchone()
     if not b:
         raise NoSuchBatch(batch_id)
     if b["undone_at"]:
-        return {"batch_id": batch_id, "restored": 0, "skipped": [], "already": True, "ripples_undone": [], "ripples_kept": []}
+        return {"batch_id": batch_id, "restored": 0, "skipped": [], "already": True, "undone": True, "ripples_undone": [], "ripples_kept": []}
     undone: list[int] = []
     kept: list[int] = []
     entries = _entries(b["undo_json"])                           # before any write: broken data changes nothing
@@ -591,6 +601,13 @@ def undo(conn: sqlite3.Connection, batch_id: int) -> dict:
         if b["source"] != "ripple":                              # a ripple's own undo looks for nothing: a ripple never causes one
             _follow_ripples(conn, batch_id, undone, kept)        # before the cause's own entries: the ripple wrote after it
         restored, skipped = _undo_entries(conn, entries)
+        if not restored and skipped and all(s["why"] != UNKNOWN_UNDO for s in skipped):
+            # Everything it wrote was changed since: nothing is undone, its ripples included, and it stays
+            # undoable (once the later change is undone, this one can be). An entry Factotum does not know
+            # never becomes undoable, so a batch with one is marked as today.
+            conn.rollback()
+            return {"batch_id": batch_id, "restored": 0, "skipped": skipped, "already": False, "undone": False,
+                    "ripples_undone": [], "ripples_kept": []}
         conn.execute("UPDATE batches SET undone_at = ? WHERE id = ?", (now_iso(), batch_id))
         from . import ripple                                     # here, not at the top: ripple imports batches
         ripple.unqueue(conn, batch_id)                           # a ripple it queued that has not run never runs for it
@@ -598,14 +615,17 @@ def undo(conn: sqlite3.Connection, batch_id: int) -> dict:
     except Exception:
         conn.rollback()
         raise
-    return {"batch_id": batch_id, "restored": restored, "skipped": skipped, "already": False,
+    return {"batch_id": batch_id, "restored": restored, "skipped": skipped, "already": False, "undone": True,
             "ripples_undone": sorted(undone), "ripples_kept": sorted(kept)}
 
 
 def _follow_ripples(conn: sqlite3.Connection, batch_id: int, undone: list[int], kept: list[int]) -> None:
     """Undo, in the caller's transaction, every not-undone ripple batch that `batch_id` caused, whole,
     when every field it wrote still holds what it wrote; otherwise leave it whole and record on its
-    cause that the cause was undone. Newest first, so a later ripple over the same text goes first."""
+    cause that the cause was undone. Newest first, so a later ripple over the same text goes first.
+    An undone ripple that had other causes, not undone, queues them again (`ripple.enqueue`), so the
+    next run brings its neighbours up to date for what is still true."""
+    again: set[int] = set()
     for r in conn.execute("SELECT id, cause_json, undo_json FROM batches WHERE source = 'ripple' AND undone_at IS NULL AND id > ? "
                           "ORDER BY id DESC", (batch_id,)).fetchall():
         try:
@@ -622,10 +642,17 @@ def _follow_ripples(conn: sqlite3.Connection, batch_id: int, undone: list[int], 
             _undo_entries(conn, entries)
             conn.execute("UPDATE batches SET undone_at = ? WHERE id = ?", (now_iso(), r["id"]))
             undone.append(r["id"])
+            again.update(x for x in cause["batches"] if type(x) is int and x != batch_id)
         else:
             cause.update(cause_undone_at=now_iso(), cause_undone_batch=batch_id)
             conn.execute("UPDATE batches SET cause_json = ? WHERE id = ?", (json.dumps(cause), r["id"]))
             kept.append(r["id"])
+    if again:
+        from . import ripple                                     # here, not at the top: ripple imports batches
+        queued = {i for q in ripple.pending(conn) for i in q["batches"]}
+        for o in conn.execute("SELECT id, source FROM batches WHERE id IN (SELECT value FROM json_each(?)) AND undone_at IS NULL ORDER BY id",
+                              (json.dumps(sorted(again - queued)),)).fetchall():
+            ripple.enqueue(conn, o["id"], o["source"])           # a cause still in force ripples again
 
 
 def _in_place(conn: sqlite3.Connection, entries: list) -> bool:
