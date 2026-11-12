@@ -492,6 +492,9 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
   `relations` row** (2026-11-11), and its inferred links are cards.
 - **`filing` evidence is not the planner's and not a Review decision's** (2026-11-11), like `mail_new` and `link_suggestion`.
 - **`follow_thread` is a batch op whose undo deletes the `links` row it added** (2026-11-11); connectors cannot send it.
+  A chat reply's `link_thread` is a proposal like the others (polish 2026-11-11): the page stages it as `follow_thread`
+  with the run's newest seen message time as `at` (`mcp_server.seen_threads`), so nothing is linked before Apply; a chat
+  create's cited threads ride in its batch (`chat._follows`), never `add_link` after it.
 - **`claude.filing.enabled` is not in `PAID_SWITCHES`** (2026-11-11): that tuple builds `OLD_DEFAULTS`; a new paid
   switch that did not exist before 2026-11-10 stays out of it and gets its own default test.
 - **A filing run is dequeued before it runs** (2026-11-11): a failed one is logged and not retried; `file-task` runs

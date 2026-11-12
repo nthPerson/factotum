@@ -305,7 +305,9 @@ def test_chat_turn_stores_the_exchange_validates_proposals_links_seen_threads_an
     assert res["ok"] and res["reply_md"].startswith("Max wrote") and res["cost_usd"] == 0.33
     assert [(p["op"], p.get("task_id")) for p in res["proposals"]] == [("set", 388), ("link_thread", 388), ("create", None), ("add_reminder", 23)]
     assert res["proposals"][0]["fields"] == {"due": "2026-11-05", "due_is_datetime": 0, "context": "Max proposed Tue"} and res["proposals"][0]["evidence"] == [{"kind": "mail_thread", "ref": "c1", "label": "Oct 29 from Max"}]
-    assert res["proposals"][1]["applied"] is True and one(conn, "SELECT ref, label FROM links WHERE task_id = 388 AND kind = 'mail_thread'") == {"ref": "c1", "label": "PD session"}
+    # a thread is a proposal like the others since the polish pass (2026-11-11): nothing is linked until Apply
+    assert res["proposals"][1]["applied"] is False and res["proposals"][1]["fields"]["subject"] == "PD session"
+    assert one(conn, "SELECT ref FROM links WHERE task_id = 388 AND kind = 'mail_thread'") is None
     assert res["proposals"][3]["fields"] == {"fire_at": "2026-11-02T18:00", "label": "Submit", "repeat": None}
     assert len(res["rejected"]) == 4 and any("9999" in r for r in res["rejected"])
     assert [d["draft_message_id"] for d in res["drafts"]] == [900]                 # the sidecar, not the model's claim

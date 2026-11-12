@@ -2032,8 +2032,17 @@
     const e = staged.get(placeKey(p, mid, i)); if (e) { e.prop = mid + '-' + i; persistStaged(); }
     return true;
   }
+  // A mail thread a reply proposes to follow (`link_thread`) is a `follow_thread` change, written by Apply and taken
+  // back by Undo like the rest; a thread the task follows already (`applied`) has nothing to stage.
+  const threadWords = f => (f || {}).subject ? `follow the mail thread “${cut60(f.subject)}”` : 'follow a mail thread';
   function stageProposalAs(p, mid, i) {
-    if (p.op === 'link_thread') return false;
+    if (p.op === 'link_thread') {
+      if (p.applied) return false;
+      const f = p.fields || {};
+      stageChange({ task_id: p.task_id, op: 'follow_thread', fields: { conversation_id: f.conversation_id, subject: f.subject || null, account: f.account || null, at: f.at || null } },
+        threadWords(f).replace(/^follow/, 'follows'), {}, 'c' + mid + '-' + i);
+      return true;
+    }
     if (p.op === 'create') {
       stageExtra('new:c' + mid + '-' + i, null, 'create', p.fields || {}, 'new task: ' + cut60((p.fields || {}).name), { from_chat: { message_id: mid, index: i } });
       return true;
@@ -2062,13 +2071,13 @@
       const fields = p.fields && Object.keys(p.fields).length && p.op !== 'link_thread' ? `<span class="code">${esc(Object.entries(p.fields).filter(([k]) => k !== 'due_is_datetime').map(([k, v]) => `${k}: ${v === null ? 'cleared' : String(v).slice(0, 60)}`).join(' · '))}</span>` : '';
       let ctl;
       if (p.op === 'create') ctl = p.applied ? `<span class="chip staged">created Task-${p.task_id}</span>` : `<button class="btn small" data-chat-create="${m.id}" data-i="${i}">Create task</button>`;
-      else if (p.op === 'link_thread') ctl = `<span class="chip staged">linked</span>`;
+      else if (p.op === 'link_thread' && p.applied) ctl = `<span class="chip staged">linked</span>`;
       else if (done) ctl = `<span class="chip staged">applied</span>`;
       else if (isStaged) ctl = `<span class="chip staged">staged</span>`;
       else ctl = `<label><input type="checkbox" data-chat-prop="${m.id}" data-i="${i}" checked> stage</label>`;
-      return `<div class="prop">${ctl}<span class="plabel">${p.task_id != null ? `<span class="code">Task-${p.task_id}</span> ` : ''}${esc(p.label || p.op)}</span>${fields}${ev}</div>`;
+      return `<div class="prop">${ctl}<span class="plabel">${p.task_id != null ? `<span class="code">Task-${p.task_id}</span> ` : ''}${esc(p.op === 'link_thread' ? threadWords(p.fields) : p.label || p.op)}</span>${fields}${ev}</div>`;
     }).join('');
-    const stageable = m.proposals.some((p, i) => !['create', 'link_thread'].includes(p.op) && !propApplied(m.id, i) && !(staged.has(propKey(p, m.id, i))));
+    const stageable = m.proposals.some((p, i) => p.op !== 'create' && !(p.op === 'link_thread' && p.applied) && !propApplied(m.id, i) && !(staged.has(propKey(p, m.id, i))));
     return `<div class="props"><div class="phead">Proposals${stageable ? `<button class="btn small primary" data-chat-stage="${m.id}">Stage selected</button>` : ''}</div>${items}</div>`;
   }
   function draftsHtml(m) {
@@ -2259,7 +2268,7 @@
   }
   // The words of a proposal: `main` (what it does), `sub` (where it hangs, and whether it is another task).
   const cut40 = s => { s = String(s == null ? '' : s); return s.length > 40 ? s.slice(0, 40) + '…' : s; };
-  const PLACE_OPS = new Set(['create', 'set', 'done', 'drop', 'pin_top', 'longterm', 'add_reminder', 'add_note', 'link', 'unlink', 'merge']);      // what stageProposal stages
+  const PLACE_OPS = new Set(['create', 'set', 'done', 'drop', 'pin_top', 'longterm', 'add_reminder', 'add_note', 'link', 'unlink', 'merge', 'link_thread']);      // what stageProposal stages
   function proposalsOf(mid) {
     for (const pl of places.values()) { const m = pl.messages.find(x => x.id === mid); if (m) return m.proposals || []; }
     const m = chat.messages.find(x => x.id === mid); return (m && m.proposals) || [];
@@ -2299,6 +2308,7 @@
       const s = siblingOf(props, f.other);
       main = `${T} ${f.kind === 'part_of' ? 'is now part of' : 'now waits on'}: ${s ? s.name : f.other}`;
     } else if (REL_OPS.includes(p.op)) main = `${T} ${changeWords(p)}`;
+    else if (p.op === 'link_thread') main = `${T}: ${threadWords(f)}`;
     else if (p.op === 'set') main = `${T}: ${setWords(f)}`;
     else main = (p.task_id != null ? T + ': ' : '') + (changeWords(p) || p.label || p.op);
     // Only a place about a task has another task; a create's task_id, once made, is the new task itself.
@@ -2327,7 +2337,7 @@
         const out = placeTicked(pl, p, m.id, i) ? placeLeftOut(pl, props, p, m.id) : null;
         if (out !== null) t.sub = (t.sub ? t.sub + ', ' : '') + `left out while “${cut40(out)}” is not ticked`;
         const words = `<span class="pw"><span class="pm">${linkTasks(t.main)}</span>${t.sub ? ` <span class="ps">${linkTasks(t.sub)}</span>` : ''}</span>`;
-        if (p.op === 'link_thread' || p.applied) return `<div class="pprop"><span></span>${words}<span class="chip staged">${p.op === 'create' && p.task_id ? 'created ' + tref(p.task_id) : 'linked'}</span></div>`;
+        if (p.applied) return `<div class="pprop"><span></span>${words}<span class="chip staged">${p.op === 'create' && p.task_id ? 'created ' + tref(p.task_id) : 'linked'}</span></div>`;
         if (propApplied(m.id, i)) return `<div class="pprop"><span></span>${words}<span class="chip staged">applied</span></div>`;
         if (staged.has(placeKey(p, m.id, i))) return `<div class="pprop"><span></span>${words}<span class="chip staged">staged</span></div>`;
         if (!PLACE_OPS.has(p.op)) return `<div class="pprop"><span></span>${words}<span></span></div>`;

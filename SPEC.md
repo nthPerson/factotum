@@ -57,7 +57,8 @@ Four causes, none of them the user's discipline:
   with the create (Source Planner, Slack, Mail or Ripple, keyed by the card), the links the card showed, a mail
   card's thread followed and the card's verdict; its Undo drops the task and brings the card back, and Create
   after that Undo reopens the same task in one batch. A link proposed in a chat turn is never applied at once (it lands in the
-  tray), and a merge always waits for a tap: it drops a task, so no direct write path (a connector's
+  tray), nor is a mail thread a chat reply proposes to follow (`link_thread`, staged as `follow_thread`; polish 2026-11-11), and a chat
+  Create follows the threads its proposal cites inside its batch, and a merge always waits for a tap: it drops a task, so no direct write path (a connector's
   `apply_changes` included) may make one. Closing never cascades along a link.
 - **Outflow must not depend on the user.** Every task has a close signal or an expiry.
 - **The evidence rule**: delete or close on good evidence, never on a hunch. Headless runs can
@@ -711,10 +712,13 @@ Python validates before the UI may stage anything: ops in that set only; a task 
 row; `set` fields pass the voice-note cleaner (settable fields, taxonomy, ISO dates); a reminder
 validates like the tray's; a `create` is made by its Create button at once or staged in the tray as
 `from_chat` (the server makes the stored proposal; both key it `chat:<message>:<n>`, so the two never make
-two tasks); mail evidence counts only for a conversation the run actually fetched. **`link_thread` is applied at once**,
-but only for a conversation the run fetched (the server records `seen.jsonl` per run): a link is
-metadata the sweep then watches for free, not task state, so a task linked once never goes stale
-silently. **Drafts** come from the server's own record (`drafts.jsonl`), never from the model's claim;
+two tasks); mail evidence counts only for a conversation the run actually fetched. **`link_thread` is a proposal like the others**
+(polish 2026-11-11; it used to be written at once, with no batch and no Undo), and only for a conversation the run
+fetched (the server records `seen.jsonl` per run, with the newest message time each tool showed): the page lists it
+("follow the mail thread “…”"), ticked like the rest, and stages it as a `follow_thread` change, so Apply writes the
+link (seen up to the newest mail the run read, so the next sweep does not call that mail "Thread updated") and Undo
+removes it. A thread the task already follows is shown as linked, with nothing to stage. A chat Create (and a chat
+create staged in the tray) follows the threads its proposal cites in the same batch, so one Undo takes back both. **Drafts** come from the server's own record (`drafts.jsonl`), never from the model's claim;
 they are listed with "Open in Mailbird" (`select_conversation`, or `show_notification` for a new
 message). A new draft goes only to a bare address a task names (counterpart, waiting_on) or one of the
 user's own accounts — a hostile mail that CCs a stranger cannot make that stranger a recipient; a reply

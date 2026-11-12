@@ -12,12 +12,14 @@ drafted and which threads were read.
 
 What Python enforces: ops in CHAT_OPS only; task ops name an existing row; `set` fields pass the same
 cleaner as a voice note (SETTABLE, taxonomy, ISO dates); a reminder validates like the tray's;
-`link_thread` is applied at once but only for a conversation the run actually fetched (`seen.jsonl`),
-since a link is metadata the sweep then watches, not task state; `create` waits for a click; drafts
-are read from `drafts.jsonl`, written by the server as it made them. A task link (`link`, `unlink`,
-`merge`, a create's `links`) may only name tasks the turn attached or a reading tool showed
-(`tasks_seen.jsonl`), and is never applied at once; Create runs one `batches.apply`, so a proposed
-task and its links undo together. Everything rejected is kept on the message so the UI can show it.
+`link_thread` names only a conversation the run actually fetched (`seen.jsonl`) and, like every other
+proposal, is written by Apply (the page stages it as a `follow_thread` change, seen up to the newest
+mail the run read) and taken back by Undo (polish 2026-11-11: it used to be written at once, with no
+batch); `create` waits for a click; drafts are read from `drafts.jsonl`, written by the server as it
+made them. A task link (`link`, `unlink`, `merge`, a create's `links`) may only name tasks the turn
+attached or a reading tool showed (`tasks_seen.jsonl`), and is never applied at once; Create runs one
+`batches.apply`, so a proposed task, its links and the mail threads it cites (`follow_thread` on the
+create's ref) undo together. Everything rejected is kept on the message so the UI can show it.
 """
 from __future__ import annotations
 
@@ -33,7 +35,7 @@ from pathlib import Path
 
 from . import batches, config as C, mcp_server, relations
 from .claude import runner as R
-from .db import add_link, add_mention, get_task, log_run, now_iso, one, rows
+from .db import add_mention, get_task, log_run, now_iso, one, rows
 from .sync_file import _clean_task_fields
 
 PROMPTS = C.ROOT / "prompts"
@@ -265,7 +267,8 @@ def _clean_proposals(conn: sqlite3.Connection, cfg: dict, data: dict, seen: dict
             kind, ref = str(e.get("kind") or "")[:30], str(e.get("ref") or "")[:200]
             if kind == "mail_thread" and ref not in seen:
                 continue                                           # a thread the run never fetched proves nothing
-            evidence.append({"kind": kind, "ref": ref, "label": str(e.get("label") or "")[:160]})
+            evidence.append(dict({"kind": kind, "ref": ref, "label": str(e.get("label") or "")[:160]},
+                                 **({"at": seen[ref]["at"]} if kind == "mail_thread" and seen[ref].get("at") else {})))
         if op not in CHAT_OPS:
             rejected.append(f"{label}: unknown op {op!r}"); continue
         if op == "create":
@@ -304,8 +307,13 @@ def _clean_proposals(conn: sqlite3.Connection, cfg: dict, data: dict, seen: dict
             if ref not in seen:
                 rejected.append(f"{label}: a thread this turn never read"); continue
             s = seen[ref]
-            add_link(conn, tid, "mail_thread", ref, label=s.get("subject"), account=s.get("account"))
-            kept.append({"op": "link_thread", "task_id": tid, "fields": {"conversation_id": ref, "subject": s.get("subject"), "account": s.get("account")}, "label": label, "evidence": evidence, "applied": True})
+            # Written by Apply as a `follow_thread` change (the page stages these fields), seen up to the newest
+            # mail the run read. A thread the task follows already is shown as linked, with nothing to stage.
+            followed = one(conn, "SELECT 1 AS x FROM links WHERE task_id = ? AND kind = 'mail_thread' AND ref = ?", (tid, ref)) is not None
+            f = {"conversation_id": ref, "subject": s.get("subject"), "account": s.get("account")}
+            if s.get("at"):
+                f["at"] = s["at"]
+            kept.append({"op": "link_thread", "task_id": tid, "fields": f, "label": label, "evidence": evidence, "applied": followed})
             continue
         elif op in ("link", "unlink", "merge"):
             other = fields.get("into") if op == "merge" else fields.get("other")
@@ -480,7 +488,7 @@ _CREATE_LOCK = threading.Lock()
 def create_from_proposal(conn: sqlite3.Connection, cfg: dict, message_id: int, index: int, today: date, lock=None) -> int:
     """The user clicked Create on a stored proposal: one batch keyed `chat:<message>:<index>`, so a
     second click changes nothing and one Undo takes back the task and its links. A link to another
-    proposal's ref is made only once that task exists (create it first). Cited mail threads become links.
+    proposal's ref is made only once that task exists (create it first). Cited mail threads are followed in the same batch.
     Two clicks at once (the API runs routes on a thread pool over one connection) are taken one after
     the other, so the second finds the task the first made instead of writing an empty batch. `lock`: the API's
     commit_lock, taken after _CREATE_LOCK."""
@@ -512,7 +520,8 @@ def _create_from_proposal(conn: sqlite3.Connection, cfg: dict, message_id: int, 
         links.append(dict(ln, other=other))
     if links:
         f["links"] = links
-    res = batches.apply(conn, [{"op": "create", "fields": f, "source_key": key}], "chat", today)
+    f["ref"] = "new"                                 # the cited threads below follow the task this batch makes
+    res = batches.apply(conn, [{"op": "create", "fields": f, "source_key": key}] + _follows("new", p), "chat", today)
     skipped += res["skipped"]
     if not res["created"]:
         ex = one(conn, "SELECT id FROM tasks WHERE source_key = ?", (key,))
@@ -520,13 +529,23 @@ def _create_from_proposal(conn: sqlite3.Connection, cfg: dict, message_id: int, 
             return int(ex["id"])
         raise ValueError("; ".join(s["why"] for s in res["skipped"]) or "nothing was created")
     tid = res["created"][0]
-    for e in p.get("evidence") or []:
-        if e.get("kind") == "mail_thread" and e.get("ref"):
-            add_link(conn, tid, "mail_thread", e["ref"], label=e.get("label"))
     props[index] = dict(p, applied=True, task_id=tid, batch_id=res["batch_id"], skipped=skipped)
     conn.execute("UPDATE chat_messages SET proposals_json = ? WHERE id = ?", (json.dumps(props, default=str), message_id))
     conn.commit()
     return tid
+
+
+def _follows(ref: str, p: dict) -> list[dict]:
+    """The mail threads a create proposal cites, as `follow_thread` changes on the task its create makes
+    (`ref`, resolved inside the same batch), so the batch's Undo removes them with the task."""
+    out = []
+    for e in p.get("evidence") or []:
+        if isinstance(e, dict) and e.get("kind") == "mail_thread" and e.get("ref"):
+            f = {"conversation_id": str(e["ref"]), "subject": e.get("label") or None}
+            if e.get("at"):
+                f["at"] = e["at"]
+            out.append({"op": "follow_thread", "task_id": ref, "fields": f})
+    return out
 
 
 # ---- proposals staged in the tray ---------------------------------------------------------------
@@ -589,6 +608,9 @@ def resolve_staged(conn: sqlite3.Connection, cfg: dict, changes: list[dict], ski
             if links:
                 f["links"] = links
             ch = {"op": "create", "fields": f, "source_key": key, "created_source": "Chat", "from_chat": {"message_id": m, "index": i}}
+            follows = _follows(f["ref"], props[i])           # its cited threads, in the same batch, right after it
+        else:
+            follows = []
         if isinstance(ch, dict):                             # a tray ref to a task already made becomes its id (copies: the caller's list is left as it was)
             ch = dict(ch)
             if "task_id" in ch:
@@ -600,12 +622,13 @@ def resolve_staged(conn: sqlite3.Connection, cfg: dict, changes: list[dict], ski
                 if isinstance(f.get("links"), list):
                     f["links"] = [dict(ln, other=_made(conn, ln.get("other"))) if isinstance(ln, dict) else ln for ln in f["links"]]
         out.append(ch)
+        out.extend(follows)
     return out
 
 
 def mark_staged(conn: sqlite3.Connection, changes: list[dict], res: dict) -> None:
-    """After the batch: each chat create it made marks its stored proposal applied, with the task and the batch (its Undo),
-    and is linked to every mail thread the proposal cites, as Create does (so the mail sweep follows that thread)."""
+    """After the batch: each chat create it made marks its stored proposal applied, with the task and the batch (its Undo).
+    The mail threads the proposal cites were followed inside the batch (`resolve_staged`), as Create does."""
     for ch in changes:
         fc = ch.get("from_chat") if isinstance(ch, dict) and ch.get("op") == "create" else None
         if not fc:
@@ -616,9 +639,6 @@ def mark_staged(conn: sqlite3.Connection, changes: list[dict], res: dict) -> Non
         m = one(conn, "SELECT proposals_json FROM chat_messages WHERE id = ?", (fc["message_id"],))
         props = _loads((m or {}).get("proposals_json"), [])
         i = fc["index"]
-        for e in props[i].get("evidence") or []:
-            if isinstance(e, dict) and e.get("kind") == "mail_thread" and e.get("ref"):
-                add_link(conn, ex["id"], "mail_thread", e["ref"], label=e.get("label"))
         props[i] = dict(props[i], applied=True, task_id=ex["id"], batch_id=res["batch_id"])
         conn.execute("UPDATE chat_messages SET proposals_json = ? WHERE id = ?", (json.dumps(props, default=str), fc["message_id"]))
     conn.commit()

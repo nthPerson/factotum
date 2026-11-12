@@ -151,7 +151,11 @@ def seen_threads(run_dir: Path | str) -> dict[str, dict]:
             except json.JSONDecodeError:
                 continue
             if d.get("conversation_id"):
-                out.setdefault(d["conversation_id"], {}).update({k: v for k, v in d.items() if v is not None})
+                s = out.setdefault(d["conversation_id"], {})
+                at = max((str(x) for x in (s.get("at"), d.get("at")) if x), default=None)   # the newest message any read showed
+                s.update({k: v for k, v in d.items() if v is not None})
+                if at:
+                    s["at"] = at
     return out
 
 
@@ -485,10 +489,12 @@ def _account_id(ctx: Context, address: str | None) -> int | None:
     return aid
 
 
-def _see(ctx: Context, cid, subject=None, account=None, last_message_id=None, people=()) -> None:
+def _see(ctx: Context, cid, subject=None, account=None, last_message_id=None, people=(), at=None) -> None:
+    """`at`: the newest message time the tool showed (a followed thread is seen up to it, so the next sweep
+    does not call the mail the turn read "Thread updated")."""
     if cid:
         ctx.record("seen", {"conversation_id": str(cid), "subject": _cut(subject, 200) if subject else None, "account": account, "last_message_id": last_message_id,
-                            "people": sorted({_addr_of(p) for p in people if _addr_of(p)}) or None})
+                            "people": sorted({_addr_of(p) for p in people if _addr_of(p)}) or None, "at": str(at) if at else None})
 
 
 def _addr_of(x) -> str:
@@ -568,7 +574,7 @@ def mail_search(ctx: Context, args: dict) -> dict:
                "last_message_id": int(c["lastMessageId"]) if str(c.get("lastMessageId") or "").isdigit() else c.get("lastMessageId"),
                "account": acc, "messages": c.get("messageCount"), "preview": _cut(c.get("preview") or c.get("snippet"), PREVIEW)}
         out.append(row)
-        _see(ctx, row["conversation_id"], row["subject"], acc, row["last_message_id"])
+        _see(ctx, row["conversation_id"], row["subject"], acc, row["last_message_id"], at=row["at"])
     return {"conversations": out}
 
 
@@ -582,7 +588,8 @@ def mail_thread(ctx: Context, args: dict) -> dict:
     msgs = [{"id": m.get("id"), "from": _who(m.get("from")), "at": m.get("receivedAtUtc") or m.get("sentAtUtc"), "preview": _cut(m.get("preview") or m.get("bodyPreview"), PREVIEW)}
             for m in (c.get("messages") or [])[:30]]
     acc = ctx.accounts()["by_id"].get(int(c["accountId"])) if c.get("accountId") is not None else ctx.account_of_folder(c.get("folderId"), *(c.get("actualFolders") or []))
-    _see(ctx, cid, c.get("subject"), acc, msgs[-1]["id"] if msgs else None, people=[m.get("from") for m in (c.get("messages") or [])])
+    _see(ctx, cid, c.get("subject"), acc, msgs[-1]["id"] if msgs else None, people=[m.get("from") for m in (c.get("messages") or [])],
+         at=max((str(m["at"]) for m in msgs if m.get("at")), default=None))
     return {"conversation_id": cid, "subject": _cut(c.get("subject"), 160), "account": acc, "messages": msgs}
 
 
@@ -598,7 +605,7 @@ def mail_message(ctx: Context, args: dict) -> dict:
     mine = ctx.accounts()["by_email"]
     people = [m.get("from"), *(m.get("to") or []), *(m.get("cc") or [])]
     acc = ctx.accounts()["by_id"].get(int(m["accountId"])) if m.get("accountId") is not None else next((_addr_of(p) for p in people if _addr_of(p) in mine), None)
-    _see(ctx, m.get("conversationId"), m.get("subject"), acc, mid, people=people)
+    _see(ctx, m.get("conversationId"), m.get("subject"), acc, mid, people=people, at=m.get("receivedAtUtc") or m.get("sentAtUtc"))
     return {"message_id": mid, "conversation_id": m.get("conversationId"), "subject": _cut(m.get("subject"), 200), "from": _who(m.get("from")),
             "to": [_who(x) for x in (m.get("to") or [])][:20], "cc": [_who(x) for x in (m.get("cc") or [])][:20], "at": m.get("receivedAtUtc") or m.get("sentAtUtc"),
             "body": body[:cap], "truncated": len(body) > cap, "attachments": [str(a.get("name") or a.get("fileName") or "") for a in (m.get("attachments") or [])][:20]}

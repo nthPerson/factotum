@@ -314,7 +314,7 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit(f"chat turn failed: {res['error']}")
         print(f"\n{res['reply_md']}\n")
         for i, pr in enumerate(res["proposals"]):
-            print(f"  proposal {i}: {pr['label']}" + (" (applied: link)" if pr.get("applied") else "") + (f" · {json.dumps(pr['fields'])}" if pr.get("fields") else ""))
+            print(f"  proposal {i}: {pr['label']}" + (" (the task follows this thread already)" if pr.get("applied") and pr.get("op") == "link_thread" else "") + (f" · {json.dumps(pr['fields'])}" if pr.get("fields") else ""))
         for d in res["drafts"]:
             print(f"  draft in Mailbird: {d.get('kind')} · {d.get('subject') or ''} · {d.get('account') or ''} (message {d.get('draft_message_id')})")
         for r in res["rejected"]:

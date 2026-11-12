@@ -368,3 +368,96 @@ def test_factotums_own_refusal_of_a_push_address_is_marked_as_such(cfg, tmp_path
     assert out["ok"] is False and out["status"] == 500 and out["factotum_refused"] is False
     devs = {d["endpoint"]: d for d in client.get("/api/push").json()["devices"]}
     assert devs["https://push.invalid/svc"]["factotum_refused"] is False and devs["https://intranet.corp/admin"]["factotum_refused"] is True
+
+
+# --- G1 / G3: a chat reply's mail threads are followed in a batch, never at once ------------------------
+
+def _chat_reply(c, cfg, tmp_path, monkeypatch, proposals, seen, attached=(5,)):
+    """One stored chat turn whose run read the `seen` records and replied with `proposals`."""
+    from pathlib import Path
+    from factotum import chat
+    from factotum.claude.runner import RunResult
+    from conftest import TODAY
+    monkeypatch.setattr(chat, "RUNS_DIR", tmp_path / "runs")
+    data = {"reply_md": "Found it.", "proposals": proposals}
+
+    def fake(cfg, kind, prompt, **kw):
+        (Path(kw["workdir"]) / "seen.jsonl").write_text("".join(json.dumps(s) + "\n" for s in seen))
+        return RunResult(True, data, json.dumps(data), 0.1, 100, session_id="S")
+    return chat.turn(c, cfg, chat.new_thread(c), "find the thread", list(attached), today=TODAY, runner=fake)
+
+
+SEEN = [{"conversation_id": "conv-1", "subject": "Visit dates", "account": "me@example.edu", "at": "2026-11-01T08:00:00Z"},
+        {"conversation_id": "conv-1", "subject": "Visit dates", "at": "2026-11-01T09:30:00Z"},          # mail_thread after mail_search
+        {"conversation_id": "conv-1", "at": "2026-10-30T07:00:00Z"}]                                    # an older message read last
+
+
+def test_a_chat_link_thread_is_a_proposal_written_by_apply_and_taken_back_by_undo(cfg, tmp_path, monkeypatch):
+    client, c = _app(cfg, tmp_path)
+    mk(c, 5, name="Plan the visit")
+    mk(c, 6, name="Book the room")
+    c.execute("INSERT INTO links (task_id, kind, ref, created_at) VALUES (6, 'mail_thread', 'conv-1', ?)", (now_iso(),)); c.commit()
+    res = _chat_reply(c, cfg, tmp_path, monkeypatch, [
+        {"op": "link_thread", "task_id": 5, "fields": {"conversation_id": "conv-1"}, "label": "link the visit thread"},
+        {"op": "link_thread", "task_id": 6, "fields": {"conversation_id": "conv-1"}, "label": "already followed"},
+        {"op": "link_thread", "task_id": 5, "fields": {"conversation_id": "never-read"}, "label": "a thread it never read"}], SEEN, attached=(5, 6))
+    assert not c.execute("SELECT 1 FROM links WHERE task_id = 5").fetchone()          # nothing written by the turn
+    p = res["proposals"][0]
+    assert p["op"] == "link_thread" and p["applied"] is False and p["task_id"] == 5
+    assert p["fields"] == {"conversation_id": "conv-1", "subject": "Visit dates", "account": "me@example.edu", "at": "2026-11-01T09:30:00Z"}
+    assert res["proposals"][1]["applied"] is True                                       # a thread the task follows already
+    assert len(res["proposals"]) == 2 and any("never read" in r for r in res["rejected"])
+    # staged as the page stages it: one follow_thread change, written by Apply, seen up to the newest mail the run read
+    r = client.post("/api/batches/apply", json={"source": "ui", "changes": [{"task_id": 5, "op": "follow_thread", "fields": p["fields"]}]}).json()
+    ln = c.execute("SELECT ref, label, account, last_seen_at FROM links WHERE task_id = 5 AND kind = 'mail_thread'").fetchone()
+    assert dict(ln) == {"ref": "conv-1", "label": "Visit dates", "account": "me@example.edu", "last_seen_at": "2026-11-01T09:30:00Z"}
+    assert c.execute("SELECT field FROM changes WHERE batch_id = ?", (r["batch_id"],)).fetchone()[0] == "thread"
+    assert client.post(f"/api/batches/{r['batch_id']}/undo", json={}).json()["undone"] is True
+    assert not c.execute("SELECT 1 FROM links WHERE task_id = 5").fetchone()
+
+
+def test_seen_threads_keep_the_newest_time_the_run_read():
+    import tempfile
+    from pathlib import Path
+    from factotum import mcp_server
+    with tempfile.TemporaryDirectory() as d:
+        (Path(d) / "seen.jsonl").write_text("".join(json.dumps(s) + "\n" for s in SEEN))
+        s = mcp_server.seen_threads(d)["conv-1"]
+    assert s["at"] == "2026-11-01T09:30:00Z" and s["subject"] == "Visit dates" and s["account"] == "me@example.edu"
+
+
+def test_the_chat_prompts_say_a_thread_is_followed_once_the_user_applies_it():
+    from factotum import config as C
+    for name in ("chat-turn.md", "chat-search-mail.md", "chat-draft-reply.md"):
+        text = (C.ROOT / "prompts" / name).read_text(encoding="utf-8")
+        assert "link_thread" in text and "Factotum then watches it for replies." not in text
+    assert "once the user applies it" in (C.ROOT / "prompts" / "chat-turn.md").read_text(encoding="utf-8")
+
+
+def test_a_chat_create_follows_its_cited_threads_inside_its_batch(cfg, tmp_path, monkeypatch):
+    from conftest import TODAY
+    from factotum import chat
+    client, c = _app(cfg, tmp_path)
+    mk(c, 5, name="Plan the visit")
+    ev = [{"kind": "mail_thread", "ref": "conv-1", "label": "Oct 31 from Max"}]
+    res = _chat_reply(c, cfg, tmp_path, monkeypatch, [
+        {"op": "create", "fields": {"name": "Book the room"}, "label": "new task", "evidence": ev},
+        {"op": "create", "fields": {"name": "Send the agenda"}, "label": "new task", "evidence": ev}], SEEN)
+    mid = res["message_id"]
+    assert res["proposals"][0]["evidence"][0]["at"] == "2026-11-01T09:30:00Z"
+    # Create: the task and its thread in one batch, one Undo takes back both
+    tid = chat.create_from_proposal(c, cfg, mid, 0, TODAY)
+    bid = chat.messages(c, res["thread_id"])[-1]["proposals"][0]["batch_id"]
+    ln = c.execute("SELECT id, last_seen_at FROM links WHERE task_id = ? AND kind = 'mail_thread' AND ref = 'conv-1'", (tid,)).fetchone()
+    assert ln and ln["last_seen_at"] == "2026-11-01T09:30:00Z"
+    assert {r[0] for r in c.execute("SELECT field FROM changes WHERE batch_id = ?", (bid,))} == {"created", "thread"}
+    client.post(f"/api/batches/{bid}/undo", json={})
+    assert not c.execute("SELECT 1 FROM links WHERE task_id = ?", (tid,)).fetchone()
+    assert c.execute("SELECT status FROM tasks WHERE id = ?", (tid,)).fetchone()[0] == "dropped"
+    # staged in the tray (from_chat): the same, through the apply route
+    r = client.post("/api/batches/apply", json={"source": "ui", "changes": [{"op": "create", "fields": {}, "from_chat": {"message_id": mid, "index": 1}}]}).json()
+    t2 = r["created"][0]
+    assert c.execute("SELECT 1 FROM links WHERE task_id = ? AND kind = 'mail_thread' AND ref = 'conv-1'", (t2,)).fetchone()
+    assert {row[0] for row in c.execute("SELECT field FROM changes WHERE batch_id = ?", (r["batch_id"],))} == {"created", "thread"}
+    client.post(f"/api/batches/{r['batch_id']}/undo", json={})
+    assert not c.execute("SELECT 1 FROM links WHERE task_id = ?", (t2,)).fetchone()
