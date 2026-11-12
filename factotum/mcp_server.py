@@ -1067,7 +1067,8 @@ def apply_changes(ctx: Context, args: dict) -> dict:
     created = [{"task_id": i, "name": (one(ctx.conn, "SELECT name FROM tasks WHERE id = ?", (i,)) or {}).get("name")} for i in res["created"]]
     ctx.record("applied", {"batch_id": res["batch_id"], "applied": res["applied"], "label": _cut(args.get("label"), 200)})
     return {"batch_id": res["batch_id"], "applied": res["applied"], "created": created, "skipped": res["skipped"], "rejected": rejected, "ignored": ignored,
-            "note": f"Applied as batch {res['batch_id']}. The user can undo it in Factotum → Log. A watch_sent closes its task when the mail sweep next sees the sent message."}
+            "note": (f"Applied as batch {res['batch_id']}. The user can undo it in Factotum → Log. A watch_sent closes its task when the mail sweep next sees the sent message."
+                     if res["batch_id"] is not None else "Nothing was applied: every change was skipped (see skipped for why); no batch was written.")}
 
 
 # ---- Slack (read-only; SPEC §6) ----------------------------------------------------------------

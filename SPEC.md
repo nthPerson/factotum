@@ -138,6 +138,7 @@ relations(id, src, dst, kind, why, source, batch_id, created_at, removed_at, rem
 mentions(id, task_id, source_kind, source_ref, at)       -- append-only; resets the fade clock
 batches(id, created_at, applied_at, undone_at, source, undo_json,
         cause_json)                -- why the batch exists, e.g. {"kind": "ripple", "from": [428], "run": 77}, or NULL
+          -- a batch whose every change is skipped leaves no row: `batches.apply` answers `batch_id: null` with the reasons
 changes(id, batch_id, task_id, field, old, new,
         note)                      -- an optional one-line reason (≤ 300), on every row the change wrote
           -- a link is two changes rows (field `link`, one per end); `evidence.kind` gains `link_suggestion`

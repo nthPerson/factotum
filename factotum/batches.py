@@ -196,6 +196,7 @@ def _same_value(cur_v, want) -> bool:
 
 def apply(conn: sqlite3.Connection, changes: list[dict], source: str, today: date | None = None, closed_by: str | None = None, cause: dict | None = None) -> dict:
     """Apply a list of changes atomically; `cause` (what set the batch off) is stored as cause_json. Returns {"batch_id", "applied": n, "skipped": [...],
+    (`batch_id` is None when every change was skipped: no batch row is kept for nothing)
     "created": [task ids a `create` made], "refs": {ref: task id}, "ripple_queued": [task ids this batch queued for a ripple
     (`ripple.enqueue`, sorted; never any for a ripple's own batch)]}."""
     today = today or date.today()
@@ -231,7 +232,14 @@ def apply(conn: sqlite3.Connection, changes: list[dict], source: str, today: dat
     except Exception:
         conn.rollback()   # one shared connection serves every request; never leave it mid-transaction
         raise
-    cur.execute("UPDATE batches SET undo_json = ? WHERE id = ?", (json.dumps(undo), batch_id))
+    if not applied and not created and not undo and not queued and \
+            cur.execute("SELECT 1 FROM changes WHERE batch_id = ? LIMIT 1", (batch_id,)).fetchone() is None:
+        # Every change was skipped: no batch row is left (the Log shows no empty batch, a toast offers no Undo
+        # for nothing). The answer has no batch, and still carries every reason.
+        cur.execute("DELETE FROM batches WHERE id = ?", (batch_id,))
+        batch_id = None
+    else:
+        cur.execute("UPDATE batches SET undo_json = ? WHERE id = ?", (json.dumps(undo), batch_id))
     conn.commit()
     if created:
         from . import suggestions          # lazy: suggestions must not be imported at the top of batches

@@ -584,7 +584,10 @@
       if (chatMids.length) reloadPlacesWith(chatMids);      // a staged new task now reads "created Task-N" where it was proposed
       // A tray ref (m<message>-<index>) is the page's own name for a new task: never shown.
       const why = String(res.skipped.length ? res.skipped[0].why : '').replace(/no task made in this batch has ref 'm\d+-\d+'/, 'the new task it links to was not in this Apply');
-      const msg = `${res.applied} change${res.applied === 1 ? '' : 's'} applied` + (res.skipped.length ? ` · ${res.skipped.length} skipped: ${why}` : '');
+      // Nothing applied: the server kept no batch (batch_id null), so the toast says why and offers no Undo.
+      const msg = !res.applied && !(res.created || []).length && res.skipped.length
+        ? `Nothing applied · ${res.skipped.length === 1 ? 'skipped' : res.skipped.length + ' skipped'}: ${why}`
+        : `${res.applied} change${res.applied === 1 ? '' : 's'} applied` + (res.skipped.length ? ` · ${res.skipped.length} skipped: ${why}` : '');
       const closed = say.filter(x => !res.skipped.some(k => k.task_id === x.id));      // a skipped Done closed nothing
       closed.forEach(x => sayable.set(x.id, x));
       if (closed.length) toast(msg, true, { buttons: [{ text: 'Say how it went', attrs: `data-say="${closed[0].id}"`, run: () => askOutcome(closed[0].id) }], holdMs: 20000 });

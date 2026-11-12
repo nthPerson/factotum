@@ -127,6 +127,11 @@ def test_apply_changes_is_offered_only_when_the_deployment_opts_in_and_writes_on
     assert "not open" in whys and "already" in whys and "taxonomy" in whys and "address" in whys
     batches.undo(c, res["batch_id"])
     assert one(c, "SELECT status FROM tasks WHERE id = ?", (tid,))["status"] == "dropped" and one(c, "SELECT due FROM tasks WHERE id = 5")["due"] is None
+    n = one(c, "SELECT COUNT(*) AS n FROM batches")["n"]                       # every change skipped by the batch: no batch, and it says so
+    res = json.loads(_text(_rpc(ctx, 5, "tools/call", {"name": "apply_changes", "arguments": {"changes": [
+        {"task_id": 5, "op": "set", "fields": {"context": "new words"}, "expect": {"context": "words it no longer has"}}]}})))
+    assert res["applied"] == 0 and res["batch_id"] is None and "batch None" not in res["note"] and "Nothing was applied" in res["note"], res
+    assert one(c, "SELECT COUNT(*) AS n FROM batches")["n"] == n
 
 
 def test_a_staged_create_reaches_the_tray_and_the_http_route_follows_the_setting(cfg, tmp_path, monkeypatch):

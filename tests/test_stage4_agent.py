@@ -3,7 +3,7 @@ import json
 import re
 
 from factotum import batches, config as C, lifecycle, mcp_server as M, relations
-from factotum.db import connect, now_iso
+from factotum.db import connect, now_iso, one
 from stage4_helpers import TODAY, link, mk
 
 
@@ -231,8 +231,12 @@ def test_two_staged_links_that_make_a_loop_skip_the_second_at_apply(cfg, tmp_pat
     assert (p1["staged"], p1["rejected"], p2["staged"], p2["rejected"]) == (1, [], 1, [])
     assert client.post(f"/api/proposals/{p1['proposal_id']}/apply", json={}).json()["applied"] == 1
     out = client.post(f"/api/proposals/{p2['proposal_id']}/apply", json={}).json()
-    assert out["applied"] == 0 and "that would make a loop" in out["skipped"][0]["why"]
+    assert out["applied"] == 0 and out["batch_id"] is None and "that would make a loop" in out["skipped"][0]["why"]
     assert active_rels(app.state.conn) == {(1, 2, "waits_on")}
+    n = one(app.state.conn, "SELECT COUNT(*) AS n FROM batches")["n"]           # the tray's Apply: the same loop, no batch row left
+    out = client.post("/api/batches/apply", json={"changes": [_lk(2, "waits_on", 1)]}).json()
+    assert out["batch_id"] is None and out["applied"] == 0 and "that would make a loop" in out["skipped"][0]["why"]
+    assert one(app.state.conn, "SELECT COUNT(*) AS n FROM batches")["n"] == n
 
 
 def test_merge_always_stages_and_link_may_apply_directly(cfg, tmp_path):

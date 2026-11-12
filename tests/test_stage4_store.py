@@ -395,3 +395,18 @@ def test_the_api_strips_source_key_from_a_change(cfg, tmp_path):
     r = client.post("/api/batches/apply", json={"source": "ui", "changes": [{"op": "create", "fields": {"name": "x"}, "source_key": "canvas:1"}]})
     t = one(app.state.conn, "SELECT source_key, source FROM tasks WHERE id = ?", (r.json()["created"][0],))
     assert t["source_key"].startswith("batch:") and t["source"] == "Manual"
+
+
+def test_a_batch_that_applies_nothing_leaves_no_batch_row(conn):
+    mk(conn, 1); mk(conn, 2)
+    assert link(conn, 1, 2, "waits_on")["applied"] == 1
+    n = one(conn, "SELECT COUNT(*) AS n FROM batches")["n"]
+    res = link(conn, 2, 1, "waits_on")                                        # a loop: every change refused
+    assert res["batch_id"] is None and res["applied"] == 0 and res["created"] == [] and res["ripple_queued"] == []
+    assert "that would make a loop" in res["skipped"][0]["why"]
+    assert one(conn, "SELECT COUNT(*) AS n FROM batches")["n"] == n           # no empty row for the Log, no Undo for nothing
+    res = batches.apply(conn, [{"task_id": 1, "op": "set", "fields": {"score": 5}}, {"op": "link", "task_id": 1, "fields": {}}], "ui", TODAY)
+    assert res["batch_id"] is None and len(res["skipped"]) == 2
+    assert one(conn, "SELECT COUNT(*) AS n FROM batches")["n"] == n
+    res = link(conn, 2, 1, "part_of")                                         # one that applies still has its batch
+    assert res["applied"] == 1 and res["batch_id"] is not None
