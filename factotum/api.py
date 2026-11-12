@@ -55,10 +55,18 @@ SHORTCUT_PATHS = ("new",)
 STAMPED = ("index.html", "app.js", "app.css", "manifest.webmanifest")
 
 
+def _mtime(name: str) -> str:
+    try:
+        return str((WEB / name).stat().st_mtime_ns)
+    except OSError:                  # missing mid-deploy: skipped, never a 500 on every /api call
+        return "-"
+
+
 def build_stamp() -> str:
     """Twelve hex digits over the modification times of the files the page is made of; read per call
-    (the web files are served from disk, so a JS-only deploy changes it without a restart)."""
-    return hashlib.sha1("|".join(str((WEB / f).stat().st_mtime_ns) for f in STAMPED).encode()).hexdigest()[:12]
+    (the web files are served from disk, so a JS-only deploy changes it without a restart). A missing
+    file counts as missing, so the stamp changes again when it appears."""
+    return hashlib.sha1("|".join(_mtime(f) for f in STAMPED).encode()).hexdigest()[:12]
 
 
 def _index_html() -> str:

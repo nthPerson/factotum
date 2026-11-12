@@ -232,3 +232,22 @@ def test_unavailable_is_only_a_missing_program_or_a_dead_login():
     assert R.unavailable(_missing_binary({}, "filing", "p")) == "missing"
     assert R.unavailable(RunResult(False, None, "Sorry", 0.1, 900, error="final message has no JSON object: Sorry")) is None
     assert R.unavailable(RunResult(True, {}, "{}", 0.1, 900)) is None
+
+
+# --- A1: a missing web file never makes the build stamp raise -------------------------------------------
+
+def test_the_build_stamp_skips_a_missing_file_and_changes_when_it_appears(tmp_path, monkeypatch, cfg):
+    from factotum import api
+    for f in api.STAMPED:
+        (tmp_path / f).write_text("x")
+    monkeypatch.setattr(api, "WEB", tmp_path)
+    full = api.build_stamp()
+    (tmp_path / "app.css").unlink()
+    gone = api.build_stamp()                                              # no FileNotFoundError
+    assert gone != full and len(gone) == 12
+    (tmp_path / "app.css").write_text("y")
+    assert api.build_stamp() != gone
+    (tmp_path / "manifest.webmanifest").unlink()
+    client = TestClient(create_app(cfg, db_path=str(tmp_path / "a.db")))
+    r = client.get("/api/review/count")
+    assert r.status_code == 200 and len(r.headers["x-factotum-build"]) == 12
