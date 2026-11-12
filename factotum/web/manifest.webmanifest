@@ -12,5 +12,11 @@
     { "src": "/static/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
     { "src": "/static/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
     { "src": "/static/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "New task", "short_name": "New task", "description": "Add a task in one line", "url": "/new",
+      "icons": [{ "src": "/static/icon-new-96.png", "sizes": "96x96", "type": "image/png" }] },
+    { "name": "Review", "short_name": "Review", "description": "Decide on what Review asks about", "url": "/review",
+      "icons": [{ "src": "/static/icon-review-96.png", "sizes": "96x96", "type": "image/png" }] }
   ]
 }

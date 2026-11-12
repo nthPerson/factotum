@@ -133,6 +133,7 @@
     const p = location.pathname;
     const t = /^\/t\/(\d+)$/.exec(p);
     if (t) return { tab: 'today', task: +t[1], legacy: false };
+    if (p === '/new') return { tab: 'today', task: null, legacy: false, add: true };
     if (p === '/') { const h = location.hash.replace('#', ''); return TABS.includes(h) ? { tab: h, task: null, legacy: true } : { tab: 'today', task: null, legacy: false }; }
     const name = p.slice(1);
     return { tab: TABS.includes(name) ? name : 'today', task: null, legacy: false };
@@ -163,6 +164,9 @@
       else if (!ev && !(history.state && history.state.page)) { setAddress('/', true); setAddress('/t/' + a.task); }      // as on a phone: Back lands on Today
       return;
     }
+    // /new (the long-press "New task"): Today with New task open. / REPLACES /new, so a reload opens Today plainly
+    // and Back leaves the app as from /. Signed out, this never runs and /new stays for the reload after Sign in again.
+    if (a.add) { ui.tab = 'today'; ui.laterOpen = false; ui.page = null; setAddress('/', true); render(); openNew(); return; }
     ui.tab = a.tab; ui.laterOpen = false;
     setAddress(addressOf(a.tab), true);      // a legacy /#<tab> or /today becomes the tab's path; otherwise nothing
     if (ui.page !== null) { closeTask(); return; }      // Back from the task page
@@ -3002,6 +3006,8 @@
     if (ui.page !== null || !LIST_TABS.includes(ui.tab)) go(LIST_TABS.includes(ui.tab) ? ui.tab : 'today'); else render();
     focusSheetBox('new-name');
   }
+  // New task on this device: the sheet on a phone, the line on a desktop. The `n` key and /new (stage 8) share it.
+  function openNew() { if (PHONE()) openSheet(); else openNewLine(); }
   // The taps go; the name stays in draft.newName for the next time the sheet opens.
   function closeSheet() {
     const a = document.activeElement; if (a && a.closest && a.closest('#sheet')) a.blur();      // a removed box would leave kb-open on
@@ -3826,7 +3832,7 @@
     if (e.key === '/' && !e.ctrlKey && !e.metaKey && !e.altKey && ui.page === null && LIST_TABS.includes(ui.tab)) { e.preventDefault(); openFind(); return; }
     if (ui.page !== null) return;      // the task page covers the tab: no key acts on what is under it
     // Before the returns below: Review has its own keys, and an empty list has no rows (and says "Press n").
-    if (e.key === 'n' && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); if (PHONE()) openSheet(); else openNewLine(); return; }      // a phone's hardware keyboard opens the sheet
+    if (e.key === 'n' && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); openNew(); return; }      // a phone's hardware keyboard opens the sheet
     if (ui.tab === 'review') { const map = { d: 'done', k: 'keep', s: 'later', x: 'drop', t: 'top', l: 'longterm' }; if (map[e.key]) { e.preventDefault(); reviewAct(map[e.key]); } return; }
     const visible = [...document.querySelectorAll('#panel .row')].map(r => +r.dataset.id); if (!visible.length) return;
     const i = visible.indexOf(ui.focus);

@@ -49,6 +49,8 @@ from .dates import parse_date
 
 WEB = Path(__file__).resolve().parent / "web"
 PAGE_TABS = ("today", "timeline", "projects", "review", "chat", "log", "settings")
+# Page addresses that are not tabs: /new opens Today with New task (the app's long-press shortcut, stage 8).
+SHORTCUT_PATHS = ("new",)
 STAMPED = ("index.html", "app.js", "app.css", "manifest.webmanifest")
 
 
@@ -1194,7 +1196,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
 
     # One explicit path per tab, never a `/{tab}` pattern (it would shadow /mcp).
     app.add_api_route("/", index, methods=["GET"], include_in_schema=False)
-    for _tab in PAGE_TABS:
+    for _tab in PAGE_TABS + SHORTCUT_PATHS:
         app.add_api_route(f"/{_tab}", index, methods=["GET"], include_in_schema=False)
     app.add_api_route("/t/{task_id:int}", lambda task_id: index(), methods=["GET"], include_in_schema=False)
 

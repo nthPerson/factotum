@@ -133,3 +133,44 @@ def test_the_worker_sets_the_badge_and_still_has_no_fetch_handler():
     js = (api.WEB / "sw.js").read_text()
     assert "function badgeOf(" in js and "function setBadge(" in js and "app_badge" in js
     assert "addEventListener('fetch'" not in js and 'addEventListener("fetch"' not in js and "onfetch" not in js
+
+
+# --- Task 4: shortcuts, their icons, /new
+# _png_size is stage 1's (imported at the top of the file)
+
+def _tool():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("make_icons", C.ROOT / "tools" / "make_icons.py")
+    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+    return mod
+
+def test_new_answers_with_the_page(cfg, tmp_path):
+    c = TestClient(create_app(cfg, db_path=str(tmp_path / "a.db")))
+    r = c.get("/new")
+    assert r.status_code == 200 and 'id="panel"' in r.text and "/static/app.js?v=" in r.text
+    assert r.headers["cache-control"] == "no-cache, must-revalidate"
+    assert c.get("/new/1").status_code == 404 and c.get("/news").status_code == 404
+
+def test_the_manifest_has_two_shortcuts_whose_addresses_and_icons_answer(cfg, tmp_path):
+    c = TestClient(create_app(cfg, db_path=str(tmp_path / "a.db")))
+    r = c.get("/static/manifest.webmanifest")
+    assert r.status_code == 200 and r.headers["content-type"].startswith("application/manifest+json")
+    m = r.json()                                                   # still valid JSON
+    sc = {s["name"]: s for s in m["shortcuts"]}
+    assert set(sc) == {"New task", "Review"} and sc["New task"]["url"] == "/new" and sc["Review"]["url"] == "/review"
+    for s in sc.values():
+        assert c.get(s["url"]).status_code == 200
+        for icon in s["icons"]:
+            g = c.get(icon["src"])
+            assert g.status_code == 200 and g.headers["content-type"].startswith("image/png")
+            assert _png_size(g.content) == (96, 96) and icon["sizes"] == "96x96"
+    assert '<link rel="manifest" href="/static/manifest.webmanifest" crossorigin="use-credentials">' in c.get("/").text
+
+def test_the_icon_tool_draws_the_shortcut_icons_that_are_committed():
+    mod = _tool()
+    for kind in ("new", "review"):
+        b = mod.shortcut(kind)
+        assert _png_size(b) == (96, 96) and b == (api.WEB / f"icon-{kind}-96.png").read_bytes()
+    assert mod.shortcut("new") != mod.shortcut("review")
+    for n in (180, 192, 512):
+        assert mod.png(n) == (api.WEB / f"icon-{n}.png").read_bytes()     # the app icons are unchanged
