@@ -1034,12 +1034,16 @@
     if (ui.page !== null && (PHONE() || !listed(id))) openPage(id, true, ui.page);
     else goTask(id);
   }
-  // Some open task has something a badge shows (a finished merge's same_as alone does not count).
+  // Some open task has something a badge shows (a finished merge's same_as alone does not count, nor a filing
+  // suggestion: that is a chip on a task added by hand, not a badge).
   function hasLinks() {
-    return openOnes().some(x => x.rel && ((x.rel.links || []).some(l => l.kind === 'part_of' || l.kind === 'waits_on') || (x.rel.suggestions || []).length || x.rel.changed));
+    return openOnes().some(x => x.rel && ((x.rel.links || []).some(l => l.kind === 'part_of' || l.kind === 'waits_on') || (x.rel.suggestions || []).some(s => s.signal !== 'filing') || x.rel.changed));
   }
-  function legendHtml() {
+  // The badge colours, under a list whose drawn rows carry a badge (`groups`: the list's groups, a folded one draws
+  // no rows); the Linked view passes none.
+  function legendHtml(groups) {
     if (PHONE() || !hasLinks()) return '';
+    if (groups && !groups.some(g => !folded(g.key) && g.rows.some(x => badgesFor(x).length))) return '';
     return `<div class="lblegend"><span><i class="ok"></i>a link you or Claude confirmed</span><span><i class="sus"></i>a link the app suspects, one tap to confirm</span><span><i class="chg"></i>changed by a linked task since you last looked</span></div>`;
   }
 
@@ -1721,7 +1725,7 @@
     const { groups } = todayGroups();      // snoozed rows are not in these groups but are open: Timeline lists them
     const lists = effectiveLinkView() === 'linked' ? linkedHtml() : groups.map(group).join('') +
       (!openOnes().length ? noTasksHtml() : groups.some(g => g.rows.length) ? '' : todayEmptyHtml());
-    return summaryHtml() + composer() + todayPlaceHtml() + linkBarHtml() + lists + legendHtml() +
+    return summaryHtml() + composer() + todayPlaceHtml() + linkBarHtml() + lists + legendHtml(effectiveLinkView() === 'linked' ? null : groups) +
       `<div class="note">Soft dates that slipped, new items, and fading backlog are not here. They wait in <b>Review</b> so this screen stays short.</div>`;
   }
   // Today with no rows. Under Ready now the waiting tasks it hides may be due this week: say so, not "nothing is due".
@@ -1752,7 +1756,8 @@
   }
   function renderTimeline() {
     if (!openOnes().length) return composer() + todayPlaceHtml() + noTasksHtml();
-    return composer() + todayPlaceHtml() + linkBarHtml() + (effectiveLinkView() === 'linked' ? linkedHtml() : timelineGroups().map(group).join('')) + legendHtml();
+    const linked = effectiveLinkView() === 'linked', groups = linked ? null : timelineGroups();
+    return composer() + todayPlaceHtml() + linkBarHtml() + (linked ? linkedHtml() : groups.map(group).join('')) + legendHtml(groups);
   }
   function projectGroups() {
     const m = new Map();
