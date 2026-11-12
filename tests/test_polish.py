@@ -297,3 +297,16 @@ def test_effective_leaves_no_wal_or_shm_beside_the_database(tmp_path, monkeypatc
     assert main(["effective", "lifecycle.top_cap"]) == 0
     assert capsys.readouterr().out.splitlines()[-1].split()[1:] == ["5", "settings"]
     assert sorted(p.name for p in tmp_path.iterdir()) == ["f.db"] and db.read_bytes() == before
+
+
+# --- F3: `exclude=` is parsed safely, once, for both Review routes ---------------------------------------
+
+def test_exclude_takes_ascii_digits_with_one_minus_and_ignores_the_rest(cfg, tmp_path):
+    from factotum.api import exclude_ids
+    assert exclude_ids("1, 2,-3,²,--5,3²,٣,+4,,x, 7 ") == {1, 2, -3, 7}
+    assert exclude_ids(None) == set() and exclude_ids("") == set()
+    client, c = _app(cfg, tmp_path)
+    mk(c, 1, name="Water the plants", last_mention_at="2026-09-01")
+    for route in ("/api/review", "/api/review/count"):
+        for bad in ("²", "--5", "1,²,--5", "٣"):
+            assert client.get(route, params={"exclude": bad}).status_code == 200, (route, bad)

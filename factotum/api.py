@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import queue
 import threading
 from datetime import date
@@ -53,6 +54,15 @@ PAGE_TABS = ("today", "timeline", "projects", "review", "chat", "log", "settings
 # Page addresses that are not tabs: /new opens Today with New task (the app's long-press shortcut, stage 8).
 SHORTCUT_PATHS = ("new",)
 STAMPED = ("index.html", "app.js", "app.css", "manifest.webmanifest")
+
+
+_ID_RE = re.compile(r"-?[0-9]+")
+
+
+def exclude_ids(raw: str | None) -> set[int]:
+    """`exclude=` of the two Review routes: comma-separated task ids, each ASCII digits with at most one
+    leading minus; anything else (`²`, `--5`, `+4`, another script's digits) is ignored, never a 500."""
+    return {int(s) for s in (x.strip() for x in (raw or "").split(",")) if _ID_RE.fullmatch(s)}
 
 
 def _mtime(name: str) -> str:
@@ -496,14 +506,14 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
     @app.get("/api/review/count")
     def review_count(exclude: str | None = None):
         """The number beside Review and on the app's icon (review_queue.count). Reads only; no lock needed."""
-        skip = {int(x) for x in (exclude or "").split(",") if x.strip().lstrip("-").isdigit()}
+        skip = exclude_ids(exclude)
         return {"count": review_queue.count(conn, eff_cfg(), date.today(), exclude=skip)}
 
     def _review(exclude: str | None):
         today = date.today()
         ecfg = eff_cfg()
         st = get_settings(conn)
-        skip = {int(x) for x in (exclude or "").split(",") if x.strip().lstrip("-").isdigit()}
+        skip = exclude_ids(exclude)
         suggestions.session(conn, today, suggestions.per_review(ecfg))   # today's few link suggestions
         conn.commit()
         open_tasks = decorate_all([t for t in rows(conn, "SELECT * FROM tasks WHERE status = 'open'") if t["id"] not in skip], today, ecfg)
