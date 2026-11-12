@@ -6,6 +6,8 @@ undoable with its cause); everything else it suggests waits on Review as a card 
 """
 from __future__ import annotations
 
+import bisect
+import functools
 import html
 import json
 import re
@@ -356,23 +358,33 @@ TASK_REF_RE = re.compile(r"\bTask-(\d{1,6})\b")
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,255}\.[A-Za-z]{2,24}")
 SET_FIELDS = ("name", "due", "hard", "effort", "project")     # what a ripple's `set` or `create` card may carry
 NEVER_FIELDS = ("counterpart", "waiting_on")                  # a ripple never copies an address or a person (design §8.6)
-# A web address a ripple may not bring to a task on its own, nor drop (design §8.6). Anything address-shaped
-# counts, since over-flagging only costs a Review card where the owner sees before and after: a scheme
-# (http, https, ftp, the de-fanged hxxp) or www. link; an IPv4 address, with or without a path; or host
-# labels joined by full stops (also 。．｡ and the de-fanged [.] (.) {.} [dot] (dot) " dot ") whose last
-# label is letters, two or more, when the host has a non-ASCII letter (an IDN or a look-alike), or a port
-# or a path follows, or the last label is in COMMON_TLDS. Not one: e.g., a.m., U.S., 3.5, v2.1, 9.30,
-# Dr. Lee (a space), a file name whose extension is not a TLD (report.pdf, Node.js, Node.js/React).
-# A host may hide an invisible character (a soft hyphen, a zero-width space or joiner) beside a label or a
-# dot. Bounded like every pattern here.
-_INV = r"[­​-‏⁠-⁤﻿]"
-_DOT = _INV + r"{0,3}(?:[.。．｡]|\[\.\]|\(\.\)|\{\.\}|\[dot\]|\(dot\)|[ \t]{1,3}dot[ \t]{1,3})" + _INV + r"{0,3}"
+# A web address a ripple may not bring to a task on its own, nor drop (design §8.6). The rule is "flag
+# unless it is plainly not one": over-flagging costs a Review card where the owner sees before and after,
+# under-flagging writes a stranger's address into the owner's text unseen. `_web_spans` looks at every
+# place in a text where a host could start, and a host never swallows what follows it, so nothing rides
+# unseen in another token's path, user-info or tail. An address is
+#   - anything after a scheme (http, https, ftp, the de-fanged hxxp);
+#   - a host: labels joined by full stops (also 。．｡ and one-dot leaders, [.] (.) {.} [dot] (dot), and
+#     invisible characters beside them) whose last label is letters, two or more, and no file extension (report.pdf, Node.js:
+#     no such host exists), or an IPv4 address. A host with any strong sign is an address: a port, a path,
+#     query or fragment, www., a non-ASCII letter, a de-fanged dot, or anything else in its whitespace-
+#     separated token but brackets, quotes, sentence punctuation, a call's "(x)" and "'s" (@evil.com,
+#     evil.com@, see:evil.com, notes.txt/evil.com). Only a bare one (the whole token) is checked against
+#     the closed lists: its last label must be a known TLD (COMMON_TLDS) and the token no degree (M.Sc);
+#   - "name dot com" with a known TLD or a path.
+# Not one: e.g., a.m., U.S., 3.5, v2.1, 9.30, Dr. Lee (a space), report.pdf, README.md, user.email.
+# Bounded like every pattern here.
+_INV = "[\u00ad\u200b-\u200f\u2060-\u2064\ufeff]"           # a soft hyphen, zero-width spaces and joiners, marks
+_DOT = _INV + r"{0,3}(?:[.\u3002\uff0e\uff61\u2024\ufe52]|\[\.\]|\(\.\)|\{\.\}|\[dot\]|\(dot\))" + _INV + r"{0,3}"
 _LABEL = r"[^\W_](?:[\w-]|" + _INV + r"){0,62}"
-_BODY = r"(?:\[\.\]|\(\.\)|[^\s<>\"')\]]){1,2000}"
-WEB_RE = re.compile(r"(?:h(?:tt|xx)ps?|ftp)(?::|\[:\])//" + _BODY + r"|www" + _DOT + _BODY +
-                    r"|(?<![^\W_])(?P<host>" + _LABEL + r"(?:" + _DOT + _LABEL + r"){1,8})(?P<port>:\d{2,5}\b(?!\.\d))?"
-                    r"(?P<path>/(?:\[\.\]|[^\s<>\"')\]]){0,2000})?", re.I)
-_FANG = re.compile(_INV + r"|\[\.\]|\(\.\)|\{\.\}|\[dot\]|\(dot\)|[ \t]{1,3}dot[ \t]{1,3}|[。．｡]|\[:\]", re.I)
+_TAIL = r"(?:\[\.\]|\(\.\)|[^\s<>\"')\]]){0,2000}"
+SCHEME_RE = re.compile(r"(?:h(?:tt|xx)ps?|ftp)(?::|\[:\])//(?:\[\.\]|\(\.\)|[^\s<>\"')\]]){1,2000}", re.I)
+HOST_RE = re.compile(r"(?<![^\W_])(?P<host>" + _LABEL + r"(?:" + _DOT + _LABEL + r"){1,8})"
+                     r"(?=(?P<port>:\d{1,5}(?![\w.]))?(?P<path>[/?#]" + _TAIL + r")?)", re.I)    # a lookahead: the scan resumes after the host
+SPACED_RE = re.compile(r"(?<![^\W_])" + _LABEL + r"(?:[ \t]{1,3}dot[ \t]{1,3}" + _LABEL + r"){1,8}(?P<path>/" + _TAIL + r")?", re.I)
+_FANG = re.compile(_INV + r"|\[\.\]|\(\.\)|\{\.\}|\[dot\]|\(dot\)|[\u3002\uff0e\uff61\u2024\ufe52]", re.I)
+_WRAP_L, _WRAP_R = "([{<\"'\u201c\u2018\u00ab", ")]}>\"'\u201d\u2019\u00bb.,;:!?"
+_BARE_TAIL = re.compile(r"(?:\(\w{0,20}\)?|['\u2019]s)?")   # what may follow a bare host in its token: m.group(1), Dana.Lee's
 # Country codes and generic TLDs, a few hundred. Left out: the ones that are much more often a file name
 # or a name in code than a bare address (md py rs sh pl cc ps so am pm id al: README.md, setup.py, row.id,
 # et.al), and generic ones that are common words after a full stop in code or config (name email int post
@@ -399,14 +411,17 @@ pictures pizza poker porn press productions promo properties property pub racing
 rent rentals repair reviews rip rocks sale salon school science security sex sexy shoes shopping singles ski
 soccer social software solar stream study style sucks support surf tattoo tax taxi team tennis theater tokyo tours
 town toys trade trading training tube university uno vegas ventures vet video vision vodka vote voting voyage
-wales wang webcam wedding wiki wine works wtf yoga zone
+wales wang webcam wedding wiki wine works wtf yoga zone bond cfd sbs cyou quest beauty hair skin makeup autos boats
+homes motorcycles yachts llc loan loans accountant cricket faith lat
 """.split())
 # File extensions that are no TLD: such a last label is never an address, path or not (Node.js/React).
 FILE_EXTS = frozenset("js mjs cjs jsx ts tsx pdf txt doc docx xls xlsx ppt pptx csv tsv json yaml yml toml ini cfg conf log "
                       "html htm css scss xml svg png jpg jpeg gif webp bmp tif tiff heic wav flac ogg webm mkv avi tex bib "
                       "ipynb java kt cpp hpp rb php swift lua sql db sqlite bak tmp gz tgz tar rar dmg exe dll apk iso odt ods "
                       "rtf epub psd".split())
-_SPACED = re.compile(r"[ \t]dot[ \t]", re.I)
+# Degrees written like a host with a known TLD: a bare one is not an address (M.Sc, B.Tech, B.Com).
+DEGREES = frozenset("b.sc m.sc b.tech m.tech b.com m.com b.arch m.arch b.ed m.ed b.eng m.eng b.des m.des b.pharm m.pharm "
+                    "m.phil d.phil b.mus m.mus".split())
 _SPACED_TLDS = frozenset("com net org edu gov io".split())    # "labdata dot com", but never "put a dot in the box"
 LEFT_OUT = "[address left out]"
 WITHHELD = "its reason named an address this task did not have, so it is left out"    # a note's fixed words then
@@ -462,11 +477,6 @@ def _emails(text: str) -> list[str]:
     return list(dict.fromkeys(m.lower() for m in EMAIL_RE.findall(text or "")))
 
 
-def _mail_spans(text: str) -> list[tuple[int, int]]:
-    """Where `text` holds an email address (`EMAIL_RE`)."""
-    return [m.span() for m in EMAIL_RE.finditer(text or "")]
-
-
 def _key(tok: str) -> str:
     """A web address as it is compared: no trailing punctuation, no http(s) or ftp scheme, no trailing
     slash, the scheme and the host (with its port) lowercased, and everything else exactly as written:
@@ -477,47 +487,67 @@ def _key(tok: str) -> str:
     return (t[:h].lower() + t[h:]).rstrip("/")
 
 
-def _web(m: re.Match, mail: list[tuple[int, int]]) -> str | None:
-    """The web address a `WEB_RE` match names, as `_key` compares it, or None for a bare host-shaped
-    token that is not one, or that lies wholly inside an email address of the same text (`mail`, its
-    `_mail_spans`: the email rule judges the whole address). A scheme or www. match is never skipped."""
-    if m.group("host") is not None:
-        if any(a <= m.start() and m.end() <= b for a, b in mail):
-            return None
-        if not _host_like(m.group("host"), bool(m.group("port") or m.group("path"))):
-            return None
-    return _key(m.group(0)) or None
-
-
 def _plain(text: str) -> str:
-    """`text` lowercased with every de-fanged or full-width dot and colon written plainly and every
-    invisible character gone, so evil[.]com, evil (.) com, evil。com and evil<zero-width space>.com are read
-    as the host shape they stand for. Only for telling whether a token is address-shaped, never for comparing."""
-    def plain(m: re.Match) -> str:
-        t = m.group(0)
-        return ":" if t == "[:]" else "" if re.fullmatch(_INV, t) else "."
-    return _FANG.sub(plain, text or "").lower()
+    """`text` lowercased with every de-fanged or full-width dot written plainly and every invisible
+    character gone: the host shape it stands for. Only for telling whether a token is an address,
+    never for comparing two."""
+    return _FANG.sub(lambda m: "" if re.fullmatch(_INV, m.group(0)) else ".", text or "").lower()
 
 
-def _host_like(raw: str, tail: bool) -> bool:
-    """True when a bare host-shaped token (`WEB_RE`'s `host`) is an address; `tail`: a port or a path follows."""
+def _host_is_address(text: str, m: re.Match, tokens: list[tuple[int, int]]) -> bool:
+    """Whether one `HOST_RE` match of `text` is a web address (the rules above `_INV`); `tokens`: the
+    spans of `text`'s whitespace-separated tokens."""
+    raw = m.group("host")
     labels = _plain(raw).split(".")
-    if len(labels) == 4 and all(lb.isdigit() and int(lb) <= 255 for lb in labels):
-        return True                                          # an IPv4 address
-    last, front = labels[-1], labels[:-1]
-    if not (last.isalpha() and len(last) >= 2) or last in FILE_EXTS:
-        return False                                         # 3.5, v2.1, 9.30, e.g., report.pdf, Node.js/React
-    if len(last) == 2 and len(front) >= 2 and all(len(lb) == 1 for lb in front):
-        return False                                         # initials: a.m.to, e.g.it (x.y.com still counts)
-    if any(ord(c) > 127 for c in raw if c.isalpha()):
-        return True                                          # an IDN or a look-alike letter
-    if tail:
-        return True                                          # name.anything/path, name.anything:8443
-    if _SPACED.search(raw) and last not in _SPACED_TLDS:
-        return False                                         # "a dot in the box" is not a de-fanged address
-    if re.fullmatch(r"[A-Z]\.[A-Z][a-z]{1,10}", raw):
-        return False                                         # a degree: M.Sc, B.Tech, B.Com (x.com and X.COM still count)
-    return last in COMMON_TLDS and not (len(last) == 2 and all(lb.isdigit() for lb in front))    # evil.com, 163.com, not 5.km
+    last = labels[-1]
+    ipv4 = len(labels) == 4 and all(lb.isdigit() and len(lb) <= 3 and int(lb) <= 255 for lb in labels)
+    if not ipv4 and (not (last.isalpha() and len(last) >= 2) or last in FILE_EXTS):
+        return False                                         # 3.5, v2.1, 9.30, e.g, a.m, report.pdf, Node.js: no host
+    i = bisect.bisect_right(tokens, (m.start(), len(text))) - 1          # the whitespace-separated token holding the host
+    token = text[tokens[i][0]:tokens[i][1]].lstrip(_WRAP_L).rstrip(_WRAP_R)
+    bare = token.startswith(raw) and _BARE_TAIL.fullmatch(token[len(raw):]) is not None
+    path = (m.group("path") or "").rstrip(".,;:!?")              # "Is it St.Louis?" has no query
+    strong = (ipv4 or not bare or m.group("port") or path or labels[0] == "www" or _plain(raw) != raw.lower()
+              or any(ord(c) > 127 for c in raw if c.isalpha()))
+    if strong:
+        return True
+    return last in COMMON_TLDS and _plain(raw) not in DEGREES
+
+
+def _web_spans(text: str) -> list[tuple[int, int, str]]:
+    """Every web address in `text`: (start, end without trailing punctuation, `_key`), by start, an outer
+    one before what lies inside it. A host lying wholly inside an email address of the same text is the
+    email rule's (`EMAIL_RE`); nothing else is skipped."""
+    text = text or ""
+    mail = [m.span() for m in EMAIL_RE.finditer(text)]
+    tokens = [m.span() for m in re.finditer(r"\S+", text)]
+    out = []
+
+    def add(a: int, b: int) -> None:
+        said = text[a:b].rstrip(".,;:!?")
+        if said:
+            out.append((a, a + len(said), _key(said)))
+    for m in SCHEME_RE.finditer(text):
+        add(*m.span())
+    for m in HOST_RE.finditer(text):
+        end = max(m.end(), m.end("port"), m.end("path"))   # the host with its port and path (an unmatched group is -1)
+        if not any(x <= m.start() and end <= y for x, y in mail) and _host_is_address(text, m, tokens):
+            add(m.start(), end)
+    for m in SPACED_RE.finditer(text):
+        if m.group("path") or _plain(m.group(0)).split()[-1] in _SPACED_TLDS:
+            add(*m.span())
+    return sorted(set(out), key=lambda s: (s[0], -s[1]))
+
+
+@functools.lru_cache(maxsize=64)
+def _web_in(text: str) -> tuple[tuple[str, str], ...]:
+    """Every web address `text` holds, once each: (as written, without trailing punctuation; as `_key`
+    compares it). Cached: `_had` asks it of the same text once per address."""
+    out: dict[str, str] = {}
+    for a, b, k in _web_spans(text):
+        if k:
+            out.setdefault(k, (text or "")[a:b])
+    return tuple((said, k) for k, said in out.items())
 
 
 def _had(addr: str, text: str) -> bool:
@@ -527,18 +557,6 @@ def _had(addr: str, text: str) -> bool:
     the head of a longer one or a longer path (x.com is not in x.community, x.com/a not in x.com/ab), nor
     in another case of a path (x.com/A is not x.com/a)."""
     return any(w == addr or (w.startswith(addr) and w[len(addr)] in "/?#") for _, w in _web_in(text))
-
-
-def _web_in(text: str) -> list[tuple[str, str]]:
-    """Every web address `text` holds, scheme or not, once each: (as written, without trailing
-    punctuation; as `_key` compares it)."""
-    out: dict[str, str] = {}
-    mail = _mail_spans(text)
-    for m in WEB_RE.finditer(text or ""):
-        w = _web(m, mail)
-        if w:
-            out.setdefault(w, m.group(0).rstrip(".,;:!?"))
-    return [(said, w) for w, said in out.items()]
 
 
 def _new_addresses(old: str, new: str) -> tuple[list[str], list[str]]:
@@ -551,7 +569,7 @@ def _new_addresses(old: str, new: str) -> tuple[list[str], list[str]]:
 
 def _loss(old: str, new: str) -> str | None:
     """Why a rewrite loses something, or None: empty, over `REWRITE_CAP`, or a web address (scheme
-    or not, anything `WEB_RE` finds), an email address or a `Task-N` of the old text missing. The same
+    or not, anything `_web_spans` finds), an email address or a `Task-N` of the old text missing. The same
     address with or without its scheme, a trailing slash or a full stop after it is kept. Such a rewrite
     is never applied nor offered: it becomes a note."""
     old, new = old or "", new or ""
@@ -588,18 +606,17 @@ def guard(old: str, new: str) -> str | None:
 
 
 def _no_new_addresses(text: str, old: str) -> str:
-    """`text` with every email or web address `old` lacks replaced by `LEFT_OUT`."""
+    """`text` with every email or web address `old` lacks replaced by `LEFT_OUT` (a web address with
+    what lies inside it)."""
     had = set(_emails(old))
     text = EMAIL_RE.sub(lambda m: m.group(0) if m.group(0).lower() in had else LEFT_OUT, text)
-    mail = _mail_spans(text)                                 # the emails kept: a host inside one is not a second address
-
-    def web(m: re.Match) -> str:
-        w = _web(m, mail)
-        if w is None or _had(w, old):
-            return m.group(0)
-        tok = m.group(0)
-        return LEFT_OUT + tok[len(tok.rstrip(".,;:!?")):]
-    return WEB_RE.sub(web, text)
+    out, at = [], 0
+    for a, b, k in _web_spans(text):
+        if a < at:
+            continue                                         # inside an address already judged
+        out.append(text[at:a] + (text[a:b] if _had(k, old) else LEFT_OUT))
+        at = b
+    return "".join(out) + text[at:]
 
 
 def _task_ref(v) -> int | None:

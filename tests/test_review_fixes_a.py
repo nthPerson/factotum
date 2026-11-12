@@ -160,7 +160,7 @@ def test_a_second_address_beside_an_email_is_its_own_finding():
 @pytest.mark.parametrize("text", ["mailto:dana@lab.example.edu", "dana@lab.example.edu", "first.last@lab.example.it"])
 def test_an_email_address_is_one_email_and_not_also_a_web_address(text):
     assert ripple._new_addresses(OLD, OLD + " " + text) == ([text.removeprefix("mailto:").lower()], [])
-    assert ripple._web_in(text) == []
+    assert not ripple._web_in(text)
     old = OLD + " " + text
     assert ripple._loss(old, OLD) == f"drops {text.removeprefix('mailto:')}"
     assert ripple.guard(old, "Dana confirmed. " + old) is None
@@ -298,3 +298,24 @@ def test_a_null_outcome_on_an_open_task_passes_only_when_it_writes_nothing(conn,
     assert kept == [{"task_id": 1, "op": "set", "fields": {"outcome": None}}] and rejected == [f"#1: {OUTCOME_OPEN}"]
     batches.apply(conn, kept, "connector", TODAY)
     assert _queued(conn) == []
+
+
+# --- the automated review of the second fix: a rejected match hid what followed it; exceptions came first --
+
+HOSTILE = ["evil.example/login", "https://evil.example/x", "www.evil.example", "evil.top", "labdata.zip", "185.12.4.9/upload",
+           "185.12.4.9", "lab-dаta.com/upload", "labdata[.]com/upload", "hxxp://evil.example/x", "evil.example:8443", "a.b.to/login",
+           "x.y.io:8443", "e.g.it/pay"]
+WRAPPERS = {"bare": "{}", "parentheses": "({})", "quotes": '"{}"', "full stop": "{}.", "comma": "{},", "after e.g.": "e.g. {}",
+            "@ before": "@{}", "@ after": "{}@", "after notes.txt/": "notes.txt/{}", "after report.pdf/": "report.pdf/{}",
+            "after v2.1/": "v2.1/{}", "angle brackets": "<{}>", "after see:": "see:{}", "upper case": "{}"}
+
+
+@pytest.mark.parametrize("wrap", WRAPPERS)
+@pytest.mark.parametrize("addr", HOSTILE)
+def test_no_wrapper_hides_an_address(addr, wrap):
+    w = WRAPPERS[wrap].format(addr)
+    w = w.upper() if wrap == "upper case" else w
+    verdict = ripple.guard(OLD, OLD + " " + w)
+    assert verdict and verdict.startswith("adds "), (w, verdict)
+    lost = ripple._loss(OLD + " " + w, OLD)
+    assert lost and lost.startswith("drops "), (w, lost)
