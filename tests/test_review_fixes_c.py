@@ -163,6 +163,7 @@ def test_a_config_without_budgets_runs_each_kind_on_the_examples_caps(tmp_path):
     from factotum.claude import runner
     ex = yaml.safe_load(C.EXAMPLE_CONFIG.read_text(encoding="utf-8"))["claude"]
     assert runner.BUDGETS_USD == ex["budgets_usd"] and runner.TIMEOUTS_S == ex["timeouts_s"]   # one table, pinned to the example
+    assert runner.MODELS == dict(ex["models"], ripple=ex["ripple"]["model"])                     # and the models (polish H8), ripple's from its own key
     bare = {"claude": {"binary": "claude"}}                                       # an install's config from before this release names none
     seen = []
 

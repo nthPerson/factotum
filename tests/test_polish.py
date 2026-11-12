@@ -739,3 +739,19 @@ def test_the_review_nudge_says_one_item_in_the_notification_and_the_log(conn, cf
     line = conn.execute("SELECT summary FROM runs WHERE kind = 'review_push' ORDER BY id DESC").fetchone()[0]
     assert line.startswith("1 item") and "1 items" not in line
 
+
+# --- H8: a run kind the config names no model for runs on the example's model ------------------------------
+
+def test_a_config_without_models_runs_each_kind_on_the_example_s_model():
+    import yaml
+    from factotum import config as C
+    from factotum.claude import runner
+    ex = yaml.safe_load(C.EXAMPLE_CONFIG.read_text(encoding="utf-8"))["claude"]
+    bare = {"claude": {"binary": "claude"}}
+    model = lambda cfg, kind, **kw: (lambda c: c[c.index("--model") + 1])(runner.command(cfg, kind, **kw))
+    assert model(bare, "check") == "haiku"                                       # claude-check ran Sonnet on a config without models
+    for kind, m in ex["models"].items():
+        assert model(bare, kind) == m, kind
+    assert model(bare, "filing") == "sonnet" and model(bare, "ripple") == "sonnet" and model(bare, "no_such_kind") == runner.DEFAULT_MODEL
+    assert model({"claude": {"models": {"check": "opus"}}}, "check") == "opus"   # a config value still wins
+    assert model(bare, "ripple", model="haiku") == "haiku"                       # and claude.ripple.model, which ripple.run passes

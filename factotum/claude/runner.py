@@ -34,6 +34,11 @@ DEFAULT_BUDGET_USD = 1.0
 BUDGETS_USD = {"sync_file": 1.00, "today_summary": 0.30, "mail_triage": 0.40, "planner_morning": 0.75, "chat_turn": 0.60, "check": 0.05,
                "filing": 0.10, "ripple": 0.30}
 TIMEOUTS_S = {"sync_file": 600, "today_summary": 180, "mail_triage": 240, "planner_morning": 480, "chat_turn": 240, "filing": 120, "ripple": 180}
+# The model likewise (polish 2026-11-11: every kind fell back to sonnet, so `claude-check` on a config without
+# `models` ran Sonnet where the example says haiku); ripple's is `claude.ripple.model`, which ripple.run passes.
+MODELS = {"sync_file": "sonnet", "today_summary": "sonnet", "mail_triage": "sonnet", "planner_morning": "sonnet", "chat_turn": "sonnet",
+          "check": "haiku", "filing": "sonnet", "ripple": "sonnet"}
+DEFAULT_MODEL = "sonnet"
 DEFAULT_MAX_TURNS = 40
 _AUTH_RE = re.compile(r"not logged in|please run /login|invalid.*(token|api key)|authentication", re.I)
 
@@ -68,7 +73,7 @@ def extract_json(text: str | None) -> dict | None:
 
 def command(cfg: dict, kind: str, allowed_tools: list[str] | tuple[str, ...] = (), *, mcp_servers: dict | None = None,
             resume: str | None = None, tools: str | None = None, stream: bool = False, model: str | None = None, budget_usd: float | None = None) -> list[str]:
-    model = str(model if model is not None else C.get(cfg, f"claude.models.{kind}", "sonnet"))
+    model = str(model if model is not None else C.get(cfg, f"claude.models.{kind}", MODELS.get(kind, DEFAULT_MODEL)))
     budget = float(budget_usd if budget_usd is not None else C.get(cfg, f"claude.budgets_usd.{kind}", BUDGETS_USD.get(kind, DEFAULT_BUDGET_USD)))
     cmd = [str(C.get(cfg, "claude.binary", "claude")), "-p", "--model", model, "--output-format", "stream-json" if stream else "json",
            "--max-budget-usd", str(budget), "--max-turns", str(int(C.get(cfg, f"claude.max_turns.{kind}", DEFAULT_MAX_TURNS))),
