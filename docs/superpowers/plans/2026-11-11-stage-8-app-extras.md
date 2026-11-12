@@ -12,7 +12,7 @@
 
 **Builds on stage 6 Part B** (`docs/superpowers/plans/2026-11-11-stage-6-by-hand.md`, Tasks 10 and 12, being built while this plan is written). Its plan names: on a desktop the `n` key "leave Review / Chat / Log / Settings for Today, `ui.newOpen = true`, render, focus `#new-line`" and a button `#new-open` ("+ New task"); on a phone `openSheet()` / `closeSheet()`, the round button `#fab-new` and the sheet `#sheet`. Task 4 below opens New task through whatever code the `n` key runs, never a second way.
 
-**Out of this stage:** a push sent only to change the number; offline caching of any kind (the worker still has no fetch handler); `launch_handler` or other manifest members; shortcuts beyond the two; a per-device badge switch; any change to `GET /api/review`'s answer.
+**Out of this stage:** a push sent only to change the number; offline caching of any kind (the worker still has no fetch handler); `launch_handler` or other manifest members; shortcuts beyond the two; a per-device badge switch; any change to `GET /api/review`'s answer; the morning brief's "Review holds N items", the planner bundle's `review_n` and `factotum review` (they keep their own `build_review_queue` calls: design §16 requires every brief to stay identical to today's with links off, and routing the brief through `review_queue` would add the flagged items and the cards to its number).
 
 ## Global Constraints
 
@@ -39,9 +39,9 @@
 
 ## Decisions this plan makes
 
-- **The Review count is defined once, read-only, in `factotum/review_queue.py`.** The number beside "Review" today comes only from `GET /api/review`, which the page loads only on the Review tab, and that route WRITES: it records the day's link-suggestion session (`suggestions.session`) and stamps `last_offered_at` on the page it shows, which is what `expire` acts on. Calling it just for a number would mark rows offered. So `review_queue.count(conn, cfg, today, exclude=())` = the length of Review's whole eligible queue (the same `lifecycle.build_review_queue` call with the same flags and `state.last_review_at`) + the waiting suggestion cards (unjudged evidence with no task, kind in `SUGGESTION_KINDS`), and `GET /api/review` builds its queue and its card list through the same module, so `count == total + len(suggestions)` for the same database (pinned by a test). `SUGGESTION_KINDS` moves to `review_queue` (`api.SUGGESTION_KINDS` stays as an alias). Cost if wrong: none for the data; one more annotate pass per page load (milliseconds, `/api/tasks` already does one).
+- **The Review count is defined once, read-only, in `factotum/review_queue.py`.** The number beside "Review" today comes only from `GET /api/review`, which the page loads only on the Review tab, and that route WRITES: it records the day's link-suggestion session (`suggestions.session`) and stamps `last_offered_at` on the page it shows, which is what `expire` acts on. Calling it just for a number would mark rows offered. So `review_queue.count(conn, cfg, today, exclude=frozenset())` = the length of Review's whole eligible queue (the same `lifecycle.build_review_queue` call with the same flags and `state.last_review_at`) + the waiting suggestion cards (unjudged evidence with no task, kind in `SUGGESTION_KINDS`), and `GET /api/review` builds its queue and its card list through the same module, so `count == total + len(suggestions)` for the same database (pinned by a test). `SUGGESTION_KINDS` moves to `review_queue` (`api.SUGGESTION_KINDS` stays as an alias). Cost if wrong: none for the data; one more annotate pass per page load (milliseconds, `/api/tasks` already does one).
 - **One known difference, stated, not hidden:** `GET /api/review` records the day's link-suggestion session before it builds the queue; `count` does not write, so before Review was opened on a given day the count can differ from Review's own by the link suggestions that session adds. It agrees again once Review has been opened that day.
-- **The review nudge counts what Review shows.** `Scheduler._review_push` builds its queue without the mail, Slack, planner and ripple flags, a second definition today ("Review: 3 items" when Review shows 4). It now calls `review_queue.queue(conn, ecfg, today)`; its text keeps its shape. Cost if wrong: a nudge on a day when only flagged items wait, which is what Review would show anyway.
+- **The review nudge counts what Review shows.** `Scheduler._review_push` builds its queue without the mail, Slack, planner and ripple flags, a second definition today ("Review: 3 items" when Review shows 4). It now calls `review_queue.queue(conn, ecfg, today)` and counts the waiting suggestion cards too (`n = len(queue) + review_queue.card_count(conn)`, the number the tab and the push's own `app_badge` show; preflight ruling: with the queue alone the nudge said "Review: 3 items" while the icon it carried said 4); its text keeps its shape (the names are the queue's first three; with only cards waiting the body is "N items waiting"). Cost if wrong: a nudge on a day when only flagged items or cards wait, which is what Review would show anyway.
 - **The page shows the count beside "Review" from the first load** (`GET /api/review/count` inside `load()`, which runs at start, after every Apply, on return to the front and after Refresh), and the loaded Review page's own number (which leaves out what the tray already decided) while Review is loaded, as today. Before this stage the tab showed no number until Review was opened. The icon always shows exactly the number the tab shows. `load()` passes the same `exclude` (the tray's decided task ids) that `loadReview` passes.
 - **`notify.app.badge`, a Settings key, `True` in `config.DEFAULTS`** ("Count on the app icon" in Settings → Notifications). It does not break the stage 3 rule "absent means off for anything that costs money or sends mail": the badge makes no Claude run, sends no mail, writes to no outside service and never causes a push; it only adds an integer to pushes the owner already chose to receive (inside their RFC 8291 encryption, so the push service cannot read it) and to the icon of the owner's own device. It is not in `PAID_SWITCHES` (that tuple is also what `effective --as-before` flips). Precedent for a `True` default: `notify.ntfy.enabled`. The starter sends nothing with it on, because the starter has no provider and no device. Off: the open page clears the icon; pushes carry no `app_badge` (a closed app keeps the last number it was given until it is opened).
 - **Which pushes carry it:** every push that goes through `app_push.send_all` (a reminder, "Task-N is free now", the evening review nudge) and Settings' "Send a test" (`send_test`), which also makes the owner's real-device check possible. They get it in ONE place, `app_push.with_badge(conn, cfg, notice)`, called by `send_all` (after its no-device early return) and `send_test`; no caller computes a count. ntfy messages carry nothing new. No push is ever sent because the number changed (iOS requires every push to show a notification, and a silent one would cost the subscription).
@@ -137,7 +137,7 @@ def count(conn, cfg: dict, today: date, exclude=frozenset()) -> int:
         return {"count": review_queue.count(conn, eff_cfg(), date.today(), exclude=skip)}
 ```
 
-- `scheduler._review_push`: `queue = review_queue.queue(self.conn, ecfg, today)`; the rest unchanged.
+- `scheduler._review_push`: `queue = review_queue.queue(self.conn, ecfg, today)`; `n = len(queue) + review_queue.card_count(self.conn)`; `if not n: return None`; `first` names `queue[:3]` as today; `body = f"{n} item{'' if n == 1 else 's'} waiting" + (f": {first}" if first else "") + (" …" if first and n > len(queue[:3]) else "")`; the title, the sends and the return value unchanged.
 - `notify.app.badge`: in `SETTINGS_KEYS` (after `"notify.provider"`) and `DEFAULTS` (`True`, with a comment `# stage 8: costs nothing, sends nothing (never a push of its own), so on when absent`); not in `PAID_SWITCHES`.
 - Example, under `notify: app:` after `push_hosts`: `badge: true                 # Settings → Notifications ("Count on the app icon"). The number of Review items on the installed app's icon: kept by the open app and carried by notifications that are sent anyway, never a notification of its own. Costs nothing and sends nothing, so on when absent`. Starter: `notify: app: { badge: true }` (a line under `notify:`). Fixture: `app: { badge: true }` under `notify:`.
 - No Settings control yet: Task 3 adds it (the CLAUDE.md "control in renderSettings" rule is met at Task 3's commit).
@@ -148,15 +148,13 @@ def count(conn, cfg: dict, today: date, exclude=frozenset()) -> int:
 """Stage 8, app extras: the Review count on the icon, the shortcuts."""
 import copy
 import json
-import os
 from datetime import date, datetime
 
-import httpx
-import pytest
-from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi.testclient import TestClient
 
 from conftest import FIXTURE, TODAY, task
+from test_stage1 import _png_size                                  # the helpers stages 1 and 2 already have, never copies
+from test_stage2 import NOTICE, _device as _subscribe_device, _service as _push_service
 from factotum import api, app_push as AP, config as C, review_queue, webpush as W
 from factotum.api import create_app
 from factotum.db import get_settings, get_task, now_iso, upsert_task
@@ -204,8 +202,12 @@ def test_the_review_nudge_counts_what_review_shows(conn, cfg):
     conn.execute("INSERT INTO evidence (task_id, kind, label, at) VALUES (1, 'thread_updated', 'Re: data', ?)", (now_iso(),))
     conn.commit()
     titles = []
-    Scheduler(cfg, conn, push=lambda cfg, title, body, **k: titles.append(title))._review_push(cfg, TODAY, {})
+    sch = Scheduler(cfg, conn, push=lambda cfg, title, body, **k: titles.append(title))
+    sch._review_push(cfg, TODAY, {})
     assert titles == ["Review: 1 item"]
+    _card(conn, "Order the reagent"); conn.commit()          # a suggestion card is on Review, so it is in the nudge's number too
+    sch._review_push(cfg, TODAY, {})
+    assert titles[-1] == "Review: 2 items"
 
 def test_the_badge_switch_is_a_settings_key_and_on_when_absent():
     assert "notify.app.badge" in C.SETTINGS_KEYS and C.DEFAULTS["notify.app.badge"] is True
@@ -265,18 +267,13 @@ function setBadge(n) {
 - [ ] **Step 1: Write the failing tests** under `# --- Task 2: the count in pushes that are sent anyway`:
 
 ```python
-NOTICE = {"title": "Call Reza", "body": "before the meeting · due Nov 5", "path": "/t/12", "tag": "task-12",
-          "actions": [{"action": "done", "title": "Done", "path": "/r/tok?a=done"}],
-          "urgency": "high", "ttl": 86400, "data": {"task_id": 12}}
-
-def _device(conn, endpoint="https://push.invalid/d1", origin="https://f.example"):
-    ua = ec.generate_private_key(ec.SECP256R1()); auth = os.urandom(16)
-    AP.subscribe(conn, endpoint, W.b64u(W.public_bytes(ua)), W.b64u(auth), "Phone", origin); conn.commit()
-    return ua, auth
+# NOTICE, a subscribed device and the fake push service are stage 2's (imported at the top); these two
+# wrappers only fit their returns to this file: (ua, auth), and a service that answers 201 to everything.
+def _device(conn, endpoint="https://push.invalid/d1"):
+    return _subscribe_device(conn, endpoint)[1:]
 
 def _service():
-    got = []
-    return got, httpx.MockTransport(lambda req: got.append((str(req.url), req)) or httpx.Response(201))
+    return _push_service({})
 
 def _sent(got, ua, auth, i=-1):
     return json.loads(W.decrypt(got[i][1].content, ua, auth))
@@ -445,18 +442,12 @@ Implementer: **opus**. UI task: yes.
   - `openNew()`: stage 6's New task opener, ONE function (see Step 1).
 
 - [ ] **Step 1: Find the opener stage 6 built.** In `app.js` search for `newOpen`, `openSheet`, `new-open`, `fab-new`, `new-line` and the keydown handler's `'n'` branch. The plan for stage 6 says the `n` key opens the line on a desktop (`ui.newOpen = true`, render, focus `#new-line`, leaving Review / Chat / Log / Settings for Today) and the sheet on a phone (`openSheet()`), and that `#new-open` and `#fab-new` open them. Then:
-  - If one named function already does "desktop: the line; phone: the sheet", `openNew` IS that function (call it; do not wrap it in a second one).
-  - If the key handler does it inline (or the button handlers do), move exactly that code into `function openNew()` in stage 6's `// ---------- by hand (stage 6): New task ----------` section and make the key, `#new-open` and `#fab-new` call it. Their behaviour must not change: run stage 6's `DEV/scenarios/s6-10-new.mjs` and `s6-12-sheet.mjs` again (both devices) after the move and report that they pass as before.
-  - If the names differ from these, use what the code has and report the names. If the opener refuses in some state (say the tray holds changes), `/new` does what the `n` key does in that state; add no conditions of your own.
-  - If stage 6's New task is not in `app.js` at all, stop and report: Task 4 depends on it.
+  - Preflight found (2026-11-11, the code as landed): the desktop opener is `openNewLine()` (sets `ui.newOpen`, leaves a non-list tab or a task page for Today through `go`, renders, `focusNewLine()`), the phone's is `openSheet(fill)`, and the keydown handler chooses between them inline: `if (PHONE()) openSheet(); else openNewLine();`. So: move exactly that choice into `function openNew() { if (PHONE()) openSheet(); else openNewLine(); }` in stage 6's `// ---------- by hand (stage 6): New task on a phone ----------` section (after `openSheet`, which it calls), and make the `n` key call `openNew()`. Leave `#new-open` (a desktop-only button that also CLOSES the line when it is open) and `#fab-new` (the phone's button, `openSheet()`) exactly as they are: each already calls its own device's opener, and routing them through `openNew` would change what they do. Run stage 6's `DEV/scenarios/s6-10-new.mjs` and `s6-12-sheet.mjs` again (both devices) after the move and report that they pass as before.
+  - If the code no longer matches that description, use what it has, report the names, and keep one function that the `n` key and `/new` share. If the opener refuses in some state (say the tray holds changes), `/new` does what the `n` key does in that state; add no conditions of your own.
 - [ ] **Step 2: Write the failing tests** under `# --- Task 4: shortcuts, their icons, /new`:
 
 ```python
-import struct
-
-def _png_size(b: bytes) -> tuple[int, int]:
-    assert b[:8] == b"\x89PNG\r\n\x1a\n"
-    return struct.unpack(">II", b[16:24])
+# _png_size is stage 1's (imported at the top of the file)
 
 def _tool():
     import importlib.util
@@ -501,7 +492,7 @@ def test_the_icon_tool_draws_the_shortcut_icons_that_are_committed():
 - [ ] **Step 5: Run the suite** (all pass, including stage 1's `test_the_manifest_and_its_icons_are_served`, `test_the_page_head_installs_the_app` and `test_task_and_tab_addresses_answer_with_the_app`).
 - [ ] **Step 6: Write and run `DEV/scenarios/s8-4-shortcuts.mjs`** (both devices):
   - M1 (the manifest as Chromium reads it): `goto /`; `const cdp = await context.newCDPSession(page); const am = await cdp.send('Page.getAppManifest');` log `am.errors` (must be `[]`) and the parsed `shortcuts` names and urls (`JSON.parse(am.data).shortcuts`). In the page: `fetch` the manifest link's `href` with `credentials: 'include'` and each shortcut's url and icon: log statuses (all 200) and the link's `crossorigin` (`use-credentials`). Look at the two icons (open them with the Read tool from `factotum/web/`).
-  - N1: `goto base + '/new'`; wait for New task to open (desktop: `#new-line` visible and focused; phone: `#sheet` not hidden — or the elements stage 6 actually uses, as found in Step 1). Log `location.pathname` (`/`), `history.length` (1: nothing pushed), the selected tab (`today`). Shot `s8-4-new` (desktop: the line on Today, frame 6; phone: the sheet, frame 11).
+  - N1: `goto base + '/new'`; wait for New task to open (desktop: `#new-line` visible and focused; phone: `#sheet` not hidden — or the elements stage 6 actually uses, as found in Step 1). Log `location.pathname` (`/`), `history.length` (M1's value plus one, the navigation to `/new` itself: the app pushed nothing; M1's `goto /` already made one entry, so it is not 1), the selected tab (`today`). Shot `s8-4-new` (desktop: the line on Today, frame 6; phone: the sheet, frame 11).
   - N2: `page.reload()`; after load log `location.pathname` (`/`) and that New task is NOT open. Shot `s8-4-reload`.
   - N3 (signed out): `context.route('**/api/tasks*', r => r.fulfill({ status: 401, body: '' }))`; `goto base + '/new'`: log `#signedout` visible and `location.pathname` (`/new`). Shot `s8-4-signedout`. `unroute`; click `#signin` (it reloads at the same address): New task opens and the address becomes `/`. Shot `s8-4-after-signin`. Expected problem: `HTTP 401: GET …/api/tasks?status=open` (stubbed).
   - N4: `goto base + '/review'`: the Review tab is selected and the address stays `/review` (it loads Review on the dev copy, as Task 3 does). Then close New task if anything left it open (Escape on a desktop, Cancel on the sheet); type nothing, add nothing.
@@ -513,7 +504,7 @@ git add factotum/web/manifest.webmanifest factotum/web/icon-new-96.png factotum/
 git commit -m "app: long-press shortcuts New task (/new) and Review, with their own icons drawn by tools/make_icons.py; /new opens Today with New task and leaves / in the address, so a reload does not reopen it, and a sign-in on the way keeps it"
 ```
 
-(If Step 1 moved stage 6's opener into `openNew`, say so in the message: `…; the n key, + New task and the round button share openNew`.)
+(Step 1 moves the `n` key's choice into `openNew`; say so in the message: `…; the n key and /new share openNew`.)
 
 ---
 
