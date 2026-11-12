@@ -520,6 +520,10 @@
   // a key whose value is undefined is left out. `quiet` (the editor, stage 6) stages without a render.
   function stageExtra(key, task_id, op, fields, label, extra = {}, quiet = false) {
     const more = Object.fromEntries(Object.entries(extra || {}).filter(([, v]) => v !== undefined));
+    const prev = staged.get(key);
+    if (prev && prev.fsug && prev.fsug !== more.fsug) {      // a filing chip's value under this key (the editor's): the same value keeps it accepted
+      if (JSON.stringify(prev.fields) === JSON.stringify(fields)) more.fsug = prev.fsug; else chipLeft(prev, true);
+    }
     staged.set(key, { task_id, op, fields, label, ...more });
     try { localStorage.setItem('factotum.staged', JSON.stringify([...staged])); } catch (_) {}
     if (!quiet) render();
@@ -561,8 +565,17 @@
 
   // ---------- staging ----------
   function persistStaged() { try { localStorage.setItem('factotum.staged', JSON.stringify([...staged])); } catch (_) {} }
+  // A filing chip's staged value (`fsug`: its evidence) has left the tray: the "accepted" verdict staged with it goes
+  // too, or, when another value took its place (`replaced`), becomes a dismissal, so Apply never records a
+  // suggestion as accepted that was not what was chosen.
+  function chipLeft(entry, replaced) {
+    const eid = entry && entry.fsug; if (!eid) return;
+    const j = staged.get('e:' + eid); if (!j || (j.fields || {}).verdict !== 'applied') return;
+    if (replaced) staged.set('e:' + eid, Object.assign({}, j, { fields: Object.assign({}, j.fields, { verdict: 'dismissed' }), label: 'filing suggestion not taken' }));
+    else staged.delete('e:' + eid);
+  }
   function discardStaged(keys) {   // keys as strings; undefined = every one
-    [...staged.keys()].filter(k => !keys || keys.has(String(k))).forEach(k => staged.delete(k));
+    [...staged.keys()].filter(k => !keys || keys.has(String(k))).forEach(k => { const e = staged.get(k); staged.delete(k); chipLeft(e, false); });
     if (!staged.size) { ui.trayOpen = false; ui.trayOff = new Set(); }
     persistStaged(); render();
   }
@@ -1076,8 +1089,8 @@
       const id = +b.dataset.id, eid = +b.dataset.fsug, t = src(id);
       const f = (t.filing || []).find(c => c.evidence_id === eid);
       if (f) {      // under the editor's key: the row and the editor show it before Apply, a later choice replaces it
-        stageChange({ task_id: id, op: 'set', fields: { [f.field]: f.value } }, `filed: ${f.field} ${f.value}`, {}, 'edit-' + f.field);
-        stageJudge(eid, id, 'applied', 'filing suggestion accepted');
+        stageJudge(eid, id, 'applied', 'filing suggestion accepted');      // first: the set below names its verdict (fsug)
+        stageChange({ task_id: id, op: 'set', fields: { [f.field]: f.value } }, `filed: ${f.field} ${f.value}`, { fsug: eid }, 'edit-' + f.field);
       } else {
         const s = filingLinks(t).find(c => c.evidence_id === eid); if (!s) return;
         const c = s.kind === 'same_as'
@@ -3212,7 +3225,7 @@
   function stageEdit(id, f, fields, label, extra) {
     const t = byId(id); if (!t) return;
     const key = editKey(id, f);
-    if (Object.entries(fields).every(([k, v]) => edNorm(t[k]) === edNorm(v))) { staged.delete(key); persistStaged(); }
+    if (Object.entries(fields).every(([k, v]) => edNorm(t[k]) === edNorm(v))) { const e = staged.get(key); staged.delete(key); chipLeft(e, false); persistStaged(); }
     else stageExtra(key, id, 'set', fields, label, extra, true);
     editRefresh(id);
   }
