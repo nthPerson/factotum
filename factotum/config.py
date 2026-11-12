@@ -68,7 +68,7 @@ DEFAULTS: dict[str, Any] = {
     "sinks.notion_notes.enabled": False, "sinks.notion_tasks_mirror.enabled": False,
     "sinks.notion_tasks_mirror.sweep_minutes": 10,
     "scoring.project_weights": {},
-    "claude.models": {}, "claude.planner.enabled": False, "claude.budgets_usd.chat_turn": 1.0,
+    "claude.models": {}, "claude.planner.enabled": False, "claude.budgets_usd.chat_turn": 0.60,
     "claude.summary.auto": False, "claude.summary.auto_minutes": 10,
     "claude.ripple.enabled": True, "claude.ripple.model": "sonnet", "claude.ripple.delay_seconds": 60,
     "claude.ripple.hourly_cap": 10, "claude.budgets_usd.ripple": 0.30,

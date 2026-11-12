@@ -150,3 +150,44 @@ def test_chat_reads_a_create_ref_and_links_beside_fields_too(conn, cfg):
     assert [p["fields"].get("ref") for p in kept] == ["s1", "s2"]
     assert kept[1]["fields"]["links"] == [{"kind": "part_of", "other": 1}, {"kind": "waits_on", "other": "s1"}]
     assert rejected == ["Conflicting: ref is given beside fields and in fields with different values; give it once, in fields"]
+
+
+# --- 5. a run kind the config names no budget or timeout for runs on the documented caps, not $1.00 / 600 s
+
+def _flag(cmd, name):
+    return cmd[cmd.index(name) + 1]
+
+
+def test_a_config_without_budgets_runs_each_kind_on_the_examples_caps(tmp_path):
+    import yaml
+    from factotum.claude import runner
+    ex = yaml.safe_load(C.EXAMPLE_CONFIG.read_text(encoding="utf-8"))["claude"]
+    assert runner.BUDGETS_USD == ex["budgets_usd"] and runner.TIMEOUTS_S == ex["timeouts_s"]   # one table, pinned to the example
+    bare = {"claude": {"binary": "claude"}}                                       # an install's config from before this release names none
+    seen = []
+
+    def exec_(cmd, timeout=None, **kw):
+        seen.append((cmd, timeout))
+        raise runner.subprocess.TimeoutExpired(cmd, timeout)
+    for kind in ex["budgets_usd"]:
+        runner.run(bare, kind, "p", exec_=exec_)
+    by_kind = {k: (float(_flag(c, "--max-budget-usd")), t) for k, (c, t) in zip(ex["budgets_usd"], seen)}
+    assert by_kind["filing"] == (0.10, 120) and by_kind["ripple"] == (0.30, 180)
+    for kind, usd in ex["budgets_usd"].items():
+        assert by_kind[kind] == (usd, ex["timeouts_s"].get(kind, runner.DEFAULT_TIMEOUT_S)), kind
+    mine = {"claude": {"budgets_usd": {"filing": 0.07}, "timeouts_s": {"filing": 99}}}   # a config value still wins
+    seen.clear()
+    runner.run(mine, "filing", "p", exec_=exec_)
+    assert (float(_flag(seen[0][0], "--max-budget-usd")), seen[0][1]) == (0.07, 99)
+    assert float(_flag(runner.command(bare, "no_such_kind"), "--max-budget-usd")) == runner.DEFAULT_BUDGET_USD
+
+
+def test_settings_show_the_budgets_the_runner_uses(tmp_path):
+    from fastapi.testclient import TestClient
+    from factotum.api import create_app
+    from factotum.claude import runner
+    for key in ("claude.budgets_usd.chat_turn", "claude.budgets_usd.ripple"):
+        assert C.DEFAULTS[key] == runner.BUDGETS_USD[key.rsplit(".", 1)[1]], key
+    e = TestClient(create_app(C.load(C.STARTER_CONFIG), db_path=str(tmp_path / "s.db"))).get("/api/settings").json()["effective"]
+    assert e["claude.budgets_usd.chat_turn"] == float(_flag(runner.command(C.load(C.STARTER_CONFIG), "chat_turn"), "--max-budget-usd")) == 0.60
+    assert e["claude.budgets_usd.ripple"] == 0.30
