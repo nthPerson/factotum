@@ -49,7 +49,8 @@ End with exactly one fenced JSON object (nothing after it):
 - `merge` fields: `into` (the task kept; this one is dropped as the same task).
 - `done` / `drop` may carry `outcome` (one line on how it turned out).
 - `add_note` fields: `text` (appended, dated; prefer it to rewriting `context`).
-- `create` may carry `ref` and `links: [{kind, other}]` where `other` is a task id or another create's `ref`.
+- `create` may carry `ref` and `links: [{kind, other}]` where `other` is a task id or another create's `ref`; both go
+  inside `fields`: `{"op": "create", "fields": {"name": "…", "ref": "s1", "links": [{"kind": "part_of", "other": 412}]}}`.
 - `create` has no `task_id`; fields as for `set` plus `name` (≤ 80 chars). Projects: {projects}.
 - `label` is for a human (≤ 80 chars). `evidence` cites what you read; leave it empty if nothing.
 - No proposals? `"proposals": []`.

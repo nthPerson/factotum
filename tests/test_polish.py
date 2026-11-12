@@ -755,3 +755,14 @@ def test_a_config_without_models_runs_each_kind_on_the_example_s_model():
     assert model(bare, "filing") == "sonnet" and model(bare, "ripple") == "sonnet" and model(bare, "no_such_kind") == runner.DEFAULT_MODEL
     assert model({"claude": {"models": {"check": "opus"}}}, "check") == "opus"   # a config value still wins
     assert model(bare, "ripple", model="haiku") == "haiku"                       # and claude.ripple.model, which ripple.run passes
+
+
+# --- H10: the chat prompts show where a create's ref and links go -----------------------------------------
+
+def test_the_chat_prompts_put_a_create_s_ref_and_links_inside_fields():
+    from factotum import config as C
+    shape = '{"op": "create", "fields": {"name": "…", "ref": "s1", "links": [{"kind": "part_of", "other": 412}]}}'
+    for name in ("chat-turn.md", "chat-split.md"):
+        text = (C.ROOT / "prompts" / name).read_text(encoding="utf-8")
+        assert shape in text and "inside `fields`" in text, name
+        assert "blocked" not in text.lower() and "dependency" not in text.lower()
