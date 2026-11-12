@@ -340,8 +340,8 @@ def _link_changes(cur, batch_id: int, rel: dict, added: bool, extra: dict[int, d
 def _merge(conn, cur, ch: dict, batch_id: int, source: str, today: date, undo: list, skipped: list) -> bool:
     """`merge`: the duplicate (`task_id`) goes into the survivor (`fields.into`), all in this batch.
     Its outside links, pending reminders and task links move to the survivor (a move a link rule
-    refuses stays on the duplicate and is said), the survivor takes a due date only when it has
-    none, and nothing else is copied; no mention is written. The duplicate is closed AFTER its links
+    refuses stays on the duplicate and is said), the survivor takes a due date and a sent-mail watch
+    only when it has none (a watch not carried is said), and nothing else is copied; no mention is written. The duplicate is closed AFTER its links
     move, so undo (newest first) reopens it before it restores a `waits_on` that points at it."""
     f = ch.get("fields") if isinstance(ch.get("fields"), dict) else {}
     goes, keep = _link_end(ch.get("task_id"), {})[0], _link_end(f.get("into"), {})[0]
@@ -402,7 +402,16 @@ def _merge(conn, cur, ch: dict, batch_id: int, source: str, today: date, undo: l
             moved["tasks"] += 1
     if dup.get("due") and not surv.get("due"):
         _write_fields(cur, surv, {"due": dup["due"], "due_is_datetime": dup.get("due_is_datetime"), "hard": dup.get("hard")}, batch_id, undo)
-    _write_fields(cur, dup, {"status": "dropped", "completed_at": today.isoformat(), "closed_by": "merge", "top_rank": None}, batch_id, undo)
+    # A sent-mail watch moves too: the mail sweep reads watches on open tasks only, so one left on the dropped
+    # duplicate would never fire. The survivor's own watch wins. Undo puts it back on the duplicate.
+    watch = {}
+    if dup.get("close_on_sent_since"):
+        if surv.get("close_on_sent_since"):
+            skipped.append({"task_id": goes, "why": f"Task-{goes}'s sent-mail watch was not carried: Task-{keep} has its own"})
+        else:
+            _write_fields(cur, surv, {"close_on_sent_since": dup["close_on_sent_since"], "close_on_sent_to": dup.get("close_on_sent_to")}, batch_id, undo)
+            watch = {"close_on_sent_since": None, "close_on_sent_to": None}
+    _write_fields(cur, dup, {"status": "dropped", "completed_at": today.isoformat(), "closed_by": "merge", "top_rank": None, **watch}, batch_id, undo)
     rid = R.add(cur, goes, keep, "same_as", f.get("why"), source, batch_id)          # any older same_as of the duplicate was removed above
     _link_changes(cur, batch_id, dict(cur.execute("SELECT * FROM relations WHERE id = ?", (rid,)).fetchone()), added=True, extra={keep: {"moved": moved}})
     undo.append({"relation_id": rid, "undo": "remove"})

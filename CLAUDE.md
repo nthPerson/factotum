@@ -331,7 +331,8 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
 - **`relations` direction** (2026-11-10): `src part_of dst` (dst is the goal), `src waits_on dst`,
   `src same_as dst` (src was merged into dst). Soft-deleted, never DELETE.
 - **What lands on a merged duplicate goes to its survivor in three ways only** (2026-11-10): a
-  sync-file mention, a sync-file instruction, a Canvas close or due move. Fields are never copied, and a
+  sync-file mention, a sync-file instruction, a Canvas close or due move. Fields are never copied (the merge
+  itself gives the survivor only a due date (copied) and a sent-mail watch (moved), each when it has none: review 2026-11-11), and a
   merge writes no mention.
 - **A reopened duplicate is its own task again** (review 2026-11-11): `reopen` removes its outgoing
   `same_as` in the batch (`batches._unmerge`), and `relations.survivor` hops only from a closed row; with

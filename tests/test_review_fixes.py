@@ -345,3 +345,36 @@ def test_undoing_the_only_cause_queues_nothing(rconn, cfg):
 
     out = ripple.run(conn, cfg, [1], TODAY, runner=runner, at="2026-11-01T10:00")
     assert batches.undo(conn, b1)["ripples_undone"] == [out["batch_id"]] and ripple.pending(conn) == []
+
+
+# ---- 5. a merge carries the duplicate's sent-mail watch --------------------------------------------------
+
+def _watch(conn, tid):
+    return tuple(conn.execute("SELECT close_on_sent_since, close_on_sent_to FROM tasks WHERE id = ?", (tid,)).fetchone())
+
+
+def test_a_merge_carries_the_duplicates_watch_and_undo_puts_it_back(conn):
+    """test_undo_roundtrip.py::test_merge_roundtrip_with_everything: the watch stayed on the dropped duplicate,
+    where the mail sweep (open tasks only) never reads it, and nothing said so."""
+    for i in (1, 2):
+        _mk(conn, i)
+    conn.execute("UPDATE tasks SET close_on_sent_since = '2026-10-05T00:00:00+00:00', close_on_sent_to = 'a@b.co' WHERE id = 1")
+    conn.commit()
+    res = batches.apply(conn, [{"op": "merge", "task_id": 1, "fields": {"into": 2}}], "ui", TODAY)
+    assert res["skipped"] == []
+    assert _watch(conn, 2) == ("2026-10-05T00:00:00+00:00", "a@b.co") and _watch(conn, 1) == (None, None)
+    # the mail sweep reads watches on open tasks only (mail_sweep.py: `watched`): the survivor's is live
+    assert [r[0] for r in conn.execute("SELECT id FROM tasks WHERE status = 'open' AND close_on_sent_since IS NOT NULL")] == [2]
+    batches.undo(conn, res["batch_id"])
+    assert _watch(conn, 1) == ("2026-10-05T00:00:00+00:00", "a@b.co") and _watch(conn, 2) == (None, None)
+
+
+def test_a_survivor_with_its_own_watch_keeps_it_and_the_merge_says_so(conn):
+    for i in (1, 2):
+        _mk(conn, i)
+    conn.execute("UPDATE tasks SET close_on_sent_since = '2026-10-05T00:00:00+00:00', close_on_sent_to = 'a@b.co' WHERE id = 1")
+    conn.execute("UPDATE tasks SET close_on_sent_since = '2026-10-07T00:00:00+00:00', close_on_sent_to = 'c@d.co' WHERE id = 2")
+    conn.commit()
+    res = batches.apply(conn, [{"op": "merge", "task_id": 1, "fields": {"into": 2}}], "ui", TODAY)
+    assert _watch(conn, 2) == ("2026-10-07T00:00:00+00:00", "c@d.co")
+    assert [s["task_id"] for s in res["skipped"]] == [1] and "watch" in res["skipped"][0]["why"] and "not carried" in res["skipped"][0]["why"]

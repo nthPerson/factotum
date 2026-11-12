@@ -220,7 +220,10 @@ so two staged links that make a loop together skip the second); at most 20 links
 A reopened duplicate is a task of its own again: `reopen` removes its `same_as` in the same batch (undo
 restores it unless the row was merged elsewhere since), the redirect (`relations.survivor`) hops only from
 a closed row, and a merge refuses a target a merge dropped (`relations.merge_target_problem`, shared with
-the MCP validator).
+the MCP validator). A merge gives the survivor the duplicate's due date and its sent-mail watch
+(`close_on_sent_*`) only when it has none of its own (a watch not carried is said in `skipped`; the mail sweep
+reads watches on open tasks only, so one left on the dropped duplicate would never fire); the duplicate's
+`calendar_event` field stays with it (the event itself is a `calendar` link, which moves).
 **Closing never cascades**: closing a goal does not close its steps, closing the last step does not close
 the goal, closing a task does not close what waits on it; the effect is on Review and on scores.
 *Scoring* (`scoring.links`, `enabled` false is exactly the old arithmetic): a task that waits on an open
