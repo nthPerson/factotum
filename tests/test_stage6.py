@@ -311,3 +311,14 @@ def test_the_api_says_which_box_a_line_came_from(cfg, tmp_path):
     pv = lambda **q: client.get("/api/add/preview", params={"text": "add Call mom", **q}).json()      # noqa: E731
     assert pv(verb=1)["name"] == "Call mom" and pv()["name"] == "add Call mom"
     assert client.get("/api/add/preview", params={"text": "Call mom", "verb": 1}).json() == {"is_add": False}
+
+
+def test_a_long_task_number_is_read_as_a_link_and_refused_not_kept_silently():
+    known = {30: {"id": 30, "name": "Goal", "status": "open", "goal": None}}
+    Q = lambda s: P(s, task=known.get)                                                      # noqa: E731
+    for n in ("99999999", "999999999999", "Task-99999999"):
+        r = Q(f"add Read after {n}")
+        num = n.split("-")[-1]
+        assert r["name"] == f"Read after {n}" and r["after"] is None, n
+        assert r["refused"] == [{"words": f"after {n}", "why": f"no Task-{num}" + K}], n
+    assert Q("add Read under 1234567890123")["refused"] == []              # 13 digits is a number in the name, not a task

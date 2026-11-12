@@ -121,7 +121,7 @@ _MONTH_WORDS = {"jan", "january", "feb", "february", "mar", "march", "apr", "apr
                 "jul", "july", "aug", "august", "sep", "sept", "september", "oct", "october", "nov", "november",
                 "dec", "december"}
 _ISO_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
-_LINK_N = re.compile(r"(?:task-)?(\d{1,7})", re.I)
+_LINK_N = re.compile(r"(?:task-)?(\d{1,12})", re.I)      # 12 digits: a long number is looked up and refused, never kept silently
 _LINK_WORDS = {"after": "waits_on", "under": "part_of"}
 _KEPT = "; kept in the name"
 _SECOND = {"part_of": "a second under", "waits_on": "a second after", "due": "a second due date",
