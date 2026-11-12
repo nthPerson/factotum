@@ -270,10 +270,20 @@ def bundle(conn: sqlite3.Connection, cfg: dict, task_ids: list[int], today: date
         waits = [r["dst"] for r in conn.execute("SELECT r.dst FROM relations r JOIN tasks t ON t.id = r.dst WHERE r.src = ? AND r.kind = 'waits_on' "
                                                 "AND r.removed_at IS NULL AND t.status = 'open' ORDER BY r.id", (nid,)).fetchall()]
         texts[nid] = n["context"] or ""
-        neighbours.append({"id": nid, "name": n["name"], "context": texts[nid][:TEXT_CAP], "due": n["due"], "hard": n["hard"],
+        neighbours.append({"id": nid, "name": n["name"], "context": texts[nid][:TEXT_CAP], "cut": _cut(texts[nid]), "due": n["due"], "hard": n["hard"],
                            "waiting_on": n["waiting_on"], "waits_on": waits, "via": via})
     return {"changed": changed, "neighbours": neighbours, "texts": texts, "ids": from_ids + [n["id"] for n in neighbours],
             "from": from_ids, "queue": queue, "batches": sorted(causes), "what": {str(c["id"]): c["what"] for c in changed}}
+
+
+# A neighbour's text longer than TEXT_CAP is shown cut, so a rewrite would be built from part of it and
+# replace all of it: such a text is never rewritten; its ripple becomes the dated note (apply).
+TOO_LONG = "the text is too long to rewrite safely, so a note was added"
+
+
+def _cut(text: str | None) -> bool:
+    """True when the prompt shows only the first TEXT_CAP characters of this text."""
+    return len(text or "") > TEXT_CAP
 
 
 LINE_CAP = 300                      # characters of a name, an outcome or a waiting_on in the prompt
@@ -317,7 +327,9 @@ def _neighbour_text(n: dict) -> str:
     if n["waiting_on"]:
         waits += f"; on {_q(n['waiting_on'])}"
     text = _q(n["context"], TEXT_CAP) if n["context"] else "(none)"
-    return f"Task-{n['id']} | {n['via']} | {due} | {waits} | {_q(n['name'])}\n  text: {text}"
+    cut = (f"\n  (cut: only its first {TEXT_CAP} characters are shown, so this text is never rewritten: "
+           "an effect `text` adds your `why` to it as a dated note)") if n.get("cut") else ""
+    return f"Task-{n['id']} | {n['via']} | {due} | {waits} | {_q(n['name'])}\n  text: {text}{cut}"
 
 
 def build_prompt(cfg: dict, b: dict, today: date, clock: str = "") -> str:
@@ -603,19 +615,21 @@ def apply(conn: sqlite3.Connection, cfg: dict, b: dict, entries: list[dict], run
             continue
         if e["effect"] == "text":
             old = b["texts"][tid]
-            why_not = guard(old, e["context"])
+            cut = _cut(old)                                  # the run saw part of it: a rewrite would lose the rest
+            why_not = TOO_LONG if cut else guard(old, e["context"])
             why = _no_new_addresses(e["why"], old)           # History's line for the change brings no address either
             if why_not is None:
                 changes.append({"task_id": tid, "op": "set", "fields": {"context": e["context"]}, "expect": {"context": old}, "note": why})
                 rewrites.append(tid)
-            elif _loss(old, e["context"]) is None and stage(
+            elif not cut and _loss(old, e["context"]) is None and stage(
                     {"task_id": tid, "op": "set", "fields": {"context": e["context"]}, "expect": {"context": old}},
                     f"rewrite the text of Task-{tid}: it {why_not}", e["why"]):
                 pass                                         # it only adds an address: the owner decides on Review (design §8.6)
             else:
                 # the note is task text: a reason that named a new address is not written at all
                 said = f"Ripple from Task-{first}: {e['why'] if why == e['why'] else WITHHELD}" if why else f"Ripple from Task-{first}"
-                changes.append({"task_id": tid, "op": "add_note", "fields": {"text": said}, "note": why})
+                note = (f"{why} ({TOO_LONG})" if why else TOO_LONG[0].upper() + TOO_LONG[1:]) if cut else why    # History says why in words
+                changes.append({"task_id": tid, "op": "add_note", "fields": {"text": said}, "note": note})
                 noted.append({"task_id": tid, "why": why_not})
         for p in e["proposals"]:
             ch, label = clean_proposal(conn, cfg, p, tid, b)
@@ -696,8 +710,9 @@ def _preview(conn: sqlite3.Connection, cfg: dict, b: dict, entries: list[dict]) 
         tid = e["task_id"]
         verdict = "nothing"
         if e["effect"] == "text":
-            why_not = guard(b["texts"][tid], e["context"])
-            verdict = ("would rewrite" if why_not is None else f"would add a note: {why_not}" if _loss(b["texts"][tid], e["context"])
+            cut = _cut(b["texts"][tid])
+            why_not = TOO_LONG if cut else guard(b["texts"][tid], e["context"])
+            verdict = ("would rewrite" if why_not is None else f"would add a note: {why_not}" if cut or _loss(b["texts"][tid], e["context"])
                        else f"would stage a card: it {why_not}")
         out.append({"task_id": tid, "effect": e["effect"], "verdict": verdict})
         for p in e["proposals"]:

@@ -372,7 +372,9 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
 - **A ripple may drop words the owner wrote** (2026-11-11): the first real dry-run removed "in person" from
   a sibling's sentence while adding where things stand. The prompt says to keep the owner's sentences and
   never soften a requirement (`test_the_prompt_says_to_keep_what_the_owner_wrote`); the guard checks only
-  links, `Task-N` and addresses, so History's Undo is the safety net.
+  links, `Task-N` and addresses, so History's Undo is the safety net. A text over `ripple.TEXT_CAP` (1500) is
+  shown cut and is never rewritten (review 2026-11-11: the rewrite replaced the whole text with what was built
+  from its first 1500 characters); its ripple is the dated note (`ripple.TOO_LONG`).
 - **Never pipe the dev or service start script's output through `tail` / `head` when it leaves a server
   running** (2026-11-11): the pipe never closes and the command hangs. And `GET /api/review` is loaded once
   per page (the in-flight flag in `app.js`) because its `last_offered_at` stamp commits on the shared

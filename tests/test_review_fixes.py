@@ -200,3 +200,71 @@ def test_commit_lock_is_reentrant():
     import inspect
     src = inspect.getsource(api.create_app)
     assert "commit_lock = threading.RLock()" in src
+
+
+# ---- 2 and 3. a ripple never rewrites a text it showed cut, and writes back what the owner wrote ------------
+
+from factotum import config as C, ripple  # noqa: E402
+from factotum.claude.runner import RunResult  # noqa: E402
+
+
+@pytest.fixture
+def rconn(tmp_path, monkeypatch):
+    monkeypatch.setattr(ripple, "RUNS_DIR", tmp_path / "runs")
+    c = connect(tmp_path / "r.db")
+    init_db(c)
+    return c
+
+
+def _shown_text(prompt: str) -> str:
+    """The first neighbour's text as the prompt shows it, read back as a JSON reader would."""
+    return json.loads(prompt.split("  text: ", 1)[1].split("\n", 1)[0])
+
+
+def _faithful(seen: dict | None = None):
+    """A model that keeps what it was shown word for word and adds where things stand."""
+    def runner(cfg, kind, prompt, **kw):
+        if seen is not None:
+            seen["prompt"] = prompt
+        data = {"ripples": [{"task_id": 2, "effect": "text", "context": _shown_text(prompt) + "\nWhere this stands: Task-1 is done.",
+                             "why": "Task-1 is done", "proposals": []}]}
+        return RunResult(True, data, json.dumps(data), 0.03, 900)
+    return runner
+
+
+def _ripple_once(conn, cfg, context: str, seen: dict | None = None) -> dict:
+    _mk(conn, 1)
+    _mk(conn, 2, context=context)
+    batches.apply(conn, [{"op": "link", "task_id": 2, "fields": {"kind": "waits_on", "other": 1}}], "ui", TODAY)
+    batches.apply(conn, [{"op": "done", "task_id": 1}], "ui", TODAY)
+    return ripple.run(conn, cfg, [1], TODAY, runner=_faithful(seen), at="2026-11-01T10:00")
+
+
+def test_a_text_shown_cut_is_never_rewritten_its_ripple_is_a_note(rconn, cfg):
+    """test_ripple_long_text.py::test_tail_lost: the model saw 1500 characters, and its rewrite replaced the
+    whole text, so the owner's requirement past the cut was gone."""
+    tail = " IMPORTANT: must be handed in person at the office, bring the signed form."
+    long = ("Owner notes. " * 120 + tail).strip()
+    assert len(long) > ripple.TEXT_CAP
+    seen: dict = {}
+    res = _ripple_once(rconn, cfg, long, seen)
+    now = rconn.execute("SELECT context FROM tasks WHERE id = 2").fetchone()[0]
+    assert res["rewritten"] == [] and [n["task_id"] for n in res["noted"]] == [2], res
+    assert now.startswith(long) and "in person" in now and now.endswith("Ripple from Task-1: Task-1 is done")
+    note = rconn.execute("SELECT note FROM changes WHERE batch_id = ? AND task_id = 2 AND field = 'context'", (res["batch_id"],)).fetchone()[0]
+    assert "the text is too long to rewrite safely, so a note was added" in note
+    assert "the text is too long to rewrite safely, so a note was added" in res["line"]
+    assert f"only its first {ripple.TEXT_CAP} characters are shown" in seen["prompt"]       # the model is told
+
+
+def test_a_text_exactly_at_the_cap_is_rewritten_one_character_more_is_a_note(rconn, cfg, tmp_path):
+    at_cap = "a" * (ripple.TEXT_CAP - 9) + " in person"[:9]
+    assert len(at_cap) == ripple.TEXT_CAP
+    seen: dict = {}
+    res = _ripple_once(rconn, cfg, at_cap, seen)
+    assert res["rewritten"] == [2] and res["noted"] == []
+    assert "characters are shown" not in seen["prompt"]
+    other = connect(tmp_path / "r2.db")
+    init_db(other)
+    res = _ripple_once(other, cfg, at_cap + "!")
+    assert res["rewritten"] == [] and [n["task_id"] for n in res["noted"]] == [2]

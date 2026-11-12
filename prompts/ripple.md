@@ -40,7 +40,10 @@ For each task in §3, choose one effect.
   - add no email address and no web address the old text did not have (such a rewrite waits on
     Review for the owner's tap instead of being applied);
   - at most {{rewrite_cap}} characters;
-  - invent no fact and no date: write only what the old text, §2 and §3 say.
+  - invent no fact and no date: write only what the old text, §2 and §3 say;
+  - a task whose text is marked `(cut: …)` was shown only in part, so it is never rewritten: choose
+    `text` only to add one line, written in `why` (where it stands now), which is added to it as a dated
+    note; or choose `none` or `propose`.
   A rewrite that breaks a rule is not applied: the old text stays and your `why` is added to it
   as a dated note instead.
 - `propose`: a change that waits for the owner's tap on Review. Nothing you propose is applied on

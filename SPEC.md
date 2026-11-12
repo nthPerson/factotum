@@ -583,8 +583,8 @@ older than 24 h is set aside unrun; with ripples off the scheduler empties the q
 
 **The input.** Per changed task: what changed as before → now, the outcome, any task merged into it. Per
 linked task (open only, at most 12: direct links first, then other steps of the same goal): its link, due
-date, who it waits on, name and text, each text cut to 1500 characters. Every value is one JSON string in
-the prompt and escaped (stranger text, §2).
+date, who it waits on, name and text, each text cut to 1500 characters (a cut text is marked so in the
+prompt). Every value is one JSON string in the prompt and escaped (stranger text, §2).
 
 **The reply** is `{"ripples": [{"task_id", "effect": "none" | "text" | "propose", "context", "why",
 "proposals": [{"op", "fields", "reason"}]}]}`, one entry per linked task. A wrong shape anywhere (not that
@@ -596,6 +596,9 @@ with source `ripple`, through `batches.apply` with `expect` set to the text the 
 edited by hand meanwhile is skipped with the usual reason; a task closed or merged meanwhile is left alone.
 A rewrite that loses something (empty, too long, or it drops a web address or a `Task-N` the old text had)
 is refused and becomes an `add_note` ("Ripple from Task-N: why"), dated by the server, in the same batch;
+so does any rewrite of a text the run was shown cut (over 1500 characters: a rewrite would replace the whole
+text with what was built from its first part), History's line saying "the text is too long to rewrite safely,
+so a note was added";
 when the reason names an address the old text lacked, the note says fixed words instead, and History's line
 for the change has that address replaced by "[address left out]". A rewrite that loses nothing but adds an
 email or web address the old text did not have is not applied on its own (a ripple never brings an address
