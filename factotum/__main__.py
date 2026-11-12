@@ -70,10 +70,10 @@ def _links_check() -> int:
     try:
         why = _not_migrated(conn)
         if why:
-            copy = Path.home() / "factotum-preview.db"
+            copy, py = Path.home() / "factotum-preview.db", sys.executable
             print(f"{path} is not migrated yet ({why}), and links-check never migrates, so it read nothing. To preview, copy it and migrate the copy: "
-                  f".venv/bin/python -c \"import sqlite3; s = sqlite3.connect('{path}'); d = sqlite3.connect('{copy}'); s.backup(d); d.close(); s.close()\" "
-                  f"&& FACTOTUM_DB={copy} .venv/bin/python -m factotum init-db && FACTOTUM_DB={copy} .venv/bin/python -m factotum links-check")
+                  f"{py} -c \"import sqlite3; s = sqlite3.connect('{path}'); d = sqlite3.connect('{copy}'); s.backup(d); d.close(); s.close()\" "
+                  f"&& FACTOTUM_DB={copy} {py} -m factotum init-db && FACTOTUM_DB={copy} {py} -m factotum links-check")
             return 0
         words = {"same_as": "same as", "part_of": "part of", "waits_on": "waits on", "any": "linked to"}
         total = {"twin": [0, 0], "text": [0, 0], "thread": [0, 0]}
