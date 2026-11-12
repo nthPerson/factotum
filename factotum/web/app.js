@@ -2046,7 +2046,9 @@
       catch (e) { if (!(e && (e.message === 'signed out' || e.network))) console.error('Loading a conversation failed:', e); }
       pl.loading = null; pl.loaded = true;      // a failure shows the place empty rather than asking again on every redraw
       if (r && !pl.live) {      // while a turn runs its own answer is appended when it ends
-        pl.thread_id = r.thread ? r.thread.id : null; pl.messages = r.messages || []; pl.named = r.named || {};
+        if (pl.origin === 'today' && r.thread && r.thread.id === closedToday()) {      // closed here: not drawn, the next sentence starts anew
+          Object.assign(pl, { thread_id: null, messages: [], named: {}, fresh: true });
+        } else { pl.thread_id = r.thread ? r.thread.id : null; pl.messages = r.messages || []; pl.named = r.named || {}; }
       }
       if (typingNow()) swapPlace(pl); else render();
     })());
@@ -2279,7 +2281,9 @@
   }
   // Today, Timeline and Projects: the Today box's conversation, under the box, once it has a message or a turn
   // runs. Loaded once per page load, so a conversation of the last 12 hours is there after a reload. Close
-  // empties it here; the next sentence starts a new thread (`fresh`), the closed one stays in Chat.
+  // empties it here; the next sentence starts a new thread (`fresh`), the closed one stays in Chat. The closed
+  // thread's id is remembered in this browser, so a reload does not draw it again; a newer thread is drawn.
+  function closedToday() { try { return +localStorage.getItem('factotum.todayClosed') || null; } catch (_) { return null; } }
   function todayPlaceHtml() {
     const pl = placeOf('today', null);
     if (!pl.loaded) loadPlace(pl);
@@ -3400,6 +3404,7 @@
     });
     panel.querySelectorAll('[data-place-close]').forEach(b => b.onclick = () => {
       const pl = places.get(b.dataset.placeClose); if (!pl || pl.live) return;
+      if (pl.origin === 'today' && pl.thread_id) { try { localStorage.setItem('factotum.todayClosed', String(pl.thread_id)); } catch (_) {} }
       Object.assign(pl, { thread_id: null, messages: [], named: {}, fresh: true, more: false }); pl.off.clear();
       if (pl.origin === 'today') draft.askToday = '';
       render();

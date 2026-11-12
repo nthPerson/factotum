@@ -854,7 +854,9 @@ link to a new task of the same reply is left out (and says so) while that task i
 proposal applied from a place or the Chat tab reads "applied" and is not offered again (the page remembers it
 per browser; an Undo of that batch offers it again). One turn runs at a time on the page; a follow-up while
 one runs is refused with the text kept. The Today box's conversation is asked for again on every return to
-the app, so one quiet for 12 hours is let go in an app left open.
+the app, so one quiet for 12 hours is let go in an app left open. Close lets it go at once and holds: the page
+remembers the closed thread's id in this browser (`factotum.todayClosed`), so a reload does not draw it again and
+the next sentence starts a new thread (`fresh: true`); a newer Today thread is drawn as usual.
 *New task.* On desktop a New task line (`n` or the button) with the add line's live preview ("Will be added
 as", chips, a legend of what each part meant, refused parts with their reasons); Enter adds at once, the
 toast says "Added Task-N" with Open and Undo, and "Add and open" opens it. Edit first moves a proposed task
