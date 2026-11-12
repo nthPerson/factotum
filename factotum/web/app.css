@@ -217,6 +217,10 @@ span.lb { cursor: default; }      /* stepsChip: the same look, not a link */
 @media (max-width: 700px) {
   .lb { font-size: 12px; padding: 6px 10px; min-height: 32px; }
   .lb.sus { padding: 5px 9px; }
+  /* 44 px where a finger lands, drawn 32 px tall: the pill's own padding would grow its background, so the extra 6 px
+     above and below is an empty ::after the badge owns (a tap on it is a tap on the link); the row does not grow. */
+  a.lb { position: relative; }
+  a.lb::after { content: ''; position: absolute; left: 0; right: 0; top: -6px; bottom: -6px; }
   .chip.need, .chip.morelinks { font-size: 12px; padding: 5px 9px; }
   .lblegend { display: none; }
 }
