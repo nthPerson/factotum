@@ -2470,15 +2470,19 @@
   const shownRuns = () => logData.runs.filter(r => !(logQuiet && routine(r)));
   // A link change in words, without the task code every Log surface prints first; null for the `in` row
   // (the other task's row of the same relation says it).
-  function logLinkWords(c) {
+  // A merged task reopened: its batch also removes the task's same_as, and the two read as one thing.
+  const reopenedIn = (b, id) => !!b && b.changes.some(x => x.task_id === id && x.field === 'status' && x.new === 'open');
+  const unmerge = c => !!c && c.field === 'link' && c.new == null && !!c.old && c.old.kind === 'same_as' && c.old.dir !== 'in';
+  function logLinkWords(c, b) {
     if (!c || c.field !== 'link') return null;
     const v = c.new != null ? c.new : c.old;
     if (!v || v.dir === 'in') return null;
+    if (unmerge(c) && reopenedIn(b, c.task_id)) return `reopened (was merged into Task-${v.other})`;
     return linkPredicate(v.kind, v.other, c.new == null);
   }
   const noteAfter = c => c.note ? ` <span class="cnote">— ${esc(c.note)}</span>` : '';
   function changeLines(b) {
-    return b.changes.filter(c => c.field !== 'link' || logLinkWords(c)).map(c => c.field === 'link' ? `<div class="logc"><span class="code">Task-${c.task_id}</span> <span class="name">${esc(c.task_name || '')}</span> <span class="f">${esc(logLinkWords(c))}</span>${noteAfter(c)}</div>`
+    return b.changes.filter(c => c.field !== 'link' || logLinkWords(c)).map(c => c.field === 'link' ? `<div class="logc"><span class="code">Task-${c.task_id}</span> <span class="name">${esc(c.task_name || '')}</span> <span class="f">${esc(logLinkWords(c, b))}</span>${noteAfter(c)}</div>`
       : c.field === 'evidence' ? `<div class="logc">${c.task_id ? `<span class="code">Task-${c.task_id}</span> <span class="name">${esc(c.task_name || '')}</span>` : '<span class="code">suggestion</span>'} <span class="f">evidence #${c.new && c.new.evidence_id}</span> ${esc((c.new || {}).verdict || '')}</div>`
       : c.field === 'created' ? `<div class="logc"><span class="code">Task-${c.task_id}</span> <span class="name">${esc(c.task_name || '')}</span> <span class="f">created</span></div>`
       : c.field === 'thread' ? `<div class="logc"><span class="code">Task-${c.task_id}</span> <span class="name">${esc(c.task_name || '')}</span> <span class="f">${esc(fieldSaid(c))}</span>${noteAfter(c)}</div>`
@@ -2498,11 +2502,12 @@
       if (NOISE.has(c.field)) continue;
       const v = c.new;
       if (c.field === 'link' && !logLinkWords(c)) continue;
-      const label = c.field === 'link' ? logLinkWords(c) : c.field === 'status' ? (v === 'open' ? 'reopened' : String(v)) : c.field === 'created' ? 'created' : c.field === 'due' ? (v ? 'due ' + String(v).slice(0, 10) : 'due date removed')
+      const label = c.field === 'link' ? logLinkWords(c, b) : c.field === 'status' ? (v === 'open' ? 'reopened' : String(v)) : c.field === 'created' ? 'created' : c.field === 'due' ? (v ? 'due ' + String(v).slice(0, 10) : 'due date removed')
         : c.field === 'snoozed_until' ? (v ? 'later, back ' + String(v).slice(0, 10) : 'back from later') : c.field === 'reminder' ? 'reminder set' : c.field === 'top_rank' ? (v ? 'Top' : 'unpinned')
         : c.field === 'evidence' ? ((v || {}).verdict === 'dismissed' ? 'dismissed' : 'seen') : c.field === 'thread' ? fieldSaid(c) : c.field === 'close_on_sent_since' ? (v ? 'closes on send' : 'watch ended') : c.field.replace(/_/g, ' ');
       const key = c.task_id || 'e' + ((v || {}).evidence_id || '');
-      const r = c.field === 'link' ? ((v || c.old || {}).kind === 'same_as' ? 6 : 4) : RANK[c.field] || 1, cur = per.get(key);
+      // an added same_as (a merge) outranks everything; a removed one only as part of a reopen, which it then says
+      const r = c.field === 'link' ? ((v || {}).kind === 'same_as' ? 6 : unmerge(c) && reopenedIn(b, c.task_id) ? 5.5 : 4) : RANK[c.field] || 1, cur = per.get(key);
       if (!cur || r > cur.r) per.set(key, { r, label, id: c.task_id });
     }
     const items = [...per.values()];
@@ -2539,7 +2544,8 @@
     const per = new Map();
     for (const c of b.changes) {
       const k = c.task_id || 'e'; if (!per.has(k)) per.set(k, { id: c.task_id, name: c.task_name, said: [], quiet: 0, skipped: 0 }); const g = per.get(k);
-      if (c.field === 'link') { const w = logLinkWords(c); w ? g.said.push(w + (c.note ? ' — ' + c.note : '')) : g.skipped++; continue; }
+      if (c.field === 'link') { const w = logLinkWords(c, b); w ? g.said.push(w + (c.note ? ' — ' + c.note : '')) : g.skipped++; continue; }
+      if (c.field === 'status' && c.new === 'open' && b.changes.some(x => x.task_id === c.task_id && unmerge(x))) continue;      // said by the link: "reopened (was merged into …)"
       QUIET.has(c.field) ? g.quiet++ : g.said.push(fieldSaid(c) + (c.note ? ' — ' + c.note : ''));
     }
     return [...per.values()].filter(g => g.said.length || g.quiet || !g.skipped).map(g => `<div class="logc dg">${g.id ? `<span class="code">Task-${g.id}</span> <span class="name">${esc(g.name || '')}</span>` : '<span class="code">suggestion</span>'}
