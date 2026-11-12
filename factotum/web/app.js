@@ -1695,9 +1695,9 @@
       : 'Press <kbd>n</kbd> or <b>New task</b> and type one line, for example <code>Email the lab the dataset fri ~S</code>, then Enter.';
     return `<div class="empty"><b>No open tasks yet.</b> ${how} Or write a sentence in the box above and Claude files it for you. Tasks also arrive from the inputs you switch on in Settings and from suggestions in Review. Coming from a Notion tasks database? See docs/SETUP.md §5.</div>`;
   }
-  function todayGroups(lv) {
+  function todayGroups(lv, withLater) {
     const ready = (lv || effectiveLinkView()) === 'ready';
-    const o = openOnes().filter(x => !(x.snoozed_until && x.snoozed_until > data.today) && (!ready || readyRow(x)));   // Later = hidden until its date
+    const o = openOnes().filter(x => (withLater || !(x.snoozed_until && x.snoozed_until > data.today)) && (!ready || readyRow(x)));   // Later = hidden until its date
     const by = f => o.filter(f);
     const today = by(x => dueDays(x) === 0), tomorrow = by(x => dueDays(x) === 1);
     return { open: o, groups: arrangeToday([
@@ -1717,6 +1717,9 @@
   // Today with no rows. Under Ready now the waiting tasks it hides may be due this week: say so, not "nothing is due".
   function todayEmptyHtml() {
     const hidden = effectiveLinkView() !== 'ready' ? 0 : new Set(todayGroups('all').groups.flatMap(g => g.rows.map(x => x.id))).size;
+    // Rows Today would show but for Later: "nothing is due" would not be true
+    const later = hidden ? 0 : new Set(todayGroups(null, true).groups.flatMap(g => g.rows.map(x => x.id))).size;
+    if (!hidden && later) return `<div class="empty">Nothing is due today or this week except ${later === 1 ? 'one task' : later + ' tasks'} you set for later. Every open task is on Timeline.</div>`;
     if (!hidden) return '<div class="empty">Nothing is due today or this week. Every open task is on Timeline.</div>';
     return `<div class="empty">Nothing here is ready now: ${hidden === 1 ? 'the one task' : `all ${hidden} tasks`} due today or this week ${hidden === 1 ? 'waits' : 'wait'} on another task. <b>All</b> shows ${hidden === 1 ? 'it' : 'them'}.</div>`;
   }
