@@ -766,3 +766,33 @@ def test_the_chat_prompts_put_a_create_s_ref_and_links_inside_fields():
         text = (C.ROOT / "prompts" / name).read_text(encoding="utf-8")
         assert shape in text and "inside `fields`" in text, name
         assert "blocked" not in text.lower() and "dependency" not in text.lower()
+
+
+# --- H13: PUT /api/settings refuses a value outside a select's choices -------------------------------------
+
+def test_a_setting_outside_its_select_s_choices_is_refused(cfg, tmp_path):
+    client, c = _app(cfg, tmp_path)
+    for values, words in (({"notify.provider": "pigeon"}, "notify.provider must be one of"),
+                          ({"server.mcp_writes": "everything"}, "server.mcp_writes must be one of"),
+                          ({"claude.ripple.model": "sonnet\n--dangerously-skip-permissions"}, "claude.ripple.model must be a model name"),
+                          ({"claude.ripple.model": ""}, "claude.ripple.model must be a model name")):
+        r = client.put("/api/settings", json={"values": values})
+        assert r.status_code == 400 and words in r.json()["detail"], (values, r.text)
+    assert client.get("/api/settings").json()["overrides"] == {}
+    ok = {"notify.provider": "both", "server.mcp_writes": "apply", "claude.ripple.model": "claude-sonnet-4-5-20250929"}   # a full model id stays allowed
+    assert client.put("/api/settings", json={"values": ok}).status_code == 200
+    assert client.get("/api/settings").json()["overrides"] == ok
+
+
+def test_the_allowed_choices_are_the_ones_the_page_offers():
+    import re
+    from factotum import config as C
+    page = (C.ROOT / "factotum" / "web" / "app.js").read_text(encoding="utf-8")
+    body = page[page.index("function renderSettings"):]
+    selects = set(re.findall(r'<select id="s-[^"]+" data-key="([a-z_.]+)"', body))
+    assert selects == set(C.CHOICES) | {"claude.ripple.model"}                       # every select is held, the ripple model by its pattern
+    for key, allowed in C.CHOICES.items():
+        line = next(l for l in body.splitlines() if f'data-key="{key}"' in l)
+        offered = set(re.findall(r"\['([a-z]+)', '[^']*'\]", line)) | set(re.findall(r'<option value="([a-z]+)"', line))
+        assert offered == set(allowed), key
+    assert all(C.MODEL_RE.fullmatch(m) for m in ("sonnet", "haiku", "opus"))

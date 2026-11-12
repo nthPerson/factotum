@@ -173,7 +173,8 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
 
 - **Settings-tab keys are a whitelist** (`config.SETTINGS_KEYS`). A new toggle needs the key
   there, its code default in `config.DEFAULTS`, a control in `web/app.js` `renderSettings`, and a
-  default in the example YAML; a number control's `min` goes in `config.MINIMA` too (PUT /api/settings refuses below it, 2026-11-11).
+  default in the example YAML; a number control's `min` goes in `config.MINIMA` too (PUT /api/settings refuses below it, 2026-11-11), and a
+  select's choices in `config.CHOICES` (it refuses anything else; the ripple model takes any one model name, `MODEL_RE`).
 - **Absent means off for the scheduled paid runs and anything that sends mail** (2026-11-10): a scheduled
   paid Claude run, a mail, a write to an outside service happens only when its switch is explicitly on. The
   default lives in `config.DEFAULTS` as False and the code reads it with `C.value(cfg, key)`, never
@@ -507,7 +508,7 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
 - **A filing run is dequeued before it runs** (2026-11-11): a failed one is logged and not retried; `file-task` runs
   it again by hand.
 - **Every subcommand but `effective` and `links-check` runs `init_db`, so migrates** (review 2026-11-11): never run one from a new checkout against the live database while the old service is up (SETUP §18).
-- **A run kind's budget and timeout default to `runner.BUDGETS_USD` / `TIMEOUTS_S`** (2026-11-11), the example's numbers (a test pins them): a new run kind needs a line in both and in the example.
+- **A run kind's budget, timeout and model default to `runner.BUDGETS_USD` / `TIMEOUTS_S` / `MODELS`** (2026-11-11), the example's values (a test pins them): a new run kind needs a line in all three and in the example.
 - **Where Claude cannot run, ripples and filing wait quietly** (2026-11-11; on by default, so a new person's machine
   may have no `claude` program or no login): `runner.unavailable` tells those two causes from a run's own failure;
   `runner.note_unavailable` keeps `state.claude.unavailable` for Settings → Claude's sentence and lets one failed

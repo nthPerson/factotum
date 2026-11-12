@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -94,9 +95,17 @@ MINIMA: dict[str, float] = {
 }
 
 
+# The choices of each Settings select (web/app.js renderSettings, held to it by a test); PUT /api/settings refuses
+# anything else. The ripple model is the exception: the page shows the effective value beside its three names, so a
+# full model id the config names stays allowed, as one model name (MODEL_RE: it becomes a `--model` argument).
+CHOICES: dict[str, tuple[str, ...]] = {"notify.provider": ("ntfy", "app", "both"), "server.mcp_writes": ("stage", "apply")}
+MODEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,99}")
+FREE_MODELS = ("claude.ripple.model",)
+
+
 def setting_problem(key: str, v: Any) -> str | None:
-    """Why `v` cannot be stored for the Settings key `key` (its type is not its default's, or a number is below
-    MINIMA), or None."""
+    """Why `v` cannot be stored for the Settings key `key` (its type is not its default's, a number is below
+    MINIMA, a select's value is not one of its CHOICES, a model is not one model name), or None."""
     import json
     import math
     d = DEFAULTS[key]
@@ -114,6 +123,10 @@ def setting_problem(key: str, v: Any) -> str | None:
         return f"{key} must be {want}, not {json.dumps(v)}"
     if key in MINIMA and v < MINIMA[key]:
         return f"{key} must be at least {MINIMA[key]:g}, not {v:g}"
+    if key in CHOICES and v not in CHOICES[key]:
+        return f"{key} must be one of {', '.join(CHOICES[key])}, not {json.dumps(v)}"
+    if key in FREE_MODELS and not MODEL_RE.fullmatch(v):
+        return f"{key} must be a model name (letters, digits, '-', '.', '_'), not {json.dumps(v)[:60]}"
     return None
 
 
