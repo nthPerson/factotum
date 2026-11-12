@@ -461,3 +461,82 @@ def test_a_chat_create_follows_its_cited_threads_inside_its_batch(cfg, tmp_path,
     assert {row[0] for row in c.execute("SELECT field FROM changes WHERE batch_id = ?", (r["batch_id"],))} == {"created", "thread"}
     client.post(f"/api/batches/{r['batch_id']}/undo", json={})
     assert not c.execute("SELECT 1 FROM links WHERE task_id = ?", (t2,)).fetchone()
+
+
+# --- G2: a notification's Done and Snooze write in one undoable batch -------------------------------------
+
+def _sent_reminder(c, cfg, tid, fire_at="2026-11-03T09:00", label="Call back"):
+    from datetime import datetime
+    from conftest import TODAY
+    from factotum import batches, reminders
+
+    class Push:
+        def __call__(self, *a, **k):
+            return "m1"
+    batches.apply(c, [{"task_id": tid, "op": "add_reminder", "fields": {"fire_at": fire_at, "label": label}}], "ui", TODAY)
+    reminders.fire(c, cfg, datetime(2026, 11, 3, 9, 0, 30), Push())
+    return c.execute("SELECT * FROM reminders WHERE task_id = ? AND status = 'sent' ORDER BY id DESC", (tid,)).fetchone()
+
+
+def test_a_notification_s_snooze_is_one_undoable_batch_the_log_can_name(cfg, tmp_path):
+    client, c = _app(cfg, tmp_path)
+    mk(c, 1, name="Call Reza")
+    cfg["notify"]["ntfy"]["topic"] = "factotum-test"
+    r0 = _sent_reminder(c, cfg, 1)
+    before = c.execute("SELECT COALESCE(MAX(id), 0) FROM batches").fetchone()[0]
+    assert client.get(f"/r/{r0['token']}", params={"a": "snooze"}).status_code == 200
+    b = c.execute("SELECT * FROM batches WHERE id > ?", (before,)).fetchall()
+    assert len(b) == 1 and b[0]["source"] == "ntfy"
+    assert c.execute("SELECT status FROM reminders WHERE id = ?", (r0["id"],)).fetchone()[0] == "snoozed"
+    new = c.execute("SELECT * FROM reminders WHERE task_id = 1 AND status = 'pending'").fetchall()
+    assert len(new) == 1 and new[0]["label"] == "Call back" and new[0]["created_by"] == "ntfy"
+    ch = c.execute("SELECT field, new FROM changes WHERE batch_id = ?", (b[0]["id"],)).fetchall()
+    assert [x["field"] for x in ch] == ["reminder"]
+    said = json.loads(ch[0]["new"])
+    assert said["fire_at"] == new[0]["fire_at"] and said["snoozed"] is True       # the Log says "snoozed to <when>"
+    # Undo: the new reminder is cancelled and the one that fired is armed again (its buttons work again)
+    u = client.post(f"/api/batches/{b[0]['id']}/undo", json={}).json()
+    assert u["undone"] is True and u["skipped"] == []
+    assert c.execute("SELECT status FROM reminders WHERE id = ?", (new[0]["id"],)).fetchone()[0] == "cancelled"
+    assert c.execute("SELECT status FROM reminders WHERE id = ?", (r0["id"],)).fetchone()[0] == "sent"
+    assert client.get(f"/r/{r0['token']}", params={"a": "snooze"}).status_code == 200
+
+
+def test_undo_of_a_notification_s_done_re_arms_its_reminder(cfg, tmp_path):
+    client, c = _app(cfg, tmp_path)
+    mk(c, 1, name="Call Reza")
+    cfg["notify"]["ntfy"]["topic"] = "factotum-test"
+    r0 = _sent_reminder(c, cfg, 1)
+    assert client.get(f"/r/{r0['token']}", params={"a": "done"}).status_code == 200
+    assert c.execute("SELECT status FROM reminders WHERE id = ?", (r0["id"],)).fetchone()[0] == "done"
+    bid = c.execute("SELECT id FROM batches WHERE source = 'ntfy' ORDER BY id DESC").fetchone()[0]
+    assert c.execute("SELECT status FROM tasks WHERE id = 1").fetchone()[0] == "done"
+    u = client.post(f"/api/batches/{bid}/undo", json={}).json()
+    assert u["undone"] is True and u["skipped"] == []
+    assert c.execute("SELECT status FROM tasks WHERE id = 1").fetchone()[0] == "open"
+    assert c.execute("SELECT status FROM reminders WHERE id = ?", (r0["id"],)).fetchone()[0] == "sent"
+    # the button works again, and a reminder acted on since is left as it is by a second undo attempt
+    assert client.get(f"/r/{r0['token']}", params={"a": "done"}).status_code == 200
+
+
+def test_undo_leaves_a_reminder_alone_that_changed_since(conn, cfg):
+    from conftest import TODAY
+    from factotum import batches
+    mk(conn, 1)
+    cfg["notify"]["ntfy"]["topic"] = "factotum-test"
+    r0 = _sent_reminder(conn, cfg, 1)
+    res = batches.apply(conn, [{"task_id": 1, "op": "done", "reminder_status": {"id": r0["id"], "status": "done"}}], "ntfy", TODAY)
+    conn.execute("UPDATE reminders SET status = 'cancelled' WHERE id = ?", (r0["id"],)); conn.commit()
+    u = batches.undo(conn, res["batch_id"])
+    assert conn.execute("SELECT status FROM reminders WHERE id = ?", (r0["id"],)).fetchone()[0] == "cancelled"
+    assert any("reminder" in s["why"] for s in u["skipped"]) and conn.execute("SELECT status FROM tasks WHERE id = 1").fetchone()[0] == "open"
+
+
+def test_the_page_cannot_send_a_reminder_status(cfg, tmp_path):
+    client, c = _app(cfg, tmp_path)
+    mk(c, 1)
+    cfg["notify"]["ntfy"]["topic"] = "factotum-test"
+    r0 = _sent_reminder(c, cfg, 1)
+    client.post("/api/batches/apply", json={"source": "ui", "changes": [{"task_id": 1, "op": "keep", "reminder_status": {"id": r0["id"], "status": "done"}}]})
+    assert c.execute("SELECT status FROM reminders WHERE id = ?", (r0["id"],)).fetchone()[0] == "sent"
+

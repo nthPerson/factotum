@@ -1101,7 +1101,11 @@ count may differ from Review's own by that day's link suggestions, which opening
 - Action tokens live on the reminder row; Done and Snooze are single use (a second tap says what
   already happened), Open only navigates (to `/t/<id>`, as does the optional tap; the page after Done or Snooze links the
   task too); all three stop working 24 h after the push. Snooze is
-  one hour from the tap. A repeating reminder's next occurrence is queued when it fires; a
+  one hour from the tap. Done and Snooze are each one undoable batch (source `ntfy`, polish 2026-11-11): Done closes
+  the task and marks the reminder done in it, Snooze adds the new reminder (the Log: "reminder snoozed to …") and
+  marks the one that fired snoozed; an Undo of either arms the reminder that fired again, so its buttons work again
+  (still within the 24 h), and a Snooze's Undo cancels the new one. The key that marks it (`reminder_status`) is
+  Python's only; the API strips it. A repeating reminder's next occurrence is queued when it fires; a
   reminder with a malformed `fire_at` never fires and shows in the task's details for repair.
 - **Setting one.** "Set reminder" on a Review card and in a row's details: date-time, optional
   label, once or daily / weekdays / weekly / monthly. It is a staged change (`add_reminder`) under

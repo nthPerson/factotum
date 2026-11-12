@@ -439,7 +439,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
     def apply_batch(body: ApplyBody):
         if body.source == ripple.RUN_KIND:          # only ripple.apply writes as a ripple: a client's would never queue one, and History would call it a ripple
             raise HTTPException(400, "source 'ripple' is written only by a ripple run")
-        changes = [{k: v for k, v in c.items() if k not in ("source_key", "created_source", "source_link", "account")} for c in body.changes]   # the page never chooses these
+        changes = [{k: v for k, v in c.items() if k not in ("source_key", "created_source", "source_link", "account", "reminder_status")} for c in body.changes]   # the page never chooses these
         try:
             with chat._CREATE_LOCK, commit_lock:     # a chat create staged here and its Create button never make two
                 left_out: list[dict] = []
@@ -1267,7 +1267,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
             k = reminders.hanging_on(conn, res["task_id"])            # open tasks that wait on it, its open goal: the outcome question (stage 5)
             if k > 0:
                 ask = {"action": f"{base}/r/{token}/outcome", "hang": k, "ripples": bool(C.value(eff_cfg(), "claude.ripple.enabled"))}
-        return HTMLResponse(_page(f"Task-{res['task_id']} {what}", res["task_name"], base, undo=res["action"] == "done", task_id=res["task_id"],
+        return HTMLResponse(_page(f"Task-{res['task_id']} {what}", res["task_name"], base, undo=bool(res.get("batch_id")), task_id=res["task_id"],
                                   free=free, ask=ask))
 
     @app.post("/r/{token}/outcome")

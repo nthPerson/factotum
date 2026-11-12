@@ -2526,7 +2526,7 @@
     return b.changes.filter(c => c.field !== 'link' || logLinkWords(c)).map(c => c.field === 'link' ? `<div class="logc"><span class="code">Task-${c.task_id}</span> <span class="name">${esc(c.task_name || '')}</span> <span class="f">${esc(logLinkWords(c, b))}</span>${noteAfter(c)}</div>`
       : c.field === 'evidence' ? `<div class="logc">${c.task_id ? `<span class="code">Task-${c.task_id}</span> <span class="name">${esc(c.task_name || '')}</span>` : '<span class="code">suggestion</span>'} <span class="f">evidence #${c.new && c.new.evidence_id}</span> ${esc((c.new || {}).verdict || '')}</div>`
       : c.field === 'created' ? `<div class="logc"><span class="code">Task-${c.task_id}</span> <span class="name">${esc(c.task_name || '')}</span> <span class="f">created</span></div>`
-      : c.field === 'thread' ? `<div class="logc"><span class="code">Task-${c.task_id}</span> <span class="name">${esc(c.task_name || '')}</span> <span class="f">${esc(fieldSaid(c))}</span>${noteAfter(c)}</div>`
+      : c.field === 'thread' || (c.field === 'reminder' && (c.new || {}).snoozed) ? `<div class="logc"><span class="code">Task-${c.task_id}</span> <span class="name">${esc(c.task_name || '')}</span> <span class="f">${esc(fieldSaid(c))}</span>${noteAfter(c)}</div>`
       : `<div class="logc"><span class="code">Task-${c.task_id}</span> <span class="name">${esc(c.task_name || '')}</span> <span class="f">${esc(c.field)}</span> ${logVal(c.old)} → ${logVal(c.new)}${noteAfter(c)}</div>`).join('');
   }
   // One line for a batch: per task, the change that matters most (a status over a date over a note).
@@ -2544,7 +2544,7 @@
       const v = c.new;
       if (c.field === 'link' && !logLinkWords(c)) continue;
       const label = c.field === 'link' ? logLinkWords(c, b) : c.field === 'status' ? (v === 'open' ? 'reopened' : String(v)) : c.field === 'created' ? 'created' : c.field === 'due' ? (v ? 'due ' + String(v).slice(0, 10) : 'due date removed')
-        : c.field === 'snoozed_until' ? (v ? 'later, back ' + String(v).slice(0, 10) : 'back from later') : c.field === 'reminder' ? 'reminder set' : c.field === 'top_rank' ? (v ? 'Top' : 'unpinned')
+        : c.field === 'snoozed_until' ? (v ? 'later, back ' + String(v).slice(0, 10) : 'back from later') : c.field === 'reminder' ? ((v || {}).snoozed ? fieldSaid(c) : 'reminder set') : c.field === 'top_rank' ? (v ? 'Top' : 'unpinned')
         : c.field === 'evidence' ? ((v || {}).verdict === 'dismissed' ? 'dismissed' : 'seen') : c.field === 'thread' ? fieldSaid(c) : c.field === 'close_on_sent_since' ? (v ? 'closes on send' : 'watch ended') : c.field.replace(/_/g, ' ');
       const key = c.task_id || 'e' + ((v || {}).evidence_id || '');
       // an added same_as (a merge) outranks everything; a removed one only as part of a reopen, which it then says
@@ -2566,6 +2566,8 @@
     if (c.field === 'created') return 'created';
     if (c.field === 'due') return v ? (o ? `due ${short(o)} → ${short(v)}` : `due ${short(v)}`) : 'due date removed';
     if (c.field === 'snoozed_until') return v ? `later, back ${short(v)}` : 'back from later';
+    // a notification's Snooze is a new reminder marked `snoozed` (reminders.act)
+    if (c.field === 'reminder' && v && v.snoozed && v.fire_at) return 'reminder snoozed to ' + fmtWhen(v.fire_at);
     if (c.field === 'reminder') return 'reminder ' + (v && v.fire_at ? short(v.fire_at) : 'set') + (v && v.repeat ? ' · ' + v.repeat : '');
     if (c.field === 'top_rank') return v ? (o ? `Top ${o} → ${v}` : 'pinned to Top') : 'unpinned';
     if (c.field === 'longterm') return v ? 'long-term' : 'not long-term';

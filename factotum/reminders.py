@@ -200,18 +200,16 @@ def act(conn: sqlite3.Connection, cfg: dict, token: str, action: str, now_local:
     now_local = now_local or local_now(cfg)
     if action == "open":
         return {"action": "open", "task_id": r["task_id"], "task_name": r["task_name"]}
+    # Done and Snooze are one batch each (source `ntfy`): the reminder that fired is marked in it, so an Undo of
+    # the Done re-arms it, and a Snooze (a new reminder an hour on) is in the Log with its Undo.
     if action == "done":
-        res = batches.apply(conn, [{"task_id": r["task_id"], "op": "done"}], "ntfy")
-        conn.execute("UPDATE reminders SET status = 'done' WHERE id = ?", (r["id"],))
-        conn.commit()
+        res = batches.apply(conn, [{"task_id": r["task_id"], "op": "done", "reminder_status": {"id": r["id"], "status": "done"}}], "ntfy")
         return {"action": "done", "task_id": r["task_id"], "task_name": r["task_name"], "batch_id": res["batch_id"]}
     if action == "snooze":
         at = (now_local + SNOOZE).strftime("%Y-%m-%dT%H:%M")
-        conn.execute("UPDATE reminders SET status = 'snoozed' WHERE id = ?", (r["id"],))
-        conn.execute("INSERT INTO reminders (task_id, fire_at, label, status, created_by, created_at) VALUES (?, ?, ?, 'pending', 'ntfy', ?)",
-                     (r["task_id"], at, r.get("label"), now_iso()))
-        conn.commit()
-        return {"action": "snooze", "task_id": r["task_id"], "task_name": r["task_name"], "fire_at": at}
+        res = batches.apply(conn, [{"task_id": r["task_id"], "op": "add_reminder", "fields": {"fire_at": at, "label": r.get("label")},
+                                    "reminder_status": {"id": r["id"], "status": "snoozed"}}], "ntfy")
+        return {"action": "snooze", "task_id": r["task_id"], "task_name": r["task_name"], "fire_at": at, "batch_id": res["batch_id"]}
     raise TokenError(400, f"unknown action {action!r}")
 
 

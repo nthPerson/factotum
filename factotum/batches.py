@@ -241,6 +241,8 @@ def apply(conn: sqlite3.Connection, changes: list[dict], source: str, today: dat
                 applied += _follow_thread(conn, cur, ch, batch_id, undo, skipped, refs)
             elif _apply_one(conn, cur, ch, batch_id, source, today, closed_by, undo, skipped):
                 applied += 1
+            if isinstance(ch, dict) and isinstance(ch.get("reminder_status"), dict):
+                _reminder_status(cur, ch, batch_id, before, undo, skipped)
             note = str(ch.get("note") or "").strip()[:300] if isinstance(ch, dict) else ""
             if note:
                 cur.execute("UPDATE changes SET note = ? WHERE batch_id = ? AND id > ?", (note, batch_id, before))
@@ -425,6 +427,30 @@ def _judge_suggestions(conn, cur, a: int, b: int, batch_id: int, undo: list, ski
     for s in R.pending_suggestions(cur, {a}).get(a, []):
         if s["other"] == b:
             _judge_evidence(conn, cur, {"op": "judge_evidence", "task_id": a, "fields": {"evidence_id": s["evidence_id"], "verdict": "applied"}}, batch_id, undo, skipped)
+
+
+REMINDER_ACTS = ("done", "snoozed")
+
+
+def _reminder_status(cur, ch: dict, batch_id: int, before: int, undo: list, skipped: list) -> None:
+    """A notification's Done or Snooze (`reminders.act`), Python callers only (the API strips the key): the
+    reminder that fired is marked `done` or `snoozed` in the same batch as the task's Done or the snooze's new
+    reminder, so the batch's Undo arms it again (its buttons work again) and a snooze's new reminder is named
+    as one in the Log (`snoozed` on its `reminder` change)."""
+    rs = ch["reminder_status"]
+    rid, status = rs.get("id"), rs.get("status")
+    r = cur.execute("SELECT id, task_id, status FROM reminders WHERE id = ?", (rid,)).fetchone() if type(rid) is int else None
+    if not r or status not in REMINDER_ACTS:
+        skipped.append({"task_id": ch.get("task_id"), "why": "reminder_status names no reminder, or a status other than done or snoozed"})
+        return
+    if r["status"] == status:
+        return
+    cur.execute("UPDATE reminders SET status = ? WHERE id = ?", (status, rid))
+    undo.append({"task_id": r["task_id"], "reminder_id": rid, "status_was": r["status"], "status_now": status})
+    if status == "snoozed" and ch.get("op") == "add_reminder":
+        made = cur.execute("SELECT id, new FROM changes WHERE batch_id = ? AND field = 'reminder' AND id > ? ORDER BY id DESC LIMIT 1", (batch_id, before)).fetchone()
+        if made:
+            cur.execute("UPDATE changes SET new = ? WHERE id = ?", (json.dumps(dict(json.loads(made["new"]), snoozed=True)), made["id"]))
 
 
 def _follow_thread(conn, cur, ch: dict, batch_id: int, undo: list, skipped: list, refs: dict | None = None) -> bool:
@@ -698,6 +724,10 @@ def _undo_entries(conn: sqlite3.Connection, entries: list) -> tuple[int, list[di
                 skipped.append({"task_id": u.get("task_id"), "why": f"Task-{u.get('task_id')}: the thread link was moved or removed since; left as it is"})
                 continue
             conn.execute("UPDATE tasks SET edited_at = ? WHERE id = ?", (now_iso(), u["task_id"]))
+        elif "reminder_id" in u and "status_was" in u:        # a notification's Done or Snooze: armed again unless acted on since
+            if not conn.execute("UPDATE reminders SET status = ? WHERE id = ? AND status = ?", (u["status_was"], u["reminder_id"], u.get("status_now"))).rowcount:
+                skipped.append({"task_id": u.get("task_id"), "why": f"Task-{u.get('task_id')}: the reminder was changed since; left as it is"})
+                continue
         elif "reminder_id" in u:
             conn.execute("UPDATE reminders SET status = 'cancelled' WHERE id = ?", (u["reminder_id"],))
         elif "evidence_id" in u:
