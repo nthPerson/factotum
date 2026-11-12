@@ -461,6 +461,15 @@ body.tray-open .toast.ask { bottom: calc(38vh + 110px + env(safe-area-inset-bott
 .card .lsug { align-items: center; }      /* a suggested link: the question, its buttons, why (wraps like every .extra) */
 .card .lsug .hint { margin: 0; }
 @media (max-width: 700px) { .card .lsug .btn { width: 100%; min-height: 44px; } }
+/* A mail about this task (stage 7): who wrote, the subject and why, then Follow its thread / Not about this. */
+.card .mailabout { align-items: center; }
+.card .mailabout .chip { background: var(--accent-soft); color: var(--accent); }
+.card .mailabout > span:not(.chip) { flex: 1 1 260px; min-width: 0; overflow-wrap: anywhere; }
+.card .mailabout .hint { margin: 0; }
+@media (max-width: 700px) { .card .mailabout .btn { width: 100%; min-height: 44px; } }
+/* A mail suggestion's link, said before Create (stage 7). */
+.card .sg-link { font-size: 13px; color: var(--accent); margin: -4px 0 10px; }
+.card .sg-link a { color: inherit; }
 /* Ripples on the card (stage 5): "Since you last looked", and a ripple's proposal with Accept / Dismiss. */
 .card .since { background: var(--surface-2); border-radius: 8px; padding: 10px 12px; margin: 10px 0; display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
 .card .since .sl { overflow-wrap: anywhere; }

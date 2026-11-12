@@ -1728,11 +1728,25 @@
   const REASON_CLS = { freed: 'ok', steps_done: 'ok', blocker_gone: 'warn', linked_changed: 'chg', link_suggested: 'new', ripple: 'chg' };
   // The card's reason line: the server's sentence for a link reason (every Task-N in it opens that task),
   // else the reason's label; then the other reasons and the planner's and the ripple's flags.
+  // A card whose only proposals (ripples aside) are mail cards ("This mail is about Task-N") says From your
+  // mail, not Planner suggests, and its planner flag adds nothing: the mail line under it says it.
   function reasonText(item) {
     const { reasons, primary, flags } = item, said = (item.texts || {})[primary];
-    const head = said ? esc(said).replace(/Task-(\d+)/g, '<a href="/t/$1" data-open-task="$1">Task-$1</a>') : esc(review.labels[primary]);
-    const flag = k => flags && flags[k] ? ` · <b>${esc(flags[k])}</b>` : '';
-    return head + (reasons.length > 1 ? ' · also ' + esc(reasons.slice(1).map(r => review.labels[r]).join(', ')) : '') + flag('planner') + flag('ripple');
+    const props = (item.evidence || []).filter(e => e.change && e.by !== 'ripple');
+    const mailOnly = props.length > 0 && props.every(e => e.change.op === 'follow_thread');
+    const label = r => r === 'planner' && mailOnly ? 'From your mail' : review.labels[r];
+    const head = said ? esc(said).replace(/Task-(\d+)/g, '<a href="/t/$1" data-open-task="$1">Task-$1</a>') : esc(label(primary));
+    const flag = k => flags && flags[k] && !(k === 'planner' && mailOnly) ? ` · <b>${esc(flags[k])}</b>` : '';
+    return head + (reasons.length > 1 ? ' · also ' + esc(reasons.slice(1).map(label).join(', ')) : '') + flag('planner') + flag('ripple');
+  }
+  // "This mail is about Task-N. Follow its thread?" (mail_triage's about card, a follow_thread proposal): who
+  // wrote, the subject and why, then Follow its thread or Not about this. Drawn in place of the Accept line.
+  function mailAboutHtml(e, tid) {
+    const c = e.change || {}, m = c.mail || {}, f = c.fields || {}, subject = m.subject || f.subject || '';
+    const from = [m.sender ? esc(m.sender) : '', subject ? `“${esc(subject)}”` : ''].filter(Boolean).join(' · ');
+    const hint = from || e.reason ? ` <span class="hint">— ${from}${from && e.reason ? ', ' : ''}${e.reason ? esc(e.reason) : ''}</span>` : '';
+    return `<div class="extra mailabout"><span class="chip">From your mail</span><span>This mail is about Task-${tid}. Follow its thread?${hint}</span>`
+      + `<button class="btn small primary" data-follow="${e.id}">Follow its thread</button><button class="btn small" data-notabout="${e.id}">Not about this</button></div>`;
   }
   // Which of two tasks a merge keeps when the suggestion does not say: the Canvas row, else the older, else
   // the lower id (relations.default_survivor's rule, on what the page holds).
@@ -1811,7 +1825,7 @@
         <div class="big"><button class="done" data-rv="done">Done <kbd>d</kbd></button><button data-rv="keep">Keep <kbd>k</kbd></button><button class="later" data-rv="later">Later <kbd>s</kbd></button><button class="drop" data-rv="drop">Drop <kbd>x</kbd></button></div>
         <div class="later-menu ${ui.laterOpen ? 'on' : ''}"><span class="hint">Comes back on:</span><button class="btn small" data-rv="tomorrow">Tomorrow</button><button class="btn small" data-rv="fri">Friday</button><button class="btn small" data-rv="nextweek">Next week</button><button class="btn small" data-rv="pickdate">📅 ${ui.datePick ? 'Hide date' : 'Pick a date…'}</button></div>
         ${ui.laterOpen && ui.datePick ? `<div class="remform datepick"><label for="rv-date" class="hint">Comes back on</label><input type="date" id="rv-date" min="${data.today}" value="${isoPlus(1)}" aria-label="Pick a date"><button class="btn small primary" id="rv-date-go">Use this date</button></div>` : ''}
-        ${(items[0].evidence || []).filter(e => e.change && !staged.has('e:' + e.id)).map(e => e.by === 'ripple' ? rippleLineHtml(e, x.id) : `<div class="extra"><span class="chip">Planner suggests</span><span>${esc(e.label)}${e.reason ? ` <span class="hint" style="margin:0">— ${esc(e.reason)}</span>` : ''}</span><button class="btn small primary" data-rv-accept="${e.id}">Accept</button></div>`).join('')}
+        ${(items[0].evidence || []).filter(e => e.change && !staged.has('e:' + e.id)).map(e => e.by === 'ripple' ? rippleLineHtml(e, x.id) : e.change.op === 'follow_thread' ? (suggestionStaged(e.id) ? '' : mailAboutHtml(e, x.id)) : `<div class="extra"><span class="chip">Planner suggests</span><span>${esc(e.label)}${e.reason ? ` <span class="hint" style="margin:0">— ${esc(e.reason)}</span>` : ''}</span><button class="btn small primary" data-rv-accept="${e.id}">Accept</button></div>`).join('')}
         ${linkSuggestionsHtml(items[0])}
         <div class="extra"><button class="btn small" data-rv="top">★ Pin to Top</button><button class="btn small" data-rv="longterm">Mark long-term (never fades)</button>${dueForm(x.id, x.due)}${reminderForm(x.id)}</div>
         ${reviewPlaceHtml(x.id)}
@@ -1833,6 +1847,7 @@
         <div class="why ${rip ? 'chg' : 'new'}">${slack ? 'Mentioned in Slack' : mail ? 'From your mail' : rip ? 'Ripple suggests' : 'Planner suggests'}</div>
         <h2>${esc(slack || mail ? f.name || sg.label : sg.label.replace(/^create:\s*/i, ''))}</h2>
         ${would ? `<div class="sub">${would}</div>` : ''}
+        ${(sg.links || []).map(l => `<div class="sg-link">Will be ${l.kind === 'waits_on' ? 'waiting on' : 'a step of'} <a href="/t/${l.other}" data-open-task="${l.other}">Task-${l.other}</a>${l.other_name ? ' ' + esc(l.other_name) : ''}</div>`).join('')}
         ${mail && f.context ? `<p>${esc(f.context)}</p>` : ''}
         ${sg.reason ? `<p class="ctx">${esc(sg.reason)}</p>` : ''}
         ${mail ? `<p class="hint from">✉ ${esc(mail.sender || '')} · “${esc(mail.subject || '')}”${mail.at ? ' · ' + day(String(mail.at)) : ''}${mail.account ? ` · to ${esc(mail.account)}` : ''}</p>` : ''}
@@ -2411,12 +2426,13 @@
     return b.changes.filter(c => c.field !== 'link' || logLinkWords(c)).map(c => c.field === 'link' ? `<div class="logc"><span class="code">Task-${c.task_id}</span> <span class="name">${esc(c.task_name || '')}</span> <span class="f">${esc(logLinkWords(c))}</span>${noteAfter(c)}</div>`
       : c.field === 'evidence' ? `<div class="logc">${c.task_id ? `<span class="code">Task-${c.task_id}</span> <span class="name">${esc(c.task_name || '')}</span>` : '<span class="code">suggestion</span>'} <span class="f">evidence #${c.new && c.new.evidence_id}</span> ${esc((c.new || {}).verdict || '')}</div>`
       : c.field === 'created' ? `<div class="logc"><span class="code">Task-${c.task_id}</span> <span class="name">${esc(c.task_name || '')}</span> <span class="f">created</span></div>`
+      : c.field === 'thread' ? `<div class="logc"><span class="code">Task-${c.task_id}</span> <span class="name">${esc(c.task_name || '')}</span> <span class="f">${esc(fieldSaid(c))}</span>${noteAfter(c)}</div>`
       : `<div class="logc"><span class="code">Task-${c.task_id}</span> <span class="name">${esc(c.task_name || '')}</span> <span class="f">${esc(c.field)}</span> ${logVal(c.old)} → ${logVal(c.new)}${noteAfter(c)}</div>`).join('');
   }
   // One line for a batch: per task, the change that matters most (a status over a date over a note).
   function batchLine(b) {
     const NOISE = new Set(['completed_at', 'closed_by', 'due_is_datetime', 'last_reviewed_at', 'close_on_sent_to']);
-    const RANK = { status: 5, created: 5, due: 4, snoozed_until: 3, reminder: 3, close_on_sent_since: 3 };
+    const RANK = { status: 5, created: 5, due: 4, snoozed_until: 3, reminder: 3, close_on_sent_since: 3, thread: 3 };
     const cause = b.cause || {}, from = Array.isArray(cause.from) && cause.from.length ? cause.from[0] : null;
     if (cause.kind === 'ripple' && from != null) {
       const k = new Set(b.changes.filter(c => c.task_id && !NOISE.has(c.field)).map(c => c.task_id)).size;
@@ -2429,7 +2445,7 @@
       if (c.field === 'link' && !logLinkWords(c)) continue;
       const label = c.field === 'link' ? logLinkWords(c) : c.field === 'status' ? (v === 'open' ? 'reopened' : String(v)) : c.field === 'created' ? 'created' : c.field === 'due' ? (v ? 'due ' + String(v).slice(0, 10) : 'due date removed')
         : c.field === 'snoozed_until' ? (v ? 'later, back ' + String(v).slice(0, 10) : 'back from later') : c.field === 'reminder' ? 'reminder set' : c.field === 'top_rank' ? (v ? 'Top' : 'unpinned')
-        : c.field === 'evidence' ? ((v || {}).verdict === 'dismissed' ? 'dismissed' : 'seen') : c.field === 'close_on_sent_since' ? (v ? 'closes on send' : 'watch ended') : c.field.replace(/_/g, ' ');
+        : c.field === 'evidence' ? ((v || {}).verdict === 'dismissed' ? 'dismissed' : 'seen') : c.field === 'thread' ? fieldSaid(c) : c.field === 'close_on_sent_since' ? (v ? 'closes on send' : 'watch ended') : c.field.replace(/_/g, ' ');
       const key = c.task_id || 'e' + ((v || {}).evidence_id || '');
       const r = c.field === 'link' ? ((v || c.old || {}).kind === 'same_as' ? 6 : 4) : RANK[c.field] || 1, cur = per.get(key);
       if (!cur || r > cur.r) per.set(key, { r, label, id: c.task_id });
@@ -2456,6 +2472,7 @@
     if (c.field === 'waiting_on') return v ? 'waiting on ' + cut(v, 50) : 'no longer waiting';
     if (c.field === 'close_on_sent_since') return v ? 'closes when the mail is sent' : 'sent-mail watch ended';
     if (c.field === 'evidence') return 'evidence #' + ((v || {}).evidence_id || '?') + ' ' + ((v || {}).verdict || '');
+    if (c.field === 'thread') return v && v.subject ? `follows the mail thread “${cut(v.subject, 80)}”` : v ? 'follows a mail thread' : 'no longer follows the mail thread';
     if (c.field === 'context' || c.field === 'why_now') { const added = o && v && String(v).startsWith(String(o)) ? String(v).slice(String(o).length) : v;
       return (c.field === 'context' ? (o && v && String(v).startsWith(String(o)) ? 'note added: ' : 'context: ') : 'why now: ') + '“' + cut(added == null ? '' : added, 180) + '”'; }
     return c.field.replace(/_/g, ' ') + ' ' + (v === null || v === undefined ? 'cleared' : '→ ' + cut(typeof v === 'object' ? JSON.stringify(v) : v, 60));
@@ -3414,6 +3431,16 @@
       stageJudge(eid, tid, 'applied', 'suggestion accepted'); toast(['done', 'drop'].includes(c.op) ? 'Decision staged · Apply in the tray' : 'Suggestion staged · decide on the card, then Apply');
     });
     panel.querySelectorAll('[data-rv-dismiss]').forEach(b => b.onclick = () => { stageJudge(+b.dataset.rvDismiss, +b.closest('.card').dataset.id, 'dismissed', 'suggestion dismissed'); });
+    // A mail card on a task: follow its thread (the link, with its verdict) or say the mail is not about it.
+    const mailCard = eid => { const item = review && review.items.find(i => (i.evidence || []).some(e => e.id === eid)); const e = item && item.evidence.find(e => e.id === eid); return e && e.change && e.change.op === 'follow_thread' ? { e, tid: item.task.id } : null; };
+    panel.querySelectorAll('[data-follow]').forEach(b => b.onclick = () => {
+      const m = mailCard(+b.dataset.follow); if (!m) return;
+      const { e, tid } = m, subject = (e.change.mail || {}).subject || (e.change.fields || {}).subject || '';
+      stageChange({ task_id: tid, op: 'follow_thread', fields: e.change.fields }, `follows “${subject}”`, { ev: e.id }, 'f' + e.id);
+      stageJudge(e.id, tid, 'applied', 'mail card accepted');
+      toast('Staged · it follows the thread once you Apply');
+    });
+    panel.querySelectorAll('[data-notabout]').forEach(b => b.onclick = () => { const m = mailCard(+b.dataset.notabout); if (m) stageJudge(m.e.id, m.tid, 'dismissed', 'not about this mail'); });
     panel.querySelectorAll('[data-since-see]').forEach(b => b.onclick = () => { const id = +b.dataset.sinceSee; ui.sinceOpen = ui.sinceOpen === id ? null : id; render(); });
     panel.querySelectorAll('[data-since-undo]').forEach(b => b.onclick = async () => {
       b.disabled = true;
