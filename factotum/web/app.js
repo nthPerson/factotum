@@ -841,6 +841,8 @@
   const propApplied = (mid, i) => appliedProps.has(mid + '-' + i);
   async function undoBatch(id) {
     const res = await api(`/api/batches/${id}/undo`, { method: 'POST' });
+    const made = addedBy.get(id);      // an add undone: nothing about the dropped task stays attached, selected or open
+    if (made != null) { addedBy.delete(id); ui.sel.delete(made); ui.open.delete(made); if (ui.focus === made) ui.focus = null; }
     const before = appliedProps.size;
     for (const [k, b] of [...appliedProps]) if (b === id) appliedProps.delete(k);
     if (appliedProps.size !== before) persistApplied();
@@ -2733,6 +2735,7 @@
   // from (its key; none: a fresh key), and what to do once made. Returns its id, or null when it was not made (the
   // caller's text stays) or another add is still in flight (the call is ignored).
   let adding = false;
+  const addedBy = new Map();      // an add's batch → the task it made, so its Undo can let go of that task
   async function addTask(input, opts = {}) {
     if (adding) return null;
     adding = true;
@@ -2748,8 +2751,13 @@
       if (opts.clear) opts.clear();
       if (opts.box && addKeys[opts.box] === key) renewKey(opts.box);
       lastBatch = res.batch_id;
+      if (res.batch_id != null && !res.already) addedBy.set(res.batch_id, id);
       try { await load(); } catch (_) {}      // the task is made either way; the lists catch up on the next load
-      if (opts.open) openTask(id); else if (!PHONE()) jumpTo(id, false);
+      // Adding never changes the tab and never focuses or attaches the new task (the next sentence to Claude would
+      // carry it); the box being typed in keeps the focus, so a second task can be typed at once. Where the row is
+      // drawn in this view it flashes. The toast's Open goes to it; Add and open opens it.
+      if (opts.open) openTask(id);
+      else { const el = document.querySelector(`#panel .row[data-id="${id}"]`); if (el) { el.classList.remove('flash'); void el.offsetWidth; el.classList.add('flash'); } }
       toast((opts.said ? opts.said(id) : `Added Task-${id}`) + (res.already ? ' (already added)' : '')
         + ((res.refused || []).length ? ' · ' + res.refused.map(r => (r.words ? r.words + ': ' : '') + r.why).join(' · ') : '')
         + ((res.skipped || []).length ? ' · ' + res.skipped[0].why : ''), true, { buttons: [{ text: 'Open', run: () => goTask(id) }] });

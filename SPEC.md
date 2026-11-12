@@ -859,7 +859,10 @@ remembers the closed thread's id in this browser (`factotum.todayClosed`), so a 
 the next sentence starts a new thread (`fresh: true`); a newer Today thread is drawn as usual.
 *New task.* On desktop a New task line (`n` or the button) with the add line's live preview ("Will be added
 as", chips, a legend of what each part meant, refused parts with their reasons); Enter adds at once, the
-toast says "Added Task-N" with Open and Undo, and "Add and open" opens it. Edit first moves a proposed task
+toast says "Added Task-N" with Open and Undo, and "Add and open" opens it. Adding never changes the tab and
+never focuses or attaches the new task (the box keeps the focus, so the next one can be typed at once; a row drawn
+in the current view flashes), and Undo of an add lets go of that task if it was attached since. A bare `add` /
+`new` / `+` is refused in the preview ("a task needs a name") and sends nothing. Edit first moves a proposed task
 into this line. On a phone a round button at the bottom opens a sheet (a name, then taps for the date,
 project, effort and a link; Add task adds, while the keyboard's Enter or Done only puts the keyboard away;
 or let Claude file a typed or dictated sentence, which carries no selected rows). Each box that adds (the line,
