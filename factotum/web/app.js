@@ -371,6 +371,13 @@
     } catch (_) {}
   }
 
+  async function loadCount() {
+    const excl = [...staged.keys()].filter(k => typeof k === 'number').join(',');      // as loadReview sends it
+    try { reviewCount = (await api('/api/review/count' + (excl ? '?exclude=' + excl : ''))).count; } catch (_) {}      // a failure keeps the last count; a sign-out shows its own screen
+  }
+  // The number beside Review and on the icon, without a redraw (render() and a return while something is typed).
+  function showCount() { const rv = reviewShown(); document.getElementById('n-review').textContent = rv || ''; syncBadge(); }
+
   // ---------- loading ----------
   let pending = [];           // batches a skill staged (/api/proposals): Apply or Dismiss, above every tab
   async function load() {
@@ -380,8 +387,7 @@
     detailGen++; detailCache.forEach(d => { d.stale = true; });      // an opened task keeps what it shows until its new answer arrives
     try { pending = (await api('/api/proposals')).proposals; } catch (_) { pending = []; }
     try { summary = await api('/api/summary'); } catch (_) { summary = null; }
-    const excl = [...staged.keys()].filter(k => typeof k === 'number').join(',');      // as loadReview sends it
-    try { reviewCount = (await api('/api/review/count' + (excl ? '?exclude=' + excl : ''))).count; } catch (_) {}      // a failure keeps the last count; a sign-out shows its own screen
+    await loadCount();
     document.getElementById('today-label').textContent = '· ' + TODAY().toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
     render();        // what is being typed survives it (the drafts)
     watchSummary();
@@ -420,17 +426,18 @@
       else location.reload();
       return;
     }
-    if (typingNow()) { if (ui.tab === 'today') { clearTimeout(sumTimer); pollSummary(); } return; }
+    // Off Review, a Review page loaded earlier is let go, so the number beside Review and on the icon is the
+    // server's fresh count again (as at Refresh's end); a Review session in progress keeps its page. The icon is
+    // set again even when the number did not change: a push may have put another number there in the meantime.
+    // Before the typing check: with something typed only the count is asked for and shown, nothing is redrawn.
+    if (ui.tab !== 'review') review = null;
+    badgeShown = undefined;
+    if (typingNow()) { if (ui.tab === 'today') { clearTimeout(sumTimer); pollSummary(); } loadCount().then(showCount); return; }
     if (ui.tab === 'log') logData = null;
     // The Today box's conversation is asked for again, so one gone quiet for 12 hours is let go in an app that
     // stays open (the server's rule, chat.place_thread). A closed one stays closed; one with a turn running stays.
     const tp = places.get('today:');
     if (tp && tp.loaded && !tp.live && !tp.loading && !tp.fresh) tp.loaded = false;
-    // Off Review, a Review page loaded earlier is let go, so the number beside Review and on the icon is the
-    // server's fresh count again (as at Refresh's end); a Review session in progress keeps its page. The icon is
-    // set again even when the number did not change: a push may have put another number there in the meantime.
-    if (ui.tab !== 'review') review = null;
-    badgeShown = undefined;
     // A failed reload keeps what is on screen: a sign-out shows its own screen and no network is not a
     // fault. Anything else (a server error, a bug in a redraw) is logged rather than lost.
     load().then(loadPush).catch(e => { if (!(e && (e.message === 'signed out' || e.network))) console.error('Reloading on return failed:', e); });
@@ -1402,8 +1409,7 @@
     p.querySelectorAll('textarea.grow').forEach(grow);
     document.querySelectorAll('#tabs button').forEach(b => { b.setAttribute('aria-selected', b.dataset.tab === ui.tab); if (b.dataset.tab === ui.tab && PHONE() && b.scrollIntoView) b.scrollIntoView({ block: 'nearest', inline: 'center' }); });
     document.getElementById('n-today').textContent = openOnes().filter(x => x.due && fmtDue(x.due).days <= 1).length || '';
-    const rv = reviewShown(); document.getElementById('n-review').textContent = rv || '';
-    syncBadge();
+    showCount();
     renderRemind();
     renderTray();
     renderSheet();
