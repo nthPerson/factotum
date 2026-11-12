@@ -678,6 +678,7 @@
       const id = batch; u.disabled = true;
       let res;
       try { res = await undoBatch(id); } catch (e) { toast('Undo failed: ' + e.message, true, { batch: id }); return; }     // the batch stays undoable: Undo again
+      if (res.undone === false) { await load(); toast(undoSaid(res), true, { batch: id }); return; }     // not undone: its Undo stays offered
       if (lastBatch === id) lastBatch = null;
       await load(); toast(undoSaid(res));
     };
@@ -899,8 +900,11 @@
     try { localStorage.setItem('factotum.applied', JSON.stringify(kept)); } catch (_) {}
   }
   const propApplied = (mid, i) => appliedProps.has(mid + '-' + i);
+  // `undone: false`: nothing was restored because everything the batch wrote was changed since; the batch stays
+  // undoable, so nothing here lets go of it (its task, the card it made, the proposals it applied).
   async function undoBatch(id) {
     const res = await api(`/api/batches/${id}/undo`, { method: 'POST' });
+    if (res && res.undone === false) return res;
     const made = addedBy.get(id);      // an add undone: nothing about the dropped task stays attached, selected or open
     if (made != null) { addedBy.delete(id); ui.sel.delete(made); ui.open.delete(made); if (ui.focus === made) ui.focus = null; }
     if (cardMade.has(id)) { const t = cardMade.get(id); cardMade.delete(id); ui.sel.delete(t); ui.open.delete(t); if (ui.focus === t) ui.focus = null; review = null; }      // a card's Create undone: Review is read again, so the card is back
@@ -912,6 +916,10 @@
   // The ripples the batch set off follow it: undone with it, or kept when a linked task's text changed after.
   function undoSaid(res) {
     if (res.already) return 'Already undone';
+    if (res.undone === false) {
+      const w = (res.skipped || []).map(s => s.why);
+      return 'Not undone: ' + (w.slice(0, 2).join('; ') || 'it was changed since') + (w.length > 2 ? ` · +${w.length - 2} more` : '');
+    }
     const k = (res.skipped || []).length, u = (res.ripples_undone || []).length, kept = (res.ripples_kept || []).length;
     const said = ['Undone'];
     if (k) said.push(`${k} left as ${k === 1 ? 'it is' : 'they are'}: ${res.skipped[0].why}`);
@@ -1997,7 +2005,8 @@
   async function undoAndSay(id) {
     let res;
     try { res = await undoBatch(id); } catch (e) { toast('Undo failed: ' + (e.detail || e.message)); return null; }
-    toast(undoSaid(res));
+    if (res.undone === false) toast(undoSaid(res), true, { batch: id });      // not undone: the Undo stays offered
+    else toast(undoSaid(res));
     logData = null;
     await load();
     return res;
