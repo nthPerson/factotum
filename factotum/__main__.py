@@ -33,7 +33,8 @@ SYSTEMD_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 def _effective(keys: list[str], as_before: bool) -> int:
     """Print what each Settings key is and where it comes from. Reads the config file and the database
-    (opened read-only, never created); prints no secret."""
+    (never created; opened `query_only`, so nothing is written, and closed cleanly so no -wal / -shm is
+    left beside it: a `mode=ro` connection to a WAL database leaves both behind); prints no secret."""
     import hashlib
     import sqlite3
     cfg = C.load()
@@ -41,8 +42,9 @@ def _effective(keys: list[str], as_before: bool) -> int:
     exists = path.exists()
     overrides: dict = {}
     if exists:
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        conn = sqlite3.connect(f"file:{path}?mode=rw", uri=True)      # rw only so the last close can tidy the WAL files
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only = ON")
         try:
             overrides = get_settings(conn)
         finally:

@@ -551,7 +551,8 @@ file in use, marked `(starter settings)` when it is the starter, and the databas
 there is none) and then one line per Settings key: the key, its value as JSON and where the value comes
 from: `settings` (the Settings tab froze it into the database; it wins over the file), `file`,
 `machine` (the time zone, taken from this computer), `default` (the code's) or `unset`. It only reads:
-the config file, and the database opened read-only (never created). `.env` is read only to find those
+the config file, and the database opened so it cannot write (`query_only`; never created), and it leaves
+no `-wal` / `-shm` file beside it. `.env` is read only to find those
 two, and no `.env` value is printed. Three values (the ntfy topic, the brief's address, the calendar id)
 show as `set #<fingerprint>` or `empty`, so a diff still sees a change without the value on screen.
 `--as-before` reads absent keys the way the code did before 2026-11-10, when four switches (the

@@ -280,3 +280,20 @@ def test_overlapping_review_and_task_reads_that_stamp_answer_only_200(cfg, tmp_p
         codes = list(ex.map(lambda u: client.get(u).status_code, urls))
     assert set(codes) == {200}, {u: s for u, s in zip(urls, codes) if s != 200}
     assert not c.in_transaction
+
+
+# --- A4: `factotum effective` leaves nothing beside a database it only read ---------------------------------
+
+def test_effective_leaves_no_wal_or_shm_beside_the_database(tmp_path, monkeypatch, capsys):
+    from conftest import FIXTURE
+    from factotum.__main__ import main
+    from factotum.db import connect, init_db, set_setting
+    db = tmp_path / "f.db"
+    c = connect(db); init_db(c); set_setting(c, "lifecycle.top_cap", 5); c.commit(); c.close()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["f.db"]
+    before = db.read_bytes()
+    monkeypatch.setattr(C, "DEFAULT_CONFIG_PATHS", [FIXTURE])
+    monkeypatch.setenv("FACTOTUM_DB", str(db))
+    assert main(["effective", "lifecycle.top_cap"]) == 0
+    assert capsys.readouterr().out.splitlines()[-1].split()[1:] == ["5", "settings"]
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["f.db"] and db.read_bytes() == before
