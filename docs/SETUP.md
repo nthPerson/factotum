@@ -554,7 +554,8 @@ the config file, and the database opened read-only (never created). `.env` is re
 two, and no `.env` value is printed. Three values (the ntfy topic, the brief's address, the calendar id)
 show as `set #<fingerprint>` or `empty`, so a diff still sees a change without the value on screen.
 `--as-before` reads absent keys the way the code did before 2026-11-10, when four switches (the
-morning brief, the planner, the automatic summary, the Notion notes) were on whenever the key was missing.
+morning brief, the planner, the automatic summary, the Notion notes) were on whenever the key was missing,
+and ripples and filing did not exist (so they read off there).
 
 The deploy check for stage 3, in the main checkout after the merge and BEFORE restarting the service
 (the running service is not affected by files changing, except `factotum/web/`):
@@ -572,6 +573,12 @@ missing: add the key to `config/factotum.yaml` with the value from the before fi
 Settings), run the two commands again, then restart (check `journalctl -u factotum -n 5` for a Claude
 run in flight first). Lines with origin `settings` are values the Settings tab froze into the database;
 they win over the file.
+
+Two lines are expected in that diff on a config file that names neither of them:
+`claude.ripple.enabled` and `claude.filing.enabled`, `false` before and `true default` after. They are new in
+this release and on by default (each runs only after something you did, costs a few cents, and writes
+nothing History cannot undo); add `enabled: false` to the config file (`claude: {ripple: {enabled: false},
+filing: {enabled: false}}`) or untick them in Settings → Claude to keep them off.
 
 ## 19. Notifications from the app
 
@@ -664,10 +671,15 @@ can run one light Claude run (no tools, about $0.03, measured 2026-11-11) that r
 linked tasks so it says where things stand, and stages anything else (close, date, reminder, link) as
 cards on Review. Every rewrite is its own batch, shown in History and undone with one tap.
 
-- **Switch on:** Settings -> Claude -> Ripples. Absent means off. The numbers: the quiet period (seconds
+- **On by default** (since 2026-11-11; it runs only after a linked task you closed or changed, costs about 3
+  cents, and every rewrite has Undo): Settings -> Claude -> Ripples switches it off, or `claude: {ripple:
+  {enabled: false}}` in the config file. The numbers: the quiet period (seconds
   to wait after the last change so a Done and its outcome line are one run, default 60), the hourly cap
   (runs an hour, 10), the budget per run ($0.30) and the model (sonnet). The scheduler must be running
   (`serve` without `--no-scheduler`); otherwise Settings says ripples wait.
+- **Where Claude cannot run** (no `claude` program, or not signed in): ripples and filing wait. Settings ->
+  Claude says which, the Log has one failed row a day for each, and what was waiting is set aside, not
+  retried. `.venv/bin/python -m factotum claude-check` tests the login.
 - **Try one:** `.venv/bin/python -m factotum ripple <task_id> --dry-run` is a real run from that task and
   writes nothing; it prints what it would do. Without `--dry-run` it applies and stages.
 - **Where things are kept:** each run's prompt and result under `data/runs/ripple/`, its cost and one-line
@@ -689,8 +701,8 @@ which is in the recording's batch and can be undone.
 - **How many a day:** Settings -> Review and lifecycle -> Suggested links (`links.suggestions_per_review`,
   default 5). Over the cap, the rest wait and are offered on later days; 0 shows none. Chips on a task you
   just made are not counted.
-- **Filing a task you add:** off until you switch it on in Settings -> Claude -> Filing a task you add
-  (`claude.filing.enabled`; absent means off). When you add a task with only a name, one small Claude run with
+- **Filing a task you add:** on by default (since 2026-11-11; `claude.filing.enabled`, on when absent);
+  Settings -> Claude -> Filing a task you add switches it off. When you add a task with only a name, one small Claude run with
   no tools suggests its project, effort, a likely link and a likely twin as chips; it never changes what you
   typed. The model and budget are `claude.models.filing` and `claude.budgets_usd.filing` ($0.10). Sonnet by
   default (the example and the starter say so), about 4 cents a task (measured 2026-11-11 on a copy of a real

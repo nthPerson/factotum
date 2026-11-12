@@ -43,6 +43,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
+from .claude import runner as claude_runner
 from . import app_push, batches, by_hand, commands, config as C, filing, lifecycle, oauth, relations, reminders, review_queue, ripple, suggestions, summary
 from .db import connect, get_settings, get_task, init_db, now_iso, rows, seed_accounts, set_setting
 from .dates import parse_date
@@ -682,6 +683,8 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
             "accounts": [dict(a, roles=json.loads(a["roles_json"])) for a in rows(conn, "SELECT * FROM accounts ORDER BY id")],
             "sources": {k: {"enabled": C.value(ecfg, f"sources.{k}.enabled")} for k in ("plaud", "canvas", "mail", "calendar")},
             "sinks": {k: {"enabled": C.value(ecfg, f"sinks.{k}.enabled")} for k in ("notion_notes", "notion_tasks_mirror")},
+            # "missing" / "signed_out" when a ripple or filing run found today that Claude cannot run on this machine
+            "claude_unavailable": claude_runner.unavailable_today(conn, date.today()),
         }
 
     def push_state() -> dict:

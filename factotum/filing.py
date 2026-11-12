@@ -130,6 +130,14 @@ def run(conn, cfg: dict, task_id: int, *, runner=None, dry_run: bool = False, to
     t0 = time.time()
     res = runner(cfg, KIND, prompt, allowed_tools=[], tools="", workdir=workdir)
     ms = int((time.time() - t0) * 1000)
+    why = _runner.unavailable(res)
+    if why and not dry_run:              # Claude cannot run here: noted for Settings, one failed row a day for it
+        if _runner.note_unavailable(conn, KIND, why, today or date.today()):
+            log_run(conn, KIND, ms, ok=False, summary=f"Task-{task_id}", error=f"{(res.error or why)[:600]} · filing waits until Claude runs on this machine")
+        conn.commit()
+        return {"ok": False, "error": res.error or why, "unavailable": why, "cost_usd": 0.0}
+    if res.ok and not dry_run:
+        _runner.clear_unavailable(conn)
     if not res.ok or not isinstance(res.data, dict):
         err = (res.error or "the run returned no JSON object")[:1000]
         log_run(conn, KIND, ms, ok=False, summary=f"Task-{task_id}", error=err, cost_usd=res.cost_usd)
@@ -203,6 +211,10 @@ def run_queue(conn, cfg: dict, now: datetime, runner=None) -> str | None:
         except Exception as e:
             conn.rollback()
             res = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        if res.get("unavailable"):           # every other run would fail the same way: what waits is not filed (the run logged it)
+            set_setting(conn, QUEUE_KEY, [])
+            conn.commit()
+            break
         lines.append(res.get("line") if res.get("ok") else f"Task-{tid}: failed ({str(res.get('error') or '')[:80]})")
     return "; ".join(lines) or None
 

@@ -123,3 +123,112 @@ def test_a_card_s_new_task_still_goes_through_the_link_detectors(cfg, tmp_path):
     eid = c.execute("SELECT MAX(id) FROM evidence").fetchone()[0]
     tid = client.post(f"/api/review/suggestions/{eid}/create", json={}).json()["task_id"]
     assert c.execute("SELECT 1 FROM evidence WHERE kind = 'link_suggestion' AND task_id IN (?, 2)", (tid,)).fetchone()
+
+
+# --- E2: ripples and filing on by default; a machine where Claude cannot run ------------------------------
+
+import copy  # noqa: E402
+from datetime import date, datetime, timedelta, timezone  # noqa: E402
+
+from stage4_helpers import TODAY, link  # noqa: E402
+
+from factotum import batches, filing, ripple  # noqa: E402
+from factotum import config as C  # noqa: E402
+from factotum.claude import runner as R  # noqa: E402
+from factotum.claude.runner import RunResult  # noqa: E402
+from factotum.db import get_settings, set_setting  # noqa: E402
+from factotum.scheduler import Scheduler  # noqa: E402
+
+REAL_RUN = R.run                     # taken before any test patches it
+SIGNED_OUT = RunResult(False, None, "Not logged in · Please run /login", 0.0, 50, error="auth: Not logged in · Please run /login", auth_failed=True)
+
+
+def _missing_binary(cfg, kind, prompt, **kw):
+    """What runner.run answers when the `claude` program is not there (its FileNotFoundError branch)."""
+    return REAL_RUN(cfg, kind, prompt, exec_=lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError(2, "No such file", "claude")), **{k: v for k, v in kw.items() if k in ("allowed_tools", "tools", "workdir", "model", "budget_usd")})
+
+
+def _failed_rows(conn, kind):
+    return conn.execute("SELECT COUNT(*) FROM runs WHERE kind = ? AND ok = 0", (kind,)).fetchone()[0]
+
+
+def _starter_like(cfg):
+    """The fixture with nothing set for ripples and filing: what a new person on the starter gets."""
+    c = copy.deepcopy(cfg)
+    c["claude"].pop("ripple", None); c["claude"].pop("filing", None)
+    assert C.value(c, "claude.ripple.enabled") is True and C.value(c, "claude.filing.enabled") is True
+    return c
+
+
+@pytest.mark.parametrize("answer", ["signed_out", "missing"])
+def test_ripples_on_a_machine_where_claude_cannot_run_fail_once_a_day_and_set_their_rows_aside(conn, cfg, tmp_path, monkeypatch, answer):
+    monkeypatch.setattr(ripple, "RUNS_DIR", tmp_path / "runs")
+    calls = []
+
+    def run(c, kind, prompt, **kw):
+        calls.append(kind)
+        return SIGNED_OUT if answer == "signed_out" else _missing_binary(c, kind, prompt, **kw)
+    monkeypatch.setattr(R, "run", run)
+    on = _starter_like(cfg)
+    s = Scheduler(on, conn, push=lambda *a, **k: None, ripple=ripple)
+    old = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat(timespec="seconds")
+    for n in range(3):                                                    # three separate groups, each due
+        a, b = 10 * n + 1, 10 * n + 2
+        mk(conn, a); mk(conn, b); link(conn, b, a, "waits_on")
+        batches.apply(conn, [{"op": "done", "task_id": a}], "ui", TODAY)
+    conn.execute("UPDATE ripple_queue SET queued_at = ?", (old,)); conn.commit()
+    t0 = datetime.now().replace(second=0, microsecond=0)
+    for i in range(6):                                                   # ticks a minute apart, then an hour later
+        s.tick(t0 + timedelta(minutes=i))
+    s.tick(t0 + timedelta(hours=1, minutes=1))
+    s.tick(t0 + timedelta(hours=2, minutes=2))
+    assert len(calls) <= 3                                               # no retry every tick: one try, then an hour's back-off
+    assert _failed_rows(conn, "ripple") + _failed_rows(conn, "ripples") == 1      # one row in the Log for this cause today
+    assert conn.execute("SELECT COUNT(*) FROM ripple_queue").fetchone()[0] == 3 - len(calls)   # each group tried is set aside, never retried
+    state = get_settings(conn)[R.UNAVAILABLE_KEY]
+    assert state["why"] == answer and state["day"] == date.today().isoformat()
+
+
+@pytest.mark.parametrize("answer", ["signed_out", "missing"])
+def test_filing_on_a_machine_where_claude_cannot_run_fails_once_a_day_and_drops_its_queue(conn, cfg, tmp_path, monkeypatch, answer):
+    monkeypatch.setattr(filing, "RUNS_DIR", tmp_path / "runs")
+    calls = []
+
+    def run(c, kind, prompt, **kw):
+        calls.append(kind)
+        return SIGNED_OUT if answer == "signed_out" else _missing_binary(c, kind, prompt, **kw)
+    monkeypatch.setattr(R, "run", run)
+    on = _starter_like(cfg)
+    s = Scheduler(on, conn, push=lambda *a, **k: None, mailer=None)
+    now = datetime.now().replace(second=0, microsecond=0)
+    for n in range(5):
+        batches.apply(conn, [{"op": "create", "fields": {"name": f"Water plant {n}"}}], "ui", TODAY)
+    s.tick(now); s.tick(now + timedelta(minutes=1))
+    batches.apply(conn, [{"op": "create", "fields": {"name": "Call the bank"}}], "ui", TODAY)     # later the same day
+    s.tick(now + timedelta(minutes=2))
+    assert calls == ["filing", "filing"]                                 # one try per batch of adds, never one per task
+    assert filing.queued(conn, now.date()) == []                         # a filing run not made is simply not made
+    assert conn.execute("SELECT COUNT(*) FROM runs WHERE kind = 'filing'").fetchone()[0] == 1 and _failed_rows(conn, "filing") == 1
+    assert get_settings(conn)[R.UNAVAILABLE_KEY]["why"] == answer
+
+
+def test_settings_say_ripples_and_filing_wait_while_claude_cannot_run_and_a_good_run_clears_it(cfg, tmp_path, monkeypatch):
+    client, c = _app(cfg, tmp_path)
+    assert client.get("/api/settings").json()["claude_unavailable"] is None
+    R.note_unavailable(c, "filing", "signed_out", date.today()); c.commit()
+    assert client.get("/api/settings").json()["claude_unavailable"] == "signed_out"
+    set_setting(c, R.UNAVAILABLE_KEY, {"day": "2020-01-01", "why": "missing", "logged": ["filing"]}); c.commit()
+    assert client.get("/api/settings").json()["claude_unavailable"] is None              # yesterday's is not today's
+    R.note_unavailable(c, "ripple", "missing", date.today()); c.commit()
+    monkeypatch.setattr(filing, "RUNS_DIR", tmp_path / "runs")
+    tid = batches.apply(c, [{"op": "create", "fields": {"name": "Water the plants"}}], "ui", TODAY)["created"][0]
+    good = RunResult(True, {"project": None, "effort": "S", "link": None, "twin": None}, "{}", 0.01, 900)
+    assert filing.run(c, cfg, tid, runner=lambda *a, **k: good)["ok"]
+    assert client.get("/api/settings").json()["claude_unavailable"] is None
+
+
+def test_unavailable_is_only_a_missing_program_or_a_dead_login():
+    assert R.unavailable(SIGNED_OUT) == "signed_out"
+    assert R.unavailable(_missing_binary({}, "filing", "p")) == "missing"
+    assert R.unavailable(RunResult(False, None, "Sorry", 0.1, 900, error="final message has no JSON object: Sorry")) is None
+    assert R.unavailable(RunResult(True, {}, "{}", 0.1, 900)) is None

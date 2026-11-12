@@ -3,7 +3,8 @@
 # Factotum runs on this file when config/factotum.yaml does not exist, and says so: one line in the
 # service log and a banner in the app. Nothing here belongs to anyone: no name, no addresses, this
 # machine's time zone, three projects of equal weight, and every input, output, notification and
-# paid Claude run switched off. To make Factotum your own, copy config/factotum.example.yaml (the
+# scheduled paid Claude run switched off. Two small runs are on: ripples and filing (each runs only after
+# something you did, costs a few cents, and writes nothing History cannot undo); switch them off below. To make Factotum your own, copy config/factotum.example.yaml (the
 # reference: every key, explained) to config/factotum.yaml, edit it, and restart Factotum.
 # Do not set Factotum up by editing this file; an update replaces it.
 
@@ -76,8 +77,8 @@ links: { suggestions_per_review: 5 }
 claude:
   planner: { enabled: false }
   summary: { auto: false, auto_minutes: 10 }
-  filing: { enabled: false }
-  ripple: { enabled: false, model: sonnet, delay_seconds: 60, hourly_cap: 10 }
+  filing: { enabled: true }     # on by default: one small run (≈ 4 cents) after you add a task with only a name; `enabled: false` or Settings → Claude to keep it off
+  ripple: { enabled: true, model: sonnet, delay_seconds: 60, hourly_cap: 10 }   # on by default: one light run (≈ 3 cents) after a linked task is closed or changes; `enabled: false` or Settings → Claude to keep it off
   models: { filing: sonnet }
   budgets_usd: { ripple: 0.30 }
   timeouts_s: { ripple: 180 }

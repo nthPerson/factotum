@@ -396,8 +396,8 @@ Queued tasks sit in `state.ripple.pending`. The scheduler runs the ripple after 
 outcome is saved. The API wakes the scheduler, as the Refresh button does. With no scheduler the
 queue waits and the UI says so. Controls: `claude.ripple.enabled` (a Settings toggle),
 `claude.ripple.model`, a budget per run, an hourly cap on runs, and the usual back-off after a
-failure. Like every paid run (§15), ripples are off when the key is missing; the owner switches
-them on in Settings when the stage ships.
+failure. Ripples are on when the key is missing (the owner's decision, 2026-11-11; one of the two
+exceptions in §15), and Settings switches them off.
 
 ### 8.2 The run
 
@@ -525,8 +525,8 @@ default 5), so seeding does not flood it.
 
 After a task is added with only a name, a small run with no tools proposes its project, effort, a
 likely link and a likely twin. They appear on the row as dashed chips, one tap each. Nothing the
-user typed is changed by this run. It has its own switch, `claude.filing.enabled`, off when the
-key is missing like every paid run (§15).
+user typed is changed by this run. It has its own switch, `claude.filing.enabled`, on when the
+key is missing (the owner's decision, 2026-11-11; one of the two exceptions in §15).
 
 ## 11. The agent's surface
 
@@ -775,10 +775,12 @@ exists.
 - **The tests come first.** The suite loads the example as its fixture and asserts on its
   projects and accounts. The current example is copied to `tests/fixtures/` and the tests are
   pointed at the copy, in a commit of its own, before the example is touched.
-- **Absent means off** for everything that costs money or sends mail. The morning brief, the
+- **Absent means off** for the scheduled paid runs and anything that sends mail. The morning brief, the
   planner, the automatic summary and the notes sink are on today when their key is missing; their
-  absent-key defaults flip to off. The runs this design adds (ripples, filing) follow the same
-  rule from the start. Before this ships, the owner's effective settings are compared before and
+  absent-key defaults flip to off. The runs this design adds (ripples, filing) are the two exceptions
+  (the owner's decision, 2026-11-11): on unless switched off, because each runs only after something the
+  owner did, costs cents (about 3 cents a ripple run, about 4 cents a filed task) and writes nothing
+  History cannot undo. Before this ships, the owner's effective settings are compared before and
   after and must be identical.
 - **A failed brief must not re-run the planner.** Today the planner runs first, a failed send
   leaves the day unmarked, and the job retries every hour, running the planner again each time.
@@ -842,8 +844,8 @@ Checks that apply to every stage with a surface:
 - A waiting task does not fade.
 - Reminder links stay behind the sign-in; a notification button that cannot reach them opens the
   task instead.
-- Every paid run is off when its setting is missing, ripples and filing included; the owner
-  switches those two on when they ship.
+- Every scheduled paid run is off when its setting is missing; ripples and filing are on unless
+  switched off (2026-11-11), because each runs only after something the owner did.
 - Undo never overwrites a later edit, and a staged text edit never overwrites a ripple.
 - A merge writes no mention, and nothing is copied onto the survivor except a missing due date.
 - A note saved with Done or Drop on Review is the outcome.

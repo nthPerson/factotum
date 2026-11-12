@@ -19,21 +19,24 @@ from factotum.db import get_settings, get_task, log_run, now_iso
 from factotum.scheduler import Scheduler
 
 # --- Task 1: the ripple keys and the runner's per-run model and budget
-RIPPLE_DEFAULTS = {"claude.ripple.enabled": False, "claude.ripple.model": "sonnet", "claude.ripple.delay_seconds": 60,
+RIPPLE_DEFAULTS = {"claude.ripple.enabled": True, "claude.ripple.model": "sonnet", "claude.ripple.delay_seconds": 60,
                    "claude.ripple.hourly_cap": 10, "claude.budgets_usd.ripple": 0.30}
 
 
-def test_ripple_keys_are_settings_keys_and_ripples_are_off_when_missing():
+def test_ripple_keys_are_settings_keys_and_ripples_are_on_when_missing():
+    """On by default since 2026-11-11 (the owner's decision): a ripple runs only after something the owner did."""
     for k, v in RIPPLE_DEFAULTS.items():
         assert k in C.SETTINGS_KEYS and C.DEFAULTS[k] == v, k
-    assert C.value({}, "claude.ripple.enabled") is False and "claude.ripple.enabled" not in C.PAID_SWITCHES
+    assert C.value({}, "claude.ripple.enabled") is True and "claude.ripple.enabled" not in C.PAID_SWITCHES
+    assert C.OLD_DEFAULTS["claude.ripple.enabled"] is False                     # before this release no ripple ran
 
 
 def test_the_example_the_fixture_and_the_starter_carry_the_ripple_keys():
     for path in (C.EXAMPLE_CONFIG, FIXTURE, C.STARTER_CONFIG):
         c = C.load(path)
         for k, v in RIPPLE_DEFAULTS.items():
-            assert C.get(c, k, "absent") == v, (path.name, k)
+            want = False if (path == FIXTURE and k == "claude.ripple.enabled") else v      # the fixture keeps them off for the suite
+            assert C.get(c, k, "absent") == want, (path.name, k)
 
 
 def test_the_runner_takes_a_model_and_a_budget_for_one_run(cfg):

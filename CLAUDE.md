@@ -49,7 +49,8 @@ Delete thread, the Log's Timeline / Changes / Runs / All views. Stage 1 of the l
 addresses with Back, the phone task page, the short selection bar, Sign in again, fresh on return,
 self-update by build stamp; the command leftover fault and the brief retry fault. Stage 3 (2026-11-10): a
 neutral start: without `config/factotum.yaml` the app runs on `config/factotum.starter.yaml` and says so (one
-stderr line, a banner on every tab); absent means off for every paid or mailing switch, with one table of
+stderr line, a banner on every tab); absent means off for every scheduled paid or mailing switch (ripples and filing,
+on unless switched off, are the two exceptions since 2026-11-11), with one table of
 code defaults (`config.DEFAULTS`, read through `C.value`); `factotum effective` prints each switch's value and
 origin; accounts are seeded once (`state.accounts_seeded`); Settings shows effective values and saves only the
 control that changed; the example is a reference with placeholders, and the suite loads
@@ -171,11 +172,15 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
 - **Settings-tab keys are a whitelist** (`config.SETTINGS_KEYS`). A new toggle needs the key
   there, its code default in `config.DEFAULTS`, a control in `web/app.js` `renderSettings`, and a
   default in the example YAML.
-- **Absent means off for anything that costs money or sends mail** (2026-11-10): a paid Claude run, a
-  mail, a write to an outside service happens only when its switch is explicitly on. The default lives
-  in `config.DEFAULTS` as False and the code reads it with `C.value(cfg, key)`, never
+- **Absent means off for the scheduled paid runs and anything that sends mail** (2026-11-10): a scheduled
+  paid Claude run, a mail, a write to an outside service happens only when its switch is explicitly on. The
+  default lives in `config.DEFAULTS` as False and the code reads it with `C.value(cfg, key)`, never
   `C.get(cfg, key, True)`; a new Settings key needs its `DEFAULTS` entry too (with `SETTINGS_KEYS`, the
-  control and the example). New runs (ripples, filing) follow this from the start.
+  control and the example). Ripples and filing are the two exceptions (2026-11-11, the owner's decision;
+  `config.ON_WHEN_NEW`): on unless switched off, because each runs only after something the owner did (a
+  linked task closed or changed; a task added by hand with only a name), costs cents (about 3 cents a ripple
+  run, at most the hourly cap; about 4 cents a filed task; measured 2026-11-11) and writes nothing History
+  cannot undo. `OLD_DEFAULTS` has both False, so `effective --as-before` shows them turning on.
   `tests/test_stage3.py::_code_defaults` fails when a literal default in the code disagrees with the table.
   `DEFAULTS` holds the Settings keys only; a file-only key (`scoring.links.*`, 2026-11-11) keeps its literal
   default in the code, and the example, `tests/fixtures/factotum.fixture.yaml` and the starter carry the same value.
@@ -363,7 +368,7 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
   `ripple.set_waker`; a second process (the stdio skill server) is picked up by the next tick.
 - **The ripple reply is `{"ripples": [...]}` and a wrong shape applies nothing** (2026-11-11).
 - **`claude.ripple.enabled` is not in `PAID_SWITCHES`** (2026-11-11): that tuple is also what
-  `effective --as-before` flips. It is off when missing like every paid run.
+  `effective --as-before` flips. It is on when missing (`ON_WHEN_NEW`, 2026-11-11).
 - **A ripple may drop words the owner wrote** (2026-11-11): the first real dry-run removed "in person" from
   a sibling's sentence while adding where things stand. The prompt says to keep the owner's sentences and
   never soften a requirement (`test_the_prompt_says_to_keep_what_the_owner_wrote`); the guard checks only
@@ -470,6 +475,11 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
   switch that did not exist before 2026-11-10 stays out of it and gets its own default test.
 - **A filing run is dequeued before it runs** (2026-11-11): a failed one is logged and not retried; `file-task` runs
   it again by hand.
+- **Where Claude cannot run, ripples and filing wait quietly** (2026-11-11; on by default, so a new person's machine
+  may have no `claude` program or no login): `runner.unavailable` tells those two causes from a run's own failure;
+  `runner.note_unavailable` keeps `state.claude.unavailable` for Settings → Claude's sentence and lets one failed
+  row a day per kind into the Log; the ripple group is set aside (the scheduler backs off an hour, no second row)
+  and the filing queue is emptied. The next run that succeeds clears the note.
 - **The Review count is `review_queue.count`, and it reads only** (2026-11-11): `GET /api/review` writes (the
   day's suggestion session, the `last_offered_at` stamp `expire` acts on), so it is never called for a number; a
   new place that shows how many items wait on Review uses `review_queue`, never its own `build_review_queue` call.

@@ -48,8 +48,10 @@ SETTINGS_KEYS = [
     "claude.filing.enabled",                                              # stage 7
 ]
 
-# One default for every Settings key. Absent means off for anything that costs money or sends mail
-# (PAID_SWITCHES, the mail suggestions); read these with value(). The AST test in tests/test_stage3.py
+# One default for every Settings key. Absent means off for the scheduled paid runs and anything that sends
+# mail (PAID_SWITCHES, the mail suggestions); ripples and filing (ON_WHEN_NEW) are the two exceptions, on
+# unless switched off: each runs only after something the owner did, costs cents, and writes nothing
+# History cannot undo (the owner's decision, 2026-11-11). Read these with value(). The AST test in tests/test_stage3.py
 # holds every literal default for one of these keys elsewhere in the code to this table.
 DEFAULTS: dict[str, Any] = {
     "lifecycle.fade_days": 21, "lifecycle.fade_warn_days": 3, "lifecycle.last_call_days": 7,
@@ -68,16 +70,18 @@ DEFAULTS: dict[str, Any] = {
     "scoring.project_weights": {},
     "claude.models": {}, "claude.planner.enabled": False, "claude.budgets_usd.chat_turn": 1.0,
     "claude.summary.auto": False, "claude.summary.auto_minutes": 10,
-    "claude.ripple.enabled": False, "claude.ripple.model": "sonnet", "claude.ripple.delay_seconds": 60,
+    "claude.ripple.enabled": True, "claude.ripple.model": "sonnet", "claude.ripple.delay_seconds": 60,
     "claude.ripple.hourly_cap": 10, "claude.budgets_usd.ripple": 0.30,
     "server.oauth.enabled": False, "server.mcp_writes": "stage",
     "links.suggestions_per_review": 5,                                    # stage 7
-    "claude.filing.enabled": False,                                       # stage 7
+    "claude.filing.enabled": True,                                        # stage 7
 }
 PAID_SWITCHES = ("notify.morning_brief.enabled", "claude.planner.enabled", "claude.summary.auto", "sinks.notion_notes.enabled")
-# The code's defaults before 2026-11-10 (the four paid / mailing switches were on when absent), for
-# `factotum effective --as-before` only: diff it against the plain output when deploying.
-OLD_DEFAULTS: dict[str, Any] = {**DEFAULTS, **{k: True for k in PAID_SWITCHES}}
+# On when absent, and new in this release (2026-11-11): before it nothing of the kind ran.
+ON_WHEN_NEW = ("claude.ripple.enabled", "claude.filing.enabled")
+# The code's defaults before 2026-11-10 (the four paid / mailing switches were on when absent; no ripple or
+# filing run existed), for `factotum effective --as-before` only: diff it against the plain output when deploying.
+OLD_DEFAULTS: dict[str, Any] = {**DEFAULTS, **{k: True for k in PAID_SWITCHES}, **{k: False for k in ON_WHEN_NEW}}
 # What `factotum effective` reports, and the values it never prints (shown as a fingerprint).
 REPORT_KEYS = ["owner.timezone", *SETTINGS_KEYS]
 MASKED = {"notify.ntfy.topic", "notify.morning_brief.to", "sources.calendar.calendar_id"}

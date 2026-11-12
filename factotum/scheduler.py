@@ -11,12 +11,12 @@ the review time or turning the brief off takes effect at the next tick.
     mail_triage     when the mail sweep left new mail to read (mail_triage.pending) and sources.mail.suggest.enabled:
                     one light run that turns it into Review suggestions, no more often than sources.mail.suggest.minutes
     link_suggestions every suggestions.SWEEP_MINUTES (free): the link detectors (stage 7, design §10)
-    filing          when claude.filing.enabled (off when the key is absent) and a task waits in the filing queue: its runs
+    filing          when claude.filing.enabled (on when the key is absent) and a task waits in the filing queue: its runs
     notion_mirror   every sinks.notion_tasks_mirror.sweep_minutes when the mirror is on: rows edited since the last pass
     refresh         when the Today tab asked (`state.refresh.requested`): every enabled sweep now, then the planner
     today_summary   when the Today summary is stale (summary.get) and claude.summary.auto is switched on (off when the key is absent): one light run,
                     no more often than claude.summary.auto_minutes
-    ripples         every tick when claude.ripple.enabled (off when the key is absent): one connected group of queued tasks
+    ripples         every tick when claude.ripple.enabled (on when the key is absent): one connected group of queued tasks
                     (ripple.next_group: after claude.ripple.delay_seconds of quiet, at once for an outcome, within the hourly
                     cap); off empties the queue
 
@@ -393,6 +393,11 @@ class Scheduler:
 
         def job() -> None:
             res = self.ripple.run(self.conn, ecfg, ids, now.date(), at=now.strftime("%Y-%m-%dT%H:%M"))
+            if res.get("unavailable"):          # Claude cannot run here: the run logged it once today; back off an hour, no second row
+                set_setting(self.conn, "state.last_fail.ripples", now.strftime("%Y-%m-%dT%H:%M"))
+                self.conn.commit()
+                did.append("ripples: waiting, Claude cannot run on this machine")
+                return
             if not res.get("ok"):
                 raise RuntimeError(res.get("error") or "no result")
             did.append(f"ripples: {res.get('line')}")       # the run logged itself (kind ripple, with its cost)

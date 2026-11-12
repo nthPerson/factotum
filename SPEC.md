@@ -560,7 +560,10 @@ messages, $0.14, 7 s.
 
 ### 8.6 `ripple`: bringing linked tasks up to date (`factotum/ripple.py`, added 2026-11-11)
 When a task that others are linked to is closed, materially changed or merged, one light run (no tools)
-brings the tasks linked to it up to date. It is off unless `claude.ripple.enabled` is on (§9 "Configuration").
+brings the tasks linked to it up to date. It runs while `claude.ripple.enabled` is on, which it is when the key
+is absent (since 2026-11-11, §9 "Configuration"). Where Claude cannot run (no `claude` program, or not signed in)
+the group is set aside, the scheduler backs off an hour, one failed row a day goes to the Log and Settings → Claude
+says ripples and filing wait (`runner.unavailable`, `state.claude.unavailable`).
 
 **What queues.** `batches.apply` calls `ripple.enqueue` for every source but `ripple` (a ripple never
 triggers a ripple), reading the batch's own `changes`: `status` open → done / dropped ("closed", unless the
@@ -636,9 +639,10 @@ Today and of the links. One small run files it.
 (`[{task_id, day}]`, at most 50, kept for the day it was made and the next); the API wakes the scheduler after
 a create. A task made by a recording, Canvas, mail, a connector or Chat is never queued.
 
-**When it runs.** The scheduler's `filing` job (§10), only when `claude.filing.enabled` is on (it is off when
-the key is missing, like every paid run), at most 3 tasks a tick. A task is dequeued before its run, so a
-failed run is logged and not retried (`file-task` runs it again by hand), and a task that was filed by hand,
+**When it runs.** The scheduler's `filing` job (§10), only when `claude.filing.enabled` is on (it is on when
+the key is missing since 2026-11-11, one of the two exceptions in §9 "Configuration"), at most 3 tasks a tick. A
+task is dequeued before its run, so a failed run is logged and not retried; where Claude cannot run at all the
+rest of the queue is dropped too, with one failed row a day in the Log and a sentence in Settings → Claude (`file-task` runs it again by hand), and a task that was filed by hand,
 linked or closed meanwhile is skipped without a run.
 
 **The run.** One run with no tools (`tools=""`), model `claude.models.filing` (sonnet by default, and when the key
@@ -753,17 +757,21 @@ the first of: a Settings override (the `settings` table, `SETTINGS_KEYS` only), 
 the code's default (`config.DEFAULTS`, one entry per Settings key, read through `C.value`). The
 user's file is `config/factotum.yaml` (or what `FACTOTUM_CONFIG` names); without it Factotum runs
 on `config/factotum.starter.yaml` (no name, no addresses, the machine's time zone, three projects of
-equal weight, every input, output, notification and paid Claude run off, connector writes staged),
+equal weight, every input, output, notification and scheduled paid Claude run off, ripples and filing on,
+connector writes staged),
 prints one line to stderr and shows a banner on every tab ("Starter settings in use.") with how to
 make it your own; the example is never loaded unless named. Settings shows each control's effective
 value, its default filled in, and a change saves that one key (earlier overrides stay until removed
-from the table). **Absent means off** for anything that costs money or sends mail: the morning
+from the table). **Absent means off** for the scheduled paid runs and anything that sends mail: the morning
 brief, the planner, the automatic summary, the Notion notes sink and the mail suggestions run only
-when their key is explicitly on. Mail accounts are seeded from the user's file once per database
+when their key is explicitly on. Ripples and filing are the two exceptions, on unless switched off
+(2026-11-11, the owner's decision), because each runs only after something the owner did (a linked task
+closed or changed; a task added by hand with only a name), costs cents (about 3 cents a ripple run, at most
+the hourly cap; about 4 cents a filed task; measured 2026-11-11) and writes nothing History cannot undo. Mail accounts are seeded from the user's file once per database
 (`state.accounts_seeded`), never from the starter, so a table emptied on purpose stays empty.
 `python -m factotum effective [KEY…] [--as-before]` prints each key's value and origin (`settings`,
 `file`, `machine`, `default`, `unset`) without writing or printing a secret; `--as-before` uses the
-pre-stage-3 defaults, so a diff of the two is the deploy check (SETUP §18).
+pre-stage-3 defaults (ripples and filing did not exist: off), so a diff of the two is the deploy check (SETUP §18).
 
 **Stage 1 of the linked-tasks design (2026-11-10): the app shell** (design
 `docs/superpowers/specs/2026-11-10-linked-tasks-design.md` §13). The page is an installable app: a

@@ -154,10 +154,12 @@ def test_the_list_carries_filing_chips_until_the_field_is_set_and_a_create_wakes
     assert woke == [1] and [f["field"] for f in client.get(f"/api/tasks/{tid}").json()["filing"]] == ["project"]
 
 
-def test_the_filing_switch_is_off_when_its_key_is_missing():
+def test_the_filing_switch_is_on_when_its_key_is_missing():
+    """On by default since 2026-11-11 (the owner's decision): a filing run follows a task the owner added by hand."""
     import yaml
     from conftest import FIXTURE
-    assert "claude.filing.enabled" in C.SETTINGS_KEYS and C.DEFAULTS["claude.filing.enabled"] is False and C.value({}, "claude.filing.enabled") is False
-    assert "claude.filing.enabled" not in C.PAID_SWITCHES                                       # OLD_DEFAULTS would invent a difference for `effective --as-before`
-    for p in (C.EXAMPLE_CONFIG, C.STARTER_CONFIG, FIXTURE):
-        assert C.get(yaml.safe_load(p.read_text()), "claude.filing.enabled") is False, p
+    assert "claude.filing.enabled" in C.SETTINGS_KEYS and C.DEFAULTS["claude.filing.enabled"] is True and C.value({}, "claude.filing.enabled") is True
+    assert "claude.filing.enabled" not in C.PAID_SWITCHES and C.OLD_DEFAULTS["claude.filing.enabled"] is False     # `effective --as-before` shows it turning on
+    for p in (C.EXAMPLE_CONFIG, C.STARTER_CONFIG):
+        assert C.get(yaml.safe_load(p.read_text()), "claude.filing.enabled") is True, p
+    assert C.get(yaml.safe_load(FIXTURE.read_text()), "claude.filing.enabled") is False        # the suite's fixture keeps it off

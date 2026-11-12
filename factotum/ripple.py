@@ -655,6 +655,20 @@ def _drop_queued(conn: sqlite3.Connection, b: dict) -> None:
         conn.execute("DELETE FROM ripple_queue WHERE task_id = ? AND last_batch_id = ?", (tid, last))
 
 
+def _cannot_run(conn: sqlite3.Connection, b: dict, why: str, err: str, ms: int, today: date) -> dict:
+    """Claude cannot run on this machine (no program, or not signed in): the group's rows, as the run read
+    them, are set aside at once (a retry would fail the same way), the cause is noted for Settings, and one
+    failed row a day is logged for it. Commits. `unavailable` tells the scheduler to log nothing more."""
+    from .claude import runner as _runner
+    aside = [tid for tid, last in b["queue"].items()
+             if conn.execute("DELETE FROM ripple_queue WHERE task_id = ? AND last_batch_id = ?", (tid, last)).rowcount]
+    if _runner.note_unavailable(conn, RUN_KIND, why, today):
+        log_run(conn, RUN_KIND, ms, ok=False, summary="ripple",
+                error=f"{err[:600]} · ripples wait until Claude runs on this machine; set aside: {_tasks(aside) or 'nothing'}")
+    conn.commit()
+    return {"ok": False, "error": err, "unavailable": why, "cost_usd": 0.0}
+
+
 def _failed(conn: sqlite3.Connection, b: dict, err: str, ms: int, cost: float, dry_run: bool, run_id: int | None = None) -> dict:
     """A run that failed: one more attempt on each of the group's rows still as the run read them, a
     row reaching `MAX_ATTEMPTS` set aside; the run logged with its cost. Commits."""
@@ -744,8 +758,13 @@ def run(conn: sqlite3.Connection, cfg: dict, task_ids: list[int], today: date | 
                  model=C.value(cfg, "claude.ripple.model"), budget_usd=float(C.value(cfg, "claude.budgets_usd.ripple")))
     (workdir / "result.txt").write_text(res.result_text or "", encoding="utf-8")
     ms = int((time.monotonic() - started) * 1000)
+    why = _runner.unavailable(res)
+    if why and not dry_run:
+        return _cannot_run(conn, b, why, res.error or why, ms, today)
     if not res.ok:
         return _failed(conn, b, res.error or "no JSON", ms, res.cost_usd, dry_run)
+    if not dry_run:
+        _runner.clear_unavailable(conn)
     try:
         entries = parse(res.data, b)
     except ReplyError as e:

@@ -70,7 +70,12 @@ def test_a_day_on_the_starter_spends_nothing_and_sends_nothing(conn, monkeypatch
     rec = lambda name: (lambda *a, **k: calls.append(name) or {"ok": True})            # noqa: E731
     monkeypatch.setattr(factotum.claude.runner, "run", rec("claude"))                  # a mistake here must never start a real run
     mod = lambda name: SimpleNamespace(sweep_job=rec(name), run=rec(name), pending=lambda *a, **k: True, get=lambda *a, **k: None)   # noqa: E731
-    s = Scheduler(C.load(C.STARTER_CONFIG), conn, push=lambda cfg, *a, **k: calls.append("push") if notify.enabled(cfg) else None,
+    # Ripples and filing are on in the starter since 2026-11-11 (each spends cents, and only after something the
+    # owner did); this day is about everything else, so the two are named off here, and off they clear the queue.
+    starter = C.load(C.STARTER_CONFIG)
+    assert C.value(starter, "claude.ripple.enabled") is True and C.value(starter, "claude.filing.enabled") is True
+    C.set_(starter, "claude.ripple.enabled", False); C.set_(starter, "claude.filing.enabled", False)
+    s = Scheduler(starter, conn, push=lambda cfg, *a, **k: calls.append("push") if notify.enabled(cfg) else None,
                   mailer=rec("mail"), calendar=mod("calendar"), canvas=mod("canvas"), mail=mod("mail_sweep"), planner=mod("planner"),
                   mirror=mod("mirror"), slack=mod("slack"), summary=mod("summary"), triage=mod("triage"), ripple=ripple)
     for h, m in ((6, 0), (7, 0), (12, 0), (19, 45)):
@@ -202,10 +207,25 @@ def test_effective_prints_each_value_and_where_it_comes_from_and_no_secret(tmp_p
     _eff("--as-before")
     before = capsys.readouterr().out
     changed = {l.split()[0] for l in set(before.splitlines()) ^ set(lines)}
-    assert changed == set(C.PAID_SWITCHES)                                       # the whole difference stage 3 makes
+    assert changed == set(C.PAID_SWITCHES) | set(C.ON_WHEN_NEW)                  # stage 3's four, and the two new runs turning on
     _eff("lifecycle.fade_days", "no.such.key")
     tail = capsys.readouterr().out.splitlines()[2:]
     assert [l.split()[0] for l in tail if l.strip()] == ["lifecycle.fade_days", "no.such.key"] and tail[-1].split()[-1] == "unset"
+
+def test_effective_as_before_differs_only_in_ripples_and_filing_for_a_config_naming_the_older_switches(tmp_path, monkeypatch, capsys):
+    y = tmp_path / "mine.yaml"
+    y.write_text("notify: {morning_brief: {enabled: true}}\nclaude: {planner: {enabled: true}, summary: {auto: false}}\nsinks: {notion_notes: {enabled: false}}\n")
+    monkeypatch.setattr(C, "DEFAULT_CONFIG_PATHS", [y])
+    monkeypatch.setenv("FACTOTUM_DB", str(tmp_path / "none.db"))
+    _eff()
+    now = capsys.readouterr().out.splitlines()
+    _eff("--as-before")
+    before = capsys.readouterr().out.splitlines()
+    diff = set(now) ^ set(before)
+    assert {l.split()[0] for l in diff} == {"claude.ripple.enabled", "claude.filing.enabled"} == set(C.ON_WHEN_NEW)
+    assert {tuple(l.split()[1:]) for l in diff if l in now} == {("true", "default")}
+    assert {tuple(l.split()[1:]) for l in diff if l in before} == {("false", "default")}
+
 
 def test_effective_never_creates_or_writes_the_database(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(C, "DEFAULT_CONFIG_PATHS", [C.STARTER_CONFIG])

@@ -92,6 +92,51 @@ def _finish(env: dict, returncode: int, stderr: str) -> RunResult:
     return RunResult(True, data, text, cost, ms, envelope=env, session_id=sid)
 
 
+# --- a machine where Claude cannot run at all (no `claude` program, or not signed in) --------------------
+# Ripples and filing are on by default (2026-11-11), so a new person's machine may have neither the program
+# nor a login. Such a failure is noted once a day per run kind (one row in the Log), Settings → Claude says
+# so, and the caller sets its work aside instead of retrying it; the next run that succeeds clears the note.
+UNAVAILABLE_KEY = "state.claude.unavailable"
+_MISSING = "claude binary not found"
+
+
+def unavailable(res: RunResult | None) -> str | None:
+    """"missing" (no `claude` program where the config points), "signed_out" (a dead login), or None for
+    any other result: a failure of one run (a timeout, a bad reply) is that run's own business."""
+    if res is None or res.ok:
+        return None
+    if res.auth_failed:
+        return "signed_out"
+    if (res.error or "").startswith(_MISSING):
+        return "missing"
+    return None
+
+
+def note_unavailable(conn, kind: str, why: str, today) -> bool:
+    """Record that Claude cannot run here (`why`) for Settings; True only the first time today for `kind`,
+    so the caller logs one failed row a day for this cause. The caller commits."""
+    from ..db import get_settings, set_setting
+    st = get_settings(conn).get(UNAVAILABLE_KEY)
+    day = today.isoformat()
+    logged = list(st.get("logged") or []) if isinstance(st, dict) and st.get("day") == day else []
+    first = kind not in logged
+    set_setting(conn, UNAVAILABLE_KEY, {"day": day, "why": why, "logged": logged + ([kind] if first else [])})
+    return first
+
+
+def clear_unavailable(conn) -> None:
+    """A run succeeded: Claude runs here. The caller commits."""
+    from ..db import get_settings, set_setting
+    if get_settings(conn).get(UNAVAILABLE_KEY) is not None:
+        set_setting(conn, UNAVAILABLE_KEY, None)
+
+
+def unavailable_today(conn, today) -> str | None:
+    from ..db import get_settings
+    st = get_settings(conn).get(UNAVAILABLE_KEY)
+    return st.get("why") if isinstance(st, dict) and st.get("day") == today.isoformat() else None
+
+
 def _env(workdir) -> dict:
     env = dict(os.environ)
     if workdir:
@@ -116,7 +161,7 @@ def run(cfg: dict, kind: str, prompt: str, *, allowed_tools: list[str] | tuple[s
     except subprocess.TimeoutExpired:
         return RunResult(False, None, "", 0.0, timeout_s * 1000, error=f"timeout after {timeout_s}s")
     except FileNotFoundError as e:
-        return RunResult(False, None, "", 0.0, 0, error=f"claude binary not found ({e}): the service runs with systemd's minimal PATH, "
+        return RunResult(False, None, "", 0.0, 0, error=f"{_MISSING} ({e}): the service runs with systemd's minimal PATH, "
                                                       "so set claude.binary in config to the absolute path (`which claude`)")
     try:
         env = json.loads(res.stdout or "")
