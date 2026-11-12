@@ -510,6 +510,14 @@ body.tray-open .toast.ask { bottom: calc(38vh + 110px + env(safe-area-inset-bott
 .settings .sub { display: block; font-size: 12px; color: var(--muted); font-weight: 400; }
 .settings input, .settings select { font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); color: var(--fg); max-width: 100%; }
 .settings input[type=number] { width: 90px; }
+/* A switch: the box and its word in one label; the row's title above or beside it is a label for the same box */
+.settings .field > label[for] { cursor: pointer; }
+.settings label.sw { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; font-weight: 400; vertical-align: middle; }
+.settings label.sw input[type=checkbox] { margin: 0; }
+@media (hover: none), (max-width: 700px) {
+  .settings label.sw { min-height: 44px; min-width: 44px; padding-right: 10px; }
+  .settings label.sw input[type=checkbox] { width: 22px; height: 22px; min-height: 0; padding: 0; }
+}
 .settings table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .settings tr.muted td { color: var(--muted); }
 .settings td { padding: 4px 6px 4px 0; vertical-align: middle; }
