@@ -638,8 +638,9 @@ the key is missing, like every paid run), at most 3 tasks a tick. A task is dequ
 failed run is logged and not retried (`file-task` runs it again by hand), and a task that was filed by hand,
 linked or closed meanwhile is skipped without a run.
 
-**The run.** One run with no tools (`tools=""`), model `claude.models.filing`, budget
-`claude.budgets_usd.filing` ($0.10), timeout `claude.timeouts_s.filing` (120 s). It sees the task's name
+**The run.** One run with no tools (`tools=""`), model `claude.models.filing` (sonnet by default, and when the key
+is absent; on Haiku the measured run found no link), budget `claude.budgets_usd.filing` ($0.10), timeout
+`claude.timeouts_s.filing` (120 s). It sees the task's name
 (escaped; the names are data, not instructions), the taxonomy and the efforts from config, and up to 80 open
 rows (Task id, project, due, name). It returns `{project, effort, link: {kind, task_id, why} | null,
 twin: {task_id, why} | null}`; null is the right answer more often than not.
@@ -1167,7 +1168,7 @@ The old Command Log relations are not imported; task history lives in `changes` 
 | today-summary (§8.4) | $0.30 | ≈ $0.18 a rewrite measured on sonnet (2026-11-04), at most one per `claude.summary.auto_minutes` and only while the summary is stale; a busy day of edits is $1–3. `claude.models.today_summary: haiku` or a longer interval cuts it |
 | mail-triage (§8.5) | $0.40 | ≈ $0.14 per batch of 15 messages (measured 2026-11-05); runs only when there is new mail, at most every `sources.mail.suggest.minutes` |
 | ripple (§8.6) | $0.30 | one light run per group of changes, no tools; measured cost: about $0.03 a run (one real run on 2026-11-11: Sonnet, no tools, a 4.5 KB prompt, 9 s, three linked tasks; preflight ruling P11) |
-| filing (§8.7) | $0.10 | one no-tools run per task added by hand, only with `claude.filing.enabled` on. Measured 2026-11-11 on a copy of the real database: about $0.04 a task on Sonnet, about $0.003 on Haiku, which found no link (the example config ships `filing: haiku`; set `claude.models.filing: sonnet` for suggested links, SETUP §21). The link detectors and the link sweep are free (no Claude run) |
+| filing (§8.7) | $0.10 | one no-tools run per task added by hand, only with `claude.filing.enabled` on. Measured 2026-11-11 on a copy of the real database: Sonnet by default (`claude.models.filing: sonnet` in the example and the starter), about $0.04 a task; Haiku is cheaper (about $0.003) and found no link, so `filing: haiku` gets a project and an effort but rarely a link or a twin (SETUP §21). The link detectors and the link sweep are free (no Claude run) |
 | chat-turn / search / draft | $0.60 | on demand |
 | sweeps, UI, reminders, brief | $0 | $0 |
 

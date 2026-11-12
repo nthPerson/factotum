@@ -158,7 +158,7 @@ pages and plaud-sync is the user's checklist (SETUP §15). Update this paragraph
 .venv/bin/python -m factotum effective [KEY…] [--as-before]   # each switch's value and origin, read-only; diff the two before a deploy (SETUP §18)
 .venv/bin/python -m factotum links-check                 # what the link detectors would suggest now; read-only
 .venv/bin/python -m factotum sweep links                 # one detector pass now (free); "<n> suggested: …"
-.venv/bin/python -m factotum file-task ID [--dry-run]    # one filing run for a task (a real run, ~$0.04 on sonnet measured 2026-11-11); --dry-run writes nothing
+.venv/bin/python -m factotum file-task ID [--dry-run]    # one filing run for a task (a real run, ~$0.04 on sonnet, the default; measured 2026-11-11); --dry-run writes nothing
 # every sweep and the planner at once: Refresh on the Today tab (the scheduler runs it; a `refresh` row in the Log)
 sudo systemctl restart factotum                    # after code changes; see the restart rule below
 journalctl -u factotum -n 20

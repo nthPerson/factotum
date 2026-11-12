@@ -666,10 +666,11 @@ which is in the recording's batch and can be undone.
 - **Filing a task you add:** off until you switch it on in Settings -> Claude -> Filing a task you add
   (`claude.filing.enabled`; absent means off). When you add a task with only a name, one small Claude run with
   no tools suggests its project, effort, a likely link and a likely twin as chips; it never changes what you
-  typed. The model and budget are `claude.models.filing` and `claude.budgets_usd.filing` ($0.10). Measured
-  2026-11-11 on a copy of a real database: about $0.04 a task on Sonnet; Haiku cost $0.003 but found no link.
-  The shipped example names Haiku, so set `claude.models.filing: sonnet` in `config/factotum.yaml` if you want
-  link suggestions. The scheduler must be running; the link detectors cost nothing.
+  typed. The model and budget are `claude.models.filing` and `claude.budgets_usd.filing` ($0.10). Sonnet by
+  default (the example and the starter say so), about 4 cents a task (measured 2026-11-11 on a copy of a real
+  database). Haiku is cheaper ($0.003) and found no link; set `claude.models.filing: haiku` in
+  `config/factotum.yaml` only if a project and an effort are enough. The scheduler must be running; the link
+  detectors cost nothing.
 - **Try one filing run first:** make a copy of the database with the backup API (never `cp`, the file is in WAL
   mode and a copy goes stale):
 

@@ -82,12 +82,14 @@ def test_file_task_dry_run_prints_and_stores_nothing(conn, cfg, tmp_path, monkey
     assert not rows(c, "SELECT 1 FROM evidence WHERE kind IN ('filing', 'link_suggestion')")
 
 
-def test_the_filing_run_kind_has_a_small_model_and_budget_in_the_example_and_the_fixture():
+def test_the_filing_run_kind_is_sonnet_with_a_small_budget_in_the_example_the_fixture_and_the_starter():
+    # ruling 2026-11-11 (measured): haiku cost $0.003 and proposed no link; sonnet about $0.04 with a correct waits_on
     import yaml
     from conftest import FIXTURE
     for p in (C.EXAMPLE_CONFIG, FIXTURE):
         y = yaml.safe_load(p.read_text())
-        assert (C.get(y, "claude.models.filing"), C.get(y, "claude.budgets_usd.filing"), C.get(y, "claude.timeouts_s.filing")) == ("haiku", 0.1, 120), p
+        assert (C.get(y, "claude.models.filing"), C.get(y, "claude.budgets_usd.filing"), C.get(y, "claude.timeouts_s.filing")) == ("sonnet", 0.1, 120), p
+    assert C.get(yaml.safe_load(C.STARTER_CONFIG.read_text()), "claude.models.filing") == "sonnet"
 
 
 def test_a_task_made_by_hand_with_only_a_name_is_queued_and_nothing_else_is(conn):
