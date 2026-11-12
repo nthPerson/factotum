@@ -77,6 +77,7 @@ claude:
   summary: { auto: false, auto_minutes: 10 }
   filing: { enabled: false }
   ripple: { enabled: false, model: sonnet, delay_seconds: 60, hourly_cap: 10 }
+  models: { filing: sonnet }
   budgets_usd: { ripple: 0.30 }
   timeouts_s: { ripple: 180 }
 

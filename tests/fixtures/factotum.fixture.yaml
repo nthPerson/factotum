@@ -273,7 +273,7 @@ links: { suggestions_per_review: 5 }
 
 claude:
   binary: claude                # absolute path (`which claude`) for the same reason; `factotum claude-check` says which
-  models: { sync_file: sonnet, today_summary: sonnet, mail_triage: sonnet, planner_morning: sonnet, chat_turn: sonnet, check: haiku, filing: haiku }
+  models: { sync_file: sonnet, today_summary: sonnet, mail_triage: sonnet, planner_morning: sonnet, chat_turn: sonnet, check: haiku, filing: sonnet }
   budgets_usd: { sync_file: 1.00, today_summary: 0.30, mail_triage: 0.40, planner_morning: 0.75, chat_turn: 0.60, check: 0.05, filing: 0.10, ripple: 0.30 }
   planner: { enabled: true }   # the morning brief's verdict and proposals; off = the plain brief
   summary: { auto: true, auto_minutes: 10 }   # the Today tab's summary: rewritten by one light run when it goes stale (a row it is about changed,
