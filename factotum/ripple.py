@@ -375,13 +375,17 @@ NEVER_FIELDS = ("counterpart", "waiting_on")                  # a ripple never c
 # Not one: e.g., a.m., U.S., 3.5, v2.1, 9.30, Dr. Lee (a space), report.pdf, README.md, user.email.
 # Bounded like every pattern here.
 _INV = "[\u00ad\u200b-\u200f\u2060-\u2064\ufeff]"           # a soft hyphen, zero-width spaces and joiners, marks
-_DOT = _INV + r"{0,3}(?:[.\u3002\uff0e\uff61\u2024\ufe52]|\[\.\]|\(\.\)|\{\.\}|\[dot\]|\(dot\))" + _INV + r"{0,3}"
-_LABEL = r"[^\W_](?:[\w-]|" + _INV + r"){0,62}"
-_TAIL = r"(?:\[\.\]|\(\.\)|[^\s<>\"')\]]){0,2000}"
-SCHEME_RE = re.compile(r"(?:h(?:tt|xx)ps?|ftp)(?::|\[:\])//(?:\[\.\]|\(\.\)|[^\s<>\"')\]]){1,2000}", re.I)
-HOST_RE = re.compile(r"(?<![^\W_])(?P<host>" + _LABEL + r"(?:" + _DOT + _LABEL + r"){1,8})"
-                     r"(?=(?P<port>:\d{1,5}(?![\w.]))?(?P<path>[/?#]" + _TAIL + r")?)", re.I)    # a lookahead: the scan resumes after the host
-SPACED_RE = re.compile(r"(?<![^\W_])" + _LABEL + r"(?:[ \t]{1,3}dot[ \t]{1,3}" + _LABEL + r"){1,8}(?P<path>/" + _TAIL + r")?", re.I)
+# No bound a stranger can exceed: a label, the number of labels, a path, a port, a spaced run are as long
+# as they are (a cut match would be judged on part of an address). Still linear: a label run starts only
+# where a run of label characters starts, and nothing else here can match two ways.
+_DOT = r"(?:[.\u3002\uff0e\uff61\u2024\ufe52]|\[\.\]|\(\.\)|\{\.\}|\[dot\]|\(dot\))"
+_LABEL = r"(?:[\w-]|" + _INV + r")+"                          # with any invisible characters inside or beside it
+_START = r"(?<![\w-])(?<!" + _INV + r")"
+_TAIL = r"(?:\[\.\]|\(\.\)|[^\s<>\"')\]])*"
+SCHEME_RE = re.compile(r"(?:h(?:tt|xx)ps?|ftp)(?::|\[:\])//(?:\[\.\]|\(\.\)|[^\s<>\"')\]])+", re.I)
+HOST_RE = re.compile(_START + r"(?P<host>" + _LABEL + r"(?:" + _DOT + _LABEL + r")+)"
+                     r"(?=(?P<port>:\d+(?![\w.]))?(?P<path>[/?#])?)", re.I)    # a lookahead: the scan resumes after the host
+SPACED_RE = re.compile(_START + _LABEL + r"(?:[ \t]+dot[ \t]+" + _LABEL + r")+(?P<path>/" + _TAIL + r")?", re.I)
 _FANG = re.compile(_INV + r"|\[\.\]|\(\.\)|\{\.\}|\[dot\]|\(dot\)|[\u3002\uff0e\uff61\u2024\ufe52]", re.I)
 _WRAP_L, _WRAP_R = "([{<\"'\u201c\u2018\u00ab", ")]}>\"'\u201d\u2019\u00bb.,;:!?"
 _BARE_TAIL = re.compile(r"(?:\(\w{0,20}\)?|['\u2019]s)?")   # what may follow a bare host in its token: m.group(1), Dana.Lee's
@@ -494,23 +498,34 @@ def _plain(text: str) -> str:
     return _FANG.sub(lambda m: "" if re.fullmatch(_INV, m.group(0)) else ".", text or "").lower()
 
 
-def _host_is_address(text: str, m: re.Match, tokens: list[tuple[int, int]]) -> bool:
+def _tail_ends(text: str) -> list[int]:
+    """For each place in `text`, where a path starting there ends (`_TAIL`'s stop characters; a ) or ]
+    closing a de-fanged (.) or [.] does not stop it): one pass, so a long path holding many hosts costs
+    no more than a short one."""
+    ends = [len(text)] * (len(text) + 1)
+    for i in range(len(text) - 1, -1, -1):
+        c = text[i]
+        stop = c.isspace() or c in "<>\"'" or (c in ")]" and text[max(0, i - 2):i + 1] not in ("[.]", "(.)"))
+        ends[i] = i if stop else ends[i + 1]
+    return ends
+
+
+def _host_is_address(text: str, m: re.Match, tokens: list[tuple[int, int]], path: str) -> bool:
     """Whether one `HOST_RE` match of `text` is a web address (the rules above `_INV`); `tokens`: the
-    spans of `text`'s whitespace-separated tokens."""
+    spans of `text`'s whitespace-separated tokens; `path`: the path, query or fragment after it."""
     raw = m.group("host")
     labels = _plain(raw).split(".")
     last = labels[-1]
-    ipv4 = len(labels) == 4 and all(lb.isdigit() and len(lb) <= 3 and int(lb) <= 255 for lb in labels)
+    ipv4 = len(labels) == 4 and all(lb.isdigit() for lb in labels)         # any four numbers: 185.12.4.999 too
     if not ipv4 and (not (last.isalpha() and len(last) >= 2) or last in FILE_EXTS):
         return False                                         # 3.5, v2.1, 9.30, e.g, a.m, report.pdf, Node.js: no host
+    if (ipv4 or m.group("port") or path.rstrip(".,;:!?") or labels[0] == "www" or _plain(raw) != raw.lower()
+            or any(ord(c) > 127 for c in raw if c.isalpha())):
+        return True                                          # a strong sign ("Is it St.Louis?" has no query)
     i = bisect.bisect_right(tokens, (m.start(), len(text))) - 1          # the whitespace-separated token holding the host
     token = text[tokens[i][0]:tokens[i][1]].lstrip(_WRAP_L).rstrip(_WRAP_R)
-    bare = token.startswith(raw) and _BARE_TAIL.fullmatch(token[len(raw):]) is not None
-    path = (m.group("path") or "").rstrip(".,;:!?")              # "Is it St.Louis?" has no query
-    strong = (ipv4 or not bare or m.group("port") or path or labels[0] == "www" or _plain(raw) != raw.lower()
-              or any(ord(c) > 127 for c in raw if c.isalpha()))
-    if strong:
-        return True
+    if not (token.startswith(raw) and _BARE_TAIL.fullmatch(token[len(raw):]) is not None):
+        return True                                          # not bare: something is glued to it
     return last in COMMON_TLDS and _plain(raw) not in DEGREES
 
 
@@ -521,6 +536,7 @@ def _web_spans(text: str) -> list[tuple[int, int, str]]:
     text = text or ""
     mail = [m.span() for m in EMAIL_RE.finditer(text)]
     tokens = [m.span() for m in re.finditer(r"\S+", text)]
+    tails = _tail_ends(text)
     out = []
 
     def add(a: int, b: int) -> None:
@@ -530,8 +546,9 @@ def _web_spans(text: str) -> list[tuple[int, int, str]]:
     for m in SCHEME_RE.finditer(text):
         add(*m.span())
     for m in HOST_RE.finditer(text):
-        end = max(m.end(), m.end("port"), m.end("path"))   # the host with its port and path (an unmatched group is -1)
-        if not any(x <= m.start() and end <= y for x, y in mail) and _host_is_address(text, m, tokens):
+        after = m.end("port") if m.group("port") else m.end()
+        end = tails[after] if m.group("path") else after          # the host with its port and path
+        if not any(x <= m.start() and end <= y for x, y in mail) and _host_is_address(text, m, tokens, text[after:end]):
             add(m.start(), end)
     for m in SPACED_RE.finditer(text):
         if m.group("path") or _plain(m.group(0)).split()[-1] in _SPACED_TLDS:
@@ -606,17 +623,25 @@ def guard(old: str, new: str) -> str | None:
 
 
 def _no_new_addresses(text: str, old: str) -> str:
-    """`text` with every email or web address `old` lacks replaced by `LEFT_OUT` (a web address with
-    what lies inside it)."""
+    """`text` with every email or web address `old` lacks replaced by `LEFT_OUT`: the union of their
+    spans (an overlapping or adjacent one included, and an address `old` has that overlaps one) is cut out,
+    so no character of a new address is copied. If the result still names an address `old` lacks, the
+    whole of it is `LEFT_OUT`."""
     had = set(_emails(old))
-    text = EMAIL_RE.sub(lambda m: m.group(0) if m.group(0).lower() in had else LEFT_OUT, text)
+    text = EMAIL_RE.sub(lambda m: m.group(0) if m.group(0).lower() in had else LEFT_OUT, text or "")
+    cut: list[list[int]] = []
+    for a, b, k in sorted((a, b, k) for a, b, k in _web_spans(text) if not _had(k, old)):
+        if cut and a <= cut[-1][1]:
+            cut[-1][1] = max(cut[-1][1], b)
+        else:
+            cut.append([a, b])
     out, at = [], 0
-    for a, b, k in _web_spans(text):
-        if a < at:
-            continue                                         # inside an address already judged
-        out.append(text[at:a] + (text[a:b] if _had(k, old) else LEFT_OUT))
+    for a, b in cut:
+        out.append(text[at:a] + LEFT_OUT)
         at = b
-    return "".join(out) + text[at:]
+    out = "".join(out) + text[at:]
+    mail, web = _new_addresses(old, out)
+    return LEFT_OUT if mail or web else out
 
 
 def _task_ref(v) -> int | None:

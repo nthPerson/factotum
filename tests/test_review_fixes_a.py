@@ -319,3 +319,82 @@ def test_no_wrapper_hides_an_address(addr, wrap):
     assert verdict and verdict.startswith("adds "), (w, verdict)
     lost = ripple._loss(OLD + " " + w, OLD)
     assert lost and lost.startswith("drops "), (w, lost)
+
+
+# --- the automated review of the third fix: the note's sanitiser skipped overlapping spans; a bound cut a run short --
+
+NOTE_OLD = "Kept: lab.example.edu, x.com/a and https://kept.example/path"
+
+
+@pytest.mark.parametrize("why", [
+    "lab.example.edu dot com",                           # a de-fanged run overlapping a kept host
+    "see lab.example.edu dot top/login now",
+    "x.com/" + "a/" * 997 + "evil.top/zzzz",            # a new host nested at the end of a kept one's long path
+    "x.com/aevil.top",                                   # a kept address directly followed by a new one
+    "x.com/a/evil.top and https://kept.example/path/evil.top",
+    "https://kept.example/pathevil[.]com/x",
+    "x.com/a" + "​" * 5 + "evil.top",
+])
+def test_a_note_keeps_no_part_of_an_address_the_task_lacks(why):
+    out = ripple._no_new_addresses(why, NOTE_OLD)
+    assert ripple._new_addresses(NOTE_OLD, out) == ([], []), out
+
+
+@pytest.mark.parametrize("wrap", WRAPPERS)
+@pytest.mark.parametrize("addr", HOSTILE)
+def test_a_note_with_a_hostile_address_glued_to_a_kept_one_keeps_none_of_it(addr, wrap):
+    w = WRAPPERS[wrap].format(addr)
+    w = w.upper() if wrap == "upper case" else w
+    for why in ("x.com/a" + w, "lab.example.edu" + w, "see x.com/a" + w + " then lab.example.edu"):
+        out = ripple._no_new_addresses(why, NOTE_OLD)
+        assert ripple._new_addresses(NOTE_OLD, out) == ([], []), (why, out)
+
+
+def _run(steps: int, last: str, path: str = "") -> str:
+    return " dot ".join([f"l{i}" for i in range(steps)] + [last]) + path
+
+
+@pytest.mark.parametrize("steps", [2, 8, 9, 20, 60])        # "dot" steps; nine labels are one bounded match
+@pytest.mark.parametrize("last, path", [("com", ""), ("top", "/login"), ("evil", "/x")])
+def test_a_long_spaced_dot_run_is_judged_whole(steps, last, path):
+    run = _run(steps, last, path)
+    assert ripple.guard(OLD, OLD + " " + run).startswith("adds "), run
+    assert ripple._loss(OLD + " " + run, OLD).startswith("drops "), run
+
+
+@pytest.mark.parametrize("text", ["connect the dot to the line and put a dot in the box", "dot dot dot", "a dot " * 40 + "end",
+                                  "the dot matrix printer dot by dot"])
+def test_an_ordinary_sentence_with_dot_in_it_is_not_an_address(text):
+    assert ripple.guard(OLD, OLD + " " + text) is None
+
+
+@pytest.mark.parametrize("added", [
+    "l1.l2.l3.l4.l5.l6.l7.l8.l9.l10.top",                  # more labels than any bound
+    "a1.b1.c1.d1.e1.f1.g1.h1.i1.j1.top",
+    "a1.b1.c1.d1.e1.f1.g1.h1.i1.top",                      # ten labels: nine in one bounded match, then a lone "top"
+    "a" * 70 + ".top",                                     # a label longer than 63
+    "x." + "a" * 300 + ".top/login",
+    "-evil.top",
+    "evil" + "​" * 5 + "." + "​" * 5 + "top",   # more invisible characters than any bound
+    "185.12.4.999",                                        # an octet over 255
+    "185.12.4.9999/upload",
+    "evil.top:123456",
+])
+def test_a_bound_overflowed_is_still_an_address(added):
+    assert ripple.guard(OLD, OLD + " " + added).startswith("adds "), added
+    assert ripple._loss(OLD + " " + added, OLD).startswith("drops "), added
+
+
+def test_two_long_paths_that_differ_only_far_in_are_two_addresses():
+    a, b = "x.com/" + "a" * 2500 + "/one", "x.com/" + "a" * 2500 + "/two"
+    assert ripple._new_addresses(a, b)[1] and ripple._loss(a, b)
+
+
+@pytest.mark.parametrize("run", ["a dot " * 333, "x.com/" * 333, "a." * 1000, "a-" * 1000 + ".top", ("ab‍" * 666) + ".com",
+                                 "l dot " * 300 + "com", "[.]" * 666, "a" * 2000, "x." + "a" * 1990 + ".top"])
+def test_a_hostile_2000_character_text_is_judged_quickly(run):
+    import time
+    run = run[:2000]
+    t = time.perf_counter()
+    ripple.guard("old", run); ripple._no_new_addresses(run, "old"); ripple._loss(run, "x")
+    assert time.perf_counter() - t < 1.0
