@@ -886,3 +886,13 @@ body.sheet-on .toast { z-index: 10; bottom: auto; top: calc(12px + env(safe-area
   .stepline .btn { min-height: 44px; }
   .bulk .linkline .btn { min-height: 40px; }
 }
+/* Touch targets of at least 44 px for stage 6's small controls (verify fix wave, 2026-11-11). Text links inside a
+   line get vertical padding offset by a negative margin: the tap area grows, the line does not move. */
+@media (hover: none), (max-width: 700px) {
+  .ptoday .pclose, .details [data-ask-task], .details [data-more], .taskpage [data-ask-task], .taskpage [data-more],
+  .btn[data-link-open], .btn[data-hist-undo] { min-height: 44px; }
+  .picker .hits button { min-height: 44px; }
+  .sheet .sgrid { grid-template-columns: minmax(0, 1fr) auto; }
+  .sheet .seffort .stog { min-width: 44px; }
+  .place a.tref, .pchips a { padding-block: 15px; margin-block: -15px; }
+}
