@@ -697,7 +697,8 @@ user's own accounts — a hostile mail that CCs a stranger cannot make that stra
 draft needs a conversation the turn read and is flagged in the UI when it reaches an address no task
 names. The UI renders proposals as checkboxes; "Stage selected" puts them in the tray. "Search
 related emails" and "Draft reply" are chat turns with a canned prompt (`prompts/chat-search-mail.md`,
-`chat-draft-reply.md`) and the task attached; on a Review card the conversation lists what a reply proposes
+`chat-draft-reply.md`) and the task attached, shown only while mail is on (`sources.mail.enabled`; with it off, as on
+the starter, the Chat tab's intro and prompts leave mail out too, and Refresh names only the inputs that are on); on a Review card the conversation lists what a reply proposes
 and "Stage all N with this decision" puts the ticked ones in the tray beside the card's decision (one Apply,
 one Undo; see Places below). Every turn is a `runs` row (`chat-turn`)
 with its cost; prompt and result live under `data/runs/chat/<thread>-<message>/`.
