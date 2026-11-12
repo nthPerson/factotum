@@ -352,7 +352,6 @@ def build_prompt(cfg: dict, b: dict, today: date, clock: str = "") -> str:
 EFFECTS = ("none", "text", "propose")
 WHY_CAP = 300
 # Bounded patterns: the old text is a task's text and may hold a stranger's words.
-URL_RE = re.compile(r"https?://[^\s<>\"')\]]{1,2000}")
 TASK_REF_RE = re.compile(r"\bTask-(\d{1,6})\b")
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,255}\.[A-Za-z]{2,24}")
 SET_FIELDS = ("name", "due", "hard", "effort", "project")     # what a ripple's `set` or `create` card may carry
@@ -414,26 +413,38 @@ def parse(data, b: dict) -> list[dict]:
     return out
 
 
-def _urls(text: str) -> list[str]:
-    return list(dict.fromkeys(u.rstrip(".,;:!?") for u in URL_RE.findall(text or "")))
-
-
 def _emails(text: str) -> list[str]:
     return list(dict.fromkeys(m.lower() for m in EMAIL_RE.findall(text or "")))
 
 
 def _web(m: re.Match) -> str | None:
     """The web address a `WEB_RE` match names (no scheme, lowercased, no trailing punctuation or
-    slash), or None for a bare token that is not one."""
+    slash), or None for a bare token that is not one, or for the two halves of an email address
+    (`EMAIL_RE` judges those)."""
     if m.group(1) is not None and not m.group(2) and m.group(1).lower() not in COMMON_TLDS:
+        return None
+    if m.string[m.start() - 1:m.start()] == "@" or m.string[m.end():m.end() + 1] == "@":
         return None
     return re.sub(r"^https?://", "", m.group(0).rstrip(".,;:!?"), flags=re.I).lower().rstrip("/") or None
 
 
 def _had(addr: str, old: str) -> bool:
     """True when the old text already holds `addr` (a normalised web address), with or without a
-    scheme, not as the tail of a longer host (x.com is not in fox.com)."""
-    return re.search(r"(?<![a-z0-9-])" + re.escape(addr), (old or "").lower()) is not None
+    scheme or a trailing slash or full stop, not as the tail of a longer host (x.com is not in fox.com
+    nor in a.x.com) nor as the head of a longer one or a longer path (x.com is not in x.community,
+    x.com/a not in x.com/ab)."""
+    return re.search(r"(?<![\w.-])" + re.escape(addr) + r"(?![\w-]|\.[\w-])", (old or "").lower()) is not None
+
+
+def _web_in(text: str) -> list[tuple[str, str]]:
+    """Every web address `text` holds, scheme or not, once each: (as written, without trailing
+    punctuation; normalised as `_web` gives it)."""
+    out: dict[str, str] = {}
+    for m in WEB_RE.finditer(text or ""):
+        w = _web(m)
+        if w:
+            out.setdefault(w, m.group(0).rstrip(".,;:!?"))
+    return [(said, w) for w, said in out.items()]
 
 
 def _new_addresses(old: str, new: str) -> tuple[list[str], list[str]]:
@@ -445,17 +456,22 @@ def _new_addresses(old: str, new: str) -> tuple[list[str], list[str]]:
 
 
 def _loss(old: str, new: str) -> str | None:
-    """Why a rewrite loses something, or None: empty, over `REWRITE_CAP`, or a web address or a
-    `Task-N` of the old text missing. Such a rewrite is never applied nor offered: it becomes a note."""
+    """Why a rewrite loses something, or None: empty, over `REWRITE_CAP`, or a web address (scheme
+    or not, anything `WEB_RE` finds), an email address or a `Task-N` of the old text missing. The same
+    address with or without its scheme, a trailing slash or a full stop after it is kept. Such a rewrite
+    is never applied nor offered: it becomes a note."""
     old, new = old or "", new or ""
     if not new.strip():
         return "empty"
     if len(new) > REWRITE_CAP:
         return f"longer than {REWRITE_CAP} characters"
-    kept = set(_urls(new))
-    for u in _urls(old):
-        if u not in kept:
-            return f"drops {u}"
+    for said, w in _web_in(old):
+        if not _had(w, new):
+            return f"drops {said}"
+    mail = set(_emails(new))
+    for m in _emails(old):
+        if m not in mail:
+            return f"drops {m}"
     refs = {int(n) for n in TASK_REF_RE.findall(new)}
     for n in dict.fromkeys(int(n) for n in TASK_REF_RE.findall(old)):
         if n not in refs:

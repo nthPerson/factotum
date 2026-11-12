@@ -34,7 +34,8 @@ For each task in §3, choose one effect.
 - `none`: nothing it says or needs has changed. Choose it whenever you are not sure.
 - `text`: rewrite its text so it says where the task stands now, after what changed ("Where this
   stands"). The rewrite replaces the old text; History keeps the old one. Rules:
-  - keep every web address and every `Task-N` the old text had, word for word;
+  - keep every web address (with `https://` or without), every email address and every `Task-N` the old
+    text had, word for word;
   - keep the sentences the owner wrote, and add where things stand after them;
   - never remove or soften a requirement the owner wrote ("in person", "by Friday"); when what
     changed conflicts with one, keep it and say that it conflicts;

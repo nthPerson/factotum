@@ -613,7 +613,7 @@ without a string `context`) fails the whole run and nothing is applied.
 **What applies, and the guard.** Only a text rewrite (`context`, at most 2000 characters), as one batch
 with source `ripple`, through `batches.apply` with `expect` set to the text the run was shown, so a task
 edited by hand meanwhile is skipped with the usual reason; a task closed or merged meanwhile is left alone.
-A rewrite that loses something (empty, too long, or it drops a web address or a `Task-N` the old text had)
+A rewrite that loses something (empty, too long, or it drops a web address, written with `https://` or without, an email address or a `Task-N` the old text had)
 is refused and becomes an `add_note` ("Ripple from Task-N: why"), dated by the server, in the same batch;
 so does any rewrite of a text the run was shown cut (over 1500 characters: a rewrite would replace the whole
 text with what was built from its first part), History's line saying "the text is too long to rewrite safely,
