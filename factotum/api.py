@@ -211,7 +211,7 @@ def _page(title: str, text: str, base: str, undo: bool = False, task_id: int | N
     ({"action": url, "hang": k, "ripples": bool}). Both sit between the text and the Open link, Free now first."""
     back = f"{base}/t/{task_id}" if task_id is not None else f"{base}/"
     label = f"Open Task-{task_id}" if task_id is not None else "Open Factotum"
-    hint = ' Undo is in the Log tab.' if undo else ''
+    hint = '<p style="color:#555">Undo is in the Log tab.</p>' if undo else ''      # its own line: the text before it is a task's name
     freed = ""
     if free:
         items = "".join(f'<li><a href="{escape(base)}/t/{f["id"]}" style="color:#2a6">Task-{f["id"]}</a> {escape(f["name"])}</li>' for f in free)
@@ -229,7 +229,7 @@ def _page(title: str, text: str, base: str, undo: bool = False, task_id: int | N
                 '<button style="margin-top:8px;font:16px system-ui;padding:10px 18px;min-height:44px">Save</button></form>')
     return (f'<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Factotum</title>'
             f'<body style="font:16px system-ui;margin:0;padding:24px;background:#fafaf7;color:#1a1a1a"><h2 style="margin:0 0 8px">{escape(title)}</h2>'
-            f'<p style="color:#555">{escape(text)}{hint}</p>{freed}{form}<p><a href="{escape(back)}" style="color:#2a6">{escape(label)}</a></p></body>')
+            f'<p style="color:#555">{escape(text)}</p>{hint}{freed}{form}<p><a href="{escape(back)}" style="color:#2a6">{escape(label)}</a></p></body>')
 
 
 class JsonOnlyMutations:

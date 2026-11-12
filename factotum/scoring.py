@@ -65,7 +65,7 @@ def score(task: dict, today: date, cfg: dict) -> tuple[int, str, list[str]]:
     w = (sc.get("project_weights", {}) or {}).get(weight, 0)
     if w:
         total += w
-        reasons.append(f"{task.get('project')} {weight} +{w}")
+        reasons.append(f"{task.get('project') or 'no project'} {weight} +{w}")
 
     extra_mentions = max(0, int(task.get("mentions") or 1) - 1)
     mb = min(sc.get("mention_cap", 15), extra_mentions * sc.get("mention_bonus", 5))

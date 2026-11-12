@@ -310,3 +310,27 @@ def test_exclude_takes_ascii_digits_with_one_minus_and_ignores_the_rest(cfg, tmp
     for route in ("/api/review", "/api/review/count"):
         for bad in ("²", "--5", "1,²,--5", "٣"):
             assert client.get(route, params={"exclude": bad}).status_code == 200, (route, bad)
+
+
+# --- C1: a task with no project says "no project" in its score reasons -----------------------------------
+
+def test_a_task_with_no_project_says_no_project_in_its_score_reasons(cfg):
+    from datetime import date
+    from factotum import scoring
+    for project in (None, ""):
+        _, _, reasons = scoring.score({"id": 1, "name": "x", "project": project, "mentions": 1, "status": "open"}, date(2026, 11, 11), cfg)
+        assert not any(r.startswith(("None ", " ")) for r in reasons), reasons
+        assert any(r.startswith("no project medium +") for r in reasons), reasons
+    _, _, reasons = scoring.score({"id": 1, "name": "x", "project": "Personal", "mentions": 1, "status": "open"}, date(2026, 11, 11), cfg)
+    assert any(r.startswith("Personal ") for r in reasons), reasons
+
+
+# --- C3: after a reminder's Done the task name and "Undo is in the Log tab." are two lines ----------------
+
+def test_the_done_page_puts_the_task_name_and_the_undo_line_apart():
+    from factotum.api import _page
+    html = _page("Task-5 marked done", "Call the bank", "", undo=True, task_id=5)
+    assert "Call the bank Undo" not in html and "Call the bankUndo" not in html
+    assert '>Call the bank</p>' in html
+    assert '>Undo is in the Log tab.</p>' in html
+    assert "Undo is in the Log tab." not in _page("Task-5 snoozed", "Call the bank", "", undo=False, task_id=5)
