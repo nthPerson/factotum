@@ -620,7 +620,8 @@ text with what was built from its first part), History's line saying "the text i
 so a note was added";
 when the reason names an address the old text lacked, the note says fixed words instead, and History's line
 for the change has that address replaced by "[address left out]". A rewrite that loses nothing but adds an
-email or web address the old text did not have is not applied on its own (a ripple never brings an address
+email or web address the old text did not have (anything address-shaped: a scheme or www., an IP address, a host with a
+known top-level domain, a port or a path, a host with a non-ASCII letter, a de-fanged x[.]com; compared with the host's case folded and the path's kept) is not applied on its own (a ripple never brings an address
 to a task, design §8.6) and is not a note either: it waits on Review as a card ("Ripple suggests", with the
 text before and after); Accept stages it with `expect` set to the text the run was shown, and when the task's
 text has changed since, the card says so and offers only Dismiss. Only when no card can be staged (the same
