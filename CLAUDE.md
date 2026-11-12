@@ -68,7 +68,7 @@ suggestions, the Log in words, "Free now" after a reminder's Done). Stage 5 (202
 rewrites their text as an undoable `ripple` batch and stages everything else on Review), the outcome
 question on close, "Task-N is free now", the Review block and Settings controls. Stage 6 (2026-11-11): in place and by hand (the conversation on a Review card,
 under the Today box and in an opened task; New task on Enter with its preview and the phone sheet; the editor; linking
-by hand; Find any task). Stage 7 (2026-11-11): suggested links (`factotum/suggestions.py`: twins, shared threads and "Task-N" in text as `link_suggestion` cards, one per pair ever, at most `links.suggestions_per_review` offered a day), links proposed by the planner, a recording and mail triage (`follow_thread`), and `factotum/filing.py`: a task made by hand is filed by one small no-tools run into dashed chips. Stage 8 (2026-11-11): app extras: the Review count on the installed app's icon (one read-only count, `review_queue`, for the tab, the icon and the pushes that are sent anyway; `notify.app.badge`) and long-press shortcuts to New task (`/new`) and Review. Retiring the old Notion
+by hand; Find any task). Stage 7 (2026-11-11): suggested links (`factotum/suggestions.py`: twins, shared threads and "Task-N" in text as `link_suggestion` cards, one per pair ever, at most `links.suggestions_per_review` offered a day), links proposed by the planner, a recording and mail triage (`follow_thread`), and `factotum/filing.py`: a task made by hand is filed by one small no-tools run into dashed chips. Stage 8 (2026-11-11): app extras: the Review count on the installed app's icon (one read-only count, `review_queue`, for the tab, the icon and the pushes that are sent anyway; `notify.app.badge`) and long-press shortcuts to New task (`/new`) and Review. The polish pass and final review (2026-11-11): Create on a Review card is one undoable batch; ripples and filing are on by default; every writer on the API's shared connection takes one lock; `links-check` reads only (no migration); a run kind the config names no budget or timeout for gets the example's (`runner.BUDGETS_USD`, `TIMEOUTS_S`). Retiring the old Notion
 pages and plaud-sync is the user's checklist (SETUP §15). Update this paragraph when something lands.
 
 ## Where things live
@@ -158,8 +158,10 @@ pages and plaud-sync is the user's checklist (SETUP §15). Update this paragraph
 .venv/bin/python -m factotum serve                 # http://127.0.0.1:8750
 .venv/bin/python -m factotum ripple <task_id> [--dry-run]   # one ripple now from a task (a real run, ~$0.03 measured 2026-11-11); --dry-run writes nothing
 .venv/bin/python -m factotum effective [KEY…] [--as-before]   # each switch's value and origin, read-only; diff the two before a deploy (SETUP §18)
-.venv/bin/python -m factotum links-check                 # what the link detectors would suggest now; read-only
-.venv/bin/python -m factotum sweep links                 # one detector pass now (free); "<n> suggested: …"
+.venv/bin/python -m factotum links-check                 # what the link detectors would suggest now; read-only, never migrates (an unmigrated DB: it says how to preview on a copy)
+.venv/bin/python -m factotum sweep links                 # one detector pass now (free); "<n> suggested: …"; the scheduler's first tick after a start runs one by itself
+.venv/bin/python -m factotum add "text" [--dry-run]       # a task by hand from one line, as New task (#project ~effort ! a date, after N, under N); --dry-run prints how it would be filed
+.venv/bin/python -m factotum find "words or 412"          # any task, open or closed, by number or words
 .venv/bin/python -m factotum file-task ID [--dry-run]    # one filing run for a task (a real run, ~$0.04 on sonnet, the default; measured 2026-11-11); --dry-run writes nothing
 # every sweep and the planner at once: Refresh on the Today tab (the scheduler runs it; a `refresh` row in the Log)
 sudo systemctl restart factotum                    # after code changes; see the restart rule below
@@ -171,7 +173,7 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
 
 - **Settings-tab keys are a whitelist** (`config.SETTINGS_KEYS`). A new toggle needs the key
   there, its code default in `config.DEFAULTS`, a control in `web/app.js` `renderSettings`, and a
-  default in the example YAML.
+  default in the example YAML; a number control's `min` goes in `config.MINIMA` too (PUT /api/settings refuses below it, 2026-11-11).
 - **Absent means off for the scheduled paid runs and anything that sends mail** (2026-11-10): a scheduled
   paid Claude run, a mail, a write to an outside service happens only when its switch is explicitly on. The
   default lives in `config.DEFAULTS` as False and the code reads it with `C.value(cfg, key)`, never
@@ -479,6 +481,8 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
   switch that did not exist before 2026-11-10 stays out of it and gets its own default test.
 - **A filing run is dequeued before it runs** (2026-11-11): a failed one is logged and not retried; `file-task` runs
   it again by hand.
+- **Every subcommand but `effective` and `links-check` runs `init_db`, so migrates** (review 2026-11-11): never run one from a new checkout against the live database while the old service is up (SETUP §18).
+- **A run kind's budget and timeout default to `runner.BUDGETS_USD` / `TIMEOUTS_S`** (2026-11-11), the example's numbers (a test pins them): a new run kind needs a line in both and in the example.
 - **Where Claude cannot run, ripples and filing wait quietly** (2026-11-11; on by default, so a new person's machine
   may have no `claude` program or no login): `runner.unavailable` tells those two causes from a run's own failure;
   `runner.note_unavailable` keeps `state.claude.unavailable` for Settings → Claude's sentence and lets one failed
@@ -517,7 +521,7 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
   still creates Notion task rows for every recording until it is stopped, and the cron would import
   them as twins of what sync-file just wrote. Removed at the phase 3 restart.
 - **Restarting mid-run loses that recording** (2026-09-16). Before `systemctl restart factotum`,
-  check `journalctl -u factotum -n 5` for a Claude run in flight and wait for it.
+  check for a Claude run in flight and wait for it: `systemctl status factotum --no-pager` (a `claude` child under the service) or `pgrep -af 'claude -p'` (nothing when idle); the journal shows only the Plaud trigger's runs (2026-11-11).
 - **In the Notion Tasks DB, `Calendar Event` and `last_edited_time` are automation artefacts**
   (2026-11-01): plaud-sync created an event for every dated task and its planner rewrote `Why now`
   and `Score` on every open row, so neither says anything about the user. The import classifier

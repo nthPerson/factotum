@@ -770,6 +770,9 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
 
     @app.put("/api/settings")
     def put_settings(body: SettingsBody):
+        bad = [p for p in (C.setting_problem(k, v) for k, v in body.values.items() if k in C.SETTINGS_KEYS) if p]   # all checked before any is written
+        if bad:
+            raise HTTPException(400, "; ".join(bad))
         for k, v in body.values.items():
             if k not in C.SETTINGS_KEYS:
                 if cfg.get("_starter"):

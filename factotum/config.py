@@ -2,8 +2,8 @@
 
 Precedence for a key read through `effective()`: database override > yaml > built-in default.
 
-2026-11-10: with no config/factotum.yaml the fallback is config/factotum.starter.yaml (neutral, everything
-off), not the example, which was the owner's own setup and so quietly ran a stranger's install as theirs.
+2026-11-10: with no config/factotum.yaml the fallback is config/factotum.starter.yaml (neutral: every input,
+output, notification and scheduled paid run off; ripples and filing on since 2026-11-11), not the example, which was the owner's own setup and so quietly ran a stranger's install as theirs.
 """
 from __future__ import annotations
 
@@ -68,7 +68,7 @@ DEFAULTS: dict[str, Any] = {
     "sinks.notion_notes.enabled": False, "sinks.notion_tasks_mirror.enabled": False,
     "sinks.notion_tasks_mirror.sweep_minutes": 10,
     "scoring.project_weights": {},
-    "claude.models": {}, "claude.planner.enabled": False, "claude.budgets_usd.chat_turn": 1.0,
+    "claude.models": {}, "claude.planner.enabled": False, "claude.budgets_usd.chat_turn": 0.60,
     "claude.summary.auto": False, "claude.summary.auto_minutes": 10,
     "claude.ripple.enabled": True, "claude.ripple.model": "sonnet", "claude.ripple.delay_seconds": 60,
     "claude.ripple.hourly_cap": 10, "claude.budgets_usd.ripple": 0.30,
@@ -82,6 +82,41 @@ ON_WHEN_NEW = ("claude.ripple.enabled", "claude.filing.enabled")
 # The code's defaults before 2026-11-10 (the four paid / mailing switches were on when absent; no ripple or
 # filing run existed), for `factotum effective --as-before` only: diff it against the plain output when deploying.
 OLD_DEFAULTS: dict[str, Any] = {**DEFAULTS, **{k: True for k in PAID_SWITCHES}, **{k: False for k in ON_WHEN_NEW}}
+# The least each number on the Settings tab may be: the page's own `min` (web/app.js renderSettings, held to it by a
+# test). PUT /api/settings refuses a value below it, and a value whose type is not its default's (setting_problem).
+MINIMA: dict[str, float] = {
+    "lifecycle.fade_days": 7, "lifecycle.fade_warn_days": 1, "lifecycle.last_call_days": 1, "lifecycle.top_cap": 3, "lifecycle.review_cap": 5,
+    "links.suggestions_per_review": 0,
+    "sources.canvas.sweep_minutes": 5, "sources.mail.sweep_minutes": 5, "sources.mail.suggest.minutes": 5, "sources.calendar.sweep_minutes": 5,
+    "sources.slack.sweep_minutes": 5, "sinks.notion_tasks_mirror.sweep_minutes": 2,
+    "claude.summary.auto_minutes": 1, "claude.ripple.delay_seconds": 10, "claude.ripple.hourly_cap": 1,
+    "claude.budgets_usd.ripple": 0.05, "claude.budgets_usd.chat_turn": 0.05,
+}
+
+
+def setting_problem(key: str, v: Any) -> str | None:
+    """Why `v` cannot be stored for the Settings key `key` (its type is not its default's, or a number is below
+    MINIMA), or None."""
+    import json
+    import math
+    d = DEFAULTS[key]
+    if isinstance(d, bool):
+        ok, want = isinstance(v, bool), "true or false"
+    elif isinstance(d, int):
+        ok, want = type(v) is int, "a whole number"
+    elif isinstance(d, float):
+        ok, want = type(v) in (int, float) and math.isfinite(v), "a number"
+    elif isinstance(d, str):
+        ok, want = isinstance(v, str), "text"
+    else:
+        ok, want = isinstance(v, type(d)), "a list" if isinstance(d, list) else "an object"
+    if not ok:
+        return f"{key} must be {want}, not {json.dumps(v)}"
+    if key in MINIMA and v < MINIMA[key]:
+        return f"{key} must be at least {MINIMA[key]:g}, not {v:g}"
+    return None
+
+
 # What `factotum effective` reports, and the values it never prints (shown as a fingerprint).
 REPORT_KEYS = ["owner.timezone", *SETTINGS_KEYS]
 MASKED = {"notify.ntfy.topic", "notify.morning_brief.to", "sources.calendar.calendar_id"}

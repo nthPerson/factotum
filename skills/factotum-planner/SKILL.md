@@ -3,7 +3,7 @@ name: factotum-planner
 description: Query and groom the user's task list, mail, calendar and Plaud recordings through Factotum. Use for tasks, to-dos, deadlines, what is due or overdue, what to work on now, task codes like Task-17, completing / deferring / dropping / reminding, weekly review and backlog grooming, finding the email behind a task, drafting a reply, and recalling what a recorded meeting said.
 ---
 
-<!-- skill-version: 2026-11-10 -->
+<!-- skill-version: 2026-11-11 -->
 
 # Factotum — planner
 
@@ -68,7 +68,7 @@ instead of creating its twin (a create with an open task's exact name is refused
 | can't start until / after X / needs X first | `{"op": "link", "task_id": n, "fields": {"kind": "waits_on", "other": X, "why": "…"}}` |
 | part of / a step of / under X | `{"op": "link", "task_id": n, "fields": {"kind": "part_of", "other": X}}` |
 | same as / duplicate of / merge into | `{"op": "merge", "task_id": <goes away>, "fields": {"into": <kept>}}` (always staged; say which row is kept) |
-| break this into steps / split it | one call: `create` per step with a `ref` and `links` (`[{"kind": "part_of", "other": <goal id or ref>}]`) |
+| break this into steps / split it | one call: a `create` per step, its `ref` and `links` inside `fields` (the example below the table) |
 | unlink / not related after all | `{"op": "unlink", "task_id": n, "fields": {"kind": "…", "other": X}}` |
 | how did it turn out | `done` / `drop` with `fields: {"outcome": "one line"}` |
 | remind me `<when>` | `{"op": "add_reminder", "task_id": n, "fields": {"fire_at": "YYYY-MM-DDTHH:MM", "label": "…", "repeat": null}}` |
@@ -76,12 +76,21 @@ instead of creating its twin (a create with an open task's exact name is refused
 | close it once I have emailed `<person>` | `{"op": "watch_sent", "task_id": n, "fields": {"to": "person@example.org"}}` — find the address with `mail_search` if the user gave a name; the mail sweep closes the task when a message to it is sent from now on. On a new task: `"watch_sent_to": "…"` beside `fields` |
 | stop watching / bring a closed task back | `{"op": "unwatch_sent"}` / `{"op": "reopen"}` |
 
+Splitting Task-412 into two steps, the second only after the first (a `ref` names a step made in the
+same call; `other` is a task id or such a ref):
+
+```json
+[{"op": "create", "fields": {"name": "Draft the methods section", "ref": "s1", "links": [{"kind": "part_of", "other": 412}]}},
+ {"op": "create", "fields": {"name": "Send the draft for comments", "ref": "s2", "links": [{"kind": "part_of", "other": 412}, {"kind": "waits_on", "other": "s1"}]}}]
+```
+
 Closing a task never closes the tasks linked to it.
 
 Every op but `create` needs `task_id` (an integer). A watch needs an email address, not a name; if
 the search finds two candidates, ask which. Read the result: `rejected` says why a change was left
 out (a due that is not a date, a project outside the taxonomy, a name over 80 characters) and
-`ignored` names keys that are not settable, so never report a field as set unless it was. Direct
+`ignored` names keys that are not settable or were put where they are not read (beside `fields`
+instead of inside it), so never report a field as set unless it was. Direct
 writes are capped per hour; past the cap, stage.
 
 ## Invariants

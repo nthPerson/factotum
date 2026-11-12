@@ -1,9 +1,9 @@
 ---
 name: factotum-ops
-description: Operate and troubleshoot the Factotum service (the task system that replaced plaud-sync) — the systemd unit, the scheduler and its sweeps (mail, Canvas, calendar, Notion mirror), the morning brief and planner, ntfy reminders, the Plaud trigger, headless Claude runs and their cost, config keys and secrets, the Log tab. Use for "is Factotum running", "why didn't the brief arrive", "the reminder didn't fire", "what did the planner do", restarting after a deploy, checking a connector, and adjusting intervals or budgets.
+description: Operate and troubleshoot the Factotum service (the task system that replaced plaud-sync) — the systemd unit, the scheduler and its sweeps (mail, Canvas, calendar, Notion mirror, links), the morning brief and planner, ripples and filing, reminders through ntfy or the app's own notifications, the Plaud trigger, headless Claude runs and their cost, config keys and secrets, the Log tab. Use for "is Factotum running", "why didn't the brief arrive", "the reminder didn't fire", "what did the planner do", restarting after a deploy, checking a connector, and adjusting intervals or budgets.
 ---
 
-<!-- skill-version: 2026-11-02 -->
+<!-- skill-version: 2026-11-11 -->
 
 # Factotum — ops
 
@@ -19,7 +19,7 @@ systemctl status factotum --no-pager | head -5
 journalctl -u factotum -n 30 --no-pager
 ```
 
-Then the Log tab (http://127.0.0.1:8750/#log or the public hostname): every automation that did
+Then the Log tab (http://127.0.0.1:8750/log or the public hostname): every automation that did
 something, and every Claude run with its cost, is a row in `runs`; batches with every field change
 and an Undo are above it. Through the `factotum` MCP server, `task_get` shows one task's history.
 
@@ -39,12 +39,28 @@ cd /home/robert/factotum
 .venv/bin/python -m factotum connectors       # the claude.ai / Desktop connectors behind /mcp; --arm before approving a new one, --revoke ID
 .venv/bin/python -m factotum mirror --dry-run # rows the Notion mirror would push
 .venv/bin/python -m factotum tick             # one scheduler tick — ONLY with factotum.service stopped: two schedulers on one DB send the brief twice and fire reminders twice
+.venv/bin/python -m factotum effective [KEY …] [--as-before]   # each switch's value and where it comes from (settings, file, default); reads only
+.venv/bin/python -m factotum links-check      # what the link detectors would suggest now; reads only, never migrates
+.venv/bin/python -m factotum sweep links      # one link-detector pass now (free); writes cards
+.venv/bin/python -m factotum ripple ID [--dry-run]     # one ripple from Task-ID now (a real run, ~$0.03); --dry-run prints it and writes nothing
+.venv/bin/python -m factotum file-task ID [--dry-run]  # one filing run for Task-ID (a real run, ~$0.04); --dry-run prints the JSON and stores nothing
+.venv/bin/python -m factotum add "text" [--dry-run]    # a task by hand, as the New task line (#project ~effort ! a date, after N, under N); --dry-run shows how it would be filed
+.venv/bin/python -m factotum find "words or 412"       # any task, open or closed, by number or words
 ```
+
+Every subcommand but `effective` and `links-check` runs the database's migrations first: from a new
+checkout while the old service is still up, run only those two (docs/SETUP.md §18 is the deploy order).
 
 ## Things that bite (dates are when they were learned)
 
-- **Restart only when no Claude run is in flight** (`journalctl -u factotum -n 5`): a restart
-  mid-run loses that recording or chat turn.
+- **Restart only when no Claude run is in flight**: `systemctl status factotum --no-pager` (a running
+  `claude` child shows under the service) or `pgrep -af 'claude -p'` (prints nothing when idle). The
+  journal shows only the Plaud trigger's runs, not a ripple, a filing, the planner, the summary, mail
+  triage or a chat turn. A restart mid-run loses that recording, filing or chat turn and pays a ripple twice.
+- **"Ripples and filing wait: …"** in Settings → Claude means Claude cannot run on this machine: the
+  `claude` program is missing (or `claude.binary` does not point at it) or it is not signed in. The Log
+  has one failed row a day for each, what was waiting is set aside (not retried), and the next run that
+  succeeds clears the line. `claude-check` says which; sign in with `claude` in a terminal.
 - **The brief is "at or after HH:MM, once a day"**: a deploy after 06:30 sends it immediately.
   Two briefs in a morning means two schedulers (or the old lark-server timers) were alive.
 - **"database is locked" on Apply** (2026-11-01) means a scheduler branch left a transaction open;
@@ -68,7 +84,8 @@ cd /home/robert/factotum
 
 | Changing… | Where |
 |---|---|
-| review time, fade days, sweep intervals (Slack too), planner on/off, chat budget, sources and sinks on/off, the connector on/off, arming and revoking connectors | Settings tab (stored in the DB; saves on change) |
+| review time, fade days, sweep intervals (Slack too), planner on/off, chat budget, ripples and filing on/off (and the ripple's quiet period, hourly cap, budget and model), suggested links a day, sources and sinks on/off, the connector on/off, arming and revoking connectors | Settings tab (stored in the DB; saves on change) |
+| where reminders go (`notify.provider`: ntfy, the app or both), the count on the app icon | Settings → Notifications; each device turns the app's notifications on there for itself ("Turn on notifications on this device", then "Send a test") |
 | the Access team and AUD tag the consent page verifies, the callback allowlist, token lifetimes | `config/factotum.yaml` `server.oauth` (docs/SETUP.md §16) |
 | projects, weights, Canvas course map, mail allow/deny, Notion property names, Slack workspaces, Discord servers | `config/factotum.yaml` |
 | tokens and passwords (Notion, Mailbird, ntfy, Canvas, SMTP, IMAP, Slack, Discord, the MCP route) | `.env` — never print its values |
@@ -82,12 +99,21 @@ sync-file ≈ $0.15 per recording, planner ≈ $0.10–0.30 a run (each morning,
 Today tab), the Today summary's automatic rewrite ≈ $0.18 each on sonnet, at most one per ten minutes and only
 while it is stale (kind `today-summary`; Settings → Claude turns it off or spaces it out), mail triage
 ≈ $0.14 per batch of 15 messages and only when there is new mail (kind `mail-triage`; Settings →
-Inputs → Tasks from mail), a chat turn $0.05–0.20, chat-check $0.002. `GET /api/stats` reports the last 7 days; the Log tab shows each run.
+Inputs → Tasks from mail), a ripple ≈ $0.03 a run (Sonnet, no tools, at most `claude.ripple.hourly_cap` runs an
+hour; kind `ripple`; Settings → Claude → Ripples), filing ≈ $0.04 a task added by hand with only a name
+(Sonnet, no tools; kind `filing`; Settings → Claude → Filing a task you add), a chat turn $0.05–0.20,
+chat-check $0.002. Ripples and filing are on by default (each runs only after something the user did and
+is undoable); every scheduled paid run is off until switched on. A run kind the config names no budget for
+gets the example's (filing $0.10, ripple $0.30). `GET /api/stats` reports the last 7 days; the Log tab shows each run.
 
 ## Schema versions and backups
 
-The database carries a schema version (`PRAGMA user_version`). A data migration runs at start-up and
-first writes a backup to `data/backups/` with the SQLite backup API; never `cp` the database.
+The database carries a schema version (`PRAGMA user_version`). A data migration runs at start-up (and
+at any subcommand but `effective` and `links-check`), and writes a backup to `data/backups/` with the
+SQLite backup API first only when it will change data (migration 1: only when the import's `task`
+links are still there to convert). A backup of your own uses the same API (docs/SETUP.md §18), never
+`cp`, and keeps `data/push-keys.json` with it: the app's notifications are bound to that key pair, and
+without it every device has to turn them on again.
 
 ## What this skill may do
 

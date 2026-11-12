@@ -5,7 +5,7 @@
 # config/factotum.yaml, replace the placeholders (Your Name, you@example.com, example.edu,
 # YOUR_DATABASE_ID …), switch on what you have set up, and restart Factotum. Without
 # config/factotum.yaml Factotum runs on config/factotum.starter.yaml (no name, no addresses,
-# everything off) and says so.
+# every input, output, notification and scheduled paid run off; ripples and filing on) and says so.
 #
 # - Secrets never go here; they go in .env (see .env.example and docs/SETUP.md §8).
 # - A comment that names "Settings → <section>" means the Settings tab has a control for that key.

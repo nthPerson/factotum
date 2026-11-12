@@ -26,6 +26,14 @@ from pathlib import Path
 from .. import config as C
 
 DEFAULT_TIMEOUT_S = 600
+DEFAULT_BUDGET_USD = 1.0
+# What one run of a kind may spend and how long it may take when the config names no value for it (an install's
+# config from before a kind existed names none): the example's numbers, which a test holds this table to. A kind
+# in neither falls back to the two values above. `claude.budgets_usd.chat_turn` and `.ripple` are Settings keys
+# too; config.DEFAULTS carries the same two numbers, so Settings shows what a run uses.
+BUDGETS_USD = {"sync_file": 1.00, "today_summary": 0.30, "mail_triage": 0.40, "planner_morning": 0.75, "chat_turn": 0.60, "check": 0.05,
+               "filing": 0.10, "ripple": 0.30}
+TIMEOUTS_S = {"sync_file": 600, "today_summary": 180, "mail_triage": 240, "planner_morning": 480, "chat_turn": 240, "filing": 120, "ripple": 180}
 DEFAULT_MAX_TURNS = 40
 _AUTH_RE = re.compile(r"not logged in|please run /login|invalid.*(token|api key)|authentication", re.I)
 
@@ -61,7 +69,7 @@ def extract_json(text: str | None) -> dict | None:
 def command(cfg: dict, kind: str, allowed_tools: list[str] | tuple[str, ...] = (), *, mcp_servers: dict | None = None,
             resume: str | None = None, tools: str | None = None, stream: bool = False, model: str | None = None, budget_usd: float | None = None) -> list[str]:
     model = str(model if model is not None else C.get(cfg, f"claude.models.{kind}", "sonnet"))
-    budget = float(budget_usd if budget_usd is not None else C.get(cfg, f"claude.budgets_usd.{kind}", 1.0))
+    budget = float(budget_usd if budget_usd is not None else C.get(cfg, f"claude.budgets_usd.{kind}", BUDGETS_USD.get(kind, DEFAULT_BUDGET_USD)))
     cmd = [str(C.get(cfg, "claude.binary", "claude")), "-p", "--model", model, "--output-format", "stream-json" if stream else "json",
            "--max-budget-usd", str(budget), "--max-turns", str(int(C.get(cfg, f"claude.max_turns.{kind}", DEFAULT_MAX_TURNS))),
            "--permission-mode", "default", "--setting-sources", "", "--disable-slash-commands",
@@ -150,7 +158,7 @@ def run(cfg: dict, kind: str, prompt: str, *, allowed_tools: list[str] | tuple[s
         budget_usd: float | None = None) -> RunResult:
     """`on_event` set → stream-json: every event (system init, assistant blocks, tool results, the
     final result) is passed to it as it arrives, so a chat turn can show "searching mail…" live."""
-    timeout_s = timeout_s or int(C.get(cfg, f"claude.timeouts_s.{kind}", DEFAULT_TIMEOUT_S))
+    timeout_s = timeout_s or int(C.get(cfg, f"claude.timeouts_s.{kind}", TIMEOUTS_S.get(kind, DEFAULT_TIMEOUT_S)))
     cwd = str(workdir) if workdir else None
     cmd = command(cfg, kind, allowed_tools, mcp_servers=mcp_servers, resume=resume, tools=tools, stream=on_event is not None,
                   model=model, budget_usd=budget_usd)

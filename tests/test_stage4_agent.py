@@ -456,7 +456,7 @@ def test_the_chat_prompt_teaches_links_and_no_longer_says_it_has_no_other_tools(
 
 def test_the_planner_skill_names_the_new_tools_and_phrases():
     s = (C.ROOT / "skills" / "factotum-planner" / "SKILL.md").read_text()
-    assert "skill-version: 2026-11-10" in s and all(n in s for n in ("task_neighbours", "waiting_tasks", "twin_candidates", "goal_tree", "can't start until", "break this into steps"))
+    assert "skill-version: 2026-11-11" in s and all(n in s for n in ("task_neighbours", "waiting_tasks", "twin_candidates", "goal_tree", "can't start until", "break this into steps"))
 
 
 def test_nothing_the_user_or_the_agent_reads_says_blocked_or_dependency():

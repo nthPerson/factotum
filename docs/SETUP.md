@@ -448,8 +448,13 @@ own `claude mcp` list, so the two registrations above are per machine: clone the
 copy `skills/factotum-planner` and `skills/factotum-ops`), symlink them into `~/.claude/skills`,
 and add the server over HTTP with the bearer token as shown. **Claude Desktop and claude.ai** do
 not read `~/.claude/skills` at all: their skills are the ones uploaded under Settings →
-Capabilities → Skills (zip each `skills/factotum-*` folder and upload it once; it then shows on
+Capabilities → Skills (zip each `skills/factotum-*` folder and upload it; it then shows on
 every device signed into the account), and their tools come from a connector — see §16.
+
+**After a deploy that changes `skills/`** the copies elsewhere are stale: zip and upload both skills again in
+claude.ai / Claude Desktop (an old planner skill writes a note by overwriting the task's text, which loses a
+ripple's rewrite; the current one sends `add_note`), and pull on every other machine that has the repository
+(its `~/.claude/skills` links point into it). Ask "which skill-version is loaded" to check.
 
 ## 15. Retiring plaud-sync (the user's clicks)
 
@@ -472,7 +477,7 @@ Everything below is reversible or archival; nothing in Factotum depends on it.
 
 ## 16. The claude.ai / Claude Desktop connector (OAuth)
 
-Factotum is its own OAuth server for `/mcp` (SPEC §15). Four steps, each once.
+Factotum is its own OAuth server for `/mcp` (SPEC §15). Four steps, each once, and a fifth after some deploys.
 
 1. **Config.** Turn the connector on in **Settings → Connections**, not in the YAML: the Settings
    tab stores that toggle as an override in the database, and an override beats the file (an
@@ -524,6 +529,10 @@ Factotum is its own OAuth server for `/mcp` (SPEC §15). Four steps, each once.
    once, each call one batch with an Undo in the Log. The same setting governs the skills in
    Claude Code. After changing it, reconnect the connector in claude.ai (or start a new chat) so
    it reloads the tool list. Upload the skills (§14) so those chats know the recipes.
+5. **After a deploy that adds or changes tools** (the linked-tasks release added `task_neighbours`,
+   `waiting_tasks`, `twin_candidates` and `goal_tree`), reconnect the connector in claude.ai (or start a new
+   chat) so it reloads the tool list; until then it offers the old one. If the reconnect asks for consent
+   again, arm first (step 3). Upload the skills again too (§14).
 
 ## 17. Installing the app on a phone and a desktop
 
@@ -544,43 +553,103 @@ browser re-reads the manifest (up to a day or more) or after a reinstall; iOS ha
 
 Updating needs nothing: the app reloads itself when it is next brought to the front.
 
-## 18. Deploying a change to defaults: `factotum effective`
+## 18. Deploying a release: `factotum effective` and the order of the steps
 
 `.venv/bin/python -m factotum effective [KEY …] [--as-before]` prints two header lines (the config
 file in use, marked `(starter settings)` when it is the starter, and the database, `(none yet)` when
 there is none) and then one line per Settings key: the key, its value as JSON and where the value comes
 from: `settings` (the Settings tab froze it into the database; it wins over the file), `file`,
 `machine` (the time zone, taken from this computer), `default` (the code's) or `unset`. It only reads:
-the config file, and the database opened so it cannot write (`query_only`; never created), and it leaves
-no `-wal` / `-shm` file beside it. `.env` is read only to find those
+the config file, and the database opened so it cannot write (`query_only`; never created, never
+migrated), and it leaves no `-wal` / `-shm` file beside it. `.env` is read only to find those
 two, and no `.env` value is printed. Three values (the ntfy topic, the brief's address, the calendar id)
-show as `set #<fingerprint>` or `empty`, so a diff still sees a change without the value on screen.
+show as `set #<two hex characters>` or `empty`: enough to see that a value changed between two runs, too
+few to find it from (a topic of `factotum-` and eight random hex characters cannot be found by trying them).
 `--as-before` reads absent keys the way the code did before 2026-11-10, when four switches (the
 morning brief, the planner, the automatic summary, the Notion notes) were on whenever the key was missing,
 and ripples and filing did not exist (so they read off there).
 
-The deploy check for stage 3, in the main checkout after the merge and BEFORE restarting the service
-(the running service is not affected by files changing, except `factotum/web/`):
+**Every subcommand but `effective` and `links-check` migrates the database.** Any other
+`python -m factotum …` (`score`, `review`, `expire`, every `--dry-run`, every `*-check`, `find`) runs
+`init_db` first, and on a database an older release made that runs this release's migrations (and, when one
+changes data, writes a backup into `data/backups/`). So none of them is run from a new checkout while the
+old service is still up on the live database; run them after the restart, or on a copy.
+
+**The deploy, in this order.** The running service reads `prompts/*.md` on every Claude run and serves
+`factotum/web/` as it is on disk, so between a merge and a restart the old code would run the new prompts
+and serve the new page to the old API: stop it first.
+
+1. **No Claude run in flight.** `systemctl status factotum --no-pager`: a `claude` process in the service's
+   tree is a run (a recording, a ripple, a filing, the planner, the summary, mail triage or a chat turn), or
+   `pgrep -af 'claude -p'`, which prints nothing when none runs. `journalctl` shows only the Plaud
+   trigger's runs. Wait until there is none: a restart mid-run loses a recording or a filing and pays for a
+   ripple twice.
+2. **Stop the service and back up.** A `cp` of the database is stale (it runs in WAL mode, and the newest
+   writes may still be in `factotum.db-wal`; CLAUDE.md), so copy it with the backup API, and keep
+   `data/push-keys.json` with it:
+
+   ```bash
+   sudo systemctl stop factotum
+   cd /home/robert/factotum && umask 077 && mkdir -p data/backups
+   .venv/bin/python -c "import sqlite3; s = sqlite3.connect('data/factotum.db'); d = sqlite3.connect('data/backups/before-deploy-$(date +%F).db'); s.backup(d); d.close(); s.close()"
+   [ -f data/push-keys.json ] && cp -p data/push-keys.json data/backups/
+   ```
+3. **Merge** (or pull) the release into `/home/robert/factotum`.
+4. **The two `effective` commands**, writing their files somewhere only you can read (`umask 077`, under
+   your home directory): they print every Settings value of your install, addresses included:
+
+   ```bash
+   cd /home/robert/factotum && umask 077
+   .venv/bin/python -m factotum effective --as-before > ~/effective-before.txt
+   .venv/bin/python -m factotum effective > ~/effective-after.txt
+   diff ~/effective-before.txt ~/effective-after.txt
+   ```
+
+   The first line of both files must name `config/factotum.yaml`; `(starter settings)` there means the
+   service would start on the starter (fix `FACTOTUM_CONFIG` in `.env`). On an install from before this
+   release `diff` always prints these two changes, ripples and filing turning on (the line numbers may differ):
+
+   ```
+   40c40
+   < claude.ripple.enabled                      false                      default
+   ---
+   > claude.ripple.enabled                      true                       default
+   48c48
+   < claude.filing.enabled                      false                      default
+   ---
+   > claude.filing.enabled                      true                       default
+   ```
+
+   They are new in this release and on by default (each runs only after something you did, costs a few
+   cents, and writes nothing History cannot undo): leave them, or keep them off with
+   `claude: {ripple: {enabled: false}, filing: {enabled: false}}` in `config/factotum.yaml` (or untick both
+   in Settings → Claude once the service runs). Any **other** line is a switch that was on only because its
+   key was missing: add the key to `config/factotum.yaml` with the value from the before file (or set it in
+   Settings), and run the two commands again until only those two lines remain (none, once you named both).
+   Lines with origin `settings` are values the Settings tab froze into the database; they win over the file.
+5. **Edit the config** if you want to (the step above, a new key the release documents).
+6. **Start the service:** `sudo systemctl start factotum`, then `journalctl -u factotum -n 20`. The first
+   start migrates the database (with a backup in `data/backups/` when a migration changes data), and the
+   first scheduler tick runs the link detectors (§21: free, and Review offers a day's worth at a time).
+7. **After a release that changes `skills/` or the MCP tools:** zip both `skills/factotum-*` folders and
+   upload them again in claude.ai / Claude Desktop (§14; an old copy of the planner skill writes a note by
+   overwriting the task's text, which now loses a ripple's rewrite); reconnect the connector so it reloads the
+   tool list (§16; this release adds `task_neighbours`, `waiting_tasks`, `twin_candidates` and `goal_tree`);
+   and pull on every other machine that has the repository (its `~/.claude/skills` links point into it).
+
+**Previewing before the merge.** From the new checkout (a worktree, say), the same two commands with
+`FACTOTUM_CONFIG` and `FACTOTUM_DB` naming the live files only read them, so they are safe while the
+service runs; `links-check` the same way says what the link detectors would suggest, or, on a database
+this release has not migrated yet, says so and how to preview on a migrated copy:
 
 ```bash
-cd /home/robert/factotum
-.venv/bin/python -m factotum effective --as-before > /tmp/effective-before.txt
-.venv/bin/python -m factotum effective > /tmp/effective-after.txt
-diff /tmp/effective-before.txt /tmp/effective-after.txt && echo identical
+cd <the new checkout> && umask 077
+export FACTOTUM_CONFIG=/home/robert/factotum/config/factotum.yaml FACTOTUM_DB=/home/robert/factotum/data/factotum.db
+/home/robert/factotum/.venv/bin/python -m factotum effective --as-before > ~/effective-before.txt
+/home/robert/factotum/.venv/bin/python -m factotum effective > ~/effective-after.txt
+diff ~/effective-before.txt ~/effective-after.txt
+/home/robert/factotum/.venv/bin/python -m factotum links-check
 ```
-
-`identical` and a first line naming `config/factotum.yaml` (not `(starter settings)`) mean nothing
-changes for this install. Each line `diff` prints is a switch that was on only because its key was
-missing: add the key to `config/factotum.yaml` with the value from the before file (or switch it in
-Settings), run the two commands again, then restart (check `journalctl -u factotum -n 5` for a Claude
-run in flight first). Lines with origin `settings` are values the Settings tab froze into the database;
-they win over the file.
-
-Two lines are expected in that diff on a config file that names neither of them:
-`claude.ripple.enabled` and `claude.filing.enabled`, `false` before and `true default` after. They are new in
-this release and on by default (each runs only after something you did, costs a few cents, and writes
-nothing History cannot undo); add `enabled: false` to the config file (`claude: {ripple: {enabled: false},
-filing: {enabled: false}}`) or untick them in Settings → Claude to keep them off.
 
 ## 19. Notifications from the app
 
@@ -721,7 +790,11 @@ which is in the recording's batch and can be undone.
 
   `--dry-run` is a real run that prints the JSON and the cost and stores nothing; without it the proposals are
   stored. A failed run is logged and not retried by the scheduler; run `file-task` again by hand.
-- **Before the first `sweep links` on an existing database:** run `.venv/bin/python -m factotum links-check`
-  (read-only; it lists what the detectors would suggest, and how many they would write). The first pass seeds
-  every existing "Task-N" reference in your tasks' text as a card, and Review shows only a day's worth at a
-  time (the cap), so a long list arrives over several days. Then `.venv/bin/python -m factotum sweep links`.
+- **The first link pass runs by itself** at the service's first scheduler tick after the deploy (it is free,
+  no Claude run, and has no daily slot to wait for). It seeds every existing "Task-N" reference in your tasks'
+  text as a card, and Review shows only a day's worth at a time (the cap), so a long list arrives over several
+  days. To see beforehand what it will suggest, run `links-check` on a migrated copy: it reads only and never
+  migrates, so on the live database before the restart it says the database is not migrated yet and prints the
+  three commands (a backup-API copy, `init-db` on the copy, `links-check` on the copy) to run instead. After the
+  restart `.venv/bin/python -m factotum links-check` reads the live database (what is still to come), and
+  `.venv/bin/python -m factotum sweep links` runs one pass now.

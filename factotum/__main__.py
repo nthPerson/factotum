@@ -31,20 +31,75 @@ from .db import connect, get_settings, init_db, rows
 SYSTEMD_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 
+def _open_reading(path):
+    """An existing database opened so nothing can be written (`query_only`), without `init_db` and so without
+    a migration; never created. Closed cleanly it leaves no -wal / -shm beside it (a `mode=ro` connection to a
+    WAL database leaves both behind; `rw` only lets the last close tidy them)."""
+    import sqlite3
+    conn = sqlite3.connect(f"file:{path}?mode=rw", uri=True)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA query_only = ON")
+    return conn
+
+
+def _not_migrated(conn) -> str | None:
+    """Why this database is not yet what this code's `init_db` makes it (an older release's file), or None."""
+    import re
+    from .db import MIGRATIONS, SCHEMA, VERSIONED, schema_version
+    latest = max((m.version for m in VERSIONED), default=0)
+    if schema_version(conn) < latest:
+        return f"its version is {schema_version(conn)}, this code's is {latest}"
+    have = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    missing = [t for t in re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", SCHEMA) if t not in have]
+    missing += [f"{t}.{c}" for t, cols in MIGRATIONS.items() if t in have
+                for c in cols if c not in {r[1] for r in conn.execute(f"PRAGMA table_info({t})")}]
+    return f"it has no {', '.join(missing[:4])}" if missing else None
+
+
+def _links_check() -> int:
+    """What the link detectors would suggest now. Reads only: the database is opened like `effective`'s, never
+    migrated, so it is safe to run from a new checkout while the old service is still up."""
+    from pathlib import Path
+    from . import suggestions
+    C.load()                                     # .env may name FACTOTUM_DB
+    path = C.db_path()
+    if not path.exists():
+        print(f"no database at {path}; nothing to check")
+        return 0
+    conn = _open_reading(path)
+    try:
+        why = _not_migrated(conn)
+        if why:
+            copy, py = Path.home() / "factotum-preview.db", sys.executable
+            print(f"{path} is not migrated yet ({why}), and links-check never migrates, so it read nothing. To preview, copy it and migrate the copy: "
+                  f"{py} -c \"import sqlite3; s = sqlite3.connect('{path}'); d = sqlite3.connect('{copy}'); s.backup(d); d.close(); s.close()\" "
+                  f"&& FACTOTUM_DB={copy} {py} -m factotum init-db && FACTOTUM_DB={copy} {py} -m factotum links-check")
+            return 0
+        words = {"same_as": "same as", "part_of": "part of", "waits_on": "waits on", "any": "linked to"}
+        total = {"twin": [0, 0], "text": [0, 0], "thread": [0, 0]}
+        for c in suggestions.detect(conn):
+            why_not = suggestions.why_not(conn, c["kind"], c["a"], c["b"])
+            t = total.setdefault(c["signal"], [0, 0])
+            t[0] += 1
+            t[1] += why_not is None
+            print(f"{c['signal']:<7} Task-{c['a']} → Task-{c['b']}  {words[c['kind']]}  {c['why']}  {why_not or 'would write'}")
+        print(" · ".join(f"{s} {n} ({w} would write)" for s, (n, w) in total.items()))
+    finally:
+        conn.close()
+    return 0
+
+
 def _effective(keys: list[str], as_before: bool) -> int:
     """Print what each Settings key is and where it comes from. Reads the config file and the database
     (never created; opened `query_only`, so nothing is written, and closed cleanly so no -wal / -shm is
     left beside it: a `mode=ro` connection to a WAL database leaves both behind); prints no secret."""
     import hashlib
-    import sqlite3
     cfg = C.load()
     path = C.db_path()
     exists = path.exists()
     overrides: dict = {}
     if exists:
-        conn = sqlite3.connect(f"file:{path}?mode=rw", uri=True)      # rw only so the last close can tidy the WAL files
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA query_only = ON")
+        conn = _open_reading(path)
         try:
             overrides = get_settings(conn)
         finally:
@@ -54,8 +109,8 @@ def _effective(keys: list[str], as_before: bool) -> int:
     defaults = C.OLD_DEFAULTS if as_before else C.DEFAULTS
     for key in keys or C.REPORT_KEYS:
         value, origin = C.explain(cfg, overrides, key, defaults)
-        if key in C.MASKED:
-            shown = "set #" + hashlib.sha256(json.dumps(value).encode()).hexdigest()[:8] if value else "empty"
+        if key in C.MASKED:     # two hex characters: enough to see a change between two runs, too few to find an 8-hex topic by trying them all
+            shown = "set #" + hashlib.sha256(json.dumps(value).encode()).hexdigest()[:2] if value else "empty"
         else:
             shown = json.dumps(value, ensure_ascii=False)
         print(f"{key:<42} {shown:<26} {origin}")
@@ -165,6 +220,8 @@ def main(argv: list[str] | None = None) -> int:
     a = ap.parse_args(argv)
     if a.cmd == "effective":
         return _effective(a.keys, a.as_before)
+    if a.cmd == "links-check":
+        return _links_check()
 
     cfg = C.load()
     conn = connect(C.db_path())
@@ -454,17 +511,6 @@ def main(argv: list[str] | None = None) -> int:
         now = _dt.now()
         mod = {"mail": mail_sweep, "canvas": canvas, "calendar": gcal, "slack": slack_sweep, "links": suggestions}[a.which]
         print(mod.sweep_job(conn, ecfg, now) or "nothing to do")
-    elif a.cmd == "links-check":
-        from . import suggestions
-        words = {"same_as": "same as", "part_of": "part of", "waits_on": "waits on", "any": "linked to"}
-        total = {"twin": [0, 0], "text": [0, 0], "thread": [0, 0]}
-        for c in suggestions.detect(conn):
-            why_not = suggestions.why_not(conn, c["kind"], c["a"], c["b"])
-            t = total.setdefault(c["signal"], [0, 0])
-            t[0] += 1
-            t[1] += why_not is None
-            print(f"{c['signal']:<7} Task-{c['a']} → Task-{c['b']}  {words[c['kind']]}  {c['why']}  {why_not or 'would write'}")
-        print(" · ".join(f"{s} {n} ({w} would write)" for s, (n, w) in total.items()))
     elif a.cmd == "calendar-check":
         from datetime import datetime, timedelta
         from . import gcal
