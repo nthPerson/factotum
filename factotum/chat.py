@@ -83,17 +83,19 @@ def _at(v: str | None) -> datetime:
 def place_thread(conn: sqlite3.Connection, origin: str, task_id: int | None, now: datetime | None = None) -> int | None:
     """The thread a place continues. A Review card and an opened task share one per task: the newest with
     that task and origin `review` or `task`. The Today box continues the newest `today` thread whose last
-    message is under TODAY_THREAD_HOURS old. Newest is by the last message, else the thread's creation;
-    timestamps are whole seconds, so a tie goes to the higher id. A Chat-tab thread (no origin) is never found."""
+    message is under TODAY_THREAD_HOURS old. Newest is the one written to last: the highest message id (a thread
+    with none yet, just made by the turn route, is newer still; then the higher thread id), never the wall clock,
+    which can step back (WSL's did by 9 s between two turns and the older thread was taken: polish 2026-11-11).
+    The age check alone reads timestamps. A Chat-tab thread (no origin) is never found."""
+    sub = ("SELECT t.id, (SELECT MAX(id) FROM chat_messages m WHERE m.thread_id = t.id) AS mid, "
+           "COALESCE((SELECT MAX(created_at) FROM chat_messages m WHERE m.thread_id = t.id), t.created_at) AS at FROM chat_threads t ")
     if origin == "today":
-        cands = rows(conn, "SELECT t.id, COALESCE((SELECT MAX(created_at) FROM chat_messages m WHERE m.thread_id = t.id), t.created_at) AS at "
-                           "FROM chat_threads t WHERE t.origin = 'today'")
+        cands = rows(conn, sub + "WHERE t.origin = 'today'")
     else:
-        cands = rows(conn, "SELECT t.id, COALESCE((SELECT MAX(created_at) FROM chat_messages m WHERE m.thread_id = t.id), t.created_at) AS at "
-                           "FROM chat_threads t WHERE t.origin IN ('review', 'task') AND t.task_id = ?", (task_id,))
+        cands = rows(conn, sub + "WHERE t.origin IN ('review', 'task') AND t.task_id = ?", (task_id,))
     if not cands:
         return None
-    best = max(cands, key=lambda r: (_at(r["at"]), r["id"]))
+    best = max(cands, key=lambda r: (r["mid"] is None, r["mid"] or 0, r["id"]))
     if origin == "today" and (now or datetime.now(timezone.utc)) - _at(best["at"]) >= timedelta(hours=TODAY_THREAD_HOURS):
         return None
     return int(best["id"])

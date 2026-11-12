@@ -796,3 +796,21 @@ def test_the_allowed_choices_are_the_ones_the_page_offers():
         offered = set(re.findall(r"\['([a-z]+)', '[^']*'\]", line)) | set(re.findall(r'<option value="([a-z]+)"', line))
         assert offered == set(allowed), key
     assert all(C.MODEL_RE.fullmatch(m) for m in ("sonnet", "haiku", "opus"))
+
+
+# --- H14: the place's thread is the one written to last, whatever the wall clock said -----------------------
+
+def test_the_newest_place_thread_survives_a_clock_step_back(conn):
+    """The flake in test_the_turn_route_finds_the_place_…: WSL's clock stepped back 9 s between two turns, so the
+    older thread's last message carried the later timestamp and was taken for the newest."""
+    from factotum import chat
+    old = chat.new_thread(conn, None, "review", 5)
+    conn.execute("INSERT INTO chat_messages (thread_id, role, text, created_at) VALUES (?, 'user', 'hi', '2026-11-12T06:02:55+00:00')", (old,))
+    new = chat.new_thread(conn, None, "review", 5)
+    conn.execute("INSERT INTO chat_messages (thread_id, role, text, created_at) VALUES (?, 'user', 'new', '2026-11-12T06:02:46+00:00')", (new,))
+    conn.commit()
+    assert chat.place_thread(conn, "review", 5) == new == chat.place_thread(conn, "task", 5)
+    conn.execute("INSERT INTO chat_messages (thread_id, role, text, created_at) VALUES (?, 'user', 'back to it', '2026-11-12T06:02:40+00:00')", (old,)); conn.commit()
+    assert chat.place_thread(conn, "review", 5) == old                               # written to last
+    empty = chat.new_thread(conn, None, "review", 5)                                  # just made by the turn route, its first message not written yet
+    assert chat.place_thread(conn, "review", 5) == empty
