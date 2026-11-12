@@ -307,10 +307,6 @@ def record(conn: sqlite3.Connection, outcome: dict) -> None:
                      (now_iso(), outcome["error"], outcome["id"]))
 
 
-# Every network call comes before the first write, so the SQLite write lock is never held across
-# the network (CLAUDE.md: a thread holding it makes every UI Apply fail with "database is locked").
-# send_all commits its own rows: a device the push service no longer knows must stay removed even
-# when the caller rolls back (a reminder that stays pending because nothing was sent, say).
 def with_badge(conn: sqlite3.Connection, cfg: dict, notice: dict) -> dict:
     """`notice` with the Review count as `badge`, unless it has one or `notify.app.badge` is off."""
     if "badge" in notice or not C.value(cfg, "notify.app.badge"):
@@ -322,6 +318,10 @@ def with_badge(conn: sqlite3.Connection, cfg: dict, notice: dict) -> dict:
         return notice               # the number is never a reason not to send
 
 
+# Every network call comes before the first write, so the SQLite write lock is never held across
+# the network (CLAUDE.md: a thread holding it makes every UI Apply fail with "database is locked").
+# send_all commits its own rows: a device the push service no longer knows must stay removed even
+# when the caller rolls back (a reminder that stays pending because nothing was sent, say).
 def send_all(conn: sqlite3.Connection, cfg: dict, notice: dict, *, transport=None) -> dict:
     """Push `notice` to every device. Raises KeyFileError (nothing sent or written) when the key file
     is missing or unreadable, and NothingSent after recording when no device accepted."""

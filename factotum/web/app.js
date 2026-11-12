@@ -351,12 +351,13 @@
   // out what the tray already decided). The icon always gets what the tab shows.
   let reviewCount = null;
   let badgeShown;            // what the icon was last given (undefined: nothing yet), so a redraw calls nothing
+  // null: not known yet (no Review page and no count has arrived), and the icon is then left as it is.
   function reviewShown() {
-    if (!review) return reviewCount || 0;
+    if (!review) return reviewCount === null ? null : (reviewCount || 0);
     const cards = review.suggestions || [];
     return review.total || cards.length ? review.total + cards.filter(x => !x.created).length : 0;
   }
-  // Off (notify.app.badge), signed out, or 0: cleared. Before Settings has loaded: nothing (the switch is not known yet).
+  // Off (notify.app.badge), signed out, or 0: cleared. Before Settings has loaded, or while the count is not known: nothing.
   function syncBadge() {
     const out = !document.getElementById('signedout').hidden;
     const n = out ? 0 : !settings ? null : !settings.effective['notify.app.badge'] ? 0 : reviewShown();
@@ -424,6 +425,11 @@
     // stays open (the server's rule, chat.place_thread). A closed one stays closed; one with a turn running stays.
     const tp = places.get('today:');
     if (tp && tp.loaded && !tp.live && !tp.loading && !tp.fresh) tp.loaded = false;
+    // Off Review, a Review page loaded earlier is let go, so the number beside Review and on the icon is the
+    // server's fresh count again (as at Refresh's end); a Review session in progress keeps its page. The icon is
+    // set again even when the number did not change: a push may have put another number there in the meantime.
+    if (ui.tab !== 'review') review = null;
+    badgeShown = undefined;
     // A failed reload keeps what is on screen: a sign-out shows its own screen and no network is not a
     // fault. Anything else (a server error, a bug in a redraw) is logged rather than lost.
     load().then(loadPush).catch(e => { if (!(e && (e.message === 'signed out' || e.network))) console.error('Reloading on return failed:', e); });
