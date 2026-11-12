@@ -52,7 +52,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 main { flex: 1; padding-block: 16px 110px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
   display: grid; grid-template-columns: 320px minmax(0, 1fr); gap: 20px; align-items: start; max-width: 1240px; width: 100%; margin: 0 auto; }
 main.rail-min { grid-template-columns: 58px minmax(0, 1fr); }
-@media (max-width: 860px) { main, main.rail-min { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 860px) { main, main.rail-min { grid-template-columns: minmax(0, 1fr); align-content: start; } }      /* start: main is at least the screen's height, and a short page's rows stretched apart under the rail */
 .panel { min-width: 0; }
 .cmd { display: flex; gap: 8px; align-items: flex-end; }
 .cmd input, .cmd textarea { flex: 1; min-width: 0; font: inherit; padding: 9px 12px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); color: var(--fg); }
