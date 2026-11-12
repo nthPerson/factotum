@@ -49,13 +49,14 @@ def _what(cur, batch_id: int) -> dict[int, set[str]]:
     """What this batch did that ripples, by task id, read from its own `changes` rows."""
     rows = cur.execute("SELECT task_id, field, old, new FROM changes WHERE batch_id = ? ORDER BY id", (batch_id,)).fetchall()
     merged = {r["task_id"] for r in rows if r["field"] == "closed_by" and _load(r["new"]) == "merge"}
+    reopened = {r["task_id"] for r in rows if r["field"] == "status" and _load(r["new"]) == "open"}     # a reopen clears the outcome and never ripples
     out: dict[int, set[str]] = {}
     for r in rows:
         f, old, new = r["field"], _load(r["old"]), _load(r["new"])
         if f == "status":
             tag = "closed" if old == "open" and new in ("done", "dropped") and r["task_id"] not in merged else None
         elif f in ("name", "due", "hard", "outcome"):
-            tag = f
+            tag = None if f == "outcome" and r["task_id"] in reopened else f
         elif f == "context":
             tag = "text" if batches._norm_text(old) != batches._norm_text(new) else None
         elif f == "link":

@@ -127,7 +127,7 @@ tasks(id, name, project, area, status,            -- open|done|dropped|faded|lap
       context, why_now, score, priority, manual_priority, mentions, last_mention_at,
       created_at, edited_at, completed_at, closed_by,     -- user|canvas|mail-evidence|fade|lapse|voice|chat|import
       snoozed_until, last_reviewed_at, calendar_event, notion_page_id, canvas_id,
-      outcome,                     -- one line, what came of it (done / drop may carry it; ≤ 300)
+      outcome,                     -- one line, what came of it (done / drop may carry it; ≤ 300; reopen clears it)
       neighbours_seen_at)          -- stamped when the task is opened or a Review decision is made; "a linked task changed" is measured from it
 reminders(id, task_id, fire_at, label, repeat, status, ntfy_seq, token, created_by)
           -- repeat: NULL|daily|weekdays|weekly|monthly; status: pending|sent|snoozed|done|cancelled
@@ -570,7 +570,7 @@ says ripples and filing wait (`runner.unavailable`, `state.claude.unavailable`).
 
 **What queues.** `batches.apply` calls `ripple.enqueue` for every source but `ripple` (a ripple never
 triggers a ripple), reading the batch's own `changes`: `status` open → done / dropped ("closed", unless the
-same batch merged it); `name`, `due`, `hard`, `outcome`; `context` when its normalised text differs
+same batch merged it); `name`, `due`, `hard`, `outcome` (not the one a reopen clears); `context` when its normalised text differs
 ("text"); a `same_as` link added with the survivor at its end ("merge"). Only for a task with at least one
 active link afterwards. Fade, lapse, reopen, `why_now`, effort and the rest never queue. The queue is the
 table `ripple_queue` (one row per changed task: `queued_at`, `now`, `last_batch_id`, the batches and what

@@ -183,7 +183,7 @@ def _resolve(conn: sqlite3.Connection, change: dict, today: date, closed_by: str
     elif op in ("fade", "lapse"):
         fields.update(status="faded" if op == "fade" else "lapsed", completed_at=today.isoformat(), closed_by=closed_by, top_rank=None)
     elif op == "reopen":
-        fields.update(status="open", completed_at=None, closed_by=None)
+        fields.update(status="open", completed_at=None, closed_by=None, outcome=None)    # how it ended is no longer true; undo restores it
     elif op == "pin_top":
         fields.setdefault("top_rank", _next_top_rank(conn))
     elif op == "unpin":

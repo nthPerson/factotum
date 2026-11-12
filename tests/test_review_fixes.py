@@ -378,3 +378,46 @@ def test_a_survivor_with_its_own_watch_keeps_it_and_the_merge_says_so(conn):
     res = batches.apply(conn, [{"op": "merge", "task_id": 1, "fields": {"into": 2}}], "ui", TODAY)
     assert _watch(conn, 2) == ("2026-10-07T00:00:00+00:00", "c@d.co")
     assert [s["task_id"] for s in res["skipped"]] == [1] and "watch" in res["skipped"][0]["why"] and "not carried" in res["skipped"][0]["why"]
+
+
+# ---- 6. reopen clears the outcome ---------------------------------------------------------------------
+
+def test_reopen_clears_the_outcome_and_its_undo_restores_it(conn):
+    from factotum import relations
+    _mk(conn, 1); _mk(conn, 2)
+    batches.apply(conn, [{"op": "link", "task_id": 2, "fields": {"kind": "waits_on", "other": 1}}], "ui", TODAY)
+    batches.apply(conn, [{"op": "done", "task_id": 1, "fields": {"outcome": "the chair said yes"}}], "ui", TODAY)
+    r = batches.apply(conn, [{"op": "reopen", "task_id": 1}], "ui", TODAY)
+    out = lambda: conn.execute("SELECT outcome FROM tasks WHERE id = 1").fetchone()[0]      # noqa: E731
+    assert out() is None
+    assert relations.detail(conn, 2)[0]["other"]["outcome"] is None                        # the linked task's row says no stale outcome
+    batches.undo(conn, r["batch_id"])
+    assert out() == "the chair said yes"
+    # closed again with no outcome: none is shown as current; the outcome question still saves one
+    batches.apply(conn, [{"op": "reopen", "task_id": 1}], "ui", TODAY)
+    batches.apply(conn, [{"op": "done", "task_id": 1}], "ui", TODAY)
+    assert out() is None and relations.detail(conn, 2)[0]["other"]["outcome"] is None
+    batches.apply(conn, [{"op": "set", "task_id": 1, "fields": {"outcome": "no after all"}}], "ui", TODAY)
+    assert out() == "no after all"
+
+
+def test_a_reopened_task_shows_no_stale_outcome_through_the_api(cfg, tmp_path):
+    client, conn = _client(cfg, tmp_path)
+    _mk(conn, 1); _mk(conn, 2)
+    batches.apply(conn, [{"op": "link", "task_id": 2, "fields": {"kind": "waits_on", "other": 1}}], "ui", TODAY)
+    batches.apply(conn, [{"op": "done", "task_id": 1, "fields": {"outcome": "first"}}], "ui", TODAY)
+    client.post("/api/batches/apply", json={"source": "ui", "changes": [{"op": "reopen", "task_id": 1}]})
+    t = client.get("/api/tasks/2").json()
+    assert all(r["other"]["outcome"] is None for r in t["relations"])
+    assert client.get("/api/tasks/1").json()["outcome"] is None
+
+
+def test_a_reopen_that_clears_an_outcome_still_queues_no_ripple(conn):
+    """SPEC §8.6: fade, lapse and reopen never queue; clearing the outcome is part of the reopen."""
+    _mk(conn, 1); _mk(conn, 2)
+    batches.apply(conn, [{"op": "link", "task_id": 2, "fields": {"kind": "waits_on", "other": 1}}], "ui", TODAY)
+    batches.apply(conn, [{"op": "done", "task_id": 1, "fields": {"outcome": "fine"}}], "ui", TODAY)
+    conn.execute("DELETE FROM ripple_queue")
+    conn.commit()
+    r = batches.apply(conn, [{"op": "reopen", "task_id": 1}], "ui", TODAY)
+    assert r["ripple_queued"] == [] and ripple.pending(conn) == []
