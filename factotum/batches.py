@@ -125,7 +125,10 @@ def _create(conn, cur, ch: dict, batch_id: int, source: str, today: date, undo: 
         except ValueError as e:
             skipped.append({"task_id": None, "why": f"{name[:40]}: watch not set: {e}"})
     now = now_iso()
-    # `created_source`, like `source_key`, is set by Python callers only (the API strips both)
+    # `created_source`, `source_link` and `account`, like `source_key`, are set by Python callers only (the API strips them)
+    for k in ("source_link", "account"):
+        if ch.get(k):
+            vals[k] = str(ch[k])
     tid = upsert_task(conn, dict(vals, status="open", source=ch.get("created_source") or created_source(source), source_key=source_key or f"batch:{batch_id}:{len(created)}", hard=vals.get("hard", 0),
                                  mentions=1, last_mention_at=today.isoformat(), created_at=now, edited_at=now))
     # `new` keeps who the create named: an address a direct batch introduced is not a contact (mcp_server.known_recipients)
@@ -221,7 +224,7 @@ def apply(conn: sqlite3.Connection, changes: list[dict], source: str, today: dat
             elif op == "merge":
                 applied += _merge(conn, cur, ch, batch_id, source, today, undo, skipped)
             elif op == "follow_thread":
-                applied += _follow_thread(conn, cur, ch, batch_id, undo, skipped)
+                applied += _follow_thread(conn, cur, ch, batch_id, undo, skipped, refs)
             elif _apply_one(conn, cur, ch, batch_id, source, today, closed_by, undo, skipped):
                 applied += 1
             note = str(ch.get("note") or "").strip()[:300] if isinstance(ch, dict) else ""
@@ -401,13 +404,14 @@ def _judge_suggestions(conn, cur, a: int, b: int, batch_id: int, undo: list, ski
             _judge_evidence(conn, cur, {"op": "judge_evidence", "task_id": a, "fields": {"evidence_id": s["evidence_id"], "verdict": "applied"}}, batch_id, undo, skipped)
 
 
-def _follow_thread(conn, cur, ch: dict, batch_id: int, undo: list, skipped: list) -> bool:
+def _follow_thread(conn, cur, ch: dict, batch_id: int, undo: list, skipped: list, refs: dict | None = None) -> bool:
     """`follow_thread`: an open task follows a mail thread from now on (a `mail_thread` row in
     `links`, seen up to `fields.at`, so the sweep does not call the mail the card came from "Thread
     updated"). Accepting "This mail is about Task-N. Follow its thread?" (mail_triage.py). A thread
-    the task already follows is a no-op; undo deletes the row this batch inserted."""
+    the task already follows is a no-op; undo deletes the row this batch inserted. `task_id` may be the
+    ref of a task created earlier in the batch (a Review card's Create follows the mail it came from)."""
     f = ch.get("fields") if isinstance(ch.get("fields"), dict) else {}
-    tid = _link_end(ch.get("task_id"), {})[0]
+    tid = _link_end(ch.get("task_id"), refs or {})[0]
     task = get_task(conn, tid) if tid is not None else None
     if not task:
         skipped.append({"task_id": ch.get("task_id"), "why": "no such task"})

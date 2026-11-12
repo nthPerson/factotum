@@ -880,6 +880,7 @@
     const res = await api(`/api/batches/${id}/undo`, { method: 'POST' });
     const made = addedBy.get(id);      // an add undone: nothing about the dropped task stays attached, selected or open
     if (made != null) { addedBy.delete(id); ui.sel.delete(made); ui.open.delete(made); if (ui.focus === made) ui.focus = null; }
+    if (cardMade.has(id)) { const t = cardMade.get(id); cardMade.delete(id); ui.sel.delete(t); ui.open.delete(t); if (ui.focus === t) ui.focus = null; review = null; }      // a card's Create undone: Review is read again, so the card is back
     const before = appliedProps.size;
     for (const [k, b] of [...appliedProps]) if (b === id) appliedProps.delete(k);
     if (appliedProps.size !== before) persistApplied();
@@ -2841,6 +2842,7 @@
   // caller's text stays) or another add is still in flight (the call is ignored).
   let adding = false;
   const addedBy = new Map();      // an add's batch → the task it made, so its Undo can let go of that task
+  const cardMade = new Map();     // a suggestion card's Create batch → its task: its Undo lets go of the task and reads Review again
   async function addTask(input, opts = {}) {
     if (adding) return null;
     adding = true;
@@ -3541,7 +3543,17 @@
     panel.querySelectorAll('[data-sugg-dismiss]').forEach(b => b.onclick = () => { stageJudge(+b.dataset.suggDismiss, null, 'dismissed', 'suggestion dismissed'); });
     panel.querySelectorAll('[data-sugg-create]').forEach(b => b.onclick = async () => {
       const id = +b.dataset.suggCreate;
-      try { const r = await api(`/api/review/suggestions/${id}/create`, { method: 'POST' }); const sg = (review.suggestions || []).find(x => x.id === id); if (sg) sg.created = r.task_id; toast(`Created Task-${r.task_id} · it shows as New in Review`); await load(); await loadReview(); }      // the queue is re-read, so the new row's card is next
+      // One review batch (the task, its links, the card's verdict): the toast's Undo drops the task and brings the card back;
+      // Create on a card whose task that Undo dropped reopens it. The queue is re-read, so the new row's card is next.
+      try {
+        const r = await api(`/api/review/suggestions/${id}/create`, { method: 'POST', body: '{}' });
+        const sg = (review.suggestions || []).find(x => x.id === id); if (sg) sg.created = r.task_id;
+        lastBatch = r.batch_id;
+        if (r.batch_id != null) cardMade.set(r.batch_id, r.task_id);
+        const said = r.reopened ? `Reopened Task-${r.task_id}` : r.already ? `Task-${r.task_id} was already created` : `Created Task-${r.task_id} · it shows as New in Review`;
+        toast(said + ((r.skipped || []).length ? ' · ' + r.skipped[0] : ''), r.batch_id != null, { batch: r.batch_id, buttons: [{ text: 'Open', run: () => goTask(r.task_id) }] });
+        await load(); await loadReview();
+      }
       catch (e) { toast('Create failed: ' + e.message); }
     });
     // The date is used only on the button: a date input's own change event fires while the phone's

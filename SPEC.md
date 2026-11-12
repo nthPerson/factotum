@@ -50,7 +50,10 @@ Four causes, none of them the user's discipline:
   own `ui` batch (§9), and its Undo drops it; edits to a task still stage.
 - **Links between tasks are task state, so they ride in batches** (stage 4a, 2026-11-10): `link`,
   `unlink`, `merge`, `add_note` and a create that carries links are ops of `batches.apply`, each undoable.
-  Chat's Create is a batch too. A link proposed in a chat turn is never applied at once (it lands in the
+  Chat's Create is a batch too, and so is Create on a Review suggestion card (2026-11-11): one `review` batch
+  with the create (Source Planner, Slack, Mail or Ripple, keyed by the card), the links the card showed, a mail
+  card's thread followed and the card's verdict; its Undo drops the task and brings the card back, and Create
+  after that Undo reopens the same task in one batch. A link proposed in a chat turn is never applied at once (it lands in the
   tray), and a merge always waits for a tap: it drops a task, so no direct write path (a connector's
   `apply_changes` included) may make one. Closing never cascades along a link.
 - **Outflow must not depend on the user.** Every task has a close signal or an expiry.
@@ -319,8 +322,8 @@ price is that evidence can be committed and the sweep die before its batch is ap
 case the planner finds that evidence unjudged and proposes the change.
 
 *Links from a mail suggestion (stage 7, design §10.2).* A suggestion may carry `link` (`{kind, task_id,
-why}` naming an open row the run was shown); it is stored on the card and the Create endpoint writes the
-link in a `review` batch after the create, so the card says "Will be a step of Task-N …" before the tap.
+why}` naming an open row the run was shown); it is stored on the card and Create writes the
+link in the create's own `review` batch (one Undo takes back both), so the card says "Will be a step of Task-N …" before the tap.
 The run may also return `about`: a mail that belongs to an open task the run was shown becomes a card on
 that task, "This mail is about Task-N. Follow its thread?", whose change is `follow_thread` (§4). Both are
 staged only; at most 8 `about` cards per run.

@@ -232,10 +232,13 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
   write "Task-42 is done". `planner.NON_PROVING` stages such a proposal for Review; and its link is
   `slack_message`, never `mail_thread` (the mail sweep polls those through Mailbird).
 - **`create` is a batch op and its undo drops the row** (2026-11-04): never a DELETE — task ids are
-  forever and the mirror may already have a Notion page. Imports, sync-file, Canvas and the Review
-  suggestion cards still create outside a batch (upsert by `source_key`); connector / skill creates
-  ride in one, and since 2026-11-10 so does Chat's Create (`chat.create_from_proposal`, source `Chat`);
-  a batch create's Source follows the batch source (`batches.created_source`).
+  forever and the mirror may already have a Notion page. Imports, sync-file and Canvas still create
+  outside a batch (upsert by `source_key`); connector / skill creates ride in one, and since 2026-11-10
+  so does Chat's Create (`chat.create_from_proposal`, source `Chat`); since 2026-11-11 so does Create on
+  a Review suggestion card (`api.create_suggestion`: one `review` batch with the create, its links, a mail
+  card's `follow_thread` and the card's `judge_evidence`; Create after its Undo reopens the dropped task).
+  A batch create's Source follows the batch source (`batches.created_source`) unless a Python caller sets
+  `created_source`; `source_link` and `account` on a create are Python-only too (the API strips all four).
 - **`apply_changes` exists only when `server.mcp_writes` is `apply`** (2026-11-04): hidden from
   `tools/list` and refused on call otherwise, on both the HTTP route and the stdio skill server
   (which re-reads the setting on every call). A chat turn never has it (no writer). Whatever the

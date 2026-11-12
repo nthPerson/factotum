@@ -9,7 +9,7 @@
   POST /api/batches/apply {source, changes}   the one write path
   POST /api/batches/{id}/undo
   GET  /api/review?exclude=1,2           one page of the review queue + total, each card's pending evidence, planner suggestions
-  POST /api/review/suggestions/{id}/create   the task a suggestion describes: a planner create or a Slack mention (evidence judged applied)
+  POST /api/review/suggestions/{id}/create   the task a suggestion card describes, as one undoable review batch (evidence judged applied)
   GET  /api/settings · PUT /api/settings  Settings-tab overrides (whitelisted keys), accounts
   GET  /api/push · POST /api/push/subscribe|unsubscribe|test   this device's notifications: the public key, the devices, a test (stage 2)
   GET  /api/stats
@@ -408,7 +408,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
     def apply_batch(body: ApplyBody):
         if body.source == ripple.RUN_KIND:          # only ripple.apply writes as a ripple: a client's would never queue one, and History would call it a ripple
             raise HTTPException(400, "source 'ripple' is written only by a ripple run")
-        changes = [{k: v for k, v in c.items() if k not in ("source_key", "created_source")} for c in body.changes]   # the page never chooses either
+        changes = [{k: v for k, v in c.items() if k not in ("source_key", "created_source", "source_link", "account")} for c in body.changes]   # the page never chooses these
         try:
             with chat._CREATE_LOCK:                  # a chat create staged here and its Create button never make two
                 left_out: list[dict] = []
@@ -577,12 +577,19 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
 
     @app.post("/api/review/suggestions/{evidence_id}/create")
     def create_suggestion(evidence_id: int):
-        """Create the task a suggestion describes: a planner create (label "create: <name>", the
-        planner's reason) or a Slack mention with no task (source Slack, the message linked). An
-        upsert by source_key, so a second tap returns the same id; the evidence is judged `applied`.
-        Like every creation, not a batch (SPEC §12 precedent); a link a mail suggestion carries is
-        made after it, in a review batch, and what that batch refused is in `skipped`."""
-        from .db import add_link, now_iso, upsert_task
+        """Create the task a suggestion card describes (a planner create, a Slack mention, a task suggested
+        from mail, a ripple's create) as ONE `review` batch: the `create` (Source Planner / Slack / Mail /
+        Ripple, keyed by the card so a second tap is the same task), the links the card showed (a rule one
+        breaks by now is in `skipped`), a mail card's thread followed (`follow_thread`, seen up to the mail)
+        and the card's verdict (`judge_evidence`). Its Undo drops the task, removes its links and brings the
+        card back; Create after that Undo reopens the same task in one batch (`reopened`). A Slack card's
+        message link is provenance, added beside the batch like Chat's cited threads. Two taps at once take
+        turns. Answers {task_id, batch_id (None when nothing was written), skipped: [why], reopened, already}."""
+        with review_lock:
+            return _create_suggestion(evidence_id)
+
+    def _create_suggestion(evidence_id: int) -> dict:
+        from .db import add_link
         e = rows(conn, f"SELECT * FROM evidence WHERE id = ? AND kind IN ({','.join('?' * len(SUGGESTION_KINDS))}) AND task_id IS NULL", (evidence_id, *SUGGESTION_KINDS))
         if not e:
             raise HTTPException(404, "no such suggestion")
@@ -591,35 +598,50 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         mail = _suggestion_mail(e)
         by_ripple = e.get("account") == ripple.ACCOUNT and not is_slack and not mail
         key = f"{'slack-mention' if is_slack else 'mail-suggestion' if mail else 'ripple-suggestion' if by_ripple else 'planner-suggestion'}:{evidence_id}"
-        ex = rows(conn, "SELECT id FROM tasks WHERE source_key = ?", (key,))
+        card_links = _suggestion_links(e)[:3]
+        why = "from the mail it came from"
+
+        def thread(tid) -> list[dict]:          # a mail card's thread, followed from the mail it came from (the new task's ref or an id)
+            return [{"op": "follow_thread", "task_id": tid, "fields": {"conversation_id": str(mail["ref"]), "subject": mail.get("subject"),
+                                                                        "account": mail.get("account"), "at": mail.get("at")}}] if mail else []
+
+        def follow(tid) -> list[dict]:          # the thread and the links the card showed, on an existing task
+            return thread(tid) + [{"op": "link", "task_id": tid, "fields": {"kind": l["kind"], "other": l["other"], "why": why}} for l in card_links]
+
+        judge = {"op": "judge_evidence", "task_id": None, "fields": {"evidence_id": evidence_id, "verdict": "applied"}}
+        ex = rows(conn, "SELECT id, status, closed_by FROM tasks WHERE source_key = ?", (key,))
         if ex:
-            return {"task_id": ex[0]["id"]}
+            t = ex[0]
+            if e["judged_at"]:                  # a second tap: the same task, nothing written
+                return {"task_id": t["id"], "batch_id": None, "skipped": [], "reopened": False, "already": True}
+            # The card is back: its create was undone (the task dropped by undo: reopen it, never a second task),
+            # or the create's undo was refused because the task had been closed since (leave it; judge the card).
+            undone = t["status"] == "dropped" and t["closed_by"] == "undo"
+            changes = ([{"op": "reopen", "task_id": t["id"]}] + follow(t["id"]) if undone else []) + [judge]
+            res = batches.apply(conn, changes, "review", date.today())
+            return {"task_id": t["id"], "batch_id": res["batch_id"], "skipped": [s["why"] for s in res["skipped"]], "reopened": undone, "already": not undone}
         if e["judged_at"]:
             raise HTTPException(404, "this suggestion was already judged")
         from .sync_file import _clean_task_fields
         ecfg = eff_cfg()
         want = _suggestion_fields(ecfg, e)
         f = _clean_task_fields(ecfg, want)
-        now = now_iso()
-        tid = upsert_task(conn, dict(f, status="open", source="Slack" if is_slack else "Mail" if mail else "Ripple" if by_ripple else "Planner", source_key=key, source_link=want.get("source_link"),
-                                     account=e.get("account") if is_slack else mail.get("account") if mail else None, context=f.get("context") or (e["excerpt"] or None),
-                                     mentions=1, last_mention_at=date.today().isoformat(), created_at=now, edited_at=now))
+        f["context"] = f.get("context") or (e["excerpt"] or None)
+        f["ref"] = "card"
+        f["links"] = [{"kind": l["kind"], "other": l["other"], "why": why} for l in card_links]
+        create = {"op": "create", "fields": f, "source_key": key, "created_source": "Slack" if is_slack else "Mail" if mail else "Ripple" if by_ripple else "Planner",
+                  "source_link": want.get("source_link"), "account": e.get("account") if is_slack else mail.get("account") if mail else None}
+        res = batches.apply(conn, [create] + thread("card") + [judge], "review", date.today())
+        if not res["created"]:
+            made = rows(conn, "SELECT id FROM tasks WHERE source_key = ?", (key,))
+            if made:                            # made meanwhile by another process: that task is the answer
+                return {"task_id": made[0]["id"], "batch_id": res["batch_id"], "skipped": [], "reopened": False, "already": True}
+            raise HTTPException(400, "; ".join(s["why"] for s in res["skipped"]) or "nothing was created")
+        tid = res["created"][0]
         if is_slack and e.get("ref"):
             add_link(conn, tid, "slack_message", e["ref"], label=str(e.get("label") or "")[:120], account=e.get("account"))
-        if mail:     # the user said yes to this mail: from here on the sweep follows its thread like any linked one
-            add_link(conn, tid, "mail_thread", str(mail["ref"]), label=str(mail.get("subject") or "")[:120], account=mail.get("account"))
-            # seen up to the message the card was made from, or the next sweep would call that same message "Thread updated"
-            conn.execute("UPDATE links SET last_seen_at = ? WHERE task_id = ? AND kind = 'mail_thread' AND ref = ? AND last_seen_at IS NULL", (mail.get("at"), tid, str(mail["ref"])))
-        conn.execute("UPDATE evidence SET judged_at = ?, verdict = 'applied' WHERE id = ?", (now, evidence_id))
-        suggestions.at_create_guarded(conn, [tid])
-        conn.commit()
-        links = _suggestion_links(e)
-        if not links:
-            return {"task_id": tid, "skipped": []}
-        # the link the card showed, in a review batch of its own (undoable; a rule it breaks by now is said)
-        res = batches.apply(conn, [{"op": "link", "task_id": tid, "fields": {"kind": l["kind"], "other": l["other"], "why": "from the mail it came from"}} for l in links[:3]],
-                            "review", date.today())
-        return {"task_id": tid, "skipped": [s["why"] for s in res["skipped"]]}
+            conn.commit()
+        return {"task_id": tid, "batch_id": res["batch_id"], "skipped": [s["why"] for s in res["skipped"]], "reopened": False, "already": False}
 
     @app.post("/api/review/suggestions/{evidence_id}/open")
     def open_suggestion(evidence_id: int):
