@@ -700,6 +700,7 @@ label.pprop { cursor: pointer; }
   .review .card { padding-bottom: calc(88px + var(--kb, 0px)); }
   /* a box being typed in on a phone: nothing pinned covers it or the keyboard */
   body.kb-open .tray, body.kb-open .review .card .big, body.kb-open .pagebar, body.kb-open .fab { display: none; }
+  body.kb-open .bulk:not(:focus-within) { display: none; }      /* the short bar too, unless its own date box is the one typed in */
 }
 
 /* New task by hand (stage 6, frame 6): the bar above the box, the one line, its "Will be added as" preview */

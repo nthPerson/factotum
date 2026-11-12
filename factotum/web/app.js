@@ -20,8 +20,8 @@
   // What is being typed, kept outside the DOM: every render() rebuilds the panel (a chat turn's status
   // line re-renders it every second), and a long prompt must survive that with its caret.
   const draft = { cmd: '', ask: '', askFor: null, pick: '', outcome: '', askToday: '', askTask: '', askTaskFor: null,
-                  newLine: '', newKey: newKey(), newName: '',      // newName: the phone sheet's "What needs doing" (stage 6)
-                  findQ: '', picks: {},      // Find any task's box; the shared task picker's boxes by slot (stage 6)      // the New task line, and the key its next add carries (stage 6)
+                  newLine: '', newName: '',      // the New task line; the phone sheet's "What needs doing" (stage 6)
+                  findQ: '', picks: {},      // Find any task's box; the shared task picker's boxes by slot (stage 6)
                   edit: {},      // the editor's typed text by task id: {name?, context?, who?} until it is staged (stage 6)
                   step: {} };    // an Add a step line's text by task id (stage 6)
   let asking = null;        // {id, name} of the task whose outcome the toast asks (ripples (stage 5): the outcome question)
@@ -45,9 +45,9 @@
              page: null, pageScroll: 0, pageMore: false, pageLater: false,      // the task page: its id, the list's scroll, a phone's More and Later open
              bulkMore: false,      // the phone's short bar shows its second line (back to false when nothing is selected)
              askTask: null,        // the opened task whose conversation shows (stage 6; one at a time)
-             newOpen: false,
+             newOpen: false,       // the New task line is open (stage 6; a desktop's list tabs)
              sheet: null,          // the phone's New task sheet when open: {due, pick, project, effort, links, hit, linking} (stage 6)
-             findOpen: false,      // Find any task is open (stage 6)     // the New task line is open (stage 6; a desktop's list tabs)
+             findOpen: false,      // Find any task is open (stage 6)
              edWho: {},            // the editor's "is for" / "waiting on" choice by task id, kept only while its field is empty (stage 6)
              linkFor: null, linkHit: null,      // the opened task whose Link a task is open, and the task its picker found (stage 6)
              moreFor: null, mergeFor: null,     // the opened task whose More is open, and whose Merge into another picker shows (stage 6)
@@ -366,8 +366,12 @@
   // focus and caret back, so a reload of the lists loses nothing (a box left focused and empty would
   // otherwise keep the lists stale on every return). render() uses the same list, through isDraftBox.
   const DRAFT_BOXES = ['cmd', 'rv-ask', 'chat-pick', 'rv-note', 'today-ask', 'task-ask', 'new-line', 'find-q', 'pick-link', 'pick-merge', 'pick-sheet', 'new-name'];
+  // A box that can be closed with its text kept (the New task line, the phone sheet, an opened task's conversation,
+  // Find) counts only while it is drawn: text kept out of sight must not keep the lists stale on every return.
+  const drawn = id => !!document.getElementById(id);
   function typingNow() {
-    if ([draft.cmd, draft.ask, draft.pick, draft.outcome, draft.askToday, draft.askTask, draft.newLine, draft.newName, ui.findOpen ? draft.findQ : '', ...Object.values(draft.picks), ui.rvNote.text].some(s => (s || '').trim())) return true;
+    const shown = [drawn('new-line') ? draft.newLine : '', drawn('new-name') ? draft.newName : '', drawn('task-ask') ? draft.askTask : '', ui.findOpen ? draft.findQ : ''];
+    if ([draft.cmd, draft.ask, draft.pick, draft.outcome, draft.askToday, ...shown, ...Object.values(draft.picks), ui.rvNote.text].some(s => (s || '').trim())) return true;
     if (Object.keys(draft.edit).some(id => edTyped(+id))) return true;      // an editor field typed in and not staged yet
     if (Object.values(draft.step).some(s => (s || '').trim())) return true;      // an Add a step line
     if (ui.remOpen !== null || ui.dueOpen !== null || chat.busy) return true;
@@ -386,6 +390,10 @@
     }
     if (typingNow()) { if (ui.tab === 'today') { clearTimeout(sumTimer); pollSummary(); } return; }
     if (ui.tab === 'log') logData = null;
+    // The Today box's conversation is asked for again, so one gone quiet for 12 hours is let go in an app that
+    // stays open (the server's rule, chat.place_thread). A closed one stays closed; one with a turn running stays.
+    const tp = places.get('today:');
+    if (tp && tp.loaded && !tp.live && !tp.loading && !tp.fresh) tp.loaded = false;
     // A failed reload keeps what is on screen: a sign-out shows its own screen and no network is not a
     // fault. Anything else (a server error, a bug in a redraw) is logged rather than lost.
     load().then(loadPush).catch(e => { if (!(e && (e.message === 'signed out' || e.network))) console.error('Reloading on return failed:', e); });
@@ -556,6 +564,11 @@
     try {
       const res = await api('/api/batches/apply', { method: 'POST', body: JSON.stringify({ source: ui.tab === 'review' ? 'review' : 'ui', changes }) });
       lastBatch = res.batch_id;
+      // What came from a conversation is remembered as applied (a skipped one stays stageable; a made create is
+      // marked by the server, which knows whether it was made).
+      const skippedIds = new Set((res.skipped || []).map(k => k.task_id).filter(x => x != null));
+      const fromProps = picked.filter(([, s]) => s.prop && s.op !== 'create' && !(s.task_id != null && skippedIds.has(s.task_id)));
+      if (fromProps.length) { fromProps.forEach(([, s]) => appliedProps.set(s.prop, res.batch_id)); persistApplied(); }
       if (keys) { picked.forEach(([k]) => staged.delete(k)); persistStaged(); } else { staged = new Map(); try { localStorage.removeItem('factotum.staged'); } catch (_) {} }
       ui.trayOpen = false; ui.trayOff = new Set();
       ui.sel.clear(); logData = null;
@@ -569,7 +582,9 @@
         ui.reviewPaused = true; render();
       }
       if (chatMids.length) reloadPlacesWith(chatMids);      // a staged new task now reads "created Task-N" where it was proposed
-      const msg = `${res.applied} change${res.applied === 1 ? '' : 's'} applied` + (res.skipped.length ? ` · ${res.skipped.length} skipped: ${res.skipped[0].why}` : '');
+      // A tray ref (m<message>-<index>) is the page's own name for a new task: never shown.
+      const why = String(res.skipped.length ? res.skipped[0].why : '').replace(/no task made in this batch has ref 'm\d+-\d+'/, 'the new task it links to was not in this Apply');
+      const msg = `${res.applied} change${res.applied === 1 ? '' : 's'} applied` + (res.skipped.length ? ` · ${res.skipped.length} skipped: ${why}` : '');
       const closed = say.filter(x => !res.skipped.some(k => k.task_id === x.id));      // a skipped Done closed nothing
       closed.forEach(x => sayable.set(x.id, x));
       if (closed.length) toast(msg, true, { buttons: [{ text: 'Say how it went', attrs: `data-say="${closed[0].id}"`, run: () => askOutcome(closed[0].id) }], holdMs: 20000 });
@@ -810,7 +825,24 @@
     return Object.keys(out).length ? out : undefined;
   }
   function suggestionStaged(eid) { return staged.has('e:' + eid) || [...staged.values()].some(s => s.ev === eid); }
-  function undoBatch(id) { return api(`/api/batches/${id}/undo`, { method: 'POST' }); }
+  // A conversation's proposals already applied: "<message>-<index>" → the batch that applied them (stage 6). The
+  // server marks a made create itself; a set, link, note or decision is remembered here, so neither the place nor
+  // the Chat tab can stage it and apply it a second time. Kept in this browser (the newest 400); an Undo of that
+  // batch makes them stageable again.
+  let appliedProps = new Map();
+  try { appliedProps = new Map(JSON.parse(localStorage.getItem('factotum.applied') || '[]').filter(e => Array.isArray(e) && typeof e[0] === 'string')); } catch (_) { appliedProps = new Map(); }
+  function persistApplied() {
+    const kept = [...appliedProps].slice(-400); appliedProps = new Map(kept);
+    try { localStorage.setItem('factotum.applied', JSON.stringify(kept)); } catch (_) {}
+  }
+  const propApplied = (mid, i) => appliedProps.has(mid + '-' + i);
+  async function undoBatch(id) {
+    const res = await api(`/api/batches/${id}/undo`, { method: 'POST' });
+    const before = appliedProps.size;
+    for (const [k, b] of [...appliedProps]) if (b === id) appliedProps.delete(k);
+    if (appliedProps.size !== before) persistApplied();
+    return res;
+  }
   // The ripples the batch set off follow it: undone with it, or kept when a linked task's text changed after.
   function undoSaid(res) {
     if (res.already) return 'Already undone';
@@ -1842,7 +1874,13 @@
   // An op the page cannot stage is left out (false), never turned into a `set`; the toast's count says so.
   // A new task is staged as `from_chat` (the server makes the stored proposal); a link to a new task of the
   // same reply names it by its tray ref, `m<message>-<index>`, and is labelled with its name.
+  // The tray entry carries `prop` ("<message>-<index>", never sent), so Apply can remember it as applied.
   function stageProposal(p, mid, i) {
+    if (!stageProposalAs(p, mid, i)) return false;
+    const e = staged.get(placeKey(p, mid, i)); if (e) { e.prop = mid + '-' + i; persistStaged(); }
+    return true;
+  }
+  function stageProposalAs(p, mid, i) {
     if (p.op === 'link_thread') return false;
     if (p.op === 'create') {
       stageExtra('new:c' + mid + '-' + i, null, 'create', p.fields || {}, 'new task: ' + cut60((p.fields || {}).name), { from_chat: { message_id: mid, index: i } });
@@ -1867,17 +1905,18 @@
   function proposalsHtml(m) {
     if (!m.proposals || !m.proposals.length) return '';
     const items = m.proposals.map((p, i) => {
-      const key = propKey(p, m.id, i); const isStaged = staged.has(key);
+      const key = propKey(p, m.id, i); const isStaged = staged.has(key), done = propApplied(m.id, i);
       const ev = (p.evidence || []).map(e => `<span class="chip">${esc(e.label || e.kind)}</span>`).join('');
       const fields = p.fields && Object.keys(p.fields).length && p.op !== 'link_thread' ? `<span class="code">${esc(Object.entries(p.fields).filter(([k]) => k !== 'due_is_datetime').map(([k, v]) => `${k}: ${v === null ? 'cleared' : String(v).slice(0, 60)}`).join(' · '))}</span>` : '';
       let ctl;
       if (p.op === 'create') ctl = p.applied ? `<span class="chip staged">created Task-${p.task_id}</span>` : `<button class="btn small" data-chat-create="${m.id}" data-i="${i}">Create task</button>`;
       else if (p.op === 'link_thread') ctl = `<span class="chip staged">linked</span>`;
+      else if (done) ctl = `<span class="chip staged">applied</span>`;
       else if (isStaged) ctl = `<span class="chip staged">staged</span>`;
       else ctl = `<label><input type="checkbox" data-chat-prop="${m.id}" data-i="${i}" checked> stage</label>`;
       return `<div class="prop">${ctl}<span class="plabel">${p.task_id != null ? `<span class="code">Task-${p.task_id}</span> ` : ''}${esc(p.label || p.op)}</span>${fields}${ev}</div>`;
     }).join('');
-    const stageable = m.proposals.some((p, i) => !['create', 'link_thread'].includes(p.op) && !(staged.has(propKey(p, m.id, i))));
+    const stageable = m.proposals.some((p, i) => !['create', 'link_thread'].includes(p.op) && !propApplied(m.id, i) && !(staged.has(propKey(p, m.id, i))));
     return `<div class="props"><div class="phead">Proposals${stageable ? `<button class="btn small primary" data-chat-stage="${m.id}">Stage selected</button>` : ''}</div>${items}</div>`;
   }
   function draftsHtml(m) {
@@ -2022,13 +2061,14 @@
   // Every loaded place showing one of these messages reads it again (a proposal there was made into a task).
   function reloadPlacesWith(mids) { for (const pl of places.values()) if (pl.loaded && pl.messages.some(m => mids.includes(m.id))) loadPlace(pl); }
   // A turn from a place. The caller has emptied draft[draftKey]; a refused or unsent turn puts the text back
-  // there, ahead of anything typed since.
-  async function sendTurn(pl, text, canned, draftKey) {
+  // there, ahead of anything typed since. `attached`: the tasks it carries (a place about a task carries that
+  // task; otherwise the selection, unless the caller says, as the phone sheet does with [], that none ride along).
+  async function sendTurn(pl, text, canned, draftKey, attached) {
     const giveBack = () => { if (draftKey && text) draft[draftKey] = (draft[draftKey] || '').trim() ? text + '\n' + draft[draftKey] : text; };
     if (chat.busy) { giveBack(); render(); toast('Claude is still answering · your text is kept'); return; }
     chat.busy = true; chat.place = pl.key; pl.live = { status: 'Starting…', texts: [] };
     render();
-    const body = { thread_id: pl.thread_id, origin: pl.origin, task_id: pl.task_id, fresh: pl.fresh, text, attached: pl.task_id ? [pl.task_id] : attachedIds(), canned };
+    const body = { thread_id: pl.thread_id, origin: pl.origin, task_id: pl.task_id, fresh: pl.fresh, text, attached: pl.task_id ? [pl.task_id] : attached || attachedIds(), canned };
     let result = null, error = null, refused = null, started = false;
     try {
       const resp = await fetch('/api/chat/turn', { method: 'POST', headers: { 'Content-Type': 'application/json' }, redirect: 'manual', body: JSON.stringify(body) });
@@ -2118,8 +2158,8 @@
     if (p.op === 'link' && typeof f.other === 'string') { const s = siblingOf(proposalsOf(mid), f.other); return relKey(p.task_id, f.kind, 'm' + mid + '-' + (s ? s.j : f.other)); }
     return propKey(p, mid, i);
   }
-  // Ticked, not staged, not made yet: what the stage button stages.
-  const placeOpen = (p, mid, i) => PLACE_OPS.has(p.op) && !p.applied && !staged.has(placeKey(p, mid, i));
+  // Not staged, not made or applied yet: what the stage button stages (when ticked).
+  const placeOpen = (p, mid, i) => PLACE_OPS.has(p.op) && !p.applied && !propApplied(mid, i) && !staged.has(placeKey(p, mid, i));
   const andList = a => a.length < 2 ? a.join('') : a.slice(0, -1).join(', ') + ' and ' + a[a.length - 1];
   function placeMsgHtml(pl, m, newest) {
     if (m.role === 'user') return `<div class="pmsg user">${esc(m.text)}</div>`;
@@ -2130,8 +2170,11 @@
     if (props.length) {
       const row = (p, i) => {
         const k = `${pl.key}|${m.id}|${i}`, t = proposalText(p, m, pl);
+        const out = placeTicked(pl, p, m.id, i) ? placeLeftOut(pl, props, p, m.id) : null;
+        if (out !== null) t.sub = (t.sub ? t.sub + ', ' : '') + `left out while “${cut40(out)}” is not ticked`;
         const words = `<span class="pw"><span class="pm">${linkTasks(t.main)}</span>${t.sub ? ` <span class="ps">${linkTasks(t.sub)}</span>` : ''}</span>`;
         if (p.op === 'link_thread' || p.applied) return `<div class="pprop"><span></span>${words}<span class="chip staged">${p.op === 'create' && p.task_id ? 'created ' + tref(p.task_id) : 'linked'}</span></div>`;
+        if (propApplied(m.id, i)) return `<div class="pprop"><span></span>${words}<span class="chip staged">applied</span></div>`;
         if (staged.has(placeKey(p, m.id, i))) return `<div class="pprop"><span></span>${words}<span class="chip staged">staged</span></div>`;
         if (!PLACE_OPS.has(p.op)) return `<div class="pprop"><span></span>${words}<span></span></div>`;
         return `<label class="pprop"><input type="checkbox" data-pprop="${esc(k)}" ${pl.off.has(k) ? '' : 'checked'} aria-label="Stage this">${words}${p.op === 'create' ? `<span class="pbtns"><button class="btn small" data-place-create="${esc(k)}">Create</button><button class="btn small" data-edit-first="${esc(k)}">Edit first</button></span>` : '<span></span>'}</label>`;
@@ -2141,7 +2184,7 @@
         + (short ? `<div class="pmore">and ${props.length - 2} more · <button class="linkish" data-place-more="${esc(pl.key)}">Show</button></div>` : '');
       let foot = '';
       if (newest && props.some((p, i) => placeOpen(p, m.id, i))) {
-        const n = props.filter((p, i) => placeOpen(p, m.id, i) && !pl.off.has(`${pl.key}|${m.id}|${i}`)).length;
+        const n = props.filter((p, i) => placeTicked(pl, p, m.id, i) && placeLeftOut(pl, props, p, m.id) === null).length;
         const what = pl.opts.decision ? `Stage ${n > 1 ? 'all ' : ''}${n} with this decision` : `Stage ${n}`;
         foot = `<div class="pfoot"><button class="btn primary" data-place-stage="${esc(pl.key)}|${m.id}" ${n ? '' : 'disabled'}>${what}</button><span class="hint">One Apply, one Undo.</span></div>`;
       }
@@ -2167,11 +2210,27 @@
       ${chips}</div>`;
   }
   // Every ticked, unstaged, unmade proposal of that message, into the tray.
+  // A link to a new task of the same reply is left out when that task will not be in the tray (unticked, not
+  // made, not staged): Apply could only skip it. The toast says so in words.
+  const placeTicked = (pl, p, mid, i) => placeOpen(p, mid, i) && !pl.off.has(`${pl.key}|${mid}|${i}`);
+  // The name of the new task a ref link waits for when that task will not be in the tray; null otherwise.
+  function placeLeftOut(pl, props, p, mid) {
+    const f = p.fields || {};
+    if (p.op !== 'link' || typeof f.other !== 'string') return null;
+    const s = siblingOf(props, f.other), q = s && props[s.j];
+    return q && !q.applied && !propApplied(mid, s.j) && !staged.has(placeKey(q, mid, s.j)) && !placeTicked(pl, q, mid, s.j) ? s.name : null;
+  }
   function stagePlace(pl, mid, decision) {
     const props = proposalsOf(mid);
-    let n = 0;
-    props.forEach((p, i) => { if (placeOpen(p, mid, i) && !pl.off.has(`${pl.key}|${mid}|${i}`) && stageProposal(p, mid, i)) n++; });
-    toast(decision ? `${n} staged with this decision · decide on the card, then Apply` : `${n} staged · press Apply in the tray`);
+    let n = 0; const left = [];
+    props.forEach((p, i) => {
+      if (!placeTicked(pl, p, mid, i)) return;
+      const out = placeLeftOut(pl, props, p, mid);
+      if (out !== null) { left.push(out); return; }
+      if (stageProposal(p, mid, i)) n++;
+    });
+    const why = left.length ? ` · ${left.length} left out: ${left.length === 1 ? 'it links to' : 'they link to'} ${andList(left.map(x => `“${cut40(x)}”`))}, not ticked` : '';
+    toast((decision ? `${n} staged with this decision · decide on the card, then Apply` : `${n} staged · press Apply in the tray`) + why);
     render();
   }
   async function placeCreate(mid, i) {
@@ -2594,17 +2653,22 @@
   // will be filed and what each word means; Enter makes the task at once (POST /api/add, one batch: Undo drops it).
   // The line is sent as typed (nothing stripped); the Today command box takes `add …` / `new …` / `+ …` too, and
   // only there is the verb stripped (`verb: true`). A key rides with every add: two Enters with nothing typed
-  // between them carry the same key, so the server makes one task; an edited line gets a new key.
+  // between them carry the same key, so the server makes one task; an edited line gets a new key. Each box has
+  // its own key (`line`, `cmd`, `sheet`, `step:<id>`), so a response lost in one box never makes an add from
+  // another box the same task; Duplicate has no box and takes a fresh key every time.
   const ADD_RE = /^\s*(?:(?:add|new)\s+|\+\s*)/i;
   function newKey() {
     const b = new Uint8Array(12); crypto.getRandomValues(b);
     return Array.from(b, x => (x % 36).toString(36)).join('');
   }
+  const addKeys = {};      // box → the key its next add carries
+  const addKeyOf = box => addKeys[box] || (addKeys[box] = newKey());
+  const renewKey = box => { addKeys[box] = newKey(); };
   const LIST_TABS = ['today', 'timeline', 'projects'];
   function handBarHtml() {
-    const find = '<button class="btn small" id="find-open" aria-expanded="' + ui.findOpen + '">Find any task <kbd>/</kbd></button>';
-    if (PHONE()) return `<div class="handbar">${find}</div>`;      // a phone has the round button for New task (Task 12)
-    return `<div class="handbar"><button class="btn small" id="new-open" aria-expanded="${ui.newOpen}">+ New task <kbd>n</kbd></button>${find}</div>`;
+    const phone = PHONE(), findBtn = `<button class="btn small" id="find-open" aria-expanded="${ui.findOpen}">Find any task${phone ? '' : ' <kbd>/</kbd>'}</button>`;
+    if (phone) return `<div class="handbar">${findBtn}</div>`;      // a phone has the round button for New task, and no key to press
+    return `<div class="handbar"><button class="btn small" id="new-open" aria-expanded="${ui.newOpen}">+ New task <kbd>n</kbd></button>${findBtn}</div>`;
   }
   function newLineHtml() {
     return `<div class="newline"><label class="lbl" for="new-line">New task</label>
@@ -2612,12 +2676,13 @@
       <div data-add-prev="new">${addPreviewHtml('new')}</div>
       <div class="nlact"><button class="btn primary" id="new-add">Add</button><button class="btn" id="new-add-open">Add and open</button><span class="hint">The task exists the moment you press Enter. Undo removes it.</span></div></div>`;
   }
-  // The last preview each box was answered with: {text, res}; drawn only while its box still holds an add line.
+  // The last preview each box was answered with: {text, res}; drawn only while its box holds exactly that text
+  // (never an answer about other words: after Edit first, between a keystroke and its answer, after a failed preview).
   const addPrev = { new: null, cmd: null }, addPrevT = {};
   const addText = slot => slot === 'cmd' ? draft.cmd : draft.newLine;
   function addPreviewHtml(slot) {
     const cur = addText(slot) || '', p = addPrev[slot];
-    if (!cur.trim() || (slot === 'cmd' && !ADD_RE.test(cur)) || !p || !p.res || !p.res.is_add) return '';
+    if (!cur.trim() || (slot === 'cmd' && !ADD_RE.test(cur)) || !p || p.text !== cur || !p.res || !p.res.is_add) return '';
     const r = p.res, parts = r.parts || [], refused = r.refused || [];
     const chip = x => x.kind === 'waits_on' || x.kind === 'part_of' ? `<span class="lb ${x.kind === 'waits_on' ? 'wait' : 'ok'}">${linkTasks(x.label)}</span>`
       : `<span class="chip${x.kind === 'project' ? ' proj' : x.kind === 'due' || x.kind === 'effort' ? ' mono' : ''}">${esc(x.label)}</span>`;
@@ -2631,33 +2696,38 @@
     const el = document.querySelector(`#panel [data-add-prev="${slot}"]`); if (!el) return;
     el.innerHTML = addPreviewHtml(slot); wireDetail(el);
   }
-  // 250 ms after the last keystroke; an answer for text that has changed since is dropped.
+  // 250 ms after the last keystroke; an answer for text that has changed since is dropped. A preview about other
+  // words goes at once (swapAddPrev draws nothing for them), and a failed one leaves none.
   function previewAdd(slot, text) {
     clearTimeout(addPrevT[slot]);
-    if (!text.trim() || (slot === 'cmd' && !ADD_RE.test(text))) { swapAddPrev(slot); return; }
+    swapAddPrev(slot);
+    if (!text.trim() || (slot === 'cmd' && !ADD_RE.test(text))) return;
     addPrevT[slot] = setTimeout(async () => {
       let res;
-      try { res = await api('/api/add/preview?text=' + encodeURIComponent(text) + (slot === 'cmd' ? '&verb=1' : '')); } catch (_) { return; }
+      try { res = await api('/api/add/preview?text=' + encodeURIComponent(text) + (slot === 'cmd' ? '&verb=1' : '')); }
+      catch (_) { if (text === addText(slot)) { addPrev[slot] = null; swapAddPrev(slot); } return; }
       if (text !== addText(slot)) return;
       addPrev[slot] = { text, res }; swapAddPrev(slot);
     }, 250);
   }
-  // Makes the task now. input: {text, verb?} (a line) or {fields}; opts: {open, clear, said}. Returns its id, or null
-  // when it was not made (the caller's text stays) or another add is still in flight (the call is ignored).
+  // Makes the task now. input: {text, verb?} (a line) or {fields}; opts: {box, open, clear, said}: the box it came
+  // from (its key; none: a fresh key), and what to do once made. Returns its id, or null when it was not made (the
+  // caller's text stays) or another add is still in flight (the call is ignored).
   let adding = false;
   async function addTask(input, opts = {}) {
     if (adding) return null;
     adding = true;
     try {
       let res;
-      try { res = await api('/api/add', { method: 'POST', body: JSON.stringify(Object.assign({}, input, { key: draft.newKey })) }); }
+      const key = opts.box ? addKeyOf(opts.box) : newKey();
+      try { res = await api('/api/add', { method: 'POST', body: JSON.stringify(Object.assign({}, input, { key })) }); }
       catch (e) {
         if (!(e && e.message === 'signed out')) toast('Not added: ' + (e.detail || (e.network ? 'the server did not answer' : e.message)));
         return null;
       }
       const id = res.task_id;
       if (opts.clear) opts.clear();
-      draft.newKey = newKey();
+      if (opts.box && addKeys[opts.box] === key) renewKey(opts.box);
       lastBatch = res.batch_id;
       try { await load(); } catch (_) {}      // the task is made either way; the lists catch up on the next load
       if (opts.open) openTask(id); else if (!PHONE()) jumpTo(id, false);
@@ -2681,7 +2751,7 @@
     const sent = draft.newLine;
     if (!sent.trim()) { focusNewLine(); return; }
     // A line typed further while the add was in flight is kept (it got a new key, so Enter makes it too).
-    addTask({ text: sent }, { open, clear: () => { if (draft.newLine === sent) draft.newLine = ''; } }).then(id => { if (id != null && !open) focusNewLine(); });
+    addTask({ text: sent }, { box: 'line', open, clear: () => { if (draft.newLine === sent) draft.newLine = ''; } }).then(id => { if (id != null && !open) focusNewLine(); });
   }
   // A proposed new task as an add line: name, date (with ! when hard), #project, ~effort, under N, after N.
   const compact = s => String(s || '').replace(/[^A-Za-z0-9]/g, '');      // the server compares projects the same way
@@ -2701,12 +2771,12 @@
     const p = proposalsOf(mid)[i]; if (!p || p.op !== 'create') return;
     const f = p.fields || {};
     if (PHONE()) {
-      draft.newName = String(f.name || '').trim(); draft.newKey = newKey();
+      draft.newName = String(f.name || '').trim(); renewKey('sheet');
       openSheet(sheetOf(f));
       if ((f.links || []).some(l => l && typeof l.other === 'string')) toast('A link to another new task is left out');
       return;
     }
-    draft.newLine = addLineOf(f); draft.newKey = newKey();
+    draft.newLine = addLineOf(f); renewKey('line');
     openNewLine();
     previewAdd('new', draft.newLine);
     if ((f.links || []).some(l => l && typeof l.other === 'string')) toast('A link to another new task is left out');
@@ -2730,7 +2800,9 @@
   // sheet's name, a step's line). The Today box's preview follows what is typed there.
   document.addEventListener('input', e => {
     const id = (e.target && e.target.id) || '';
-    if (id === 'new-line' || id === 'new-name' || /^step-line-\d+$/.test(id) || (id === 'cmd' && ADD_RE.test(e.target.value))) draft.newKey = newKey();
+    const box = id === 'new-line' ? 'line' : id === 'new-name' ? 'sheet' : /^step-line-\d+$/.test(id) ? 'step:' + id.slice(10)
+      : id === 'cmd' && ADD_RE.test(e.target.value) ? 'cmd' : null;
+    if (box) renewKey(box);
     if (id === 'cmd' && ui.tab !== 'chat') previewAdd('cmd', e.target.value);
   });
 
@@ -2819,7 +2891,7 @@
     if (!draft.newName.trim()) { toast('Type what needs doing first'); focusSheetBox('new-name'); return; }
     const link = kind => (s.links.find(l => l.kind === kind) || {}).other ?? null;
     addTask({ fields: { name: draft.newName, due: s.due, project: s.project || null, effort: s.effort || null, after: link('waits_on'), under: link('part_of') } },
-      { clear: () => { draft.newName = ''; } }).then(id => { if (id != null && ui.sheet) closeSheet(); });
+      { box: 'sheet', clear: () => { draft.newName = ''; } }).then(id => { if (id != null && ui.sheet) closeSheet(); });
   }
   // The name, as a sentence, to the Today box's conversation: the sheet closes and the tab becomes Today first.
   async function sheetToClaude() {
@@ -2831,16 +2903,18 @@
     if (ui.tab !== 'today' || ui.page !== null) go('today');
     const pl = placeOf('today', null);
     if (!pl.loaded) await loadPlace(pl);
-    sendTurn(pl, text, null, 'newName');
+    sendTurn(pl, text, null, 'newName', []);      // a sentence typed in the sheet is about nothing on the list
   }
   pickers.sheet = id => { if (ui.sheet) { ui.sheet.hit = id; renderSheet(); } };
   function wireSheet(el) {
     const s = ui.sheet, again = () => renderSheet();
     const nm = el.querySelector('#new-name');
     nm.oninput = () => { draft.newName = nm.value; };
+    // On a touch keyboard Enter is its Done key, tapped to put the keyboard away and reach the taps under the name:
+    // it only does that. Add task adds. A hardware keyboard's Enter adds, as the desktop line does.
     nm.addEventListener('keydown', e => {
       if (e.key === 'Escape') { e.preventDefault(); closeSheet(); }
-      else if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); sheetAdd(); }
+      else if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); if (TOUCH()) nm.blur(); else sheetAdd(); }
       e.stopPropagation();      // no key typed here acts on the list
     });
     el.querySelector('[data-sheet-cancel]').onclick = closeSheet;
@@ -3111,7 +3185,7 @@
     if (!t) return;
     if (!name) { const el = document.getElementById('step-line-' + id); if (el) el.focus(); return; }
     addTask({ fields: { name, project: t.project, under: id } },
-      { clear: () => { if ((draft.step[id] || '') === sent) delete draft.step[id]; }, said: n => 'Added Task-' + n + ' as a step of Task-' + id });
+      { box: 'step:' + id, clear: () => { if ((draft.step[id] || '') === sent) delete draft.step[id]; }, said: n => 'Added Task-' + n + ' as a step of Task-' + id });
   }
   // A copy of what the server holds (not what is staged), under the same goal; opened in its editor. `/api/add` takes a
   // date, so a timed due is cut to its day (a refused one would take `hard` with it).
@@ -3486,7 +3560,7 @@
     // The Send handler has emptied the box: what is there now was typed since, so the clear leaves it, and a line
     // not added goes back ahead of it.
     if (ui.tab !== 'chat' && ADD_RE.test(text)) {
-      const id = await addTask({ text, verb: true }, { clear: () => {} });
+      const id = await addTask({ text, verb: true }, { box: 'cmd', clear: () => {} });
       if (id == null) { draft.cmd = draft.cmd.trim() ? text + '\n' + draft.cmd : text; render(); }
       return;
     }
