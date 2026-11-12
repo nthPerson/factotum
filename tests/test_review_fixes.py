@@ -298,3 +298,50 @@ def test_a_hostile_text_still_cannot_break_out_of_its_string(rconn, cfg):
     assert sum(ln.startswith("# 5. Return") for ln in lines) == 1
     assert "</task>" not in p and "<task" not in p and " " not in p and " " not in p and "\x85" not in p
     assert _shown_text(p) == hostile                     # a JSON reader gets the owner's text back, every character
+
+
+# ---- 4. undoing one of a ripple's causes queues the causes still in force -------------------------------
+
+def test_undoing_one_of_two_causes_queues_the_other_again(rconn, cfg):
+    """test_undo_roundtrip.py::test_undo_one_of_two_causes: b1 closes Task-1, b2 closes Task-2, one ripple
+    rewrites Task-3 for both; undoing b1 undid the ripple whole and nothing would ever bring Task-3 up to
+    date for Task-2, which is still done."""
+    from datetime import datetime, timezone
+    conn = rconn
+    _mk(conn, 1); _mk(conn, 2); _mk(conn, 3, context="Needs 1 and 2.")
+    batches.apply(conn, [{"op": "link", "task_id": 3, "fields": {"kind": "waits_on", "other": 1}},
+                         {"op": "link", "task_id": 3, "fields": {"kind": "waits_on", "other": 2}}], "ui", TODAY)
+    b1 = batches.apply(conn, [{"op": "done", "task_id": 1}], "ui", TODAY)["batch_id"]
+    b2 = batches.apply(conn, [{"op": "done", "task_id": 2}], "ui", TODAY)["batch_id"]
+
+    def runner(cfg, kind, prompt, **kw):
+        data = {"ripples": [{"task_id": 3, "effect": "text", "context": "Needs 1 and 2.\nWhere this stands: Task-1 and Task-2 are done.",
+                             "why": "w", "proposals": []}]}
+        return RunResult(True, data, json.dumps(data), 0.03, 900)
+
+    ids = ripple.next_group(conn, cfg, now_utc=datetime(2030, 1, 1, tzinfo=timezone.utc))
+    out = ripple.run(conn, cfg, ids, TODAY, runner=runner, at="2026-11-01T10:00")
+    assert out["rewritten"] == [3] and conn.execute("SELECT COUNT(*) FROM ripple_queue").fetchone()[0] == 0
+    u = batches.undo(conn, b1)
+    assert u["ripples_undone"] == [out["batch_id"]]
+    assert conn.execute("SELECT context FROM tasks WHERE id = 3").fetchone()[0] == "Needs 1 and 2."
+    q = {r["task_id"]: r for r in ripple.pending(conn)}
+    assert list(q) == [2] and q[2]["batches"] == [b2] and q[2]["what"] == ["closed"], q      # Task-2 is still done: it ripples again
+    assert 1 not in q
+    # undoing the other cause too leaves nothing queued for either
+    batches.undo(conn, b2)
+    assert ripple.pending(conn) == []
+
+
+def test_undoing_the_only_cause_queues_nothing(rconn, cfg):
+    conn = rconn
+    _mk(conn, 1); _mk(conn, 3, context="Needs 1.")
+    batches.apply(conn, [{"op": "link", "task_id": 3, "fields": {"kind": "waits_on", "other": 1}}], "ui", TODAY)
+    b1 = batches.apply(conn, [{"op": "done", "task_id": 1}], "ui", TODAY)["batch_id"]
+
+    def runner(cfg, kind, prompt, **kw):
+        data = {"ripples": [{"task_id": 3, "effect": "text", "context": "Needs 1.\nWhere this stands: Task-1 is done.", "why": "w", "proposals": []}]}
+        return RunResult(True, data, json.dumps(data), 0.03, 900)
+
+    out = ripple.run(conn, cfg, [1], TODAY, runner=runner, at="2026-11-01T10:00")
+    assert batches.undo(conn, b1)["ripples_undone"] == [out["batch_id"]] and ripple.pending(conn) == []

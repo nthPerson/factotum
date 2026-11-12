@@ -605,7 +605,10 @@ def undo(conn: sqlite3.Connection, batch_id: int) -> dict:
 def _follow_ripples(conn: sqlite3.Connection, batch_id: int, undone: list[int], kept: list[int]) -> None:
     """Undo, in the caller's transaction, every not-undone ripple batch that `batch_id` caused, whole,
     when every field it wrote still holds what it wrote; otherwise leave it whole and record on its
-    cause that the cause was undone. Newest first, so a later ripple over the same text goes first."""
+    cause that the cause was undone. Newest first, so a later ripple over the same text goes first.
+    An undone ripple that had other causes, not undone, queues them again (`ripple.enqueue`), so the
+    next run brings its neighbours up to date for what is still true."""
+    again: set[int] = set()
     for r in conn.execute("SELECT id, cause_json, undo_json FROM batches WHERE source = 'ripple' AND undone_at IS NULL AND id > ? "
                           "ORDER BY id DESC", (batch_id,)).fetchall():
         try:
@@ -622,10 +625,17 @@ def _follow_ripples(conn: sqlite3.Connection, batch_id: int, undone: list[int], 
             _undo_entries(conn, entries)
             conn.execute("UPDATE batches SET undone_at = ? WHERE id = ?", (now_iso(), r["id"]))
             undone.append(r["id"])
+            again.update(x for x in cause["batches"] if type(x) is int and x != batch_id)
         else:
             cause.update(cause_undone_at=now_iso(), cause_undone_batch=batch_id)
             conn.execute("UPDATE batches SET cause_json = ? WHERE id = ?", (json.dumps(cause), r["id"]))
             kept.append(r["id"])
+    if again:
+        from . import ripple                                     # here, not at the top: ripple imports batches
+        queued = {i for q in ripple.pending(conn) for i in q["batches"]}
+        for o in conn.execute("SELECT id, source FROM batches WHERE id IN (SELECT value FROM json_each(?)) AND undone_at IS NULL ORDER BY id",
+                              (json.dumps(sorted(again - queued)),)).fetchall():
+            ripple.enqueue(conn, o["id"], o["source"])           # a cause still in force ripples again
 
 
 def _in_place(conn: sqlite3.Connection, entries: list) -> bool:

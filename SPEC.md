@@ -622,7 +622,10 @@ and named in the log line: `counterpart` or `waiting_on` (a ripple never copies 
 "batches": [causing batch ids], "what": {id: [what]}, "noted": [ids whose rewrite became a note]}`. Undoing a
 causing batch also undoes each of its ripple batches when every field the ripple wrote is still as it wrote
 it; otherwise the ripple batch stays whole and its cause gains `cause_undone_at`, which History and Review
-show. The owner can still undo it alone.
+show. The owner can still undo it alone. A ripple undone with one of its causes while its other causes
+still hold queues those causes again in the same transaction, so the next run brings the linked tasks up to
+date for what is still true (closing Task-1 and Task-2 rippled once; undoing Task-1's close must not leave
+Task-2's close unsaid).
 
 **Failure.** A failed run (no JSON, a wrong shape, the budget, the login) writes nothing; the group is tried
 twice, then set aside and logged; the job backs off an hour like every job; at most
