@@ -107,6 +107,8 @@ digest (fold into the morning brief later if missed), the Notion `Open` view rea
 - Keep the user-specific facts out of code: if you find yourself typing a Notion id, a course
   code or an email address in a `.py` file, it belongs in `config/factotum.example.yaml`.
 - Update `SPEC.md` when a decision changes; update `docs/SETUP.md` when a setup step changes.
-- Before restarting `factotum.service`, check `journalctl -u factotum -n 5` for a Claude run in
-  flight.
+- Before restarting `factotum.service`, check for a Claude run in flight: `systemctl status factotum
+  --no-pager` (a running `claude` child shows under the service) or `pgrep -af 'claude -p'` (prints nothing
+  when idle). `journalctl -u factotum -n 5` shows only the Plaud trigger's runs, not a ripple, a filing, the
+  planner, the summary, mail triage or a chat turn.
 - Commit messages end with `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`.
