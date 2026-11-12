@@ -109,8 +109,8 @@ def _effective(keys: list[str], as_before: bool) -> int:
     defaults = C.OLD_DEFAULTS if as_before else C.DEFAULTS
     for key in keys or C.REPORT_KEYS:
         value, origin = C.explain(cfg, overrides, key, defaults)
-        if key in C.MASKED:
-            shown = "set #" + hashlib.sha256(json.dumps(value).encode()).hexdigest()[:8] if value else "empty"
+        if key in C.MASKED:     # two hex characters: enough to see a change between two runs, too few to find an 8-hex topic by trying them all
+            shown = "set #" + hashlib.sha256(json.dumps(value).encode()).hexdigest()[:2] if value else "empty"
         else:
             shown = json.dumps(value, ensure_ascii=False)
         print(f"{key:<42} {shown:<26} {origin}")

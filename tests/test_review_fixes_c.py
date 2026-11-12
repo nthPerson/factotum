@@ -191,3 +191,19 @@ def test_settings_show_the_budgets_the_runner_uses(tmp_path):
     e = TestClient(create_app(C.load(C.STARTER_CONFIG), db_path=str(tmp_path / "s.db"))).get("/api/settings").json()["effective"]
     assert e["claude.budgets_usd.chat_turn"] == float(_flag(runner.command(C.load(C.STARTER_CONFIG), "chat_turn"), "--max-budget-usd")) == 0.60
     assert e["claude.budgets_usd.ripple"] == 0.30
+
+
+# --- 11. effective's fingerprint of a masked value shows that it changed, and is too short to find it by
+
+def test_effective_fingerprints_a_masked_value_with_two_hex_characters(tmp_path, monkeypatch, capsys):
+    import re
+    from factotum.__main__ import main
+    y = tmp_path / "mine.yaml"
+    y.write_text("notify:\n  ntfy: {topic: factotum-7f3a9c2e}\n  morning_brief: {to: me@example.com}\nsources: {calendar: {calendar_id: ''}}\n")
+    monkeypatch.setattr(C, "DEFAULT_CONFIG_PATHS", [y])
+    monkeypatch.setenv("FACTOTUM_DB", str(tmp_path / "none.db"))
+    assert main(["effective", *sorted(C.MASKED)]) == 0
+    lines = {l.split()[0]: l.split()[1:] for l in capsys.readouterr().out.splitlines()[2:] if l.strip()}
+    for k in ("notify.ntfy.topic", "notify.morning_brief.to"):
+        assert lines[k][0] == "set" and re.fullmatch(r"#[0-9a-f]{2}", lines[k][1]), lines[k]
+    assert lines["sources.calendar.calendar_id"][0] == "empty"
