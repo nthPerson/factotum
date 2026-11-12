@@ -340,6 +340,9 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
 - **A staged change's tray key is `stageKey`** (2026-11-11): a link is `rel:<a>:<kind>:<b>`, never the bare id (that is the task's decision and would be overwritten); a new op needs a branch in `stageKey`, `changeWords` and `stageProposal`, or the tray drops or mislabels it.
 - **Opening a task stamps `neighbours_seen_at`** (2026-11-11; `GET /api/tasks/{id}`, every call, paging included): the page fetches it only for an opened row or the task page (`ensureDetails`), never for every row, and clears the row's "updated by" marker itself when it arrives.
 - **History arrives while things are typed** (2026-11-11): `loadDetail` swaps the two async containers in place (`swapDetail`) when `typingNow()`; a new async part of the opened task goes in `[data-dlinks]` / `[data-dhist]` or it is lost on arrival.
+- **A redraw that runs when a typed field blurs lands inside the press that blurred it** (2026-11-11): between its
+  mousedown and its click. `editRefresh` redraws a row's chips through `afterPress` (held until the click; a touch until
+  its click) and `patchHtml` (unchanged chips stay the same nodes); a replaced or moved chip lost the first tap.
 - **`.details` is built only for open rows** (2026-11-11): code that reads a row's details from the DOM sees only opened rows.
 - **Today may draw a task in a group it has no date for** (2026-11-11; `arrangeToday` pulls a task that frees a hard-dated one into that group) and a filter may hide a row: `jumpTo` resets the link filter to All before giving up, and opens the task page when no list holds the id.
 - **The phone trail is `history.state.from`** (2026-11-11): a page-to-page jump pushes `{page: true, from}`; nothing keeps a trail in memory.

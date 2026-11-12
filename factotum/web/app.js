@@ -3180,8 +3180,12 @@
     const t = byId(id); if (!t) return;
     const x = view(t);
     document.querySelectorAll(`#panel .row[data-id="${id}"] > .main .name, #panel .taskpage[data-id="${id}"] > h2`).forEach(el => { el.textContent = x.name; });
-    document.querySelectorAll(`#panel .row[data-id="${id}"] > .main > .meta, #panel .taskpage[data-id="${id}"] > .meta`).forEach(el => {
-      el.innerHTML = chipsHtml(x, el.dataset.extra || ''); wireBadges(el); wireDueChips(el); wireFilingChips(el);
+    afterPress('meta:' + id, () => {
+      const t2 = byId(id); if (!t2) return;
+      const x2 = view(t2);
+      document.querySelectorAll(`#panel .row[data-id="${id}"] > .main > .meta, #panel .taskpage[data-id="${id}"] > .meta`).forEach(el => {
+        patchHtml(el, chipsHtml(x2, el.dataset.extra || ''), r => { wireBadges(r); wireDueChips(r); wireFilingChips(r); });
+      });
     });
     document.querySelectorAll(`#panel [data-edstaged="${id}"]`).forEach(el => {
       const words = el.querySelector('.edwords');
@@ -3191,6 +3195,37 @@
     const due = !!x.due;
     document.querySelectorAll(`#panel #ed-hard-${id}`).forEach(h => { h.disabled = !due; h.checked = !!(x.hard && due); h.parentElement.title = due ? '' : 'Set a due date first'; });
     document.querySelectorAll(`#panel [data-ed-effort="${id}"]`).forEach(b => b.setAttribute('aria-pressed', String(b.dataset.v === x.effort)));
+  }
+  // A press in progress, from its pointerdown until just after its click: a redraw that would move what is under
+  // the pointer waits until then (`afterPress`, one per key, the latest kept). The blur of a typed field stages it
+  // in the middle of the press; the "1 change staged" chip that adds slid a desktop row's right-aligned chips away
+  // from the pointer, and on a phone it wrapped to a new line and pushed the editor's buttons down, so the click
+  // went elsewhere (2026-11-11). A finger's mouse events come after its pointerup, so a touch lasts until its click
+  // (or half a second, for a tap that makes none).
+  let pressing = false;
+  const pressWaiting = new Map();
+  function afterPress(key, f) { if (pressing) pressWaiting.set(key, f); else f(); }
+  const pressOver = () => setTimeout(() => { pressing = false; const fs = [...pressWaiting.values()]; pressWaiting.clear(); fs.forEach(f => f()); }, 0);
+  document.addEventListener('pointerdown', () => { pressing = true; }, true);
+  document.addEventListener('pointerup', e => { if (e.pointerType === 'touch') setTimeout(pressOver, 500); else pressOver(); }, true);
+  document.addEventListener('pointercancel', pressOver, true);
+  document.addEventListener('click', pressOver, true);
+  // Redraw a box from new markup in place: a child whose markup did not change stays the same node, the rest
+  // is wired (`wire(root)`) before it goes in. Leaving a typed field stages it and calls editRefresh between the
+  // mousedown and the click of the press that blurred it; a chip replaced there lost that click (a filing chip's
+  // first tap after typing did nothing, 2026-11-11).
+  function patchHtml(el, html, wire) {
+    const tmp = document.createElement('div'); tmp.innerHTML = html; wire(tmp);
+    const sig = n => n.nodeType === 1 ? n.outerHTML : n.nodeType + ':' + n.textContent;
+    const old = [...el.childNodes], sigs = old.map(sig);
+    let i = 0;
+    for (const f of [...tmp.childNodes]) {
+      const k = sigs.indexOf(sig(f), i);
+      if (k < 0) { el.insertBefore(f, old[i] || null); continue; }
+      for (; i < k; i++) old[i].remove();      // gone from the new markup
+      i = k + 1;                                // old[k] stays as it is
+    }
+    for (; i < old.length; i++) old[i].remove();
   }
   function wireEdStaged(root) {
     root.querySelectorAll('[data-ed-discard]').forEach(b => b.onclick = () => { const id = +b.dataset.edDiscard; delete ui.edWho[id]; discardStaged(keysFor(id)); });
