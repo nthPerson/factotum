@@ -701,6 +701,10 @@ label.pprop { cursor: pointer; }
   /* a box being typed in on a phone: nothing pinned covers it or the keyboard */
   body.kb-open .tray, body.kb-open .review .card .big, body.kb-open .pagebar, body.kb-open .fab { display: none; }
   body.kb-open .bulk:not(:focus-within) { display: none; }      /* the short bar too, unless its own date box is the one typed in */
+  /* …and Review's decisions stay while its note box is typed in (the note is Done's outcome): one short row of four
+     just above the keyboard (--kb; the tray's lift does not apply, the tray is hidden) */
+  body.kb-open.kb-note .review .card .big { display: grid; bottom: var(--kb, 0px) !important; padding-top: 6px; padding-bottom: 6px; }
+  body.kb-open.kb-note .review .card .big button { min-height: 44px; padding: 4px; }
 }
 
 /* New task by hand (stage 6, frame 6): the bar above the box, the one line, its "Will be added as" preview */

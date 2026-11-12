@@ -2306,8 +2306,8 @@
     document.documentElement.style.setProperty('--kb', Math.max(0, Math.round(innerHeight - vv.height - vv.offsetTop)) + 'px');
     const a = document.activeElement;
     if (document.body.classList.contains('kb-open') && a && a.matches('input, textarea')) {      // a smaller window: the box stays in view
-      const r = a.getBoundingClientRect();
-      if (r.top < 0 || r.bottom > vv.height) showBox(a, false);
+      const r = a.getBoundingClientRect(), big = document.body.classList.contains('kb-note') && document.querySelector('#panel .review .card .big');
+      if (r.top < 0 || r.bottom > vv.height - (big ? big.offsetHeight : 0)) showBox(a, false);      // above Review's decisions too
     }
   }
   // A box into view: a box in the New task sheet scrolls the sheet alone (scrollIntoView would also scroll the list
@@ -2323,13 +2323,16 @@
   document.addEventListener('focusin', e => {
     if (!PHONE() || !typesText(e.target)) return;
     document.body.classList.add('kb-open');
+    // Review's note box keeps the four decisions (the note is Done's outcome); they sit just above the keyboard. The
+    // class outlives the box's blur by the same moment as kb-open, so the tap that blurred it lands on Done.
+    document.body.classList.toggle('kb-note', e.target.id === 'rv-note');
     if (refocusing) return;      // a redraw put the focus back: the box is where it was
     const t = e.target;
     setTimeout(() => { if (document.activeElement === t) showBox(t, !window.matchMedia('(prefers-reduced-motion: reduce)').matches); }, 300);
   });
   // A moment later, and only when no text box took the focus: a tap that blurs a box near the bottom (a picker's hit
   // under a phone task page's More) must land on what was under the finger before the pinned bars come back (stage 6).
-  document.addEventListener('focusout', () => setTimeout(() => { if (!typesText(document.activeElement)) document.body.classList.remove('kb-open'); }, 300));
+  document.addEventListener('focusout', () => setTimeout(() => { if (!typesText(document.activeElement)) document.body.classList.remove('kb-open', 'kb-note'); }, 300));
   let logData = null;
   async function loadLog() { logData = await api('/api/log?limit=' + logLimit); render(); }
   // The Log has four views of the same two lists (SPEC §9): Timeline merges changes and runs by time,

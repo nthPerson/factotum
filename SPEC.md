@@ -864,7 +864,8 @@ or let Claude file a typed or dictated sentence, which carries no selected rows)
 the Today box, the sheet, each Add a step line) has its own key; Duplicate takes a fresh one. On a phone one
 thing sits at the bottom (the tray, the short bar, the pinned bars, the round button) and none shows while
 a box has focus (`body.kb-open`), so nothing covers the box (the short bar stays only while its own date box
-has the focus).
+has the focus; Review's four decisions stay while its note box has it, `body.kb-note`, since the note is Done's
+outcome: one short row of four just above the keyboard, at `--kb`).
 *The editor.* An opened open task is its own editor: name, where it stands (`context`), due and hard
 deadline, project, effort and one "who" field with a choice `is for` / `waiting on` (it writes `counterpart`
 or `waiting_on`, never both; changing the choice moves the text). Each edit stages under its own key

@@ -436,6 +436,8 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
   counts only while drawn, or a closed one keeps every return from reloading the lists.
 - **On a phone one thing at the bottom** (2026-11-11: tray, short bar, pinned bars, the round button;
   `body.fab-on`), and `body.kb-open` hides them all while a box has focus; a new bottom bar must join both rules.
+  Two exceptions: the short bar while its own date box has focus, and Review's decisions while `#rv-note` has it
+  (`body.kb-note`, set on focusin and cleared with kb-open 300 ms after the blur, so the tap that blurred the note lands on Done).
 - **The `who` field writes `counterpart` or `waiting_on`** (2026-11-11), never both.
 
 ## Gotchas carried over from plaud-sync (dates are when they were learned)
