@@ -593,8 +593,9 @@ from:max" as it happens. The final message is one JSON object:
 ```
 Python validates before the UI may stage anything: ops in that set only; a task op names an existing
 row; `set` fields pass the voice-note cleaner (settable fields, taxonomy, ISO dates); a reminder
-validates like the tray's; `create` waits for a click (an upsert by `chat:<message>:<n>`); mail
-evidence counts only for a conversation the run actually fetched. **`link_thread` is applied at once**,
+validates like the tray's; a `create` is made by its Create button at once or staged in the tray as
+`from_chat` (the server makes the stored proposal; both key it `chat:<message>:<n>`, so the two never make
+two tasks); mail evidence counts only for a conversation the run actually fetched. **`link_thread` is applied at once**,
 but only for a conversation the run fetched (the server records `seen.jsonl` per run): a link is
 metadata the sweep then watches for free, not task state, so a task linked once never goes stale
 silently. **Drafts** come from the server's own record (`drafts.jsonl`), never from the model's claim;
@@ -604,8 +605,9 @@ user's own accounts — a hostile mail that CCs a stranger cannot make that stra
 draft needs a conversation the turn read and is flagged in the UI when it reaches an address no task
 names. The UI renders proposals as checkboxes; "Stage selected" puts them in the tray. "Search
 related emails" and "Draft reply" are chat turns with a canned prompt (`prompts/chat-search-mail.md`,
-`chat-draft-reply.md`) and the task attached; the Review card's prompt field is a turn whose proposals
-about that task are staged straight into the review batch. Every turn is a `runs` row (`chat-turn`)
+`chat-draft-reply.md`) and the task attached; on a Review card the conversation lists what a reply proposes
+and "Stage all N with this decision" puts the ticked ones in the tray beside the card's decision (one Apply,
+one Undo; see Places below). Every turn is a `runs` row (`chat-turn`)
 with its cost; prompt and result live under `data/runs/chat/<thread>-<message>/`.
 
 **Places, and what a turn carries (stage 6, 2026-11-11, design §12.6).** A conversation has a place:
@@ -846,15 +848,22 @@ drawn in three places: on a Review card, under the box on Today / Timeline / Pro
 there continues the `today` conversation without changing tab; the Chat tab's own box is unchanged), and in
 an opened task (its canned buttons now answer there instead of switching to Chat). Proposals are listed in
 the order Claude gave them with a hint on each kind; Review's button reads "Stage all N with this decision",
-elsewhere "Stage N"; a create row also has Create (at once) and Edit first (it fills the New task line). One
-turn runs at a time on the page; a follow-up while one runs is refused with the text kept.
+elsewhere "Stage N"; a create row also has Create (at once) and Edit first (it fills the New task line). A
+link to a new task of the same reply is left out (and says so) while that task is unticked and not made. A
+proposal applied from a place or the Chat tab reads "applied" and is not offered again (the page remembers it
+per browser; an Undo of that batch offers it again). One turn runs at a time on the page; a follow-up while
+one runs is refused with the text kept. The Today box's conversation is asked for again on every return to
+the app, so one quiet for 12 hours is let go in an app left open.
 *New task.* On desktop a New task line (`n` or the button) with the add line's live preview ("Will be added
 as", chips, a legend of what each part meant, refused parts with their reasons); Enter adds at once, the
 toast says "Added Task-N" with Open and Undo, and "Add and open" opens it. Edit first moves a proposed task
 into this line. On a phone a round button at the bottom opens a sheet (a name, then taps for the date,
-project, effort and a link; Add at once, or let Claude file a typed or dictated sentence). On a phone one
+project, effort and a link; Add task adds, while the keyboard's Enter or Done only puts the keyboard away;
+or let Claude file a typed or dictated sentence, which carries no selected rows). Each box that adds (the line,
+the Today box, the sheet, each Add a step line) has its own key; Duplicate takes a fresh one. On a phone one
 thing sits at the bottom (the tray, the short bar, the pinned bars, the round button) and none shows while
-a box has focus (`body.kb-open`), so nothing covers the box.
+a box has focus (`body.kb-open`), so nothing covers the box (the short bar stays only while its own date box
+has the focus).
 *The editor.* An opened open task is its own editor: name, where it stands (`context`), due and hard
 deadline, project, effort and one "who" field with a choice `is for` / `waiting on` (it writes `counterpart`
 or `waiting_on`, never both; changing the choice moves the text). Each edit stages under its own key

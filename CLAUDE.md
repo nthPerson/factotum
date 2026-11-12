@@ -421,7 +421,8 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
   dev instance's test notifications open the dev instance.
 - **A task added by hand exists on Enter** (2026-11-11; `POST /api/add`, one `ui` batch, Source `Manual`);
   everything else a person edits stages. Its `key` makes a retry or a second Enter the same task
-  (`source_key` `add:<key>`); a new line needs a new key (`newKey()`).
+  (`source_key` `add:<key>`); a new line needs a new key, and each box has its own (`addKeyOf(box)`, `renewKey`):
+  with one shared key a lost response let another box's line come back `already: true` and be erased (review 2026-11-11).
 - **An add line is never a tray command** (2026-11-11): `commands.parse` returns None for it; `parse_add`
   reads it, a refused part stays in the name, and the page sends add lines to `/api/add` before `/api/commands`.
 - **A chat create in the tray is `from_chat`** (2026-11-11): the server takes its fields from the stored
@@ -431,7 +432,8 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
 - **One thread per task for a Review card and an opened task; one turn per thread** (2026-11-11; 409): the
   page runs one turn at a time and gives the text back when it cannot send.
 - **A new text box in the page needs `isDraftBox`** (2026-11-11; `DRAFT_BOXES` or the `ed-…-<id>` /
-  `step-line-<id>` forms), a `draft` entry and its `typingNow` count.
+  `step-line-<id>` forms), a `draft` entry and its `typingNow` count; a box that can close with its text kept
+  counts only while drawn, or a closed one keeps every return from reloading the lists.
 - **On a phone one thing at the bottom** (2026-11-11: tray, short bar, pinned bars, the round button;
   `body.fab-on`), and `body.kb-open` hides them all while a box has focus; a new bottom bar must join both rules.
 - **The `who` field writes `counterpart` or `waiting_on`** (2026-11-11), never both.
