@@ -784,6 +784,25 @@ def _norm_name(v) -> str:
     return " ".join(str(v or "").split()).casefold()
 
 
+# The keys a change itself may carry, beside `fields` (CHANGES_SCHEMA); anything else is named in `ignored`.
+CHANGE_KEYS = {"op", "task_id", "fields"}
+CHANGE_KEYS_BY_OP = {"create": {"reminders", "watch_sent_to", "ref", "links"}, "set": {"expect"}}
+CREATE_HOISTED = ("ref", "links")      # a create's own keys that live in its fields; an agent often writes them beside fields
+
+
+def create_fields(ch: dict) -> tuple[dict, str | None]:
+    """A create's fields with a `ref` / `links` written beside `fields` moved in (the shape an agent writes
+    naturally, like `reminders`); (fields, None), or (fields, why) when the same key is given in both places
+    with different values."""
+    f = dict(ch.get("fields")) if isinstance(ch.get("fields"), dict) else {}
+    for k in CREATE_HOISTED:
+        if k in ch:
+            if k in f and f[k] != ch[k]:
+                return f, f"{k} is given beside fields and in fields with different values; give it once, in fields"
+            f[k] = ch[k]
+    return f, None
+
+
 def _validate_changes(ctx: Context, changes, direct: bool = False) -> tuple[list[dict], list[str], list[str]]:
     """What a skill or connector may ask for, cleaned: existing rows in the right state, settable
     fields, taxonomy projects, well-formed dates, efforts, reminders and addresses, no twin of an
@@ -847,7 +866,14 @@ def _validate_changes(ctx: Context, changes, direct: bool = False) -> tuple[list
         fields = ch.get("fields") if ch.get("fields") is not None else {}
         if not isinstance(fields, dict):
             rejected.append(f"#{i}: fields must be an object"); continue
+        own = CHANGE_KEYS | CHANGE_KEYS_BY_OP.get(op, set())
+        for k in ch:
+            if k not in own:                                 # never dropped in silence: the validator is the check
+                ignored.append(f"#{i}: {k} beside fields is not read; a {op} change carries {', '.join(sorted(own))}")
         if op == "create":
+            fields, problem = create_fields(ch)
+            if problem:
+                rejected.append(f"#{i}: {problem}"); continue
             f = cleaned(i, {k: v for k, v in fields.items() if k not in ("ref", "links")})
             if f is None:
                 continue

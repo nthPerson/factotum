@@ -78,3 +78,75 @@ def test_links_check_never_creates_a_database(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("FACTOTUM_DB", str(tmp_path / "none" / "factotum.db"))
     assert main(["links-check"]) == 0
     assert "no database" in capsys.readouterr().out and not (tmp_path / "none").exists()
+
+
+# --- 2. a create's ref / links beside fields are read as its fields'; any other key a change carries is named
+
+def _skill_ctx(cfg, tmp_path, **kw):
+    from factotum import mcp_server as M
+    from conftest import TODAY
+    return M.Context(connect(tmp_path / "t.db"), cfg, today=TODAY, run_dir=tmp_path / "run", writer=lambda: connect(tmp_path / "t.db"), **kw)
+
+
+def _tool(ctx, name, **args):
+    import json
+    from factotum import mcp_server as M
+    resp = M.dispatch(ctx, {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": args}})
+    text = "".join(c["text"] for c in resp["result"]["content"] if c["type"] == "text")
+    assert not resp["result"]["isError"], text
+    return json.loads(text)
+
+
+SPLIT_BESIDE = [{"op": "create", "ref": "s1", "links": [{"kind": "part_of", "other": 1}], "fields": {"name": "Draft section 3.1"}},
+                {"op": "create", "ref": "s2", "links": [{"kind": "part_of", "other": 1}, {"kind": "waits_on", "other": "s1"}], "fields": {"name": "Draft section 3.2"}}]
+
+
+def test_a_split_written_with_ref_and_links_beside_fields_is_staged_linked(conn, cfg, tmp_path):
+    import json
+    from stage4_helpers import mk
+    mk(conn, 1, name="Thesis chapter 3")
+    res = _tool(_skill_ctx(cfg, tmp_path), "stage_changes", changes=SPLIT_BESIDE)
+    assert (res["staged"], res["rejected"], res["ignored"]) == (2, [], [])
+    staged = json.loads(conn.execute("SELECT changes_json FROM proposals WHERE id = ?", (res["proposal_id"],)).fetchone()[0])
+    assert [c["fields"].get("ref") for c in staged] == ["s1", "s2"]
+    assert staged[1]["fields"]["links"] == [{"kind": "part_of", "other": 1}, {"kind": "waits_on", "other": "s1"}]
+
+
+def test_a_split_written_beside_fields_is_applied_linked_in_apply_mode(conn, cfg, tmp_path):
+    from stage4_helpers import active_rels, mk
+    mk(conn, 1, name="Thesis chapter 3")
+    C.set_(cfg, "server.mcp_writes", "apply")
+    res = _tool(_skill_ctx(cfg, tmp_path, apply_writes=True, source="connector"), "apply_changes", changes=SPLIT_BESIDE)
+    assert res["rejected"] == [] and res["ignored"] == [] and res["applied"] >= 2
+    new = {r[1]: r[0] for r in conn.execute("SELECT id, name FROM tasks WHERE id > 1")}
+    a, b = new["Draft section 3.1"], new["Draft section 3.2"]
+    assert active_rels(conn) == {(a, 1, "part_of"), (b, 1, "part_of"), (b, a, "waits_on")}
+
+
+def test_a_ref_given_twice_differently_rejects_the_change_and_any_other_stray_key_is_named(conn, cfg, tmp_path):
+    from factotum import mcp_server as M
+    from stage4_helpers import mk
+    from conftest import TODAY
+    mk(conn, 1, name="Thesis chapter 3")
+    ctx = M.Context(connect(tmp_path / "t.db"), cfg, today=TODAY)
+    kept, rejected, ignored = M._validate_changes(ctx, [
+        {"op": "create", "ref": "s1", "fields": {"name": "Step", "ref": "s9"}},
+        {"op": "create", "ref": "s1", "fields": {"name": "Same ref twice, same value", "ref": "s1"}},
+        {"op": "done", "task_id": 1, "outcome": "sent", "fields": {}},
+        {"op": "set", "task_id": 1, "due": "2026-11-20", "expect": {"due": None}, "fields": {"effort": "S"}}])
+    assert len(rejected) == 1 and rejected[0].startswith("#0: ref is given beside fields and in fields")
+    assert [k["fields"].get("ref") for k in kept if k["op"] == "create"] == ["s1"]
+    assert len(ignored) == 2 and ignored[0].startswith("#2: outcome beside fields is not read") and ignored[1].startswith("#3: due beside fields is not read")
+    assert "fields" in ignored[0] and "expect" in ignored[1]                      # it says where the key belongs
+
+
+def test_chat_reads_a_create_ref_and_links_beside_fields_too(conn, cfg):
+    from factotum import chat
+    from stage4_helpers import mk
+    mk(conn, 1, name="Thesis chapter 3")
+    data = {"proposals": [dict(p, label=p["fields"]["name"]) for p in SPLIT_BESIDE] +
+                         [{"op": "create", "ref": "s3", "fields": {"name": "Conflicting", "ref": "s4"}, "label": "Conflicting"}]}
+    kept, rejected = chat._clean_proposals(conn, cfg, data, {}, tasks_seen=set(), attached=[1])
+    assert [p["fields"].get("ref") for p in kept] == ["s1", "s2"]
+    assert kept[1]["fields"]["links"] == [{"kind": "part_of", "other": 1}, {"kind": "waits_on", "other": "s1"}]
+    assert rejected == ["Conflicting: ref is given beside fields and in fields with different values; give it once, in fields"]

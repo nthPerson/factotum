@@ -236,7 +236,15 @@ def _clean_proposals(conn: sqlite3.Connection, cfg: dict, data: dict, seen: dict
     kept: list[dict] = []
     rejected: list[str] = []
     known = set(attached or []) | set(tasks_seen or [])      # the only tasks a proposed link may name
-    proposals = (data.get("proposals") or [])[:PROPOSAL_CAP]
+    proposals = list((data.get("proposals") or [])[:PROPOSAL_CAP])
+    for i, p in enumerate(proposals):                         # a create's ref / links written beside fields are read as its fields'
+        if isinstance(p, dict) and p.get("op") == "create":
+            f, problem = mcp_server.create_fields(p)
+            if problem:
+                rejected.append(f"{str(p.get('label') or '').strip()[:160] or 'create'}: {problem}")
+                proposals[i] = None
+            else:
+                proposals[i] = dict(p, fields=f)
     ref_owner: dict[str, int] = {}                           # a create's ref → its place in the reply (the first one wins)
     for i, p in enumerate(proposals):
         f = p.get("fields") if isinstance(p, dict) and isinstance(p.get("fields"), dict) else {}
