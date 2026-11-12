@@ -44,6 +44,7 @@ nav.tabs button { font: inherit; background: none; border: 0; color: var(--muted
 }
 nav.tabs button[aria-selected="true"] { background: var(--surface-2); color: var(--fg); font-weight: 500; }
 nav.tabs button .n { font-family: var(--mono); font-size: 11px; margin-left: 6px; color: var(--muted); }
+nav.tabs button .n:empty { display: none; }      /* no number yet (or 0): its margin would widen the gap after the tab */
 button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .spacer { flex: 1; }
 .btn.update { flex: none; white-space: nowrap; border-color: var(--accent); color: var(--accent); font-weight: 500; }      /* a newer build is on the server (app.js onReturn) */
