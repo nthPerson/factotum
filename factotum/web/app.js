@@ -2659,7 +2659,10 @@
   // between them carry the same key, so the server makes one task; an edited line gets a new key. Each box has
   // its own key (`line`, `cmd`, `sheet`, `step:<id>`), so a response lost in one box never makes an add from
   // another box the same task; Duplicate has no box and takes a fresh key every time.
-  const ADD_RE = /^\s*(?:(?:add|new)\s+|\+\s*)/i;
+  // The same pattern as the server's (commands.ADD_RE): a bare `add` / `new` / `+` is an add line with no name, so it
+  // is refused as one ("a task needs a name") and never sent to /api/commands or to Claude as a sentence.
+  const ADD_RE = /^\s*(?:(?:add|new)(?:\s+|$)|\+\s*)/i;
+  const BARE_ADD_RE = /^\s*(?:add|new|\+)\s*$/i;
   function newKey() {
     const b = new Uint8Array(12); crypto.getRandomValues(b);
     return Array.from(b, x => (x % 36).toString(36)).join('');
@@ -2687,6 +2690,8 @@
     const cur = addText(slot) || '', p = addPrev[slot];
     if (!cur.trim() || (slot === 'cmd' && !ADD_RE.test(cur)) || !p || p.text !== cur || !p.res || !p.res.is_add) return '';
     const r = p.res, parts = r.parts || [], refused = r.refused || [];
+    if (!r.name) return `<div class="addprev"><div class="lbl">Not added yet</div>
+      <div class="refused">${refused.map(x => `<div>${x.words ? `<span class="code">${esc(x.words)}</span> ` : ''}${esc(x.why)}</div>`).join('')}</div></div>`;
     const chip = x => x.kind === 'waits_on' || x.kind === 'part_of' ? `<span class="lb ${x.kind === 'waits_on' ? 'wait' : 'ok'}">${linkTasks(x.label)}</span>`
       : `<span class="chip${x.kind === 'project' ? ' proj' : x.kind === 'due' || x.kind === 'effort' ? ' mono' : ''}">${esc(x.label)}</span>`;
     return `<div class="addprev"><div class="lbl">Will be added as</div>
@@ -3459,6 +3464,8 @@
     const cmd = document.getElementById('cmd'), cmdGo = document.getElementById('cmd-go');
     const cmdSend = () => {
       const v = draft.cmd.trim(); if (!v) return;
+      // A bare add / new / + names no task: nothing is sent (not as a command, not to Claude), the text stays.
+      if (ui.tab !== 'chat' && BARE_ADD_RE.test(v)) { toast('Not added: a task needs a name'); previewAdd('cmd', draft.cmd); if (cmd) cmd.focus(); return; }
       if (chat.busy && ui.tab === 'chat') { toast('Claude is still answering · your prompt is kept in the box'); return; }      // never clear what cannot be sent
       draft.cmd = ''; if (cmd) { cmd.value = ''; grow(cmd); } sendPrompt(v);
     };
