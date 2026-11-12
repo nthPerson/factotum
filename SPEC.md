@@ -1381,7 +1381,8 @@ and what it waits on), `waiting_tasks`, `twin_candidates` (pairs that look like 
 into `TOOL_BUDGET` by dropping whole rows from the end and reporting the count cut, so a result is never
 cut mid-JSON; `task_get` shows `linked` (task links; `links` stays outside things). New ops for
 `stage_changes`: `link`, `unlink`, `merge`, `add_note`, `done` / `drop` with `outcome`, and a `set` that
-carries `expect`. `apply_changes` accepts `link` and `unlink` but never `merge`: a merge drops a task and
+carries `expect`; a `set` of `outcome` alone is taken on a done or dropped task and refused on an open one (an
+outcome there would ripple at once with the task still open). `apply_changes` accepts `link` and `unlink` but never `merge`: a merge drops a task and
 always waits for a tap. A link counts as two rows against the hourly cap. The validator checks a link with
 the same rules as `batches.apply` before the open-task rule.
 

@@ -193,3 +193,108 @@ def test_the_scheme_and_the_host_are_compared_without_case():
 ])
 def test_what_looks_alike_but_is_written_differently_is_another_address(old, new):
     assert ripple._loss(old, new) is not None and ripple._new_addresses(old, new)[1]
+
+
+# --- 3. a connector sets an outcome only on a closed task ------------------------------------------
+
+OUTCOME_OPEN = "an outcome goes with done or drop (set it there), or on a task that is already closed"
+
+
+def _ctx(cfg, tmp_path, **kw):
+    from factotum import mcp_server as M
+    from factotum.db import connect
+    return M.Context(connect(tmp_path / "t.db"), cfg, today=TODAY, run_dir=tmp_path / "run", writer=lambda: connect(tmp_path / "t.db"), **kw)
+
+
+def _call(ctx, name, **args):
+    import json
+    from factotum import mcp_server as M
+    resp = M.dispatch(ctx, {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": args}})
+    text = "".join(c["text"] for c in resp["result"]["content"] if c["type"] == "text")
+    return resp["result"]["isError"], (text if resp["result"]["isError"] else json.loads(text))
+
+
+def _linked(conn):
+    mk(conn, 1); mk(conn, 2); link(conn, 2, 1, "waits_on")
+    conn.execute("DELETE FROM ripple_queue"); conn.commit()
+
+
+def _queued(conn):
+    return [tuple(r) for r in conn.execute("SELECT task_id, now FROM ripple_queue ORDER BY task_id")]
+
+
+def test_validate_refuses_an_outcome_on_an_open_task_and_takes_one_on_a_closed_one(conn, cfg, tmp_path):
+    from factotum import mcp_server as M
+    _linked(conn)
+    ctx = _ctx(cfg, tmp_path)
+    for direct in (False, True):
+        kept, rejected, _ = M._validate_changes(ctx, [{"op": "set", "task_id": 1, "fields": {"outcome": "the lab said no"}},
+                                                     {"op": "set", "task_id": 1, "fields": {"outcome": "x", "effort": "S"}}], direct=direct)
+        assert kept == [] and rejected == [f"#0: {OUTCOME_OPEN}", f"#1: {OUTCOME_OPEN}"]
+    batches.apply(conn, [{"op": "done", "task_id": 1}], "ui", TODAY); batches.apply(conn, [{"op": "drop", "task_id": 2}], "ui", TODAY)
+    kept, rejected, _ = M._validate_changes(ctx, [{"op": "set", "task_id": 1, "fields": {"outcome": "the lab said no"}},
+                                                 {"op": "set", "task_id": 2, "fields": {"outcome": "not needed"}},
+                                                 {"op": "set", "task_id": 1, "fields": {"outcome": "x", "effort": "S"}},
+                                                 {"op": "set", "task_id": 1, "fields": {"effort": "S"}}], direct=True)
+    assert kept == [{"task_id": 1, "op": "set", "fields": {"outcome": "the lab said no"}}, {"task_id": 2, "op": "set", "fields": {"outcome": "not needed"}}]
+    assert rejected == ["#2: Task-1 is not open (done)", "#3: Task-1 is not open (done)"]
+
+
+def test_stage_changes_refuses_an_outcome_on_an_open_task(conn, cfg, tmp_path):
+    _linked(conn)
+    err, text = _call(_ctx(cfg, tmp_path), "stage_changes", changes=[{"op": "set", "task_id": 1, "fields": {"outcome": "the lab said no"}}])
+    assert err and OUTCOME_OPEN in text
+    assert conn.execute("SELECT COUNT(*) FROM proposals").fetchone()[0] == 0 and _queued(conn) == []
+
+
+def test_stage_changes_takes_an_outcome_on_a_done_task_and_apply_ripples_it(conn, cfg, tmp_path):
+    import json
+    _linked(conn)
+    batches.apply(conn, [{"op": "done", "task_id": 1}], "ui", TODAY)
+    conn.execute("DELETE FROM ripple_queue"); conn.commit()
+    err, res = _call(_ctx(cfg, tmp_path), "stage_changes", changes=[{"op": "set", "task_id": 1, "fields": {"outcome": "the lab said no"}}])
+    assert not err and res["staged"] == 1 and res["rejected"] == []
+    staged = json.loads(conn.execute("SELECT changes_json FROM proposals WHERE id = ?", (res["proposal_id"],)).fetchone()[0])
+    out = batches.apply(conn, staged, "skill", TODAY)                     # what the tray's Apply does
+    assert out["ripple_queued"] == [1] and _queued(conn) == [(1, 1)]
+    assert get_task(conn, 1)["outcome"] == "the lab said no" and get_task(conn, 1)["status"] == "done"
+
+
+def test_apply_changes_refuses_an_outcome_on_an_open_task_and_applies_it_on_a_done_one(conn, cfg, tmp_path):
+    from factotum import config as C
+    _linked(conn)
+    C.set_(cfg, "server.mcp_writes", "apply")
+    ctx = _ctx(cfg, tmp_path, apply_writes=True, source="connector")
+    err, text = _call(ctx, "apply_changes", changes=[{"op": "set", "task_id": 1, "fields": {"outcome": "the lab said no"}}])
+    assert err and OUTCOME_OPEN in text
+    assert get_task(conn, 1)["outcome"] is None and get_task(conn, 1)["status"] == "open" and _queued(conn) == []
+    assert conn.execute("SELECT COUNT(*) FROM batches WHERE source = 'connector'").fetchone()[0] == 0
+    batches.apply(conn, [{"op": "done", "task_id": 1}], "ui", TODAY)
+    conn.execute("DELETE FROM ripple_queue"); conn.commit()
+    err, res = _call(ctx, "apply_changes", changes=[{"op": "set", "task_id": 1, "fields": {"outcome": "the lab said no"}}])
+    assert not err and res["applied"] == 1 and res["rejected"] == []
+    assert get_task(conn, 1)["outcome"] == "the lab said no" and get_task(conn, 1)["status"] == "done"
+    assert _queued(conn) == [(1, 1)]                                       # one ripple, at once
+
+
+def test_done_or_drop_with_an_outcome_still_works_and_the_page_can_still_set_one(conn, cfg, tmp_path):
+    from factotum import config as C
+    _linked(conn)
+    C.set_(cfg, "server.mcp_writes", "apply")
+    ctx = _ctx(cfg, tmp_path, apply_writes=True, source="connector")
+    err, res = _call(ctx, "apply_changes", changes=[{"op": "done", "task_id": 1, "fields": {"outcome": "sent"}}])
+    assert not err and get_task(conn, 1)["outcome"] == "sent"
+    for source in ("ui", "ntfy"):                                        # the page's "Say how it went" and the reminder's form
+        batches.apply(conn, [{"op": "set", "task_id": 1, "fields": {"outcome": f"from {source}"}}], source, TODAY)
+        assert get_task(conn, 1)["outcome"] == f"from {source}"
+
+
+def test_a_null_outcome_on_an_open_task_passes_only_when_it_writes_nothing(conn, cfg, tmp_path):
+    from factotum import mcp_server as M
+    _linked(conn); mk(conn, 3, outcome="left from an old import"); link(conn, 3, 1, "waits_on")
+    conn.execute("DELETE FROM ripple_queue"); conn.commit()
+    kept, rejected, _ = M._validate_changes(_ctx(cfg, tmp_path), [{"op": "set", "task_id": 1, "fields": {"outcome": None}},
+                                                                 {"op": "set", "task_id": 3, "fields": {"outcome": None}}], direct=True)
+    assert kept == [{"task_id": 1, "op": "set", "fields": {"outcome": None}}] and rejected == [f"#1: {OUTCOME_OPEN}"]
+    batches.apply(conn, kept, "connector", TODAY)
+    assert _queued(conn) == []
