@@ -584,7 +584,9 @@ older than 24 h is set aside unrun; with ripples off the scheduler empties the q
 **The input.** Per changed task: what changed as before → now, the outcome, any task merged into it. Per
 linked task (open only, at most 12: direct links first, then other steps of the same goal): its link, due
 date, who it waits on, name and text, each text cut to 1500 characters (a cut text is marked so in the
-prompt). Every value is one JSON string in the prompt and escaped (stranger text, §2).
+prompt). Every value is one JSON string in the prompt (stranger text, §2), with `<` and `>` and the
+characters a reader may take for a line break as JSON escapes; never HTML entities, so a rewrite that keeps
+the owner's words writes back exactly what the owner wrote.
 
 **The reply** is `{"ripples": [{"task_id", "effect": "none" | "text" | "propose", "context", "why",
 "proposals": [{"op", "fields", "reason"}]}]}`, one entry per linked task. A wrong shape anywhere (not that

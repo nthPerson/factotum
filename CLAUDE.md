@@ -375,6 +375,10 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
   links, `Task-N` and addresses, so History's Undo is the safety net. A text over `ripple.TEXT_CAP` (1500) is
   shown cut and is never rewritten (review 2026-11-11: the rewrite replaced the whole text with what was built
   from its first 1500 characters); its ripple is the dated note (`ripple.TOO_LONG`).
+- **A value a run may write back is JSON-escaped in its prompt, never HTML-escaped** (review 2026-11-11): the
+  ripple prompt `html.escape`d task text, and a rewrite that kept the owner's words wrote "Q&amp;A" into the
+  text (and an address with `&` came back changed, so the guard turned the rewrite into a note). `ripple._q` is
+  one JSON string with `<`, `>` and the line-break characters as JSON escapes, which a reader turns back.
 - **Never pipe the dev or service start script's output through `tail` / `head` when it leaves a server
   running** (2026-11-11): the pipe never closes and the command hangs. And `GET /api/review` is loaded once
   per page (the in-flight flag in `app.js`) because its `last_offered_at` stamp commits on the shared

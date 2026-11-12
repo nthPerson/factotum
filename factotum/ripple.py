@@ -288,8 +288,10 @@ def _cut(text: str | None) -> bool:
 
 LINE_CAP = 300                      # characters of a name, an outcome or a waiting_on in the prompt
 FIELD_CAP = {"context": TEXT_CAP}   # any other field's value: LINE_CAP
-# What JSON leaves raw with ensure_ascii=False and a reader may still take for a line break.
-_BREAKS = str.maketrans({"\u2028": "\\u2028", "\u2029": "\\u2029", "\x85": "\\u0085"})
+# What JSON leaves raw with ensure_ascii=False and a reader may still take for a line break; and < and >,
+# written as JSON escapes so no value ever reads as a tag, which a JSON reader turns back into the same
+# characters (never HTML entities: a faithful rewrite would write "&amp;" into the owner's text).
+_BREAKS = str.maketrans({"\u2028": "\\u2028", "\u2029": "\\u2029", "\x85": "\\u0085", "<": "\\u003c", ">": "\\u003e"})
 
 
 def _esc(v) -> str:
@@ -297,9 +299,11 @@ def _esc(v) -> str:
 
 
 def _q(v, cap: int = LINE_CAP) -> str:
-    """A value a task holds, as the prompt shows it: cut to `cap`, escaped, then ONE JSON string, so no
-    line break it holds ever starts a line of the prompt (a stranger's "# 5. Return" stays inside quotes)."""
-    return json.dumps(_esc(str(v)[:cap]), ensure_ascii=False).translate(_BREAKS)
+    """A value a task holds, as the prompt shows it: cut to `cap`, then ONE JSON string, so no line break
+    it holds ever starts a line of the prompt (a stranger's "# 5. Return" stays inside quotes). Only JSON
+    escapes: what a JSON reader gets back is exactly what the task holds, so a rewrite that keeps the
+    owner's words keeps them character for character."""
+    return json.dumps(str(v)[:cap], ensure_ascii=False).translate(_BREAKS)
 
 
 def _shown(field: str, v) -> str:
