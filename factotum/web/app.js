@@ -921,7 +921,7 @@
     const more = n => n > 1 ? ` +${n - 1}` : '';
     const tagged = (kind, dir, other) => links.some(l => l.staged && l.kind === kind && l.dir === dir && (other === undefined || l.other === other));
     const title = n => { const t = nameOf(n); return `Task-${n}` + (t ? ` · ${t.name}` + (t.status === 'done' ? ' (done)' : t.status === 'dropped' ? ' (dropped)' : '') : ''); };
-    const frees = r.frees_open || [], waits = r.waits_on_open || [], sugg = r.suggestions || [];
+    const frees = r.frees_open || [], waits = r.waits_on_open || [], sugg = (r.suggestions || []).filter(s => s.signal !== 'filing');      // a filing suggestion is a chip (filingChipsHtml)
     if (frees.length) {
       const n = r.needed_by_via === 'frees' && r.needed_by_id != null ? r.needed_by_id : frees[0];
       out.push({ kind: 'frees', look: tagged('waits_on', 'in', n) ? 'staged' : 'ok', text: (r.needed_by ? 'do first: frees ' : 'frees ') + `Task-${n}` + more(frees.length), jump: n, title: title(n) });
@@ -993,6 +993,48 @@
   function legendHtml() {
     if (PHONE() || !hasLinks()) return '';
     return `<div class="lblegend"><span><i class="ok"></i>a link you or Claude confirmed</span><span><i class="sus"></i>a link the app suspects, one tap to confirm</span><span><i class="chg"></i>changed by a linked task since you last looked</span></div>`;
+  }
+
+  // ---------- suggestions (stage 7): filing chips ----------
+  // What the filing run proposed for a task made by hand with only a name: a project, an effort (`filing` on the
+  // task) and a link or twin (a suggestion with signal `filing`). Each is a dashed chip on the row, the opened row and
+  // the task page: a tap stages it with its verdict, × dismisses it. Gone once either is staged.
+  const FILING_SAID = { part_of: ['part of', 'step:'], waits_on: ['waits on', 'frees'], same_as: ['same as', 'same as'] };
+  const filingLinks = x => ((x.rel && x.rel.suggestions) || []).filter(s => s.signal === 'filing' && FILING_SAID[s.kind]);
+  function filingChipsHtml(x) {
+    if (x.status !== 'open') return '';
+    const chip = (eid, label, title) => `<span class="fsug"><button class="chip fsug-ok" data-fsug="${eid}" data-id="${x.id}" title="${esc(title)}">${esc(label).replace(/Task-\d+/, '<span class="tid">$&</span>')}</button><button class="fsug-no" data-fsug-no="${eid}" data-id="${x.id}" aria-label="Not this">×</button></span>`;
+    const said = 'Suggested when you made it · tap to accept';
+    const fields = (x.filing || []).filter(f => !suggestionStaged(f.evidence_id)).map(f => chip(f.evidence_id, f.label, said));
+    const links = filingLinks(x).filter(s => !suggestionStaged(s.evidence_id)).map(s => {
+      const T = `Task-${s.other}`, n = nameOf(s.other);
+      return chip(s.evidence_id, `${FILING_SAID[s.kind][s.dir === 'in' ? 1 : 0]} ${T}?`, `${said} · ${T}${n ? ' ' + n.name : ''}`);
+    });
+    return fields.concat(links).join('');
+  }
+  function wireFilingChips(root) {
+    // The server's task (the open list, or the opened task's payload) holds what the chip proposed.
+    const src = id => byId(id) || detailCache.get(id) || {};
+    root.querySelectorAll('[data-fsug]').forEach(b => b.addEventListener('click', e => {
+      e.preventDefault(); e.stopPropagation();
+      const id = +b.dataset.id, eid = +b.dataset.fsug, t = src(id);
+      const f = (t.filing || []).find(c => c.evidence_id === eid);
+      if (f) {      // under the editor's key: the row and the editor show it before Apply, a later choice replaces it
+        stageChange({ task_id: id, op: 'set', fields: { [f.field]: f.value } }, `filed: ${f.field} ${f.value}`, {}, 'edit-' + f.field);
+        stageJudge(eid, id, 'applied', 'filing suggestion accepted');
+      } else {
+        const s = filingLinks(t).find(c => c.evidence_id === eid); if (!s) return;
+        const c = s.kind === 'same_as'
+          ? { task_id: s.keep === id ? s.other : id, op: 'merge', fields: { into: s.keep != null ? s.keep : s.other } }
+          : { task_id: s.dir === 'out' ? id : s.other, op: 'link', fields: { kind: s.kind, other: s.dir === 'out' ? s.other : id } };
+        stageChange(c, '', { ev: eid });
+      }
+      toast('Staged · press Apply in the tray');
+    }));
+    root.querySelectorAll('[data-fsug-no]').forEach(b => b.addEventListener('click', e => {
+      e.preventDefault(); e.stopPropagation();
+      stageJudge(+b.dataset.fsugNo, +b.dataset.id, 'dismissed', 'filing suggestion dismissed');
+    }));
   }
 
   // ---------- links (stage 4b): filters and the Linked view ----------
@@ -1480,6 +1522,7 @@
     const fadeDays = x.fade_at ? daysTo(x.fade_at) : null;
     return [
       `<span class="lbs" data-lbs="${x.id}">${linkChipsHtml(x)}</span>`,      // one box (display: contents) swapDetail redraws
+      filingChipsHtml(x),      // outside .lbs: swapDetail rewrites that box with the link badges alone
       x.top_rank ? `<span class="chip top">Top ${topPos.get(x.id) || x.top_rank}</span>` : '',
       x.longterm_effective ? `<span class="chip lt">Long-term</span>` : '',
       x.close_on_sent_since ? `<span class="chip" title="Closes itself when a message to ${esc(x.close_on_sent_to || 'the watched address')} is sent">✉ closes on send</span>` : '',
@@ -3115,7 +3158,7 @@
     const x = view(t);
     document.querySelectorAll(`#panel .row[data-id="${id}"] > .main .name, #panel .taskpage[data-id="${id}"] > h2`).forEach(el => { el.textContent = x.name; });
     document.querySelectorAll(`#panel .row[data-id="${id}"] > .main > .meta, #panel .taskpage[data-id="${id}"] > .meta`).forEach(el => {
-      el.innerHTML = chipsHtml(x, el.dataset.extra || ''); wireBadges(el); wireDueChips(el);
+      el.innerHTML = chipsHtml(x, el.dataset.extra || ''); wireBadges(el); wireDueChips(el); wireFilingChips(el);
     });
     document.querySelectorAll(`#panel [data-edstaged="${id}"]`).forEach(el => {
       const words = el.querySelector('.edwords');
@@ -3330,6 +3373,7 @@
     panel.querySelectorAll('[data-page-later]').forEach(b => b.onclick = () => pageLater(b.dataset.pageLater));
     placePageBar();
     wireBadges(panel);
+    wireFilingChips(panel);
     panel.querySelectorAll('[data-act]').forEach(b => b.addEventListener('click', () => act(+b.dataset.id, b.dataset.act)));
     wireDueChips(panel);
     panel.querySelectorAll('[data-bulk]').forEach(b => b.addEventListener('click', () => {

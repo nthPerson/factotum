@@ -220,6 +220,20 @@ span.lb { cursor: default; }      /* stepsChip: the same look, not a link */
   .chip.need, .chip.morelinks { font-size: 12px; padding: 5px 9px; }
   .lblegend { display: none; }
 }
+/* What the filing run suggested for a task made by hand (app.js filingChipsHtml): a dashed chip like a suspected
+   link (.lb.sus), one tap to accept, and × for "not this". */
+.fsug { display: inline-flex; align-items: center; gap: 2px; }
+.fsug-ok { font: inherit; font-size: 11px; font-weight: 500; line-height: 1.45; padding: 2px 8px; border-radius: 999px; background: var(--surface); border: 1px dashed var(--warn); color: var(--warn); cursor: pointer; }
+.fsug-ok .tid { font-family: var(--mono); }
+.fsug-no { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--muted); font: inherit; font-size: 14px; line-height: 1; cursor: pointer; }
+.fsug-no:hover { background: var(--surface-2); color: var(--fg); }
+.fsug-ok:focus-visible, .fsug-no:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+@media (max-width: 700px) {
+  /* 44 px where a finger lands, drawn 32 px tall: the dashed pill is the ::before, the margin gives the rest back. */
+  .fsug-ok { position: relative; isolation: isolate; min-height: 44px; margin-block: -6px; padding: 0 10px; font-size: 12px; background: transparent; border: 0; }
+  .fsug-ok::before { content: ''; position: absolute; inset: 6px 0; z-index: -1; border-radius: 999px; background: var(--surface); border: 1px dashed var(--warn); }
+  .fsug-no { width: 44px; height: 44px; margin-block: -6px; font-size: 16px; }
+}
 /* The Linked view (app.js linkedHtml, frame 2): a goal with its steps,
    a task with what waits on it, a dashed card for a suspected twin. */
 .lgroup { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; margin-bottom: 16px; }
