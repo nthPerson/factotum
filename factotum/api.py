@@ -261,6 +261,11 @@ class BuildStamp:
 def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=None) -> FastAPI:
     cfg = cfg or C.load()
     conn = connect(db_path or C.db_path(), shared=True)      # one connection for every request thread: no statement cache (db.connect)
+    # The routes that write and commit on that connection outside a batch's own path take turns here: every GET
+    # that writes (Review's day and offered stamp, an opened task's neighbours stamp, the first push key pair, a
+    # reminder link's Done or Snooze) and a suggestion card's Create. Two commits interleaved on one connection
+    # answered 500 ("cannot commit - no transaction is active"). Never held across a network call.
+    commit_lock = threading.Lock()
     init_db(conn)
     if not cfg.get("_starter"):
         seed_accounts(conn, C.get(cfg, "sources.mail.seed_accounts", []))
@@ -383,8 +388,9 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         t["history"] = history(task_id, before, limit)
         # The value before this request (the page marks what changed since), then the stamp that
         # clears the task's "changed" marker: opening a task is looking at its neighbours.
-        conn.execute("UPDATE tasks SET neighbours_seen_at = ? WHERE id = ?", (now_iso(), task_id))
-        conn.commit()
+        with commit_lock:                                        # the read above stays outside
+            conn.execute("UPDATE tasks SET neighbours_seen_at = ? WHERE id = ?", (now_iso(), task_id))
+            conn.commit()
         return t
 
     @app.post("/api/commands")
@@ -477,8 +483,6 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         and the ripple batches that landed after batch `after` (the page polls this after an Apply)."""
         return ripple.status(conn, eff_cfg(), scheduler=getattr(app.state, "scheduler", None) is not None, after=after)
 
-    review_lock = threading.Lock()
-
     @app.get("/api/review")
     def review(exclude: str | None = None):
         """One page of the review queue. `exclude` is a comma-separated list of task ids the client
@@ -486,7 +490,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         `total` is the whole eligible set after exclusion; `items` is the first `cap` of it.
         Two at once take turns: each writes (the day's suggestions, the offered stamp) and commits on
         the shared connection, and two commits interleaved there answered 500."""
-        with review_lock:
+        with commit_lock:
             return _review(exclude)
 
     @app.get("/api/review/count")
@@ -596,7 +600,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         card back; Create after that Undo reopens the same task in one batch (`reopened`). A Slack card's
         message link is provenance, added beside the batch like Chat's cited threads. Two taps at once take
         turns. Answers {task_id, batch_id (None when nothing was written), skipped: [why], reopened, already}."""
-        with review_lock:
+        with commit_lock:
             return _create_suggestion(evidence_id)
 
     def _create_suggestion(evidence_id: int) -> dict:
@@ -700,7 +704,8 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
     def push_state() -> dict:
         public, error = None, None
         try:
-            public = app_push.keys(conn, create=True).public
+            with commit_lock:                    # the first call makes the key pair and empties the devices
+                public = app_push.keys(conn, create=True).public
         except app_push.KeyFileError as e:
             error = str(e)
         hidden = ("p256dh", "auth")
@@ -718,7 +723,8 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
     @app.post("/api/push/subscribe")
     def push_subscribe(body: SubscribeBody):
         try:
-            app_push.keys(conn, create=True)
+            with commit_lock:
+                app_push.keys(conn, create=True)
         except app_push.KeyFileError as e:
             return JSONResponse({"detail": str(e)}, status_code=409)
         p256dh, auth = body.keys.get("p256dh"), body.keys.get("auth")
@@ -1197,7 +1203,8 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         session authorises them; the token is single use for done/snooze and expires after 24 h."""
         base = str(C.get(cfg, "server.public_url", "")).rstrip("/")
         try:
-            res = reminders.act(conn, eff_cfg(), token, a)
+            with commit_lock:                    # a GET that writes: Done and Snooze commit on the shared connection
+                res = reminders.act(conn, eff_cfg(), token, a)
         except reminders.TokenError as e:
             return HTMLResponse(_page("Factotum", e.why, base), status_code=e.status)
         if res["action"] == "open":

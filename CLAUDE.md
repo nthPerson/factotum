@@ -377,6 +377,10 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
   running** (2026-11-11): the pipe never closes and the command hangs. And `GET /api/review` is loaded once
   per page (the in-flight flag in `app.js`) because its `last_offered_at` stamp commits on the shared
   connection; two at once answered 500.
+- **A GET that writes takes `commit_lock`** (2026-11-11, `api.create_app`): Review's stamps, an opened task's
+  `neighbours_seen_at`, the first push key pair, a reminder link's Done / Snooze, and a suggestion card's Create;
+  two commits interleaved on the shared connection answered 500. A new route that commits outside
+  `batches.apply` takes it too (never across a network call); `GET /api/review/count` reads only and stays out.
 - **`expire` only touches rows Review has shown** (`last_offered_at`, stamped by `GET /api/review`).
   A row that was never on a Review page stays open however old it is; that is by design.
 - **The manifest must be requested with `crossorigin="use-credentials"`** (2026-11-10): otherwise Access

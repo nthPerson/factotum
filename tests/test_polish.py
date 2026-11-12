@@ -265,3 +265,18 @@ def test_undo_of_a_batch_with_broken_undo_data_answers_400_and_changes_nothing(c
     assert r.status_code == 400 and "undo" in r.json()["detail"]
     assert c.execute("SELECT undone_at FROM batches WHERE id = ?", (bid,)).fetchone()[0] is None
     assert c.execute("SELECT status FROM tasks WHERE id = 1").fetchone()[0] == "done" and not c.in_transaction
+
+
+# --- A3: GET routes that write and commit take turns ----------------------------------------------------
+
+def test_overlapping_review_and_task_reads_that_stamp_answer_only_200(cfg, tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    client, c = _app(cfg, tmp_path)
+    for i in range(1, 41):
+        mk(c, i, name=f"Task number {i}", last_mention_at="2026-09-01")
+    link(c, 2, 1, "waits_on")
+    urls = [f"/api/tasks/{1 + i % 40}" if i % 2 else "/api/review" for i in range(600)]
+    with ThreadPoolExecutor(16) as ex:
+        codes = list(ex.map(lambda u: client.get(u).status_code, urls))
+    assert set(codes) == {200}, {u: s for u, s in zip(urls, codes) if s != 200}
+    assert not c.in_transaction
