@@ -341,6 +341,30 @@
     toast('Device removed'); render();
   }
 
+  // ---------- app extras (stage 8) ----------
+  // The number beside Review and on the installed app's icon. Before Review is loaded it is the server's
+  // count (GET /api/review/count, read in load()); while Review is loaded, that page's own number (it leaves
+  // out what the tray already decided). The icon always gets what the tab shows.
+  let reviewCount = null;
+  let badgeShown;            // what the icon was last given (undefined: nothing yet), so a redraw calls nothing
+  function reviewShown() {
+    if (!review) return reviewCount || 0;
+    const cards = review.suggestions || [];
+    return review.total || cards.length ? review.total + cards.filter(x => !x.created).length : 0;
+  }
+  // Off (notify.app.badge), signed out, or 0: cleared. Before Settings has loaded: nothing (the switch is not known yet).
+  function syncBadge() {
+    const out = !document.getElementById('signedout').hidden;
+    const n = out ? 0 : !settings ? null : !settings.effective['notify.app.badge'] ? 0 : reviewShown();
+    if (n === null || n === badgeShown) return;
+    badgeShown = n;
+    try {
+      const p = n > 0 ? (typeof navigator.setAppBadge === 'function' ? navigator.setAppBadge(n) : null)
+                      : (typeof navigator.clearAppBadge === 'function' ? navigator.clearAppBadge() : null);
+      if (p && typeof p.catch === 'function') p.catch(() => {});
+    } catch (_) {}
+  }
+
   // ---------- loading ----------
   let pending = [];           // batches a skill staged (/api/proposals): Apply or Dismiss, above every tab
   async function load() {
@@ -350,6 +374,8 @@
     detailGen++; detailCache.forEach(d => { d.stale = true; });      // an opened task keeps what it shows until its new answer arrives
     try { pending = (await api('/api/proposals')).proposals; } catch (_) { pending = []; }
     try { summary = await api('/api/summary'); } catch (_) { summary = null; }
+    const excl = [...staged.keys()].filter(k => typeof k === 'number').join(',');      // as loadReview sends it
+    try { reviewCount = (await api('/api/review/count' + (excl ? '?exclude=' + excl : ''))).count; } catch (_) {}      // a failure keeps the last count; a sign-out shows its own screen
     document.getElementById('today-label').textContent = '· ' + TODAY().toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
     render();        // what is being typed survives it (the drafts)
     watchSummary();
@@ -772,6 +798,7 @@
     el.hidden = false;
     for (const c of document.querySelector('.app').children) if (c !== el) c.inert = true;
     document.getElementById('signin').focus();
+    syncBadge();      // signed out: the icon is cleared
   }
   // A reload the app asks for (Sign in again, Update) keeps what is in the command box: it is put in
   // sessionStorage, which survives the sign-in's round trip in this tab, and read back once on load.
@@ -1363,7 +1390,8 @@
     p.querySelectorAll('textarea.grow').forEach(grow);
     document.querySelectorAll('#tabs button').forEach(b => { b.setAttribute('aria-selected', b.dataset.tab === ui.tab); if (b.dataset.tab === ui.tab && PHONE() && b.scrollIntoView) b.scrollIntoView({ block: 'nearest', inline: 'center' }); });
     document.getElementById('n-today').textContent = openOnes().filter(x => x.due && fmtDue(x.due).days <= 1).length || '';
-    document.getElementById('n-review').textContent = review && (review.total || (review.suggestions || []).length) ? review.total + (review.suggestions || []).filter(x => !x.created).length : '';
+    const rv = reviewShown(); document.getElementById('n-review').textContent = rv || '';
+    syncBadge();
     renderRemind();
     renderTray();
     renderSheet();
@@ -2576,6 +2604,7 @@
       ${f('notify.provider', 'Send reminders to', 'Reminders and the evening review nudge go here. ntfy needs its app and a topic; The app needs notifications turned on below, on each device.', `<select id="s-notify.provider" data-key="notify.provider">${[['ntfy', 'ntfy'], ['app', 'The app'], ['both', 'Both']].map(([v, l]) => `<option value="${v}" ${e['notify.provider'] === v ? 'selected' : ''}>${l}</option>`).join('')}</select>`)}
       ${pushDeviceHtml()}
       <div class="push-devices"><div class="lbl">Devices with notifications on</div>${pushDevicesHtml()}</div>
+      ${f('notify.app.badge', 'Count on the app icon', 'The number of Review items on the installed app’s icon. The open app keeps it current, and notifications that are sent anyway carry it, so it also moves while the app is closed; never a notification of its own. An iPhone shows it only after notifications were allowed for the app, Android and Firefox show none.', bool('notify.app.badge'))}
       ${f('notify.ntfy.enabled', 'ntfy push', 'Reminders and the review nudge through the ntfy app, when "Send reminders to" includes ntfy.', bool('notify.ntfy.enabled') + ' &nbsp; topic ' + text('notify.ntfy.topic', '220px'))}
       <h3>Inputs</h3>
       ${f('sources.plaud.enabled', 'Plaud recordings', 'IMAP trigger + plaud CLI (phase 3).', bool('sources.plaud.enabled'))}
