@@ -1592,8 +1592,11 @@
   const dueDays = x => x.due ? fmtDue(x.due).days : null;
   // Shown wherever a list of open tasks would be, when there are none: how to add a first task (stage 6).
   function noTasksHtml() {
-    const how = PHONE() ? 'Tap <b>+</b> at the bottom' : 'Press <kbd>n</kbd> or <b>New task</b>';
-    return `<div class="empty"><b>No open tasks yet.</b> ${how} and type one line, for example <code>Email the lab the dataset fri ~S</code>, then Enter. Or write a sentence in the box above and Claude files it for you. Tasks also arrive from the inputs you switch on in Settings and from suggestions in Review. Coming from a Notion tasks database? See docs/SETUP.md §5.</div>`;
+    // A phone's sheet reads no shorthand: it has taps for the date, project, effort and a link, and its Enter only
+    // puts the keyboard away, so the phone is pointed at the taps and Add task.
+    const how = PHONE() ? 'Tap <b>+</b> at the bottom, type what needs doing, tap a day, a project or an effort if you like, then <b>Add task</b>.'
+      : 'Press <kbd>n</kbd> or <b>New task</b> and type one line, for example <code>Email the lab the dataset fri ~S</code>, then Enter.';
+    return `<div class="empty"><b>No open tasks yet.</b> ${how} Or write a sentence in the box above and Claude files it for you. Tasks also arrive from the inputs you switch on in Settings and from suggestions in Review. Coming from a Notion tasks database? See docs/SETUP.md §5.</div>`;
   }
   function todayGroups(lv) {
     const ready = (lv || effectiveLinkView()) === 'ready';
