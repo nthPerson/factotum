@@ -613,14 +613,16 @@ without a string `context`) fails the whole run and nothing is applied.
 **What applies, and the guard.** Only a text rewrite (`context`, at most 2000 characters), as one batch
 with source `ripple`, through `batches.apply` with `expect` set to the text the run was shown, so a task
 edited by hand meanwhile is skipped with the usual reason; a task closed or merged meanwhile is left alone.
-A rewrite that loses something (empty, too long, or it drops a web address or a `Task-N` the old text had)
+A rewrite that loses something (empty, too long, or it drops a web address, written with `https://` or without, an email address or a `Task-N` the old text had)
 is refused and becomes an `add_note` ("Ripple from Task-N: why"), dated by the server, in the same batch;
 so does any rewrite of a text the run was shown cut (over 1500 characters: a rewrite would replace the whole
 text with what was built from its first part), History's line saying "the text is too long to rewrite safely,
 so a note was added";
 when the reason names an address the old text lacked, the note says fixed words instead, and History's line
 for the change has that address replaced by "[address left out]". A rewrite that loses nothing but adds an
-email or web address the old text did not have is not applied on its own (a ripple never brings an address
+email or web address the old text did not have (anything address-shaped, looked for at every place in the text: a scheme or www., an IP address, a host with a
+known top-level domain or with anything beside it in its word (a port, a path, @, see:), a host with a non-ASCII letter, a de-fanged
+x[.]com; compared with the scheme's and host's case folded and the path's kept) is not applied on its own (a ripple never brings an address
 to a task, design §8.6) and is not a note either: it waits on Review as a card ("Ripple suggests", with the
 text before and after); Accept stages it with `expect` set to the text the run was shown, and when the task's
 text has changed since, the card says so and offers only Dismiss. Only when no card can be staged (the same
@@ -1387,7 +1389,8 @@ and what it waits on), `waiting_tasks`, `twin_candidates` (pairs that look like 
 into `TOOL_BUDGET` by dropping whole rows from the end and reporting the count cut, so a result is never
 cut mid-JSON; `task_get` shows `linked` (task links; `links` stays outside things). New ops for
 `stage_changes`: `link`, `unlink`, `merge`, `add_note`, `done` / `drop` with `outcome`, and a `set` that
-carries `expect`. `apply_changes` accepts `link` and `unlink` but never `merge`: a merge drops a task and
+carries `expect`; a `set` of `outcome` alone is taken on a done or dropped task and refused on an open one (an
+outcome there would ripple at once with the task still open). `apply_changes` accepts `link` and `unlink` but never `merge`: a merge drops a task and
 always waits for a tap. A link counts as two rows against the hourly cap. The validator checks a link with
 the same rules as `batches.apply` before the open-task rule.
 

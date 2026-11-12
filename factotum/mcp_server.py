@@ -989,12 +989,17 @@ def _validate_changes(ctx: Context, changes, direct: bool = False) -> tuple[list
             if row["status"] == "open":
                 rejected.append(f"#{i}: Task-{tid} is already open"); continue
             kept.append({"task_id": tid, "op": "reopen", "fields": {}}); continue
-        if row["status"] != "open":
+        # How it turned out belongs to a closed task: a set of the outcome alone is taken on a done or
+        # dropped one (the page's "Say how it went"); on an open one it is refused (it would ripple at
+        # once, the task still open), unless it is a null over no outcome, which writes nothing.
+        if row["status"] != "open" and not (op == "set" and set(fields) == {"outcome"} and row["status"] in ("done", "dropped")):
             rejected.append(f"#{i}: Task-{tid} is not open ({row['status']})"); continue
         if op == "set":
             f = cleaned(i, fields)
             if f is None:
                 continue
+            if "outcome" in f and row["status"] == "open" and (f["outcome"] is not None or row["outcome"]):
+                rejected.append(f"#{i}: an outcome goes with done or drop (set it there), or on a task that is already closed"); continue
             if not f:
                 rejected.append(f"#{i}: nothing settable in {sorted(fields)}"); continue
             out = {"task_id": tid, "op": "set", "fields": f}

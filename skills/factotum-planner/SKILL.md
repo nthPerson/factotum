@@ -70,7 +70,7 @@ instead of creating its twin (a create with an open task's exact name is refused
 | same as / duplicate of / merge into | `{"op": "merge", "task_id": <goes away>, "fields": {"into": <kept>}}` (always staged; say which row is kept) |
 | break this into steps / split it | one call: a `create` per step, its `ref` and `links` inside `fields` (the example below the table) |
 | unlink / not related after all | `{"op": "unlink", "task_id": n, "fields": {"kind": "…", "other": X}}` |
-| how did it turn out | `done` / `drop` with `fields: {"outcome": "one line"}` |
+| how did it turn out | `done` / `drop` with `fields: {"outcome": "one line"}`; on a task already closed, `{"op": "set", "fields": {"outcome": "one line"}}` (the outcome alone; refused on an open task) |
 | remind me `<when>` | `{"op": "add_reminder", "task_id": n, "fields": {"fire_at": "YYYY-MM-DDTHH:MM", "label": "…", "repeat": null}}` |
 | add a task (with reminders) | `{"op": "create", "fields": {"name": "imperative, ≤ 80 chars", "project": "<one from the taxonomy>", "due": "YYYY-MM-DD", "hard": true, "effort": "S", "context": "…"}, "reminders": [{"fire_at": "…", "label": "…"}]}` |
 | close it once I have emailed `<person>` | `{"op": "watch_sent", "task_id": n, "fields": {"to": "person@example.org"}}` — find the address with `mail_search` if the user gave a name; the mail sweep closes the task when a message to it is sent from now on. On a new task: `"watch_sent_to": "…"` beside `fields` |

@@ -34,12 +34,13 @@ For each task in §3, choose one effect.
 - `none`: nothing it says or needs has changed. Choose it whenever you are not sure.
 - `text`: rewrite its text so it says where the task stands now, after what changed ("Where this
   stands"). The rewrite replaces the old text; History keeps the old one. Rules:
-  - keep every web address and every `Task-N` the old text had, word for word;
+  - keep every web address (with `https://` or without), every email address and every `Task-N` the old
+    text had, word for word;
   - keep the sentences the owner wrote, and add where things stand after them;
   - never remove or soften a requirement the owner wrote ("in person", "by Friday"); when what
     changed conflicts with one, keep it and say that it conflicts;
-  - add no email address and no web address the old text did not have (such a rewrite waits on
-    Review for the owner's tap instead of being applied);
+  - add no email address and no web address (a bare `name.tld`, an IP address and `x[.]com` count) the old
+    text did not have (such a rewrite waits on Review for the owner's tap instead of being applied);
   - at most {{rewrite_cap}} characters;
   - invent no fact and no date: write only what the old text, §2 and §3 say;
   - a task whose text is marked `(cut: …)` was shown only in part, so it is never rewritten: choose
