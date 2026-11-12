@@ -215,7 +215,7 @@ class Scheduler:
         why = errors + [{"ntfy": "ntfy is off or has no topic", "app": "the app has no device that took it"}[p] for p in failed]
         if not delivered:                          # the Log says so, never "N items" as if it went out
             return f"nothing delivered: {'; '.join(why) or 'no provider chosen'} ({n} item{'' if n == 1 else 's'} waiting)"
-        return f"{n} items" + (" · " + "; ".join(why) if why else "")
+        return f"{n} item{'' if n == 1 else 's'}" + (" · " + "; ".join(why) if why else "")
 
     def _brief(self, ecfg: dict, today: date) -> str | None:
         """The planner is a paid run and a failed send retries hourly, so its result is kept for the day."""

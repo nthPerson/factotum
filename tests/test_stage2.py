@@ -440,7 +440,7 @@ def test_the_review_nudge_opens_review_in_the_app(conn, cfg):
     upsert_task(conn, task(id=1, due=None, created_at="2026-10-30T00:00:00+00:00", last_mention_at="2026-10-30")); conn.commit()
     C.set_(cfg, "notify.provider", "both"); rec = Rec()
     out = Scheduler(cfg, conn, push=rec.push, device_push=rec.device_push)._review_push(cfg, date(2026, 11, 1), {})
-    assert out == "1 items" and len(rec.ntfy) == 1 and rec.ntfy[0]["click"].endswith("/review")
+    assert out == "1 item" and len(rec.ntfy) == 1 and rec.ntfy[0]["click"].endswith("/review")
     n = rec.app[0]
     assert n["path"] == "/review" and n["tag"] == "review" and n["actions"] == [] and n["urgency"] == "normal" and n["ttl"] == 14400
     assert n["title"] == rec.ntfy[0]["title"] and n["body"] == rec.ntfy[0]["body"]

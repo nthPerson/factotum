@@ -722,3 +722,20 @@ def test_a_mail_triage_card_named_from_an_escaped_subject_is_stored_unescaped(co
     assert f["name"].startswith("Q&A: R&D <draft>") and "&amp;" not in json.dumps(f) and "&lt;" not in json.dumps(f)
     assert "&amp;" not in (card["label"] or "") + (card["excerpt"] or "")
 
+
+# --- H7: the evening nudge counts "1 item" in the Log too --------------------------------------------------
+
+def test_the_review_nudge_says_one_item_in_the_notification_and_the_log(conn, cfg):
+    from datetime import datetime
+    from conftest import task
+    from factotum.db import upsert_task
+    from factotum.scheduler import Scheduler
+    sent = []
+    cfg["notify"]["ntfy"]["topic"] = "factotum-test"
+    upsert_task(conn, task(id=1, due=None, created_at="2026-10-30T00:00:00+00:00", last_mention_at="2026-10-30")); conn.commit()
+    s = Scheduler(cfg, conn, push=lambda cfg, title, body, **kw: (sent.append((title, body)), "m1")[1], mailer=lambda *a, **k: None, calendar=None)
+    s.tick(datetime(2026, 11, 1, 19, 30))
+    assert sent and sent[0][0] == "Review: 1 item" and sent[0][1].startswith("1 item waiting")
+    line = conn.execute("SELECT summary FROM runs WHERE kind = 'review_push' ORDER BY id DESC").fetchone()[0]
+    assert line.startswith("1 item") and "1 items" not in line
+

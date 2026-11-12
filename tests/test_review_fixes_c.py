@@ -286,4 +286,4 @@ def test_the_review_nudge_says_when_nothing_delivered_it(conn, cfg):
     quiet = Scheduler(cfg, conn, push=lambda *a, **k: None, device_push=lambda *a, **k: {"sent": 0})._review_push(cfg, date(2026, 11, 1), {})
     assert quiet == "nothing delivered: ntfy is off or has no topic; the app has no device that took it (1 item waiting)"
     half = Scheduler(cfg, conn, push=lambda *a, **k: "m1", device_push=lambda *a, **k: {"sent": 0})._review_push(cfg, date(2026, 11, 1), {})
-    assert half.startswith("1 items") and "the app has no device that took it" in half
+    assert half.startswith("1 item ") and "the app has no device that took it" in half
