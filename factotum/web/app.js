@@ -1335,6 +1335,7 @@
   // Who made a change, from its batch's source.
   const WHO = { ui: 'you', review: 'you', command: 'you', automation: 'automatic', planner: 'planner', plaud: 'a recording', mail: 'mail', canvas: 'Canvas',
     connector: 'a connector', skill: 'Claude Code', chat: 'chat', ntfy: 'a reminder', import: 'import' };
+  // Plain text: History draws it through linkTasks (escaped, then each Task-N a link), as every other Task-N there.
   function whoText(e) {
     if (e.source === 'ripple') { const f = e.cause && Array.isArray(e.cause.from) ? e.cause.from[0] : null; return { text: Number.isInteger(f) ? `ripple from Task-${f}` : 'ripple', cls: 'chg' }; }
     const text = WHO[e.source] || String(e.source || '');
@@ -1355,13 +1356,16 @@
   const VERDICT_SAID = { applied: 'Suggestion accepted.', dismissed: 'Suggestion dismissed.', reviewed: 'Suggestion seen.', staged: 'Suggestion staged.' };
   // A ripple's rewrite that the guard refused (design §8.3) became a dated note; History says why.
   const NOTED_SAID = ' (the ripple\'s rewrite was not applied — it was empty, too long, or would have lost a link or a task reference — so its reason was added as a note)';
+  // A change that gives its own reason (ripple.TOO_LONG: "the text is too long to rewrite safely, so a note was added",
+  // in its Why line) is not given a second, different one.
+  const notedSaid = e => /too long to rewrite safely/i.test(String(e.note || '')) ? '' : NOTED_SAID;
   function historyWords(e, selfId) {
     const v = e.new, o = e.old;
     if (e.field === 'link') {
       const l = (v != null ? v : o) || {}, said = LINK_SAID[`${l.dir} ${l.kind}`];
       if (said && Number.isInteger(l.other) && l.other !== selfId) return said[v != null ? 0 : 1].replace('{T}', tref(l.other));
     }
-    if (e.field === 'context' && isNote(e, selfId)) return `Note added: “${linkTasks(textOf(v).slice(textOf(o).length).trim())}”` + (rippleNoted(e, selfId) ? NOTED_SAID : '');
+    if (e.field === 'context' && isNote(e, selfId)) return `Note added: “${linkTasks(textOf(v).slice(textOf(o).length).trim())}”` + (rippleNoted(e, selfId) ? notedSaid(e) : '');
     if (e.field === 'context') return 'Text rewritten.';
     if (e.field === 'name') return 'Renamed.';
     if (e.field === 'outcome') return `Outcome: “${linkTasks(textOf(v))}”`;
@@ -1391,7 +1395,7 @@
       // A ripple whose cause was undone after its text was edited stays (batches.undo): said, with this Undo.
       const causeUndone = e0.source === 'ripple' && !!(e0.cause && e0.cause.cause_undone_at);
       const kept = causeUndone && !e0.undone ? '<div class="hl kept">Its cause was undone; this was kept because the text changed after. Undo it here if it no longer fits.</div>' : '';
-      return `<div class="hitem${e0.undone ? ' undone' : ''}"><div class="hh"><span class="when">${esc(histWhen(e0.at))}</span><span class="who ${who.cls}">${esc(who.text)}</span>${causeUndone ? '<span class="chip causechip">cause undone</span>' : ''}<span class="spacer"></span>${undo}</div>${lines}${kept}</div>`;
+      return `<div class="hitem${e0.undone ? ' undone' : ''}"><div class="hh"><span class="when">${esc(histWhen(e0.at))}</span><span class="who ${who.cls}">${linkTasks(who.text)}</span>${causeUndone ? '<span class="chip causechip">cause undone</span>' : ''}<span class="spacer"></span>${undo}</div>${lines}${kept}</div>`;
     }).join('');
     return head + (items ? `<div class="hlist">${items}</div>` : '<p class="hint">Nothing has changed since it was created.</p>')
       + (h.more ? `<button class="btn small" data-hist-more="${id}">Earlier</button>` : '');
