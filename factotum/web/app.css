@@ -404,7 +404,7 @@ body.tray-open main { padding-bottom: 60vh; }
 /* On a touch screen or a phone the toast's buttons (Undo, Say how it went, See changes) are 44 px targets: the outcome
    question and a landed ripple are reached only through them, for 15-20 s. The padding is the target, not the text. */
 @media (hover: none), (max-width: 700px) {
-  .toast:not(.ask) { padding: 4px 4px 4px 14px; gap: 0; }      /* 4 px: a message that wraps to three lines keeps off the edge */
+  .toast:not(.ask):has(button) { padding: 4px 4px 4px 14px; gap: 0; }      /* 4 px: a message that wraps to three lines keeps off the edge; a toast with no button keeps its even padding */
   .toast:not(.ask) button { min-height: 44px; min-width: 44px; padding: 0 10px; touch-action: manipulation; }
 }
 /* The outcome question (ripples, stage 5) is drawn in the toast: a panel, not a pill. It sits over the bottom of
