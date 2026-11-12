@@ -116,8 +116,8 @@ These are existing rules (`CLAUDE.md`, `SPEC.md`) that shape the design. The bui
 - The UI has no build step and no JavaScript tests. `render()` rebuilds the panel; anything typed
   must live in `draft`, be wired through `typing()`, and be in the focus-restore list.
 - A folded section renders no rows; `jumpTo` must unfold first.
-- The offline test suite must stay green at every commit (159 tests, about 17 s today). It loads
-  `config/factotum.example.yaml` as its fixture (§15 depends on this).
+- The offline test suite must stay green at every commit (159 tests, about 17 s today). Since stage 3 it
+  loads `tests/fixtures/factotum.fixture.yaml` as its fixture, never the example (§15).
 - Task ids are forever. A create is undone by dropping the row, never by deleting it.
 
 ## 4. Vocabulary
