@@ -1006,9 +1006,11 @@ task you add" (a switch under Claude).
 **App extras (stage 8 of the linked-tasks design, 2026-11-11).** The number beside Review comes from
 `GET /api/review/count` (`review_queue.count`, read-only: `GET /api/review` records the day's suggestion
 session and stamps `last_offered_at`, so it is never called for a number) from the first load until Review is
-loaded, then from the Review page, which leaves out what the tray already decided. The app's icon gets exactly
+loaded, then from the Review page, which leaves out what the tray already decided; back at the front off
+the Review tab, that page is let go and the server's count is read again. The app's icon gets exactly
 the number the tab shows (`navigator.setAppBadge`; `clearAppBadge` at 0, when the sign-in has expired and when
-the switch is off; one call per change, not one per redraw). Settings → Notifications has "Count on the app
+the switch is off; one call per change, not one per redraw, and once more on every return to the front, so a
+number a push left there is corrected; while no count is known yet the icon is left as it is). Settings → Notifications has "Count on the app
 icon" (`notify.app.badge`, on when absent: the count makes no run, sends no mail and no push of its own, so it
 is not one of the paid or mailing switches that absent turns off, §9 "Configuration"). The manifest has two
 `shortcuts`, "New task" (`/new`) and "Review" (`/review`), each with a 96 px icon drawn by `tools/make_icons.py`
