@@ -480,7 +480,7 @@
   }
   // `quiet` (the editor, stage 6): no render and no toast; the editor redraws what is around its fields itself.
   function stageDue(id, due, quiet = false) {
-    stageExtra(id + ':due', id, 'set', { due: due || null }, due ? 'due ' + due : 'due date removed', {}, quiet);
+    stageExtra(id + ':due', id, 'set', { due: due || null }, due ? 'due ' + dayWords(due) : 'due date removed', {}, quiet);      // the page's own words: "due Fri Nov 14"
     if (!quiet) toast((due ? 'Due date staged' : 'Removal of the due date staged') + ' · press Apply in the tray to save it');
   }
   function dueForm(id, current) {
@@ -2579,7 +2579,8 @@
     if (!q) { if (asFound) find.found = null; return; }
     find.timer = setTimeout(async () => {
       let res;
-      try { res = await searchTasks(q); } catch (e) { res = { results: [], more: false, error: (e && e.message) || 'no answer' }; }
+      // The server's own words when it gave a reason (`detail`), not only the status
+      try { res = await searchTasks(q); } catch (e) { res = { results: [], more: false, error: (e && (e.detail || (e.network ? 'the server did not answer' : e.message))) || 'no answer' }; }
       find.done = find.done || new Map(); find.done.set(q, res);
       if (asFound) { if (q !== draft.findQ.trim()) return; find.found = { q, res }; }
       render();
@@ -3162,7 +3163,7 @@
       if (ui.linkHit != null) {
         const h = sheetHitInfo(ui.linkHit), closed = h.status !== 'open';
         pick += `<div class="lkhit"><span class="code">Task-${h.id}</span> <span class="nm">${esc(h.name)}</span>${statusChip(h)}</div>
-          <div class="lkchoice"><span class="lkthis">This task…</span><button class="btn small" data-link-as="part_of">is a step of it</button><button class="btn small" data-link-as="waits_on" ${closed ? `disabled title="Task-${h.id} is ${esc(h.status)}; nothing to wait on"` : ''}>waits on it</button><button class="btn small" data-link-as="same_as">is the same task</button></div>`;
+          <div class="lkchoice"><span class="lkthis">This task…</span><button class="btn small" data-link-as="part_of">is a step of it</button><button class="btn small" data-link-as="waits_on" ${closed ? `disabled title="Task-${h.id} is ${esc(h.status)}: nothing can wait on it"` : ''}>waits on it</button><button class="btn small" data-link-as="same_as">is the same task</button></div>`;
       }
     }
     const step = x.rel && x.rel.goal_id != null ? '' : `<div class="stepline"><input id="step-line-${id}" type="text" autocomplete="off" enterkeyhint="done" placeholder="Add a step" aria-label="Add a step to Task-${id}" value="${esc(draft.step[id] || '')}"><button class="btn small primary" data-step-add="${id}">Add step</button></div>
