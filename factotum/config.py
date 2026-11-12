@@ -2,8 +2,8 @@
 
 Precedence for a key read through `effective()`: database override > yaml > built-in default.
 
-2026-11-10: with no config/factotum.yaml the fallback is config/factotum.starter.yaml (neutral, everything
-off), not the example, which was the owner's own setup and so quietly ran a stranger's install as theirs.
+2026-11-10: with no config/factotum.yaml the fallback is config/factotum.starter.yaml (neutral: every input,
+output, notification and scheduled paid run off; ripples and filing on since 2026-11-11), not the example, which was the owner's own setup and so quietly ran a stranger's install as theirs.
 """
 from __future__ import annotations
 

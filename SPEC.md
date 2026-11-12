@@ -13,8 +13,9 @@ an optional records sink. Claude stays in the loop for judgment only; every writ
 It is also meant to be **handed to someone else**: everything person-specific lives in
 `config/factotum.yaml` and `.env`, every input and every sink can be switched off, and the
 Settings tab names the config file so a new user knows where the rest lives. A fresh install has
-no `config/factotum.yaml`: it runs on the neutral starter (`config/factotum.starter.yaml`, nothing
-switched on) and says so (§9 "Configuration").
+no `config/factotum.yaml`: it runs on the neutral starter (`config/factotum.starter.yaml`: every input,
+output, notification and scheduled paid run off; ripples and filing on, each run only after something the
+owner did, a few cents and undoable) and says so (§9 "Configuration").
 
 ## 1. Why (measured 2026-11-01 on plaud-sync)
 
@@ -47,7 +48,9 @@ Four causes, none of them the user's discipline:
   applied as its own batch with source `ripple` and its cause, shown in History, undone with one tap, and
   undone with its cause while the text is untouched. Everything else a ripple proposes waits on Review.
   A third exception (stage 6, 2026-11-11): a task added by hand exists the moment Enter is pressed, as its
-  own `ui` batch (§9), and its Undo drops it; edits to a task still stage.
+  own `ui` batch (§9), and its Undo drops it; edits to a task still stage. A fourth: a link the owner states
+  in a recording ("this is part of Task-12") is written in the recording's batch with the spoken sentence as
+  its note (§6 "Plaud"), undone with it; a link the run only infers is a card on Review.
 - **Links between tasks are task state, so they ride in batches** (stage 4a, 2026-11-10): `link`,
   `unlink`, `merge`, `add_note` and a create that carries links are ops of `batches.apply`, each undoable.
   Chat's Create is a batch too, and so is Create on a Review suggestion card (2026-11-11): one `review` batch
@@ -127,6 +130,9 @@ tasks(id, name, project, area, status,            -- open|done|dropped|faded|lap
       context, why_now, score, priority, manual_priority, mentions, last_mention_at,
       created_at, edited_at, completed_at, closed_by,     -- user|canvas|mail-evidence|fade|lapse|voice|chat|import
       snoozed_until, last_reviewed_at, calendar_event, notion_page_id, canvas_id,
+      last_offered_at,             -- the last day a Review page showed the row; `expire` acts only on rows it has shown
+      mirrored_at,                 -- when the Notion mirror last pushed the row (not an edit)
+      close_on_sent_since, close_on_sent_to,   -- a sent-mail watch (`watch_sent`): close when mail to that address is sent after that time
       outcome,                     -- one line, what came of it (done / drop may carry it; ≤ 300)
       neighbours_seen_at)          -- stamped when the task is opened or a Review decision is made; "a linked task changed" is measured from it
 reminders(id, task_id, fire_at, label, repeat, status, ntfy_seq, token, created_by)
@@ -139,6 +145,11 @@ relations(id, src, dst, kind, why, source, batch_id, created_at, removed_at, rem
           -- `src same_as dst` (src was merged into dst). Soft-deleted (removed_at), never DELETE: History and
           -- undo need the row. A partial unique index allows one ACTIVE row per (src, dst, kind).
 mentions(id, task_id, source_kind, source_ref, at)       -- append-only; resets the fade clock
+ripple_queue(task_id PRIMARY KEY, queued_at, batches_json, last_batch_id, what_json, now, attempts)
+          -- linked tasks a batch changed, waiting for a ripple run (§8.6): queued_at starts the quiet period,
+          -- batches_json every batch that queued the row since its last run, what_json what changed (closed, merge,
+          -- name, text, due, hard, outcome), now = 1 once an outcome arrived (run without waiting); a run deletes
+          -- the row only while last_batch_id is still the batch it ran
 batches(id, created_at, applied_at, undone_at, source, undo_json,
         cause_json)                -- why the batch exists, e.g. {"kind": "ripple", "from": [428], "run": 77}, or NULL
           -- a batch whose every change is skipped leaves no row: `batches.apply` answers `batch_id: null` with the reasons
@@ -748,8 +759,13 @@ recording or a sweep just added is one scroll away. The Log tab
 lists recent batches with every field change (old → new, task named) and an Undo per batch, and
 the Claude runs with their cost. Assets are served with `no-cache` and version-stamped URLs so a
 deploy reaches the phone without a hard refresh. Tray with one Apply and
-one Undo. Review as a card stack. Settings: lifecycle values, inputs and outputs on/off, email
-accounts table, ntfy topic, brief time and recipient, with a note naming the config file.
+one Undo. Review as a card stack. Settings, in seven sections with a note naming the config file: Review and
+lifecycle (the review reminder's time, fade, fade warning, last call, the Top and Review caps, suggested links a
+day), Notifications (where reminders go: ntfy, the app or both; this device and the devices list; the count on
+the app icon; the ntfy topic), Inputs (Plaud, Canvas, mail and tasks from mail, the calendar, Slack, Discord,
+with their intervals), Email accounts, Outputs (the Notion notes and tasks mirror, the morning brief's time and
+recipient), Claude (the morning planner, the Today summary, filing a task you add, ripples, the chat turn
+budget) and Connections (the claude.ai / Claude Desktop connector, what Claude may do with tasks).
 Keyboard: `j k d x s t l e`, Esc deselects; Review `d k s x`.
 
 **Configuration** (stage 3 of the linked-tasks design, 2026-11-10, design §15). A value comes from
@@ -1211,8 +1227,11 @@ The old Command Log relations are not imported; task history lives in `changes` 
 | chat-turn / search / draft | $0.60 | on demand |
 | sweeps, UI, reminders, brief | $0 | $0 |
 
-Every paid run Factotum starts on its own is off unless its switch is explicitly on (absent means
-off, §9 "Configuration"); a chat turn runs only when the user sends one.
+Every scheduled paid run (the planner, the automatic summary, mail triage) is off unless its switch is
+explicitly on (absent means off, §9 "Configuration"). Ripples and filing are on unless switched off (the
+owner's decision, 2026-11-11): each runs only after something the owner did (a linked task closed or
+changed; a task added by hand with only a name), costs about 3 and 4 cents, and writes nothing History
+cannot undo. A chat turn runs only when the user sends one.
 
 Target under $4/day all in, versus ≈$9/day measured in September. Settings shows the rolling
 7-day total from `runs`. Headless allowlists exclude every destructive Mailbird tool; Python

@@ -33,11 +33,18 @@ read your tasks and, as you choose in Settings, stage changes for your Apply or 
 tasks directly (every call an undoable batch). Retiring the
 old Notion pages and plaud-sync is a checklist in docs/SETUP.md §15.
 
+Since 2026-11-11 tasks can be linked: a step is part of a goal, a task waits on another, two rows are
+the same task and merge. Links show as badges, order Today and come from you (by hand, in a recording, in
+Chat) or as suggestions you confirm. When a linked task is closed or changes, a ripple (one light Claude run,
+about 3 cents) brings the tasks linked to it up to date, every rewrite undoable from History. The page
+installs as an app on a phone or a desktop, updates itself, and can send reminders and the review nudge
+as its own notifications (beside or instead of ntfy), with the Review count on its icon.
+
 ## Quick start
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-.venv/bin/python -m factotum serve                     # http://127.0.0.1:8750, on the starter settings: nothing switched on
+.venv/bin/python -m factotum serve                     # http://127.0.0.1:8750, on the starter settings: inputs, outputs, notifications and scheduled paid runs off; ripples and filing on (a few cents, after something you did)
 cp config/factotum.example.yaml config/factotum.yaml   # make it yours: projects, addresses, the integrations you use
 cp .env.example .env                                   # only the secrets of the integrations you switch on (docs/SETUP.md)
 .venv/bin/python -m factotum effective                 # what each switch is and where it comes from
