@@ -244,3 +244,46 @@ def test_every_third_party_import_is_in_requirements_or_a_direct_dependency_of_o
                 if not have & direct:
                     missing.setdefault(top, set()).add(path.name)
     assert missing == {}
+
+
+# --- 12. Settings refuses a value of the wrong type, or a number below the page's own minimum
+
+def test_settings_refuse_a_wrong_type_or_a_number_below_the_pages_minimum(cfg, tmp_path):
+    from fastapi.testclient import TestClient
+    from factotum.api import create_app
+    client = TestClient(create_app(cfg, db_path=str(tmp_path / "api.db")))
+    for values, words in (({"claude.ripple.hourly_cap": 0}, "claude.ripple.hourly_cap must be at least 1"),
+                          ({"claude.budgets_usd.ripple": 0}, "claude.budgets_usd.ripple must be at least 0.05"),
+                          ({"claude.budgets_usd.chat_turn": "0.5"}, "claude.budgets_usd.chat_turn must be a number"),
+                          ({"claude.ripple.enabled": "yes"}, "claude.ripple.enabled must be true or false"),
+                          ({"lifecycle.fade_days": "30"}, "lifecycle.fade_days must be a whole number"),
+                          ({"lifecycle.fade_days": True}, "lifecycle.fade_days must be a whole number"),
+                          ({"notify.morning_brief.to": 5}, "notify.morning_brief.to must be text"),
+                          ({"lifecycle.top_cap": 5, "lifecycle.review_cap": 2}, "lifecycle.review_cap must be at least 5")):
+        r = client.put("/api/settings", json={"values": values})
+        assert r.status_code == 400 and words in r.json()["detail"], (values, r.text)
+    assert client.get("/api/settings").json()["overrides"] == {}                 # nothing of a refused request was kept
+    ok = {"claude.ripple.hourly_cap": 1, "claude.budgets_usd.ripple": 0.05, "claude.budgets_usd.chat_turn": 2, "links.suggestions_per_review": 0,
+          "claude.ripple.enabled": False, "server.mcp_writes": "apply", "lifecycle.fade_days": 30}
+    assert client.put("/api/settings", json={"values": ok}).status_code == 200
+    assert client.get("/api/settings").json()["overrides"] == ok
+
+
+def test_the_minimum_settings_holds_is_the_one_the_page_states():
+    import re
+    page = (ROOT / "factotum" / "web" / "app.js").read_text(encoding="utf-8")
+    stated = {k: float(m) for k, m in re.findall(r"num\('([a-z_.]+)', ([0-9.]+), [0-9.]+\)", page)}
+    assert stated and {k: float(v) for k, v in C.MINIMA.items()} == stated
+
+
+def test_the_review_nudge_says_when_nothing_delivered_it(conn, cfg):
+    from datetime import date
+    from factotum.db import upsert_task
+    from factotum.scheduler import Scheduler
+    from conftest import task
+    upsert_task(conn, task(id=1, due=None, created_at="2026-10-30T00:00:00+00:00", last_mention_at="2026-10-30")); conn.commit()
+    C.set_(cfg, "notify.provider", "both")
+    quiet = Scheduler(cfg, conn, push=lambda *a, **k: None, device_push=lambda *a, **k: {"sent": 0})._review_push(cfg, date(2026, 11, 1), {})
+    assert quiet == "nothing delivered: ntfy is off or has no topic; the app has no device that took it (1 item waiting)"
+    half = Scheduler(cfg, conn, push=lambda *a, **k: "m1", device_push=lambda *a, **k: {"sent": 0})._review_push(cfg, date(2026, 11, 1), {})
+    assert half.startswith("1 items") and "the app has no device that took it" in half

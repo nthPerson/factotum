@@ -210,8 +210,12 @@ class Scheduler:
         if "app" in chosen:
             sends.append(("app", lambda: self.device_push(self.conn, ecfg, {"title": title, "body": body, "path": "/review", "tag": "review",
                                                                            "actions": [], "urgency": "normal", "ttl": 14400})))
-        _, _, errors = notify.send_each(sends)    # none delivered and one raised: it raises, and the job retries in an hour
-        return f"{n} items" + (" · " + "; ".join(errors) if errors else "")
+        delivered, _, errors = notify.send_each(sends)    # none delivered and one raised: it raises, and the job retries in an hour
+        failed = [p for p, _ in sends if p not in delivered and not any(e.startswith(f"{p}: ") for e in errors)]
+        why = errors + [{"ntfy": "ntfy is off or has no topic", "app": "the app has no device that took it"}[p] for p in failed]
+        if not delivered:                          # the Log says so, never "N items" as if it went out
+            return f"nothing delivered: {'; '.join(why) or 'no provider chosen'} ({n} item{'' if n == 1 else 's'} waiting)"
+        return f"{n} items" + (" · " + "; ".join(why) if why else "")
 
     def _brief(self, ecfg: dict, today: date) -> str | None:
         """The planner is a paid run and a failed send retries hourly, so its result is kept for the day."""
