@@ -181,7 +181,9 @@ code the user types and says.
 order and `db.migrate` runs those above it. A migration that changes data declares `needs_backup(conn)`
 and gets a copy made with the SQLite backup API in `data/backups/` (next to the database,
 `<stem>-<UTC stamp>-before-v<N>.db`) before it runs. Migration 1 turns the importer's old `links` rows of
-kind `task` into `same_as` rows or merge suggestions and deletes them.
+kind `task` into `same_as` rows or merge suggestions and deletes them; each `same_as` row it writes is dated by
+the duplicate's own `completed_at` (else its `created_at`), never the day it runs, since that date is the
+survivor's `merged_at` fade anchor.
 
 ## 5. Task lifecycle
 

@@ -110,12 +110,12 @@ def link_problem(db: Db, op: str, src: int, kind: str, dst: int) -> str | None:
     return check(db, src, dst, kind)
 
 
-def add(db: Db, src: int, dst: int, kind: str, why: str | None, source: str, batch_id: int | None) -> int:
-    """Insert an active row; returns its id. `why` is one line, cut to WHY_MAX."""
+def add(db: Db, src: int, dst: int, kind: str, why: str | None, source: str, batch_id: int | None, at: str | None = None) -> int:
+    """Insert an active row; returns its id. `why` is one line, cut to WHY_MAX. `at`: its date, now by default."""
     if why is not None:
         why = " ".join(str(why).split())[:WHY_MAX] or None
     cur = db.execute("INSERT INTO relations (src, dst, kind, why, source, batch_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                     (src, dst, kind, why, source, batch_id, now_iso()))
+                     (src, dst, kind, why, source, batch_id, at or now_iso()))
     return cur.lastrowid
 
 
@@ -252,14 +252,17 @@ def shown_ids(db: Db) -> set[int] | None:
         return None
 
 
-def import_duplicate(db: Db, loser: int, owner: int) -> str:
+def import_duplicate(db: Db, loser: int, owner: int, own_date: bool = False) -> str:
     """A row the importer found sharing another row's source key (design §5.3). A closed row is a
     duplicate that is over: `same_as` the other, source `import` (the loser when both are closed, else
     whichever of the two is closed, so the card never names a closed row as the one that goes). Two
     open rows become a merge card, never a link (a `same_as` between two open rows would send mentions
     away from an open task). Returns "same_as", "suggested" or "skipped" (a row is missing, the two are
-    one, or a card was not written: the pair was judged or one is waiting already)."""
-    status = {r["id"]: r["status"] for r in db.execute("SELECT id, status FROM tasks WHERE id IN (?, ?)", (loser, owner)).fetchall()}
+    one, or a card was not written: the pair was judged or one is waiting already). `own_date` (migration 1):
+    the `same_as` row is dated by the duplicate's own close, else its creation, never today, since its
+    date is the merge's date (`merged_at`, a fade anchor) and nothing was merged on the day it migrated."""
+    found = {r["id"]: r for r in db.execute("SELECT id, status, completed_at, created_at FROM tasks WHERE id IN (?, ?)", (loser, owner)).fetchall()}
+    status = {i: r["status"] for i, r in found.items()}
     if loser == owner or len(status) < 2:
         return "skipped"
     if status[loser] != "open" or status[owner] != "open":
@@ -267,7 +270,8 @@ def import_duplicate(db: Db, loser: int, owner: int) -> str:
         if find(db, keep, goes, "same_as"):
             return "skipped"                          # the other way round already (a loop would follow nowhere)
         if not find(db, goes, keep, "same_as"):
-            add(db, goes, keep, "same_as", IMPORT_WHY, "import", None)
+            at = (found[goes]["completed_at"] or found[goes]["created_at"]) if own_date else None
+            add(db, goes, keep, "same_as", IMPORT_WHY, "import", None, at=at)
         return "same_as"
     keep, goes = default_survivor(db, loser, owner)
     return "suggested" if suggest(db, "same_as", goes, keep, IMPORT_WHY, "import") else "skipped"
@@ -279,7 +283,7 @@ def migration_1(conn: sqlite3.Connection) -> None:
     for ln in conn.execute("SELECT task_id, ref FROM links WHERE kind = 'task' ORDER BY id").fetchall():
         ref = str(ln["ref"] or "").strip()
         if ref.isascii() and ref.isdigit():
-            import_duplicate(conn, int(ln["task_id"]), int(ref))
+            import_duplicate(conn, int(ln["task_id"]), int(ref), own_date=True)     # nothing about fading changes on the day it runs
     conn.execute("DELETE FROM links WHERE kind = 'task'")
 
 

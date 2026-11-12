@@ -471,3 +471,45 @@ def test_a_cause_that_restores_nothing_keeps_its_ripple(rconn, cfg):
     assert u["undone"] is False and u["ripples_undone"] == [] and u["ripples_kept"] == []
     assert conn.execute("SELECT context FROM tasks WHERE id = 2").fetchone()[0] == "Needs Task-1, now called New."
     assert conn.execute("SELECT undone_at, cause_json FROM batches WHERE id = ?", (out["batch_id"],)).fetchone()[0] is None
+
+
+# ---- 8. migration 1 dates its same_as rows by the duplicate, not by deploy day ---------------------------
+
+def test_migration_1_same_as_rows_carry_the_duplicates_own_date_so_no_fade_clock_restarts(tmp_path, cfg):
+    """test_migrate_old.py: an old database (main's schema, user_version 0) with the importer's `task` links;
+    the `same_as` rows were dated deploy day, `annotate` took merged_at from them and `lifecycle.fade_at`
+    restarted the survivor's fade period on deploy day."""
+    from factotum import lifecycle, relations
+    from factotum.db import schema_version
+    path = tmp_path / "data" / "factotum.db"
+    c = connect(path)
+    init_db(c)
+    old = "2025-01-01T00:00:00+00:00"
+    for i, st, done in ((1, "open", None), (3, "done", "2025-02-03"), (4, "open", None), (5, "dropped", None), (6, "open", None)):
+        _mk(c, i, status=st, completed_at=done, created_at=old, edited_at=old, last_mention_at="2025-01-01")
+    c.execute("UPDATE tasks SET created_at = '2025-01-15T00:00:00+00:00' WHERE id = 5")
+    c.execute("DROP TABLE relations")                                    # back to before stage 4a (tests/test_stage4_store.py::_pre_4a)
+    for t, col in (("tasks", "outcome"), ("tasks", "neighbours_seen_at"), ("batches", "cause_json"), ("changes", "note")):
+        c.execute(f"ALTER TABLE {t} DROP COLUMN {col}")
+    c.execute("PRAGMA user_version = 0")
+    for loser, ref in ((3, "4"), (5, "6")):                              # closed losers: same_as rows
+        c.execute("INSERT INTO links (task_id, kind, ref, created_at) VALUES (?, 'task', ?, ?)", (loser, ref, old))
+    c.commit()
+    c.close()
+    c = connect(path)
+    init_db(c)
+    assert schema_version(c) == 1
+    got = {(r[0], r[1]): r[2] for r in c.execute("SELECT src, dst, created_at FROM relations WHERE kind = 'same_as'")}
+    assert got == {(3, 4): "2025-02-03", (5, 6): "2025-01-15T00:00:00+00:00"}      # completed_at, else created_at
+    ts = relations.annotate(c, [dict(r) for r in c.execute("SELECT * FROM tasks WHERE id IN (4, 6) ORDER BY id")])
+    assert [str(t["rel"]["merged_at"])[:10] for t in ts] == ["2025-02-03", "2025-01-15"]
+    from datetime import date as _d
+    assert all(lifecycle.fade_at(t, cfg) < _d(2025, 6, 1) for t in ts)      # no fresh fade period from deploy day
+
+
+def test_a_same_as_the_importer_writes_today_is_dated_today(conn):
+    from factotum import relations
+    _mk(conn, 1, status="done", completed_at="2025-02-03"); _mk(conn, 2)
+    assert relations.import_duplicate(conn, 1, 2) == "same_as"
+    at = conn.execute("SELECT created_at FROM relations WHERE src = 1").fetchone()[0]
+    assert at[:4] >= "2026"
