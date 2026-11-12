@@ -9,6 +9,9 @@
  * What a notification shows is therefore decided twice: a change to it goes into
  * `app_push.payload` (the server) and `shape` (here) together.
  *
+ * The payload's top-level `app_badge` is the Review count for the app's icon. Safari applies it
+ * without running this script; here `setBadge` sets it. No push is ever sent for the number alone.
+ *
  * The handlers are global functions so a test browser can run them through `worker.evaluate`.
  */
 'use strict';
@@ -44,11 +47,28 @@ function shape(json) {
   return { title, options };
 }
 
+// The Review count for the app's icon (stage 8): the payload's top-level app_badge, an integer >= 0; anything else is no number.
+function badgeOf(json) {
+  const n = json && typeof json === 'object' ? json.app_badge : undefined;
+  return Number.isInteger(n) && n >= 0 ? n : null;
+}
+// Sets (0: clears) the icon's number where the browser can; never throws, never rejects, so a notification never waits on it.
+function setBadge(n) {
+  try {
+    const nav = self.navigator;
+    if (n === null || !nav) return Promise.resolve();
+    const p = n === 0 ? (typeof nav.clearAppBadge === 'function' ? nav.clearAppBadge() : null)
+                      : (typeof nav.setAppBadge === 'function' ? nav.setAppBadge(n) : null);
+    return Promise.resolve(p).catch(() => {});
+  } catch (_) { return Promise.resolve(); }
+}
+
 // Every push shows a notification: when the shaped one is refused, a plain "Factotum" one instead.
 function handlePush(json) {
   const s = shape(json);
-  return self.registration.showNotification(s.title, s.options)
-    .catch(() => self.registration.showNotification('Factotum', { body: 'Open Factotum', data: { navigate: '/' } }));
+  return Promise.all([setBadge(badgeOf(json)), self.registration.showNotification(s.title, s.options)
+    .catch(() => self.registration.showNotification('Factotum', { body: 'Open Factotum', data: { navigate: '/' } }))])
+    .then(r => r[1]);
 }
 
 // Open an address of the app: in a window already open (it follows the path without reloading), else

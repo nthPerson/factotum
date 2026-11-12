@@ -24,6 +24,7 @@ import json
 import os
 import re
 import sqlite3
+from datetime import date
 from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import urlsplit
@@ -209,7 +210,11 @@ def payload(notice: dict, origin: str) -> bytes:
     the tag and `data` are never cut, so a notice whose path, tag or data alone is too large still
     comes back over the limit; `webpush.encrypt` then refuses it and `deliver` records that as a
     failure. Every notice Factotum makes (`reminders.notice`, the review nudge, the test) has a short
-    path, tag and data."""
+    path, tag and data.
+
+    A notice may carry `"badge"`, an integer >= 0 (the Review count): it becomes the message's top-level
+    `app_badge`, never a member of `notification`, because that is where WebKit reads it; it is counted
+    in the size before anything is trimmed and never cut."""
     n: dict = {"title": notice["title"], "body": notice["body"], "navigate": origin + notice["path"]}
     if notice.get("tag"):
         n["tag"] = notice["tag"]
@@ -220,6 +225,9 @@ def payload(notice: dict, origin: str) -> bytes:
     if notice.get("data") is not None:
         n["data"] = notice["data"]
     message = {"web_push": 8030, "notification": n}
+    b = notice.get("badge")
+    if type(b) is int and b >= 0:
+        message["app_badge"] = b
     raw = _encode(message)
     if len(raw) <= W.MAX_PLAINTEXT:
         return raw
@@ -303,6 +311,17 @@ def record(conn: sqlite3.Connection, outcome: dict) -> None:
 # the network (CLAUDE.md: a thread holding it makes every UI Apply fail with "database is locked").
 # send_all commits its own rows: a device the push service no longer knows must stay removed even
 # when the caller rolls back (a reminder that stays pending because nothing was sent, say).
+def with_badge(conn: sqlite3.Connection, cfg: dict, notice: dict) -> dict:
+    """`notice` with the Review count as `badge`, unless it has one or `notify.app.badge` is off."""
+    if "badge" in notice or not C.value(cfg, "notify.app.badge"):
+        return notice
+    try:
+        from . import review_queue
+        return dict(notice, badge=review_queue.count(conn, cfg, date.today()))
+    except Exception:
+        return notice               # the number is never a reason not to send
+
+
 def send_all(conn: sqlite3.Connection, cfg: dict, notice: dict, *, transport=None) -> dict:
     """Push `notice` to every device. Raises KeyFileError (nothing sent or written) when the key file
     is missing or unreadable, and NothingSent after recording when no device accepted."""
@@ -310,6 +329,7 @@ def send_all(conn: sqlite3.Connection, cfg: dict, notice: dict, *, transport=Non
     res = {"devices": len(devs), "sent": 0, "removed": 0, "failed": 0, "errors": []}
     if not devs:
         return res
+    notice = with_badge(conn, cfg, notice)
     k = keys(conn)
     outcomes = [deliver(d, notice, k, cfg, transport) for d in devs]
     for o in outcomes:
@@ -339,7 +359,7 @@ def send_test(conn: sqlite3.Connection, cfg: dict, endpoint: str, *, transport=N
         k = keys(conn)
     except KeyFileError as e:
         return {"id": device["id"], "ok": False, "status": None, "removed": False, "error": str(e)}
-    out = deliver(device, TEST_NOTICE, k, cfg, transport)
+    out = deliver(device, with_badge(conn, cfg, TEST_NOTICE), k, cfg, transport)
     record(conn, out)
     conn.commit()
     return out
