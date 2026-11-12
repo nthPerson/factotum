@@ -43,7 +43,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
-from . import app_push, batches, by_hand, commands, config as C, filing, lifecycle, oauth, relations, reminders, ripple, suggestions, summary
+from . import app_push, batches, by_hand, commands, config as C, filing, lifecycle, oauth, relations, reminders, review_queue, ripple, suggestions, summary
 from .db import connect, get_settings, get_task, init_db, now_iso, rows, seed_accounts, set_setting
 from .dates import parse_date
 
@@ -124,7 +124,7 @@ class DraftOpenBody(BaseModel):
     draft: dict[str, Any]
 
 
-SUGGESTION_KINDS = ("proposal", "slack_mention")      # evidence with no task that Review offers as a Create / Dismiss card
+SUGGESTION_KINDS = review_queue.SUGGESTION_KINDS
 
 
 def _json_value(s: str | None):
@@ -476,18 +476,23 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         with review_lock:
             return _review(exclude)
 
+    @app.get("/api/review/count")
+    def review_count(exclude: str | None = None):
+        """The number beside Review and on the app's icon (review_queue.count). Reads only; no lock needed."""
+        skip = {int(x) for x in (exclude or "").split(",") if x.strip().lstrip("-").isdigit()}
+        return {"count": review_queue.count(conn, eff_cfg(), date.today(), exclude=skip)}
+
     def _review(exclude: str | None):
         today = date.today()
         ecfg = eff_cfg()
         st = get_settings(conn)
-        last = parse_date(st.get("state.last_review_at"))
         skip = {int(x) for x in (exclude or "").split(",") if x.strip().lstrip("-").isdigit()}
         suggestions.session(conn, today, suggestions.per_review(ecfg))   # today's few link suggestions
         conn.commit()
         open_tasks = decorate_all([t for t in rows(conn, "SELECT * FROM tasks WHERE status = 'open'") if t["id"] not in skip], today, ecfg)
         from .mail_sweep import review_flags
         flags = review_flags(conn)
-        full = lifecycle.build_review_queue(open_tasks, today, ecfg, last, flags_by_id=flags, cap=10**9)
+        full = review_queue.queue(conn, ecfg, today, open_tasks, flags)
         names = {k: v["name"] for k, v in task_briefs({s["other"] for i in full for s in i["task"]["rel"]["suggestions"]}).items()}
         for i in full:                                           # from the full rel (a text may name a closed task it waited on)
             i["texts"] = lifecycle.reason_texts(i["task"], i["reasons"])
@@ -514,7 +519,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         # Planner creates with no task (an announcement, a hunch) and Slack mentions naming no task:
         # suggestion cards with Create / Dismiss.
         cards = [{"id": e["id"], "kind": e["kind"], "label": e["label"], "reason": e["excerpt"], "at": e["at"], "fields": _suggestion_fields(ecfg, e), "mail": _suggestion_mail(e),
-                  "links": _suggestion_links(e), "by": "ripple" if e["account"] == ripple.ACCOUNT else None} for e in pending if e["task_id"] is None and e["kind"] in SUGGESTION_KINDS]
+                  "links": _suggestion_links(e), "by": "ripple" if e["account"] == ripple.ACCOUNT else None} for e in pending if review_queue.is_card(e)]
         others = task_briefs({l["other"] for c in cards for l in c["links"]})
         for c in cards:                                          # a mail suggestion's link, made when Create is pressed
             c["links"] = [dict(l, other_name=(others.get(l["other"]) or {}).get("name")) for l in c["links"]]

@@ -32,7 +32,7 @@ _starter_told = False
 SETTINGS_KEYS = [
     "lifecycle.fade_days", "lifecycle.fade_warn_days", "lifecycle.last_call_days",
     "lifecycle.top_cap", "lifecycle.review_cap",
-    "notify.review_time", "notify.snooze_presets", "notify.ntfy.enabled", "notify.ntfy.topic", "notify.provider",
+    "notify.review_time", "notify.snooze_presets", "notify.ntfy.enabled", "notify.ntfy.topic", "notify.provider", "notify.app.badge",
     "notify.morning_brief.enabled", "notify.morning_brief.time", "notify.morning_brief.to",
     "sources.plaud.enabled", "sources.canvas.enabled", "sources.mail.enabled",
     "sources.calendar.enabled", "sources.calendar.calendar_id",
@@ -56,6 +56,7 @@ DEFAULTS: dict[str, Any] = {
     "lifecycle.top_cap": 7, "lifecycle.review_cap": 15,
     "notify.review_time": "19:30", "notify.snooze_presets": [], "notify.ntfy.enabled": True, "notify.ntfy.topic": "",
     "notify.provider": "ntfy",
+    "notify.app.badge": True,       # stage 8: costs nothing, sends nothing (never a push of its own), so on when absent
     "notify.morning_brief.enabled": False, "notify.morning_brief.time": "06:30", "notify.morning_brief.to": "",
     "sources.plaud.enabled": False, "sources.canvas.enabled": False, "sources.mail.enabled": False,
     "sources.calendar.enabled": False, "sources.calendar.calendar_id": "primary",

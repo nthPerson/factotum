@@ -65,6 +65,7 @@ sinks:
   notion_tasks_mirror: { enabled: false }
 
 notify:
+  app: { badge: true }
   ntfy: { enabled: false, topic: "" }
   review_time: "19:30"
   snooze_presets: ["30m", "1h", "tomorrow 9am"]

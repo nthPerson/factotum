@@ -32,7 +32,7 @@ import time
 import traceback
 from datetime import date, datetime, timedelta
 
-from . import app_push, batches, config as C, filing, lifecycle, notify, relations, reminders, suggestions
+from . import app_push, batches, config as C, filing, lifecycle, notify, relations, reminders, review_queue, suggestions
 from .db import get_settings, log_run, rows, set_setting
 
 RETRY_AFTER = timedelta(hours=1)
@@ -195,15 +195,14 @@ class Scheduler:
     def _review_push(self, ecfg: dict, today: date, st: dict) -> str | None:
         if st.get("state.last_review_at") == today.isoformat():
             return None
-        last = st.get("state.last_review_at")
-        queue = lifecycle.build_review_queue(self._open(), today, ecfg, date.fromisoformat(last) if last else None, cap=10**9)
-        if not queue:
+        queue = review_queue.queue(self.conn, ecfg, today)
+        n = len(queue) + review_queue.card_count(self.conn)
+        if not n:
             return None
-        n = len(queue)
         base = str(C.get(ecfg, "server.public_url", "")).rstrip("/")
         first = "; ".join(i["task"]["name"][:40] for i in queue[:3])
         title = f"Review: {n} item{'' if n == 1 else 's'}"
-        body = f"{n} item{'' if n == 1 else 's'} waiting: {first}" + (" …" if n > 3 else "")
+        body = f"{n} item{'' if n == 1 else 's'} waiting" + (f": {first}" if first else "") + (" …" if first and n > len(queue[:3]) else "")
         chosen = notify.providers(ecfg)
         sends = []
         if "ntfy" in chosen:

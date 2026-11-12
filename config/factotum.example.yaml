@@ -222,6 +222,7 @@ notify:
   provider: ntfy                # Settings → Notifications. Where reminders and the evening review nudge go: ntfy (its app and the topic below), app (Factotum's own notifications, on every device where they were turned on in Settings) or both
   app:                          # Factotum's own notifications (Settings → Notifications)
     push_hosts: []              # extra push services a browser may subscribe through, exact host names (e.g. [push.example.net]); Google's, Mozilla's, Apple's and Microsoft's need nothing here. The server posts only to these, never to an IP address or localhost. Not a Settings key
+    badge: true                 # Settings → Notifications ("Count on the app icon"). The number of Review items on the installed app's icon: kept by the open app and carried by notifications that are sent anyway, never a notification of its own. Costs nothing and sends nothing, so on when absent
   ntfy:                         # push notifications through ntfy (§4); NTFY_TOKEN in .env
     enabled: false              # Settings → Outputs. On = reminders and the review push are sent to the topic below; anyone who knows the topic can read them
     server: https://ntfy.sh

@@ -257,6 +257,7 @@ sinks:
     status_map: { open: Next, done: Done, dropped: Dropped, faded: Dropped, lapsed: Dropped }
 
 notify:
+  app: { badge: true }
   ntfy:
     enabled: true
     server: https://ntfy.sh
