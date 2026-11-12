@@ -1005,7 +1005,11 @@
     if (x.status !== 'open') return '';
     const chip = (eid, label, title) => `<span class="fsug"><button class="chip fsug-ok" data-fsug="${eid}" data-id="${x.id}" title="${esc(title)}">${esc(label).replace(/Task-\d+/, '<span class="tid">$&</span>')}</button><button class="fsug-no" data-fsug-no="${eid}" data-id="${x.id}" aria-label="Not this">×</button></span>`;
     const said = 'Suggested when you made it · tap to accept';
-    const fields = (x.filing || []).filter(f => !suggestionStaged(f.evidence_id)).map(f => chip(f.evidence_id, f.label, said));
+    // A field the editor has already staged keeps the editor's choice: its chip waits (a tap would replace that choice
+    // under the same key). It is back if the edit is taken back, and the server drops it once the field is set.
+    const srv = byId(x.id) || detailCache.get(x.id) || x;
+    const edited = f => staged.has(editKey(x.id, f.field)) || (x[f.field] ?? null) !== (srv[f.field] ?? null);
+    const fields = (x.filing || []).filter(f => !suggestionStaged(f.evidence_id) && !edited(f)).map(f => chip(f.evidence_id, f.label, said));
     const links = filingLinks(x).filter(s => !suggestionStaged(s.evidence_id)).map(s => {
       const T = `Task-${s.other}`, n = nameOf(s.other);
       return chip(s.evidence_id, `${FILING_SAID[s.kind][s.dir === 'in' ? 1 : 0]} ${T}?`, `${said} · ${T}${n ? ' ' + n.name : ''}`);
@@ -2591,7 +2595,7 @@
       <h3>Claude</h3>
       ${f('claude.planner.enabled', 'Morning planner', 'One Claude run before the brief: the verdict, why-now lines and proposals. Off = the plain brief.', bool('claude.planner.enabled'))}
       ${f('claude.summary.auto', 'Today summary', 'Rewritten by one light Claude run when a task it is about changes, something becomes urgent, or the day turns. Off: the Today tab still says what changed, and Refresh rewrites it.', bool('claude.summary.auto') + ' &nbsp; at most every ' + num('claude.summary.auto_minutes', 1, 240) + ' min')}
-      ${f('claude.filing.enabled', 'Filing a task you add', 'When you add a task with only a name, one small Claude run with no tools suggests its project, effort, a likely link and a likely twin, as dashed chips you accept with one tap. It never changes what you typed. Its cost is in the Log.', bool('claude.filing.enabled'))}
+      ${f('claude.filing.enabled', 'Filing a task you add', 'When you add a task with only a name, one small Claude run with no tools suggests its project, effort, a likely link and a likely twin, as dashed chips you accept with one tap. It never changes what you typed. About 4 cents a new task (measured 2026-11-11); each run\'s cost is in the Log.', bool('claude.filing.enabled'))}
       ${f('claude.ripple.enabled', 'Ripples', 'When a linked task is closed or changes, one light Claude run brings the tasks linked to it up to date: it may rewrite their text (each rewrite is in History with Undo) and suggests anything else on Review. About 3 cents a run (measured 2026-11-11), at most ' + esc(e['claude.ripple.hourly_cap']) + ' runs an hour.', bool('claude.ripple.enabled') + ' &nbsp; after ' + num('claude.ripple.delay_seconds', 10, 3600) + ' s of quiet · at most ' + num('claude.ripple.hourly_cap', 1, 60) + ' runs an hour · $ ' + num('claude.budgets_usd.ripple', 0.05, 2) + ' a run · ' + `<select id="s-claude.ripple.model" data-key="claude.ripple.model" aria-label="Ripple model">${rippleModels(e['claude.ripple.model']).map(m => `<option value="${esc(m)}" ${(e['claude.ripple.model'] || 'sonnet') === m ? 'selected' : ''}>${esc(m)}</option>`).join('')}</select>`)}
       ${rippleInfo && rippleInfo.waiting_for_scheduler ? `<p class="hint warn">${rippleInfo.pending.length} ${rippleInfo.pending.length === 1 ? 'ripple' : 'ripples'} waiting: this instance runs no scheduler, so they run when the service does.</p>` : ''}
       ${f('claude.budgets_usd.chat_turn', 'Chat turn budget', 'Dollars a single chat turn may spend before Claude stops.', '$ ' + num('claude.budgets_usd.chat_turn', 0.05, 5) )}
@@ -3438,7 +3442,7 @@
     panel.querySelectorAll('[data-follow]').forEach(b => b.onclick = () => {
       const m = mailCard(+b.dataset.follow); if (!m) return;
       const { e, tid } = m, subject = (e.change.mail || {}).subject || (e.change.fields || {}).subject || '';
-      stageChange({ task_id: tid, op: 'follow_thread', fields: e.change.fields }, `follows “${subject}”`, { ev: e.id }, 'f' + e.id);
+      stageChange({ task_id: tid, op: 'follow_thread', fields: e.change.fields }, subject ? `follows “${subject}”` : 'follows the mail thread', { ev: e.id }, 'f' + e.id);
       stageJudge(e.id, tid, 'applied', 'mail card accepted');
       toast('Staged · it follows the thread once you Apply');
     });

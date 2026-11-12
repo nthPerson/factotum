@@ -230,7 +230,7 @@ span.lb { cursor: default; }      /* stepsChip: the same look, not a link */
 .fsug-ok:focus-visible, .fsug-no:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 @media (max-width: 700px) {
   /* 44 px where a finger lands, drawn 32 px tall: the dashed pill is the ::before, the margin gives the rest back. */
-  .fsug-ok { position: relative; isolation: isolate; min-height: 44px; margin-block: -6px; padding: 0 10px; font-size: 12px; background: transparent; border: 0; }
+  .fsug-ok { position: relative; isolation: isolate; min-height: 44px; min-width: 44px; justify-content: center; margin-block: -6px; padding: 0 10px; font-size: 12px; background: transparent; border: 0; }
   .fsug-ok::before { content: ''; position: absolute; inset: 6px 0; z-index: -1; border-radius: 999px; background: var(--surface); border: 1px dashed var(--warn); }
   .fsug-no { width: 44px; height: 44px; margin-block: -6px; font-size: 16px; }
 }
