@@ -774,6 +774,12 @@ label.pprop { cursor: pointer; }
 .fab { display: none; position: fixed; right: max(16px, env(safe-area-inset-right, 0px)); bottom: calc(16px + env(safe-area-inset-bottom, 0px)); z-index: 6;
   width: 56px; height: 56px; border-radius: 50%; border: 0; padding: 0; background: var(--accent); color: var(--on-accent); place-items: center; cursor: pointer; box-shadow: 0 6px 20px rgba(0,0,0,.25); }
 body.fab-on:not(.kb-open) .fab { display: grid; }      /* a box being typed in hides it (Task 8's kb-open), sheet open or not */
+/* Nothing under the round button: Find any task leaves it the right edge (56 px and a 16 px gap), and the list ends
+   above it when scrolled to the end, the iPhone's home bar included */
+@media (max-width: 700px) {
+  .handbar { padding-right: 72px; }
+  body.fab-on main { padding-bottom: calc(110px + env(safe-area-inset-bottom, 0px)); }
+}
 @media (max-width: 700px) { body.fab-on .toast:not(.ask) { left: 16px; transform: none; bottom: calc(20px + env(safe-area-inset-bottom, 0px)); max-width: calc(100vw - 32px - 66px); } }      /* beside the button (frame 8), never over it */
 .sheet-back { position: fixed; inset: 0; z-index: 8; background: rgba(10, 18, 22, .45); }
 .sheet { position: fixed; left: 0; right: 0; bottom: var(--kb, 0px); z-index: 9; max-height: calc(100dvh - 48px); overflow-y: auto; overscroll-behavior: contain;
