@@ -1353,10 +1353,10 @@
       const l = (v != null ? v : o) || {}, said = LINK_SAID[`${l.dir} ${l.kind}`];
       if (said && Number.isInteger(l.other) && l.other !== selfId) return said[v != null ? 0 : 1].replace('{T}', tref(l.other));
     }
-    if (e.field === 'context' && isNote(e, selfId)) return `Note added: “${esc(textOf(v).slice(textOf(o).length).trim())}”` + (rippleNoted(e, selfId) ? NOTED_SAID : '');
+    if (e.field === 'context' && isNote(e, selfId)) return `Note added: “${linkTasks(textOf(v).slice(textOf(o).length).trim())}”` + (rippleNoted(e, selfId) ? NOTED_SAID : '');
     if (e.field === 'context') return 'Text rewritten.';
     if (e.field === 'name') return 'Renamed.';
-    if (e.field === 'outcome') return `Outcome: “${esc(textOf(v))}”`;
+    if (e.field === 'outcome') return `Outcome: “${linkTasks(textOf(v))}”`;
     if (e.field === 'evidence' && VERDICT_SAID[(v || {}).verdict]) return VERDICT_SAID[v.verdict];
     if (e.field === 'created') return 'Created.';
     const s = fieldSaid(e);
@@ -1951,7 +1951,7 @@
   // with See what changed (before / after, as History shows a rewrite) and Undo (design §12.4).
   // The before / after block (History's `diffHtml` draws it too), for any two texts.
   function beforeAfter(before, after) {
-    const val = v => textOf(v) ? esc(textOf(v)) : '<span class="code">none</span>';
+    const val = v => textOf(v) ? linkTasks(textOf(v)) : '<span class="code">none</span>';      // escaped, then Task-N linked
     return `<div class="hdiff"><span class="bl">before</span><span class="bv">${val(before)}</span><span class="al">after</span><span class="av">${val(after)}</span></div>`;
   }
   const SINCE_WHAT = { name: 'its name', text: 'its text', due: 'its due date', hard: 'its hard deadline', outcome: 'its outcome' };
@@ -1960,7 +1960,7 @@
     const s = item && item.since; if (!s) return '';
     const lines = (s.by || []).map(b => {
       const T = tref(b.id), on = monDay(b.completed_at);
-      if (b.did === 'done') return `${T} finished${on ? ' ' + on : ''}.${b.outcome ? ' Outcome: ' + esc(sentence(String(b.outcome).trim())) : ''}`;
+      if (b.did === 'done') return `${T} finished${on ? ' ' + on : ''}.${b.outcome ? ' Outcome: ' + linkTasks(sentence(String(b.outcome).trim())) : ''}`;
       if (b.did === 'dropped') return `${T} was dropped${on ? ' ' + on : ''}.`;
       if (b.did === 'merged') return `${T} had another task merged into it.`;
       const what = (b.what || []).map(w => SINCE_WHAT[w]).filter(Boolean);
