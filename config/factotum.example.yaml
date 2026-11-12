@@ -239,7 +239,7 @@ links:                          # stage 7: suggested links between tasks (design
 
 claude:                         # headless `claude -p` runs (§2 for the CLI; `factotum claude-check` tests the login)
   binary: claude                # absolute path (`which claude`): the service has systemd's minimal PATH
-  models: { sync_file: sonnet, today_summary: sonnet, mail_triage: sonnet, planner_morning: sonnet, chat_turn: sonnet, check: haiku, filing: sonnet }   # the model per run kind
+  models: { sync_file: sonnet, today_summary: sonnet, mail_triage: sonnet, planner_morning: sonnet, chat_turn: sonnet, check: haiku, filing: haiku }   # the model per run kind
   budgets_usd: { sync_file: 1.00, today_summary: 0.30, mail_triage: 0.40, planner_morning: 0.75, chat_turn: 0.60, check: 0.05, filing: 0.10, ripple: 0.30 }   # the most one run may spend; chat_turn: Settings → Claude
   planner: { enabled: false }   # Settings → Claude. On = one Claude run before the brief (≈ $0.10, at most budgets_usd.planner_morning): the verdict, why-now lines and proposals; off = the plain brief
   summary: { auto: false, auto_minutes: 10 }   # Settings → Claude. auto on = the Today tab's summary is rewritten by one light run (≈ $0.18) when it goes stale,

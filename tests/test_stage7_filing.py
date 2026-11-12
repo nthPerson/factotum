@@ -87,7 +87,7 @@ def test_the_filing_run_kind_has_a_small_model_and_budget_in_the_example_and_the
     from conftest import FIXTURE
     for p in (C.EXAMPLE_CONFIG, FIXTURE):
         y = yaml.safe_load(p.read_text())
-        assert (C.get(y, "claude.models.filing"), C.get(y, "claude.budgets_usd.filing"), C.get(y, "claude.timeouts_s.filing")) == ("sonnet", 0.1, 120), p
+        assert (C.get(y, "claude.models.filing"), C.get(y, "claude.budgets_usd.filing"), C.get(y, "claude.timeouts_s.filing")) == ("haiku", 0.1, 120), p
 
 
 def test_a_task_made_by_hand_with_only_a_name_is_queued_and_nothing_else_is(conn):
