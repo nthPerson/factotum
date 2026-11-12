@@ -1441,6 +1441,10 @@
     // The focus mark on the copy j / k reached, not on every copy of a task drawn twice
     const rowsNow = [...p.querySelectorAll('.row')];
     if (ui.focusAt != null && rowsNow[ui.focusAt] && +rowsNow[ui.focusAt].dataset.id === ui.focus) rowsNow.forEach((r, n) => { if (n !== ui.focusAt) r.classList.remove('focus'); });
+    // An opened task drawn twice (Timeline may list it in two sections) shows its details on the first copy only, which
+    // also holds its conversation (taskPlacesDrawn): two copies doubled every button and every id inside them.
+    const openSeen = new Set();
+    rowsNow.forEach(r => { if (!r.classList.contains('open')) return; const id = r.dataset.id; if (openSeen.has(id)) { r.classList.remove('open'); const d = r.querySelector(':scope > .details'); if (d) d.innerHTML = ''; } else openSeen.add(id); });
     restoreDraftBox(held);
     p.querySelectorAll('textarea.grow').forEach(grow);
     document.querySelectorAll('#tabs button').forEach(b => { b.setAttribute('aria-selected', b.dataset.tab === ui.tab); if (b.dataset.tab === ui.tab && PHONE() && b.scrollIntoView) b.scrollIntoView({ block: 'nearest', inline: 'center' }); });
