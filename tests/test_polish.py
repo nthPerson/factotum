@@ -177,7 +177,7 @@ def test_ripples_on_a_machine_where_claude_cannot_run_fail_once_a_day_and_set_th
         mk(conn, a); mk(conn, b); link(conn, b, a, "waits_on")
         batches.apply(conn, [{"op": "done", "task_id": a}], "ui", TODAY)
     conn.execute("UPDATE ripple_queue SET queued_at = ?", (old,)); conn.commit()
-    t0 = datetime.now().replace(second=0, microsecond=0)
+    t0 = datetime.now().replace(hour=9, minute=0, second=0, microsecond=0)   # every tick on one day: after 22:00 the +2 h tick was tomorrow, with its own row
     for i in range(6):                                                   # ticks a minute apart, then an hour later
         s.tick(t0 + timedelta(minutes=i))
     s.tick(t0 + timedelta(hours=1, minutes=1))
