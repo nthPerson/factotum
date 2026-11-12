@@ -377,10 +377,16 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
   running** (2026-11-11): the pipe never closes and the command hangs. And `GET /api/review` is loaded once
   per page (the in-flight flag in `app.js`) because its `last_offered_at` stamp commits on the shared
   connection; two at once answered 500.
-- **A GET that writes takes `commit_lock`** (2026-11-11, `api.create_app`): Review's stamps, an opened task's
-  `neighbours_seen_at`, the first push key pair, a reminder link's Done / Snooze, and a suggestion card's Create;
-  two commits interleaved on the shared connection answered 500. A new route that commits outside
-  `batches.apply` takes it too (never across a network call); `GET /api/review/count` reads only and stays out.
+- **Every write on the API's shared connection takes `commit_lock`** (2026-11-11, `api.create_app`, an `RLock`):
+  from its first write to its commit or rollback — `batches.apply` / `undo`, every route that commits (GETs that
+  stamp included), a helper that commits (`by_hand.add`, `chat.create_from_proposal`, `chat.turn`, `app_push.send_test`
+  take it as `lock=`), and the chat turn's worker. The request threads share ONE transaction: one thread's commit
+  committed another's half-written batch (a batch row with no undo data) and a rollback threw another's work away;
+  Applies answered 500 for writes that had landed (review 2026-11-11). Never held across a Claude run or a network
+  call: commit, let go, call, take it again. Order: `turn_lock`, `chat._CREATE_LOCK`, `by_hand._ADD_LOCK`, then
+  `commit_lock` last. No `async def` route writes (it would run on the event loop). The scheduler has its own
+  connection and never takes it; `GET /api/review/count` reads only and stays out.
+  `tests/test_review_fixes.py::test_every_write_on_the_shared_connection_in_the_api_takes_commit_lock` fails a route that forgets.
 - **`expire` only touches rows Review has shown** (`last_offered_at`, stamped by `GET /api/review`).
   A row that was never on a Review page stays open however old it is; that is by design.
 - **The manifest must be requested with `crossorigin="use-credentials"`** (2026-11-10): otherwise Access

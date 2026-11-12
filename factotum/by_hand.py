@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import contextlib
 import threading
 from datetime import date
 from typing import Callable
@@ -107,7 +108,8 @@ def _clean_fields(conn, cfg: dict, fields: dict) -> tuple[dict, list[dict]]:
     return out, refused
 
 
-def add(conn, cfg: dict, *, text: str | None = None, fields: dict | None = None, key: str | None = None, today: date, verb: bool = False) -> dict:
+def add(conn, cfg: dict, *, text: str | None = None, fields: dict | None = None, key: str | None = None, today: date, verb: bool = False,
+        lock=None) -> dict:
     """Make a task now, in one `ui` batch (Source Manual; its undo drops the row). `key` makes a repeat answer with the first task."""
     if (text is None) == (fields is None):
         raise ValueError("give text or fields")
@@ -133,7 +135,7 @@ def add(conn, cfg: dict, *, text: str | None = None, fields: dict | None = None,
     if len(name) > 200:
         raise ValueError("a name is at most 200 characters")
     ch: dict = {"op": "create", "fields": create}
-    with _ADD_LOCK:
+    with _ADD_LOCK, (lock or contextlib.nullcontext()):        # `lock`: the API's commit_lock, taken after _ADD_LOCK
         if key is not None:
             old = conn.execute("SELECT id, name FROM tasks WHERE source_key = ?", (f"add:{key}",)).fetchone()
             if old:

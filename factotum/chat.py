@@ -21,6 +21,7 @@ task and its links undo together. Everything rejected is kept on the message so 
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import sqlite3
@@ -377,10 +378,24 @@ def _mapper(on_event):
     return emit, raw
 
 
+@contextlib.contextmanager
+def _writing(conn: sqlite3.Connection, lock):
+    """`lock` held for one write and its commit; a failure rolls back before the lock is let go, so no
+    other writer on a shared connection commits the half of it."""
+    with lock:
+        try:
+            yield
+        except BaseException:
+            conn.rollback()
+            raise
+
+
 def turn(conn: sqlite3.Connection, cfg: dict, thread_id: int, text: str, attached_ids: list[int], *, today: date | None = None,
-         canned: str | None = None, runner=None, on_event=None, asked: tuple[str | None, int | None] | None = None) -> dict:
+         canned: str | None = None, runner=None, on_event=None, asked: tuple[str | None, int | None] | None = None, lock=None) -> dict:
     """`asked`: the place the turn was sent from, (origin, task id). A Review card and an opened task share a
-    thread, so the prompt says the place it was asked from when that is the other of the two for the same task."""
+    thread, so the prompt says the place it was asked from when that is the other of the two for the same task.
+    `lock` (the API's commit_lock) is held for each write and its commit, never across the run."""
+    lock = lock or contextlib.nullcontext()
     today = today or date.today()
     runner = runner or R.run
     th = one(conn, "SELECT * FROM chat_threads WHERE id = ?", (thread_id,))
@@ -396,12 +411,13 @@ def turn(conn: sqlite3.Connection, cfg: dict, thread_id: int, text: str, attache
     place = (said, place_task) if said in ORIGINS else None
     prior = messages(conn, thread_id)
     shown = (text or "").strip() or (CANNED[canned][1] if canned in CANNED else "")
-    cur = conn.execute("INSERT INTO chat_messages (thread_id, role, text, attached_json, created_at) VALUES (?, 'user', ?, ?, ?)",
-                       (thread_id, shown, json.dumps(attached), now_iso()))
-    umid = int(cur.lastrowid)
-    if not th.get("title"):
-        conn.execute("UPDATE chat_threads SET title = ? WHERE id = ?", ((shown or "chat")[:TITLE_CAP], thread_id))
-    conn.commit()
+    with _writing(conn, lock):
+        cur = conn.execute("INSERT INTO chat_messages (thread_id, role, text, attached_json, created_at) VALUES (?, 'user', ?, ?, ?)",
+                           (thread_id, shown, json.dumps(attached), now_iso()))
+        umid = int(cur.lastrowid)
+        if not th.get("title"):
+            conn.execute("UPDATE chat_threads SET title = ? WHERE id = ?", ((shown or "chat")[:TITLE_CAP], thread_id))
+        conn.commit()
     run_dir = RUNS_DIR / f"{thread_id}-{umid}"
     run_dir.mkdir(parents=True, exist_ok=True)
     emit, raw = _mapper(on_event)
@@ -424,10 +440,11 @@ def turn(conn: sqlite3.Connection, cfg: dict, thread_id: int, text: str, attache
     tasks_seen = mcp_server.tasks_seen(run_dir)
     read = sorted(set(attached) | tasks_seen)        # what the turn had in view: attached, or shown by a reading tool
     if not res.ok:
-        cur = conn.execute("INSERT INTO chat_messages (thread_id, role, text, cost_usd, duration_ms, error, read_json, created_at) VALUES (?, 'assistant', ?, ?, ?, ?, ?, ?)",
-                           (thread_id, (res.result_text or "")[:2000], res.cost_usd, ms, (res.error or "run failed")[:500], json.dumps(read), now_iso()))
-        log_run(conn, "chat-turn", ms, ok=False, error=(res.error or "run failed")[:300], cost_usd=res.cost_usd, summary=f"thread {thread_id}")
-        conn.commit()
+        with _writing(conn, lock):
+            cur = conn.execute("INSERT INTO chat_messages (thread_id, role, text, cost_usd, duration_ms, error, read_json, created_at) VALUES (?, 'assistant', ?, ?, ?, ?, ?, ?)",
+                               (thread_id, (res.result_text or "")[:2000], res.cost_usd, ms, (res.error or "run failed")[:500], json.dumps(read), now_iso()))
+            log_run(conn, "chat-turn", ms, ok=False, error=(res.error or "run failed")[:300], cost_usd=res.cost_usd, summary=f"thread {thread_id}")
+            conn.commit()
         return {"ok": False, "error": res.error, "thread_id": thread_id, "message_id": int(cur.lastrowid), "user_message_id": umid, "cost_usd": res.cost_usd, "duration_ms": ms,
                 "read": read, "named": named(conn, set(read)), "origin": origin, "task_id": place_task}
     data = res.data or {}
@@ -435,14 +452,15 @@ def turn(conn: sqlite3.Connection, cfg: dict, thread_id: int, text: str, attache
     seen = mcp_server.seen_threads(run_dir)
     drafts = mcp_server.drafts_made(run_dir)
     kept, rejected = _clean_proposals(conn, cfg, data, seen, tasks_seen=tasks_seen, attached=attached)
-    cur = conn.execute("INSERT INTO chat_messages (thread_id, role, text, proposals_json, drafts_json, rejected_json, cost_usd, duration_ms, read_json, created_at) VALUES (?, 'assistant', ?, ?, ?, ?, ?, ?, ?, ?)",
-                       (thread_id, reply, json.dumps(kept, default=str), json.dumps(drafts, default=str), json.dumps(rejected), res.cost_usd, ms, json.dumps(read), now_iso()))
-    amid = int(cur.lastrowid)
-    if res.session_id:
-        conn.execute("UPDATE chat_threads SET claude_session_id = ? WHERE id = ?", (res.session_id, thread_id))
-    log_run(conn, "chat-turn", ms, ok=True, cost_usd=res.cost_usd,
-            summary=f"thread {thread_id}: {len(kept)} proposal{'s' if len(kept) != 1 else ''}, {len(drafts)} draft{'s' if len(drafts) != 1 else ''}" + (f", {len(rejected)} rejected" if rejected else ""))
-    conn.commit()
+    with _writing(conn, lock):
+        cur = conn.execute("INSERT INTO chat_messages (thread_id, role, text, proposals_json, drafts_json, rejected_json, cost_usd, duration_ms, read_json, created_at) VALUES (?, 'assistant', ?, ?, ?, ?, ?, ?, ?, ?)",
+                           (thread_id, reply, json.dumps(kept, default=str), json.dumps(drafts, default=str), json.dumps(rejected), res.cost_usd, ms, json.dumps(read), now_iso()))
+        amid = int(cur.lastrowid)
+        if res.session_id:
+            conn.execute("UPDATE chat_threads SET claude_session_id = ? WHERE id = ?", (res.session_id, thread_id))
+        log_run(conn, "chat-turn", ms, ok=True, cost_usd=res.cost_usd,
+                summary=f"thread {thread_id}: {len(kept)} proposal{'s' if len(kept) != 1 else ''}, {len(drafts)} draft{'s' if len(drafts) != 1 else ''}" + (f", {len(rejected)} rejected" if rejected else ""))
+        conn.commit()
     return {"ok": True, "thread_id": thread_id, "message_id": amid, "user_message_id": umid, "reply_md": reply, "proposals": kept, "drafts": drafts,
             "rejected": rejected, "cost_usd": res.cost_usd, "duration_ms": ms, "session_id": res.session_id,
             "read": read, "named": named(conn, set(read) | proposal_ids(kept) | set(attached)), "origin": origin, "task_id": place_task}
@@ -451,13 +469,14 @@ def turn(conn: sqlite3.Connection, cfg: dict, thread_id: int, text: str, attache
 _CREATE_LOCK = threading.Lock()
 
 
-def create_from_proposal(conn: sqlite3.Connection, cfg: dict, message_id: int, index: int, today: date) -> int:
+def create_from_proposal(conn: sqlite3.Connection, cfg: dict, message_id: int, index: int, today: date, lock=None) -> int:
     """The user clicked Create on a stored proposal: one batch keyed `chat:<message>:<index>`, so a
     second click changes nothing and one Undo takes back the task and its links. A link to another
     proposal's ref is made only once that task exists (create it first). Cited mail threads become links.
     Two clicks at once (the API runs routes on a thread pool over one connection) are taken one after
-    the other, so the second finds the task the first made instead of writing an empty batch."""
-    with _CREATE_LOCK:
+    the other, so the second finds the task the first made instead of writing an empty batch. `lock`: the API's
+    commit_lock, taken after _CREATE_LOCK."""
+    with _CREATE_LOCK, (lock or contextlib.nullcontext()):
         return _create_from_proposal(conn, cfg, message_id, index, today)
 
 
