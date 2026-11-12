@@ -3429,6 +3429,21 @@
     el.addEventListener('keydown', e => { if (e.key === 'Escape') return; if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229 && !TOUCH()) { e.preventDefault(); send(); } e.stopPropagation(); });      // 229: Safari's Enter that commits an IME candidate
   }
   // On a phone Review's decisions are pinned at the bottom (app.css), above the tray when it shows, as the page bar is.
+  // On a phone Later is pinned at the bottom while its menu is in the card: the page scrolls so the menu (and Pick a
+  // date under it) ends just above the pinned decisions, where the finger is, whether the card was scrolled to its
+  // top or its end. Again once a note box's keyboard has gone (kb-open is cleared 300 ms after the blur).
+  function revealLaterMenu(again) {
+    if (!PHONE()) return;
+    const menu = document.querySelector('#panel .review .card .later-menu.on'); if (!menu) return;
+    const last = document.querySelector('#panel .review .card .datepick') || menu;
+    const big = document.querySelector('#panel .review .card .big');
+    const b = big && big.getClientRects().length ? big.getBoundingClientRect() : null;
+    const limit = (b && b.height ? b.top : innerHeight) - 8;
+    const head = document.querySelector('header.bar'), top = head && getComputedStyle(head).position !== 'static' ? head.getBoundingClientRect().bottom + 8 : 8;
+    // the menu's end on the bar's edge, unless that would push its start under the top bar
+    window.scrollBy(0, Math.min(last.getBoundingClientRect().bottom - limit, menu.getBoundingClientRect().top - top));
+    if (!again && document.body.classList.contains('kb-open')) setTimeout(() => revealLaterMenu(true), 350);
+  }
   function placeReviewBar() {
     const big = document.querySelector('#panel .review .card .big'); if (!big) return;
     const tray = document.getElementById('tray');
@@ -3723,8 +3738,8 @@
   function reviewAct(kind, dateStr) {
     const items = review.items.filter(i => !staged.has(i.task.id)); if (!items.length) return;
     const x = items[0].task, id = x.id;
-    if (kind === 'later') { ui.laterOpen = !ui.laterOpen; ui.datePick = false; render(); return; }
-    if (kind === 'pickdate') { ui.datePick = !ui.datePick; render(); return; }
+    if (kind === 'later') { ui.laterOpen = !ui.laterOpen; ui.datePick = false; render(); revealLaterMenu(); return; }
+    if (kind === 'pickdate') { ui.datePick = !ui.datePick; render(); revealLaterMenu(); return; }
     if (kind === 'top' || kind === 'longterm') { act(id, kind); return; }   // extras, not decisions
     // A decision is a review: it sets last_reviewed_at (Keep does so server-side). An optional note saved
     // with Done or Drop is the task's outcome (design §8.5: appended to the text as well, it would ripple
