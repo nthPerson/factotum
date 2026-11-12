@@ -911,8 +911,10 @@ per task (links, `waits_on_open`, `frees_open`, `goal_id`, steps open / total, `
 first, 30 a page, `before=<change id>`, each with source, cause, undone, note and, for a link, the other
 task); opening a task stamps `neighbours_seen_at`. Review items carry `texts` for the link reasons and
 `link_suggestions`. `POST /api/batches/{id}/undo` returns `restored` and `skipped` (a field the owner
-changed since, a link whose restore would loop or duplicate, each with a reason) and 404 only for a batch
-that does not exist. The Log carries each batch's `cause` and each change's `note`. The page is described next.
+changed since, a link whose restore would loop or duplicate, each with a reason), `undone`, and 404 only for
+a batch that does not exist. An undo that restored nothing because everything it wrote was changed since
+writes nothing (its ripples stay too) and leaves the batch not undone (`undone: false`), so it can be undone
+once the later change is. The Log carries each batch's `cause` and each change's `note`. The page is described next.
 
 **Links on the page (stage 4b, 2026-11-11).** A row carries one badge per kind, in this order:
 "do first: frees" / "frees" (teal), "waits on" (amber), "steps" (teal), "updated by" (purple), "part of"

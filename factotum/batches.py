@@ -587,12 +587,13 @@ def undo(conn: sqlite3.Connection, batch_id: int) -> dict:
     it caused are followed first (newest writes go first, so a field both wrote comes back whole), and
     a ripple it queued that has not run is taken out of the queue (`ripple.unqueue`), in the same
     transaction. Any error rolls back: the API shares one connection, and an open transaction holds
-    the write lock."""
+    the write lock. When nothing was restored and every entry was skipped as changed since, nothing is
+    written and the batch is not marked undone (`undone` False in the answer; it can be undone later)."""
     b = conn.execute("SELECT * FROM batches WHERE id = ?", (batch_id,)).fetchone()
     if not b:
         raise NoSuchBatch(batch_id)
     if b["undone_at"]:
-        return {"batch_id": batch_id, "restored": 0, "skipped": [], "already": True, "ripples_undone": [], "ripples_kept": []}
+        return {"batch_id": batch_id, "restored": 0, "skipped": [], "already": True, "undone": True, "ripples_undone": [], "ripples_kept": []}
     undone: list[int] = []
     kept: list[int] = []
     entries = _entries(b["undo_json"])                           # before any write: broken data changes nothing
@@ -600,6 +601,13 @@ def undo(conn: sqlite3.Connection, batch_id: int) -> dict:
         if b["source"] != "ripple":                              # a ripple's own undo looks for nothing: a ripple never causes one
             _follow_ripples(conn, batch_id, undone, kept)        # before the cause's own entries: the ripple wrote after it
         restored, skipped = _undo_entries(conn, entries)
+        if not restored and skipped and all(s["why"] != UNKNOWN_UNDO for s in skipped):
+            # Everything it wrote was changed since: nothing is undone, its ripples included, and it stays
+            # undoable (once the later change is undone, this one can be). An entry Factotum does not know
+            # never becomes undoable, so a batch with one is marked as today.
+            conn.rollback()
+            return {"batch_id": batch_id, "restored": 0, "skipped": skipped, "already": False, "undone": False,
+                    "ripples_undone": [], "ripples_kept": []}
         conn.execute("UPDATE batches SET undone_at = ? WHERE id = ?", (now_iso(), batch_id))
         from . import ripple                                     # here, not at the top: ripple imports batches
         ripple.unqueue(conn, batch_id)                           # a ripple it queued that has not run never runs for it
@@ -607,7 +615,7 @@ def undo(conn: sqlite3.Connection, batch_id: int) -> dict:
     except Exception:
         conn.rollback()
         raise
-    return {"batch_id": batch_id, "restored": restored, "skipped": skipped, "already": False,
+    return {"batch_id": batch_id, "restored": restored, "skipped": skipped, "already": False, "undone": True,
             "ripples_undone": sorted(undone), "ripples_kept": sorted(kept)}
 
 

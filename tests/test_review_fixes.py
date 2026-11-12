@@ -421,3 +421,53 @@ def test_a_reopen_that_clears_an_outcome_still_queues_no_ripple(conn):
     conn.commit()
     r = batches.apply(conn, [{"op": "reopen", "task_id": 1}], "ui", TODAY)
     assert r["ripple_queued"] == [] and ripple.pending(conn) == []
+
+
+# ---- 7. an undo that restored nothing leaves the batch not undone ------------------------------------------
+
+def test_an_undo_that_restores_nothing_leaves_the_batch_undoable(conn):
+    """test_undo_roundtrip.py::test_two_batches_out_of_order: b1 sets "b", b2 sets "c"; undo b1 restored 0 and
+    still marked b1 undone, so after undo b2 the text was "b", a value History called undone, and b1 could never
+    be undone again."""
+    _mk(conn, 1, context="a")
+    b1 = batches.apply(conn, [{"op": "set", "task_id": 1, "fields": {"context": "b"}}], "ui", TODAY)["batch_id"]
+    b2 = batches.apply(conn, [{"op": "set", "task_id": 1, "fields": {"context": "c"}}], "ui", TODAY)["batch_id"]
+    u1 = batches.undo(conn, b1)
+    assert u1["restored"] == 0 and u1["undone"] is False and u1["already"] is False
+    assert [s["why"] for s in u1["skipped"]] == ["Task-1 context was changed after this batch; left as it is"]
+    assert set(u1) == {"batch_id", "restored", "skipped", "already", "undone", "ripples_undone", "ripples_kept"}
+    assert conn.execute("SELECT undone_at FROM batches WHERE id = ?", (b1,)).fetchone()[0] is None and not conn.in_transaction
+    assert batches.undo(conn, b2)["undone"] is True
+    assert conn.execute("SELECT context FROM tasks WHERE id = 1").fetchone()[0] == "b"
+    u = batches.undo(conn, b1)                                    # now it can be undone
+    assert u["restored"] == 1 and u["undone"] is True
+    assert conn.execute("SELECT context FROM tasks WHERE id = 1").fetchone()[0] == "a"
+
+
+def test_a_partly_restored_batch_is_undone_and_its_ripples_follow_only_then(conn, tmp_path, monkeypatch):
+    _mk(conn, 1, context="a"); _mk(conn, 2, context="x")
+    b1 = batches.apply(conn, [{"op": "set", "task_id": 1, "fields": {"context": "b"}},
+                              {"op": "set", "task_id": 2, "fields": {"context": "y"}}], "ui", TODAY)["batch_id"]
+    batches.apply(conn, [{"op": "set", "task_id": 1, "fields": {"context": "c"}}], "ui", TODAY)
+    u = batches.undo(conn, b1)
+    assert u["restored"] == 1 and len(u["skipped"]) == 1 and u["undone"] is True
+    assert conn.execute("SELECT undone_at FROM batches WHERE id = ?", (b1,)).fetchone()[0] is not None
+    assert batches.undo(conn, b1)["already"] is True
+
+
+def test_a_cause_that_restores_nothing_keeps_its_ripple(rconn, cfg):
+    conn = rconn
+    _mk(conn, 1, name="Old"); _mk(conn, 2, context="Needs Task-1.")
+    batches.apply(conn, [{"op": "link", "task_id": 2, "fields": {"kind": "waits_on", "other": 1}}], "ui", TODAY)
+    b1 = batches.apply(conn, [{"op": "set", "task_id": 1, "fields": {"name": "New"}}], "ui", TODAY)["batch_id"]
+
+    def runner(cfg, kind, prompt, **kw):
+        data = {"ripples": [{"task_id": 2, "effect": "text", "context": "Needs Task-1, now called New.", "why": "w", "proposals": []}]}
+        return RunResult(True, data, json.dumps(data), 0.03, 900)
+
+    out = ripple.run(conn, cfg, [1], TODAY, runner=runner, at="2026-11-01T10:00")
+    batches.apply(conn, [{"op": "set", "task_id": 1, "fields": {"name": "Newer"}}], "ui", TODAY)
+    u = batches.undo(conn, b1)
+    assert u["undone"] is False and u["ripples_undone"] == [] and u["ripples_kept"] == []
+    assert conn.execute("SELECT context FROM tasks WHERE id = 2").fetchone()[0] == "Needs Task-1, now called New."
+    assert conn.execute("SELECT undone_at, cause_json FROM batches WHERE id = ?", (out["batch_id"],)).fetchone()[0] is None

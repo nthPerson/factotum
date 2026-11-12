@@ -325,7 +325,9 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
   `test_every_surface_reads_annotated_rows`). A new reader that skips it ranks and fades without links,
   silently.
 - **Undo skips any field whose current value is not what that batch wrote and says so** (2026-11-10);
-  undo entries written before 2026-11-10 carry no `new` and are restored unchecked.
+  undo entries written before 2026-11-10 carry no `new` and are restored unchecked. When every entry is skipped
+  as changed since, nothing is written and the batch stays not undone (`undone: false`; review 2026-11-11: it
+  was marked undone with nothing restored, and could never be undone after the later batch was).
 - **A staged text edit carries `expect`; a note is `add_note`** (2026-11-10), appended at apply time.
   Never send a whole new `context` built from an old read.
 - **`relations` direction** (2026-11-10): `src part_of dst` (dst is the goal), `src waits_on dst`,
