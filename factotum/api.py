@@ -1282,6 +1282,8 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
                 res = reminders.save_outcome(conn, eff_cfg(), token, text)
         except reminders.TokenError as e:
             return HTMLResponse(_page("Factotum", e.why, base), status_code=e.status)
+        if res.get("already"):                      # the form is used once: a second POST writes nothing and queues nothing
+            return HTMLResponse(_page(f"Task-{res['task_id']}: nothing saved", "The outcome is already saved; change it in the task.", base, task_id=res["task_id"]))
         if not res["saved"]:
             return HTMLResponse(_page(f"Task-{res['task_id']}: nothing saved", res["task_name"], base, task_id=res["task_id"]))
         return HTMLResponse(_page(f"Task-{res['task_id']}: outcome saved", f"How it turned out: \u201c{res['outcome']}\u201d", base, undo=True, task_id=res["task_id"]))

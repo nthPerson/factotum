@@ -21,6 +21,8 @@ from .dates import parse_date
 from .db import get_settings, now_iso, rows, set_setting
 
 SNOOZE = timedelta(hours=1)
+SAID = "done_said"              # a reminder whose Done was followed by its outcome: the form is used up (save_outcome)
+STATUS_WORDS = {SAID: "done"}
 TOKEN_TTL = timedelta(hours=24)
 
 
@@ -193,7 +195,7 @@ def act(conn: sqlite3.Connection, cfg: dict, token: str, action: str, now_local:
         raise TokenError(404, "This link is unknown or was already used.")
     r = dict(r)
     if r["status"] != "sent" and action != "open":
-        raise TokenError(410, f"This reminder was already acted on (it is {r['status']}).")
+        raise TokenError(410, f"This reminder was already acted on (it is {STATUS_WORDS.get(r['status'], r['status'])}).")
     sent_at = datetime.fromisoformat(r["sent_at"]) if r.get("sent_at") else None
     if sent_at is None or datetime.now(timezone.utc) - sent_at > TOKEN_TTL:
         raise TokenError(410, "This link has expired (reminder actions are good for 24 hours).")
@@ -224,11 +226,16 @@ def hanging_on(conn: sqlite3.Connection, task_id: int) -> int:
 
 
 def save_outcome(conn: sqlite3.Connection, cfg: dict, token: str, text: str) -> dict:
-    """The one optional line after a reminder's Done: only for a token that closed its task from the link."""
+    """The one optional line after a reminder's Done: only for a token that closed its task from the link, and
+    once: the save marks the reminder `done_said` in its batch, so a later POST with the same token writes
+    nothing and queues nothing (`already`), and an Undo of that batch gives the form back. An empty line
+    saves nothing and does not use the form up."""
     r = conn.execute("SELECT r.*, t.name AS task_name, t.status AS task_status FROM reminders r JOIN tasks t ON t.id = r.task_id WHERE r.token = ?", (token,)).fetchone()
     if not r:
         raise TokenError(404, "This link is unknown or was already used.")
     r = dict(r)
+    if r["status"] == SAID:
+        return {"saved": False, "already": True, "task_id": r["task_id"], "task_name": r["task_name"]}
     if r["status"] != "done":
         raise TokenError(409, "Only a task closed from this reminder takes its outcome here; open the task to add one.")
     sent_at = datetime.fromisoformat(r["sent_at"]) if r.get("sent_at") else None
@@ -240,5 +247,5 @@ def save_outcome(conn: sqlite3.Connection, cfg: dict, token: str, text: str) -> 
     text = (text or "").strip()[:300]
     if not text:
         return {"saved": False, "task_id": tid, "task_name": r["task_name"]}
-    res = batches.apply(conn, [{"task_id": tid, "op": "set", "fields": {"outcome": text}}], "ntfy")
+    res = batches.apply(conn, [{"task_id": tid, "op": "set", "fields": {"outcome": text}, "reminder_status": {"id": r["id"], "status": SAID}}], "ntfy")
     return {"saved": True, "task_id": tid, "task_name": r["task_name"], "batch_id": res["batch_id"], "outcome": text}

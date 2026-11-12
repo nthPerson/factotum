@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS reminders (
   task_id INTEGER NOT NULL REFERENCES tasks(id),
   fire_at TEXT NOT NULL, label TEXT,
   repeat TEXT,                                   -- NULL|daily|weekdays|weekly|monthly
-  status TEXT NOT NULL DEFAULT 'pending',        -- pending|sent|snoozed|done|cancelled
+  status TEXT NOT NULL DEFAULT 'pending',        -- pending|sent|snoozed|done|done_said (its outcome saved)|cancelled
   ntfy_seq TEXT, token TEXT, created_by TEXT, created_at TEXT NOT NULL,
   sent_at TEXT                                   -- when it was pushed; the action token is valid 24 h from here
 );

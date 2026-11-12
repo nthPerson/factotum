@@ -971,7 +971,10 @@ The Log says each change in words. The page after a reminder's Done lists what t
 
 **Ripples on the page (stage 5, 2026-11-11).** Closing a task that others hang on asks one optional line,
 "How did it turn out?" (the toast after Done offers "Say how it went"; on Review the note typed with a
-close is the outcome; the page after a reminder's Done has the same box, posted to `/r/<token>/outcome`).
+close is the outcome; the page after a reminder's Done has the same box, posted to `/r/<token>/outcome`, which saves once: the save
+marks the reminder `done_said` in its batch, a later post writes and queues nothing and says "The outcome is
+already saved; change it in the task", an empty one saves nothing and leaves the form usable, and an Undo of the
+save gives the form back; polish 2026-11-11, from the security review: each post was a new batch and a ripple).
 Done never waits on it. After an Apply that queued a ripple the page asks `GET /api/ripple` every 15 s,
 only while a scheduler runs, the page is visible and one is pending (at most 10 minutes), then says "N
 linked tasks brought up to date" with See changes and Undo. A Review card a ripple changed shows, under

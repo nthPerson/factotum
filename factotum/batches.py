@@ -429,19 +429,19 @@ def _judge_suggestions(conn, cur, a: int, b: int, batch_id: int, undo: list, ski
             _judge_evidence(conn, cur, {"op": "judge_evidence", "task_id": a, "fields": {"evidence_id": s["evidence_id"], "verdict": "applied"}}, batch_id, undo, skipped)
 
 
-REMINDER_ACTS = ("done", "snoozed")
+REMINDER_ACTS = ("done", "snoozed", "done_said")      # done_said: its outcome was saved (reminders.save_outcome)
 
 
 def _reminder_status(cur, ch: dict, batch_id: int, before: int, undo: list, skipped: list) -> None:
     """A notification's Done or Snooze (`reminders.act`), Python callers only (the API strips the key): the
-    reminder that fired is marked `done` or `snoozed` in the same batch as the task's Done or the snooze's new
+    reminder that fired is marked `done` or `snoozed` (or `done_said` with its outcome) in the same batch as the task's Done or the snooze's new
     reminder, so the batch's Undo arms it again (its buttons work again) and a snooze's new reminder is named
     as one in the Log (`snoozed` on its `reminder` change)."""
     rs = ch["reminder_status"]
     rid, status = rs.get("id"), rs.get("status")
     r = cur.execute("SELECT id, task_id, status FROM reminders WHERE id = ?", (rid,)).fetchone() if type(rid) is int else None
     if not r or status not in REMINDER_ACTS:
-        skipped.append({"task_id": ch.get("task_id"), "why": "reminder_status names no reminder, or a status other than done or snoozed"})
+        skipped.append({"task_id": ch.get("task_id"), "why": "reminder_status names no reminder, or a status other than done, snoozed or done_said"})
         return
     if r["status"] == status:
         return

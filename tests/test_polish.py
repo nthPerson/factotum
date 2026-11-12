@@ -540,3 +540,30 @@ def test_the_page_cannot_send_a_reminder_status(cfg, tmp_path):
     client.post("/api/batches/apply", json={"source": "ui", "changes": [{"task_id": 1, "op": "keep", "reminder_status": {"id": r0["id"], "status": "done"}}]})
     assert c.execute("SELECT status FROM reminders WHERE id = ?", (r0["id"],)).fetchone()[0] == "sent"
 
+
+# --- H15: the outcome after a notification's Done is saved once ------------------------------------------
+
+def test_the_outcome_form_saves_once_and_an_empty_one_does_not_use_it_up(cfg, tmp_path):
+    from stage4_helpers import link
+    client, c = _app(cfg, tmp_path)
+    mk(c, 1, name="Ask the chair"); mk(c, 2); link(c, 2, 1, "waits_on")
+    cfg["notify"]["ntfy"]["topic"] = "factotum-test"
+    tok = _sent_reminder(c, cfg, 1)["token"]
+    assert client.get(f"/r/{tok}", params={"a": "done"}).status_code == 200
+    c.execute("DELETE FROM ripple_queue"); c.commit()
+    n = _batches(c)
+    r = client.post(f"/r/{tok}/outcome", data={"outcome": "   "})                       # empty: nothing saved, the form still works
+    assert "nothing saved" in r.text and _batches(c) == n
+    r = client.post(f"/r/{tok}/outcome", data={"outcome": "The chair can serve remotely"})
+    assert r.status_code == 200 and "outcome saved" in r.text and _batches(c) == n + 1
+    assert c.execute("SELECT outcome FROM tasks WHERE id = 1").fetchone()[0] == "The chair can serve remotely"
+    assert c.execute("SELECT COUNT(*) FROM ripple_queue WHERE task_id = 1").fetchone()[0] == 1
+    c.execute("DELETE FROM ripple_queue"); c.commit()
+    r = client.post(f"/r/{tok}/outcome", data={"outcome": "something else, posted again"})
+    assert r.status_code == 200 and "The outcome is already saved; change it in the task" in r.text
+    assert c.execute("SELECT outcome FROM tasks WHERE id = 1").fetchone()[0] == "The chair can serve remotely"
+    assert _batches(c) == n + 1 and c.execute("SELECT COUNT(*) FROM ripple_queue").fetchone()[0] == 0
+    # Undo of the outcome's batch gives the form back
+    bid = c.execute("SELECT MAX(id) FROM batches").fetchone()[0]
+    client.post(f"/api/batches/{bid}/undo", json={})
+    assert "outcome saved" in client.post(f"/r/{tok}/outcome", data={"outcome": "Third"}).text
