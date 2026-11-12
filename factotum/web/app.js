@@ -1248,6 +1248,8 @@
   const linkTasks = s => esc(s).replace(/Task-(\d+)/g, (_, n) => tref(n));
   // A date or a timestamp as "Nov 10", in this browser's zone (a date alone is read at noon).
   const monDay = iso => { const s = String(iso || ''); if (!s) return ''; const d = new Date(s.length > 10 ? s : s + 'T12:00:00'); return isNaN(d) ? '' : d.toLocaleDateString([], { month: 'short', day: 'numeric' }); };
+  // A stamp's day where the owner is (YYYY-MM-DD), as History's times are local; a bare date is already a day.
+  const localDay = iso => { const s = String(iso || ''); if (s.length <= 10) return s; const d = new Date(s); if (isNaN(d)) return s.slice(0, 10); const p = n => String(n).padStart(2, '0'); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`; };
   const histWhen = iso => { const d = new Date(iso || ''); if (isNaN(d)) return ''; const p = n => String(n).padStart(2, '0'); return `${monDay(iso)} ${p(d.getHours())}:${p(d.getMinutes())}`; };
   function whereHtml(x) {
     return `<section class="dsec"><h4>Where this stands</h4><p class="ctx">${x.context ? esc(x.context) : 'Nothing written yet.'}</p></section>`;
@@ -1607,7 +1609,7 @@
     const srcLink = x.source_link ? `<a href="${esc(x.source_link)}" target="_blank" rel="noopener">${x.source === 'Plaud' ? 'Plaud note' : x.source === 'Canvas' ? 'Canvas' : 'Source'}</a>` : '';
     return `<dl><dt>Score</dt><dd>${x.score} · ${x.priority} · ${esc((x.score_reasons || []).join(' · '))}</dd>
             <dt>Why now</dt><dd>${esc(x.why_now) || '<span class="code">none yet</span>'}</dd></dl>
-        <dl><dt>Source</dt><dd>${esc(x.source || '?')}${x.account ? ' · ' + esc(x.account) : ''} · ${x.mentions} mention${x.mentions === 1 ? '' : 's'} · created ${esc((x.created_at || '').slice(0, 10))}${x.legacy_status ? ' · was ' + esc(x.legacy_status) : ''}</dd>
+        <dl><dt>Source</dt><dd>${esc(x.source || '?')}${x.account ? ' · ' + esc(x.account) : ''} · ${x.mentions} mention${x.mentions === 1 ? '' : 's'} · created ${esc(localDay(x.created_at))}${x.legacy_status ? ' · was ' + esc(x.legacy_status) : ''}</dd>
             <dt>Links</dt><dd class="links">${srcLink}${links || (srcLink ? '' : '<span class="code">none</span>')}</dd>
             <dt>Lifecycle</dt><dd>${x.tier}${x.fade_at ? ' · fades ' + x.fade_at : ''}${x.last_call_at ? ' · last call ' + x.last_call_at : ''}${x.snoozed_until ? ' · snoozed until ' + x.snoozed_until : ''}</dd>
             <dt>Reminders</dt><dd>${(x.reminders || []).map(r => `<span class="chip rem">${fmtWhen(r.fire_at)}${r.repeat ? ' · ' + esc(r.repeat) : ''} ${esc(r.label || '')}</span>`).join(' ') || '<span class="code">none</span>'}</dd></dl>`;
