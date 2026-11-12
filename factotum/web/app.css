@@ -539,6 +539,8 @@ body.tray-open .toast.ask { bottom: calc(38vh + 110px + env(safe-area-inset-bott
 .settings .tablewrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 .settings table.devices td { white-space: nowrap; padding-right: 12px; }
 .settings table.devices td:nth-child(4) { white-space: normal; min-width: 160px; }
+.settings table.devices td:first-child { white-space: normal; }      /* a long device name wraps instead of widening the table past its box */
+.settings table.devices td:last-child { padding-right: 0; }
 /* On a phone each device is a block: its name, when it was added and last sent to (and its last failure, if any), Remove */
 @media (max-width: 700px) {
   .settings table.devices, .settings table.devices tbody, .settings table.devices tr, .settings table.devices td { display: block; }
@@ -550,6 +552,22 @@ body.tray-open .toast.ask { bottom: calc(38vh + 110px + env(safe-area-inset-bott
   .settings table.devices td:first-child { font-weight: 500; font-size: 14px; }
   .settings table.devices td[data-l]::before { content: attr(data-l) " "; color: var(--muted); }
   .settings table.devices .btn { min-height: 44px; margin-top: 6px; }
+}
+/* Email accounts: the label and roles boxes keep the widths they had; on a phone each account is a block (address,
+   label, roles, then On and ×) and the connectors likewise, so nothing in Settings is wider than the screen */
+.settings table.accounts input.w-label { width: 90px; }
+.settings table.accounts input.w-roles { width: 150px; }
+@media (max-width: 700px) {
+  .settings table.accounts, .settings table.accounts tbody, .settings table.accounts tr, .settings table.accounts td,
+  .settings table.conns, .settings table.conns tbody, .settings table.conns tr, .settings table.conns td { display: block; }
+  .settings table.accounts tr.hd, .settings table.conns tr.hd, .settings table.conns td:empty { display: none; }
+  .settings table.accounts tr, .settings table.conns tr { padding: 10px 0; border-bottom: 1px solid var(--line); }
+  .settings table.accounts td, .settings table.conns td { padding: 2px 0; overflow-wrap: anywhere; }
+  .settings table.accounts td input.w-label, .settings table.accounts td input.w-roles, .settings table.accounts td input[type=text] { width: 100%; box-sizing: border-box; }
+  .settings table.accounts td[data-l]::before, .settings table.conns td[data-l]::before { content: attr(data-l); display: block; color: var(--muted); font-size: 12px; }
+  .settings table.conns td[data-l]::before { display: inline; margin-right: 6px; }
+  .settings table.accounts td.acc-on, .settings table.accounts td.acc-del { display: inline-block; vertical-align: middle; margin: 6px 12px 0 0; }
+  .settings table.accounts .btn, .settings table.conns .btn { min-height: 44px; min-width: 44px; }
 }
 .note { font-size: 12px; color: var(--muted); border-left: 3px solid var(--line); padding-left: 10px; margin: 14px 0; }
 .note code { font-family: var(--mono); font-size: 12px; }
