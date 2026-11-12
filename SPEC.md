@@ -143,6 +143,9 @@ changes(id, batch_id, task_id, field, old, new,
         note)                      -- an optional one-line reason (≤ 300), on every row the change wrote
           -- a link is two changes rows (field `link`, one per end); `evidence.kind` gains `link_suggestion`
           -- (a suggested pair, `ref` {a, b, kind, why, signal}; judged through the batch that makes the link or merge)
+          -- stage 7: `signal` is one of `twin`, `thread`, `text` (the detectors), `planner`, `recording`, `filing`
+          -- (a run proposed it) or `import`; `evidence.kind` also gains `filing` (`ref` {field, value}: a project or
+          -- an effort the filing run (§8.7) suggests for a task made by hand; `label` "Personal?")
 chat_threads / chat_messages / runs / accounts / settings
 push_subscriptions(                               -- stage 2: one row per device with the app's notifications on
       id,
@@ -156,6 +159,14 @@ push_subscriptions(                               -- stage 2: one row per device
       last_failure_at,                            -- the last push it did not
       last_error)                                 -- why, as Settings shows it
 ```
+
+Stage 7 adds three `settings` rows and one batch op. `state.links.session` is `{day, ids}`: the link
+suggestions (evidence ids) offered that day, judged ones included, which `relations.annotate` reads (the daily
+cap, §9). `state.links.offered` is `{"<evidence id>": "YYYY-MM-DD"}`, the last day each was offered, which
+rotates the cap. `state.filing.pending` is the filing queue, `[{task_id, day}]`, at most 50, kept for the day
+a task was made and the next (§8.7). The batch op `follow_thread` (`fields.conversation_id`, optional account
+and time) makes an open task follow a mail thread: it adds a `mail_thread` `links` row and sets `last_seen_at`
+to the mail's time; its undo deletes the `links` row it added. A connector or skill cannot send it.
 
 The server's push key pair is not a table: it is the file `push-keys.json` beside the database (the
 directory of the file the connection has open), mode 0600, never in git (§10, §13).
@@ -247,6 +258,17 @@ of the mailbox so nothing old is replayed. One automatic retry two minutes later
 mailbox) and writes nothing. `python -m factotum sync-file <id> [--dry-run]` runs the same thing
 by hand. No large payload ever passes through a tool result, so the 40 KB MCP spill is gone.
 
+*A recording's links (stage 7, design §10.2).* The run's JSON may carry `links`. A `part_of` or `waits_on`
+the speaker stated, with the spoken sentence as `evidence`, is written in the recording's batch (source
+`plaud`) as a `link` change whose note is "Said in the recording: “…”"; so undoing the recording undoes it.
+Anything inferred, and any `same_as` (a merge drops a task, so it always waits for a tap), is a
+`link_suggestion` card with signal `recording`. Both ends must be a task the run created (`tasks[i]`), a row
+the prompt listed, or, for the goal (`to`) only, a task finished in the last 30 days (the prompt's
+reference-only list: done or dropped, not merged away, at most 25). A `waits_on` a finished task is refused
+("a finished task holds nothing up"). A re-synced recording never adds a stated link for a pair that has
+any `relations` row, active or removed, so what the owner removed does not come back; its inferred links are
+cards, and `suggestions.why_not` keeps a dismissed pair from returning.
+
 **Mailbird.** Accounts and roles live in the `accounts` table, managed in Settings → Email
 accounts (add, edit, remove, enable). Allow/deny globs in config. Sweep every `sweep_minutes`
 (`factotum/mail_sweep.py`, Python only, read-only client `factotum/mailbird.py` that refuses any
@@ -295,6 +317,13 @@ attachment is found by `fileName` (Mailbird's key; `name` was never there). Ever
 first commits what the sweep has written, so the write lock is never held across the network; the
 price is that evidence can be committed and the sweep die before its batch is applied, in which
 case the planner finds that evidence unjudged and proposes the change.
+
+*Links from a mail suggestion (stage 7, design §10.2).* A suggestion may carry `link` (`{kind, task_id,
+why}` naming an open row the run was shown); it is stored on the card and the Create endpoint writes the
+link in a `review` batch after the create, so the card says "Will be a step of Task-N …" before the tap.
+The run may also return `about`: a mail that belongs to an open task the run was shown becomes a card on
+that task, "This mail is about Task-N. Follow its thread?", whose change is `follow_thread` (§4). Both are
+staged only; at most 8 `about` cards per run.
 
 **Canvas.** `/api/v1/planner/items` with submission state; course map, effort by type and skip
 patterns in config. Auto-close on submitted/graded/excused/complete (`factotum/canvas.py`, every
@@ -418,8 +447,16 @@ recording in one tap; creations are upserts by `source_key`. Returns:
   "instructions": [ { "op": "done|defer|drop|waiting|priority|start|top|longterm|remind|correct",
                       "task_id": 364, "fields": {…}, "evidence": "spoken sentence" } ],
   "reminders": [ { "task_id": null, "task_ref": "tasks[0]", "fire_at": "2026-11-02T14:00", "label": "Get started" } ],
+  "links": [ { "kind": "part_of|waits_on|same_as", "from": "tasks[0]" | 412, "to": 388, "stated": true,
+               "evidence": "spoken sentence", "why": "…" } ],
   "calendar": [ … ], "unresolved": [ "…" ] }
 ```
+`links` (stage 7): at most `MAX_LINKS` are read, the rest reported under `unresolved`. Python enforces that `from`
+is a task this run created or an open row the prompt listed, `to` also a recently finished one (the prompt's
+closed list, §6 Plaud), `kind` is one of three, and that a stated link (`stated: true` with a sentence)
+is a `part_of` / `waits_on` that no relation already holds and `relations.link_problem` accepts; every
+refusal is a line in `unresolved`. Only that case is written; the rest are `link_suggestion`s (signal
+`recording`) through `suggestions.why_not`.
 
 ### 8.2 `planner-morning`
 Inputs: a bundle Python built (`factotum/planner.py`): scored open rows (Top first, then by
@@ -440,6 +477,14 @@ refuses to stage a card that is already waiting (same op and task and fields; fo
 name), and a created row's `source_key` is the evidence it came from (`planner:e<id>`), never the
 date and a counter: a second run cannot overwrite the task the first one made. The prompt carries
 the time of day and what was closed today, so a run at 15:00 does not write a morning's verdict.
+
+*Link proposals (stage 7, design §10.2).* The bundle lists link candidates and the prompt allows the ops
+`link`, `unlink` and `merge` (`planner.LINK_OPS`) on listed rows. Python never applies one, whatever it cites:
+a `link` or `merge` (`same_as`, the proposed row goes, `into` stays) becomes a `link_suggestion` with signal
+`planner` through `suggestions.why_not` / `suggest_pair`; an `unlink` becomes a `proposal` card. Both ends must
+be listed rows, the evidence it cites must be about one of those two tasks, and at most `LINK_CAP` (5) such
+proposals are staged per run (the prompt asks for at most 3); the rest are rejected with a reason in the run row.
+Link suggestion and `filing` evidence are not the planner's: it never judges them.
 
 ### 8.4 The Today summary (`factotum/summary.py`, added 2026-11-04)
 The planner's verdict is also the summary at the top of the Today tab, kept in the settings table
@@ -498,6 +543,11 @@ open task with source `Mail`, the mail's account, and a `mail_thread` link to th
 from then on the sweep follows that thread (seen up to the message the card was made from), and a
 "Reply to …" task closes itself when the owner answers in it (§6); for any other name the planner
 reads what was sent. The planner never sees `mail_new`.
+
+Stage 7 adds two parts to the reply: `link` on a suggestion (`{kind, task_id, why}`, an open row the run was
+shown; kept on the card, written by Create) and `about: [{evidence_id, task_id, why}]` (the mail is about an
+open task the run was shown: a `proposal` card on that task whose change is `follow_thread`, at most 8 a run).
+A task id the run was not shown is dropped. Neither writes a link or follows a thread without a tap.
 
 The scheduler runs it only when candidates exist and no more often than
 `sources.mail.suggest.minutes` (30); a Refresh (§8.4) runs it between the sweeps and the planner.
@@ -572,6 +622,39 @@ writes nothing. Prompt and result are kept under `data/runs/ripple/`.
 
 Not yet: a recording or a mail that closes a task does not supply an outcome (design §8.5's last bullet),
 so a ripple from such a close works from the task's own text only. Left for a later stage.
+
+### 8.7 `filing`: a task made by hand (`factotum/filing.py`, `prompts/filing.md`, added 2026-11-11, design §10.3)
+A task the owner adds with only a name has no project, no effort and no links, which makes it a poor citizen of
+Today and of the links. One small run files it.
+
+**When it is queued.** `suggestions.after_create` calls `filing.enqueue` for a create whose Source is "Manual"
+(`batches.created_source`: the add line, the sheet, the Today box) when the task is open, has no project (or
+"Unknown"), no effort and no `relations` row (`filing.wants`). The queue is `state.filing.pending`
+(`[{task_id, day}]`, at most 50, kept for the day it was made and the next); the API wakes the scheduler after
+a create. A task made by a recording, Canvas, mail, a connector or Chat is never queued.
+
+**When it runs.** The scheduler's `filing` job (§10), only when `claude.filing.enabled` is on (it is off when
+the key is missing, like every paid run), at most 3 tasks a tick. A task is dequeued before its run, so a
+failed run is logged and not retried (`file-task` runs it again by hand), and a task that was filed by hand,
+linked or closed meanwhile is skipped without a run.
+
+**The run.** One run with no tools (`tools=""`), model `claude.models.filing`, budget
+`claude.budgets_usd.filing` ($0.10), timeout `claude.timeouts_s.filing` (120 s). It sees the task's name
+(escaped; the names are data, not instructions), the taxonomy and the efforts from config, and up to 80 open
+rows (Task id, project, due, name). It returns `{project, effort, link: {kind, task_id, why} | null,
+twin: {task_id, why} | null}`; null is the right answer more often than not.
+
+**What Python stores.** The run changes no task field. A project or effort that is valid, and still empty on
+the task now, becomes `filing` evidence (`ref` `{field, value}`, label "Personal?"); one the owner set meanwhile
+is dropped and the rest kept. A link (`part_of` or `waits_on`) and a twin (`same_as`, the new task goes) become
+`link_suggestion`s with signal `filing` through `suggestions.why_not` / `suggest_pair`, only for a row the run
+was shown. Everything dropped is counted in the run's summary line. `filing` evidence is not the planner's and
+not a Review decision's; the page draws it as dashed chips (§9), and a filing suggestion is exempt from the
+daily cap.
+
+`python -m factotum file-task ID [--dry-run]` runs one by hand: `--dry-run` is a real run that prints the JSON
+and the cost and stores nothing. The prompt is kept under `data/runs/filing/<id>/`. Cost, measured
+2026-11-11 on a copy of the real database: see §13.
 
 ### 8.3 `chat-turn` (Chat tab, "Search related emails", "Draft reply")
 Inputs: the prompt (`prompts/chat-turn.md` on a thread's first turn, a short continuation header
@@ -884,6 +967,41 @@ bulk bar; a Linked-view goal whose text lists at least two steps offers Make the
 `python -m factotum find`. *The empty Today tab* says how to add a first task (and no longer tells a
 newcomer to run the Notion import first).
 
+**Suggested links (stage 7, 2026-11-11, design §10.1).** Three free detectors in `factotum/suggestions.py` run
+after the sweeps (every 30 minutes, `link_suggestions` in §10) and at every create, and write
+`link_suggestion` evidence through `suggest_pair` only; they never write `relations`.
+*Twins* (`same_as`): an open Canvas row and an open row of another source, same project, the same number
+in the name, due within 36 hours (`relations.twin_pairs`); two rows that are both from Canvas pair only
+when their names are one item's (equal after normalising numbers: "Quiz 05" is "Quiz 5"), because two Canvas
+items are two items, so Quiz 5, Discussion 5 and Reading 5 of one week make no twins; and a row with several
+twin candidates keeps the one it shares a title word with (project words and Canvas verbs left out), or none.
+The newer row goes and the Canvas or older one is kept. *Threads* (`any`): two to four open tasks with the
+same `mail_thread` or `calendar` link; five or more is a mailing list, not a pair; a shared recording or a
+shared person (`plaud_note`, `counterpart`) is provenance and never read. *Text* (kind guessed): "Task-N"
+(`\bTask-(\d{1,7})\b`, case-insensitive) in a task's name or text, the first 4,000 characters, at most 10
+references per task; the kind comes from the 60 characters before it on the same line (part of, steps,
+after, waits on, same as, merged into, before, ...) or a list label (`Sub-tasks:`, `Steps:`) earlier on that
+line, else `any`; `#N` and "task 12" are not the form. A `why` is generated ("Task-10's text names Task-20")
+and never quotes the task's text. **One card per unordered pair, ever** (`suggestions.why_not`): a pair with any
+`link_suggestion` row (pending or judged, either order, any signal) or any `relations` row (active or removed)
+is never suggested again, so a dismissed, linked or unlinked pair stays decided.
+*The daily cap.* `links.suggestions_per_review` (Settings, default 5; 0 shows none) is the number of link
+suggestions offered per day. `suggestions.session` picks them, never-offered first, then the longest unseen,
+then the oldest, so a card the owner keeps skipping cannot keep another out for good, records the day's set in
+`state.links.session` (and each one's day in `state.links.offered`) and takes no slot for a card whose task
+closed; a judged one is not replaced the same day. `relations.annotate` filters each row's suggestions to that
+set, so Review, the dashed badges, the Linked view, the brief's counts and the agent's `task_get` agree; with no
+session yet (a fresh database) every pending one shows. A `filing` suggestion is exempt: it is about a task
+the owner just made and shows as chips.
+*Filing chips.* A task made by hand shows what the filing run (§8.7) suggested as dashed chips on its row and in
+the opened task and task page ("Personal?", "S?", "part of Task-N?"), each with a ×: a tap on the chip stages
+the field (under the editor's key) or the link with its verdict, × dismisses it; a filing link is a chip, not a
+second dashed badge; chips and × are at least 44 px where a finger lands. *The Review mail card* is
+"This mail is about Task-N. Follow its thread?" with the sender and subject, "Follow its thread" (stages
+`follow_thread`) and "Not about this" (dismisses); a mail suggestion's card says "Will be a step of Task-N ..."
+before Create. *Settings* gains "Suggested links" (the number a day, under Review and lifecycle) and "Filing a
+task you add" (a switch under Claude).
+
 ## 10. Reminders and push
 
 - The public ntfy.sh server caps delay at 3 days and 250 messages/day, so **the service owns the
@@ -896,6 +1014,7 @@ newcomer to run the Notion import first).
   providers, for an open hard-dated task whose last open waits-on was done today; once per (task, blocker,
   day), remembered in `state.free_now.sent`. No Claude run, independent of `claude.ripple.enabled`.
 - Review push: daily at `notify.review_time`; skipped when reviewed today or the queue is empty.
+- **Suggested links and filing** (stage 7, 2026-11-11): the scheduler's `link_suggestions` job runs the three link detectors (§9) every `suggestions.SWEEP_MINUTES` (30; free, a constant), after the sweeps, and writes the day's cap through `suggestions.session`. The `filing` job runs the filing queue (§8.7), at most 3 tasks a tick, only while `claude.filing.enabled` is on and a task is waiting. Neither needs a Refresh.
 - **The clock** is one thread in the service (`factotum/scheduler.py`): a tick every 30 s re-reads the
   effective config, fires due reminders, and runs each daily job once at or after its time (so a
   service down at 06:30 still sends the brief when it comes back); a failed job retries after an
@@ -1048,6 +1167,7 @@ The old Command Log relations are not imported; task history lives in `changes` 
 | today-summary (§8.4) | $0.30 | ≈ $0.18 a rewrite measured on sonnet (2026-11-04), at most one per `claude.summary.auto_minutes` and only while the summary is stale; a busy day of edits is $1–3. `claude.models.today_summary: haiku` or a longer interval cuts it |
 | mail-triage (§8.5) | $0.40 | ≈ $0.14 per batch of 15 messages (measured 2026-11-05); runs only when there is new mail, at most every `sources.mail.suggest.minutes` |
 | ripple (§8.6) | $0.30 | one light run per group of changes, no tools; measured cost: about $0.03 a run (one real run on 2026-11-11: Sonnet, no tools, a 4.5 KB prompt, 9 s, three linked tasks; preflight ruling P11) |
+| filing (§8.7) | $0.10 | one no-tools run per task added by hand, only with `claude.filing.enabled` on. Measured 2026-11-11 on a copy of the real database: about $0.04 a task on Sonnet, about $0.003 on Haiku, which found no link (the example config ships `filing: haiku`; set `claude.models.filing: sonnet` for suggested links, SETUP §21). The link detectors and the link sweep are free (no Claude run) |
 | chat-turn / search / draft | $0.60 | on demand |
 | sweeps, UI, reminders, brief | $0 | $0 |
 

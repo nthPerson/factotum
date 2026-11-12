@@ -67,7 +67,7 @@ suggestions, the Log in words, "Free now" after a reminder's Done). Stage 5 (202
 rewrites their text as an undoable `ripple` batch and stages everything else on Review), the outcome
 question on close, "Task-N is free now", the Review block and Settings controls. Stage 6 (2026-11-11): in place and by hand (the conversation on a Review card,
 under the Today box and in an opened task; New task on Enter with its preview and the phone sheet; the editor; linking
-by hand; Find any task). Retiring the old Notion
+by hand; Find any task). Stage 7 (2026-11-11): suggested links (`factotum/suggestions.py`: twins, shared threads and "Task-N" in text as `link_suggestion` cards, one per pair ever, at most `links.suggestions_per_review` offered a day), links proposed by the planner, a recording and mail triage (`follow_thread`), and `factotum/filing.py`: a task made by hand is filed by one small no-tools run into dashed chips. Retiring the old Notion
 pages and plaud-sync is the user's checklist (SETUP §15). Update this paragraph when something lands.
 
 ## Where things live
@@ -118,6 +118,10 @@ pages and plaud-sync is the user's checklist (SETUP §15). Update this paragraph
 | "Free now" after a reminder's Done | design §14 | `api._page`, `relations.freed_by` |
 | ripples: what queues, the run, what applies, the guard, undo following the cause | design §8, SPEC §8.6 | `factotum/ripple.py` (`enqueue`, `next_group`, `bundle`, `parse`, `guard`, `clean_proposal`, `apply`, `run`, `since`, `status`), `batches.py` (`apply`, `undo`), `scheduler.py` (`_ripples`), `prompts/ripple.md` |
 | the outcome question, Free now | design §8.5, §14 | `api._page`, `reminders.save_outcome`, `reminders.free_now`, `web/app.js` (`askOutcome`, `saveOutcome`, `watchRipple`, `sinceHtml`) |
+| suggested links: the detectors, one card per pair, the daily cap | design §10.1, SPEC §9 | `factotum/suggestions.py` (`why_not`, `suggest_pair`, `twins`, `threads`, `refs_in`, `text_refs`, `sweep`, `at_create`, `session`), `relations.twin_pairs`, `relations.shown_ids` |
+| links proposed by the planner, a recording, mail | design §10.2 | `planner.apply` (`LINK_OPS`), `sync_file.apply_result` (`links`, `closed_rows`), `mail_triage.apply` (`about`), `batches` (`follow_thread`) |
+| filing a task made by hand | design §10.3, SPEC §8.7 | `factotum/filing.py`, `prompts/filing.md`, `scheduler._suggestions` |
+| filing chips, the mail card, Settings | SPEC §9 | `web/app.js` (`filingChipsHtml`, `mailAboutHtml`) |
 | the claude.ai connector: metadata, registration, consent gate, arming, tokens, `/mcp` auth | SPEC §15, SETUP §16 | `factotum/oauth.py` (`consent_identity`, `verify_access_jwt`, `armed`, `token`, `check_access`), `api.py` (`/oauth/*`, `/api/connectors`) |
 | the add line, adding at once, search | design §12.7, §12.9, SPEC §6 "The add line" | `factotum/commands.py` (`ADD_RE`, `parse_add`, `link_refusal`), `factotum/by_hand.py` (`preview`, `add`, `search`), `api.py` (`/api/add*`, `/api/search`) |
 | the conversation in place | design §12.6, SPEC §8.3 | `chat.py` (`place_thread`, `PLACE_TEXT`, `resolve_staged`, `mark_staged`), `api.py` (`/api/chat/turn`, `/api/chat/place`), `web/app.js` (`placeOf`, `loadPlace`, `sendTurn`, `placeHtml`, `stagePlace`) |
@@ -152,6 +156,9 @@ pages and plaud-sync is the user's checklist (SETUP §15). Update this paragraph
 .venv/bin/python -m factotum serve                 # http://127.0.0.1:8750
 .venv/bin/python -m factotum ripple <task_id> [--dry-run]   # one ripple now from a task (a real run, ~$0.03 measured 2026-11-11); --dry-run writes nothing
 .venv/bin/python -m factotum effective [KEY…] [--as-before]   # each switch's value and origin, read-only; diff the two before a deploy (SETUP §18)
+.venv/bin/python -m factotum links-check                 # what the link detectors would suggest now; read-only
+.venv/bin/python -m factotum sweep links                 # one detector pass now (free); "<n> suggested: …"
+.venv/bin/python -m factotum file-task ID [--dry-run]    # one filing run for a task (a real run, ~$0.04 on sonnet measured 2026-11-11); --dry-run writes nothing
 # every sweep and the planner at once: Refresh on the Today tab (the scheduler runs it; a `refresh` row in the Log)
 sudo systemctl restart factotum                    # after code changes; see the restart rule below
 journalctl -u factotum -n 20
@@ -439,6 +446,23 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
   Two exceptions: the short bar while its own date box has focus, and Review's decisions while `#rv-note` has it
   (`body.kb-note`, set on focusin and cleared with kb-open 300 ms after the blur, so the tap that blurred the note lands on Done).
 - **The `who` field writes `counterpart` or `waiting_on`** (2026-11-11), never both.
+- **One card per unordered pair, ever** (2026-11-11): every stage 7 writer goes through `suggestions.suggest_pair`
+  (`why_not`); `relations.suggest` is kind-level and is for the import only. A pair the owner dismissed, linked or
+  unlinked is never suggested again.
+- **Two Canvas rows are twins only when their names are one item's** (2026-11-11), and a row with several twin
+  candidates keeps the one it shares a title word with, or none; a course week (Quiz 5, Discussion 5) is three items.
+- **The daily cap lives in `relations.annotate`** (`shown_ids`, 2026-11-11): Review, badges, the brief and `task_get`
+  read the same day's set; only `suggestions.session` writes it; a `filing` suggestion is exempt. A new reader of
+  suggestions goes through `annotate`, never `pending_suggestions`, unless it judges them.
+- **A suggestion's `why` never quotes task text** (2026-11-11): the owner's text may say "blocked".
+- **A recording's stated link rides in its batch; a re-synced recording never re-adds a link for a pair with any
+  `relations` row** (2026-11-11), and its inferred links are cards.
+- **`filing` evidence is not the planner's and not a Review decision's** (2026-11-11), like `mail_new` and `link_suggestion`.
+- **`follow_thread` is a batch op whose undo deletes the `links` row it added** (2026-11-11); connectors cannot send it.
+- **`claude.filing.enabled` is not in `PAID_SWITCHES`** (2026-11-11): that tuple builds `OLD_DEFAULTS`; a new paid
+  switch that did not exist before 2026-11-10 stays out of it and gets its own default test.
+- **A filing run is dequeued before it runs** (2026-11-11): a failed one is logged and not retried; `file-task` runs
+  it again by hand.
 
 ## Gotchas carried over from plaud-sync (dates are when they were learned)
 

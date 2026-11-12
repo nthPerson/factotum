@@ -648,3 +648,39 @@ cards on Review. Every rewrite is its own batch, shown in History and undone wit
   summary in the Log.
 - **"Task-N is free now"** is sent to the chosen notification providers (§19) when the last task a
   hard-dated task waits on is done. It needs no Claude run and no ripple switch.
+
+## 21. Suggested links and filing (stage 7)
+
+Factotum proposes links between tasks and you confirm them with a tap. Three free detectors run every 30
+minutes after the sweeps and whenever a task is created: two tasks that look like the same item (a Canvas
+item and a recording's task for it), two to four tasks that follow one mail thread or calendar event, and
+a task whose text says "Task-N". The planner, a recording and mail triage can propose links too, and a mail
+that belongs to an open task shows on its Review card as "This mail is about Task-N. Follow its thread?".
+Suggestions appear on Review, as dashed badges on rows, and (for a task you just made) as dashed chips on it;
+nothing becomes a link until you tap, except a link you said aloud in a recording ("this is part of Task-12"),
+which is in the recording's batch and can be undone.
+
+- **How many a day:** Settings -> Review and lifecycle -> Suggested links (`links.suggestions_per_review`,
+  default 5). Over the cap, the rest wait and are offered on later days; 0 shows none. Chips on a task you
+  just made are not counted.
+- **Filing a task you add:** off until you switch it on in Settings -> Claude -> Filing a task you add
+  (`claude.filing.enabled`; absent means off). When you add a task with only a name, one small Claude run with
+  no tools suggests its project, effort, a likely link and a likely twin as chips; it never changes what you
+  typed. The model and budget are `claude.models.filing` and `claude.budgets_usd.filing` ($0.10). Measured
+  2026-11-11 on a copy of a real database: about $0.04 a task on Sonnet; Haiku cost $0.003 but found no link.
+  The shipped example names Haiku, so set `claude.models.filing: sonnet` in `config/factotum.yaml` if you want
+  link suggestions. The scheduler must be running; the link detectors cost nothing.
+- **Try one filing run first:** make a copy of the database with the backup API (never `cp`, the file is in WAL
+  mode and a copy goes stale):
+
+  ```bash
+  .venv/bin/python -c "import sqlite3; s = sqlite3.connect('data/factotum.db'); d = sqlite3.connect('/tmp/try.db'); s.backup(d); d.close(); s.close()"
+  FACTOTUM_DB=/tmp/try.db .venv/bin/python -m factotum file-task <task id> --dry-run
+  ```
+
+  `--dry-run` is a real run that prints the JSON and the cost and stores nothing; without it the proposals are
+  stored. A failed run is logged and not retried by the scheduler; run `file-task` again by hand.
+- **Before the first `sweep links` on an existing database:** run `.venv/bin/python -m factotum links-check`
+  (read-only; it lists what the detectors would suggest, and how many they would write). The first pass seeds
+  every existing "Task-N" reference in your tasks' text as a card, and Review shows only a day's worth at a
+  time (the cap), so a long list arrives over several days. Then `.venv/bin/python -m factotum sweep links`.
