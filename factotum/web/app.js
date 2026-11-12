@@ -293,9 +293,10 @@
     const list = (pushInfo && pushInfo.devices) || [];
     if (!list.length) return '<p class="hint">No device has notifications on yet.</p>';
     const mine = pushDev.sub ? pushDev.sub.endpoint : null;
-    return `<div class="tablewrap"><table class="devices"><tr><td class="code">device</td><td class="code">added</td><td class="code">last sent</td><td class="code">last failure</td><td></td></tr>${list.map(d => `<tr>
-      <td>${esc(d.label)}${d.endpoint === mine ? ' (this device)' : ''}</td><td>${esc((d.created_at || '').slice(0, 10))}</td><td>${esc(fmtStamp(d.last_success_at))}</td>
-      <td>${failedLast(d) ? esc(d.last_error || '') : '—'}</td><td>${d.endpoint === mine ? '' : `<button class="btn small" data-push-remove="${d.id}">Remove</button>`}</td></tr>`).join('')}</table></div>`;
+    // data-l names a cell when a phone stacks each device into a block (app.css); a failure cell with none stays out there
+    return `<div class="tablewrap"><table class="devices"><tr class="hd"><td class="code">device</td><td class="code">added</td><td class="code">last sent</td><td class="code">last failure</td><td></td></tr>${list.map(d => `<tr>
+      <td>${esc(d.label)}${d.endpoint === mine ? ' (this device)' : ''}</td><td data-l="added">${esc((d.created_at || '').slice(0, 10))}</td><td data-l="last sent">${esc(fmtStamp(d.last_success_at))}</td>
+      <td data-l="last failure" ${failedLast(d) ? '' : 'class="nofail"'}>${failedLast(d) ? esc(d.last_error || '') : '—'}</td><td>${d.endpoint === mine ? '' : `<button class="btn small" data-push-remove="${d.id}">Remove</button>`}</td></tr>`).join('')}</table></div>`;
   }
   // The permission is asked first, before any await: iOS asks only from inside the tap.
   async function pushOn() {

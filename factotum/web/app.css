@@ -538,6 +538,18 @@ body.tray-open .toast.ask { bottom: calc(38vh + 110px + env(safe-area-inset-bott
 .settings .tablewrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 .settings table.devices td { white-space: nowrap; padding-right: 12px; }
 .settings table.devices td:nth-child(4) { white-space: normal; min-width: 160px; }
+/* On a phone each device is a block: its name, when it was added and last sent to (and its last failure, if any), Remove */
+@media (max-width: 700px) {
+  .settings table.devices, .settings table.devices tbody, .settings table.devices tr, .settings table.devices td { display: block; }
+  .settings table.devices tr.hd, .settings table.devices td.nofail, .settings table.devices td:empty { display: none; }
+  .settings table.devices tr { padding: 10px 0; border-bottom: 1px solid var(--line); }
+  .settings table.devices tr:last-child { border-bottom: 0; padding-bottom: 0; }
+  .settings table.devices tr:nth-child(2) { padding-top: 0; }
+  .settings table.devices td, .settings table.devices td:nth-child(4) { white-space: normal; min-width: 0; padding: 2px 0; overflow-wrap: anywhere; }
+  .settings table.devices td:first-child { font-weight: 500; font-size: 14px; }
+  .settings table.devices td[data-l]::before { content: attr(data-l) " "; color: var(--muted); }
+  .settings table.devices .btn { min-height: 44px; margin-top: 6px; }
+}
 .note { font-size: 12px; color: var(--muted); border-left: 3px solid var(--line); padding-left: 10px; margin: 14px 0; }
 .note code { font-family: var(--mono); font-size: 12px; }
 
