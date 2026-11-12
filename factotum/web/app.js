@@ -40,7 +40,7 @@
   if (!folds || typeof folds !== 'object' || Array.isArray(folds)) folds = {};
   const folded = (key, dflt) => Object.prototype.hasOwnProperty.call(folds, key) ? !!folds[key] : !!dflt;
   function setFold(key, shut) { folds[key] = !!shut; try { localStorage.setItem('factotum.folds', JSON.stringify(folds)); } catch (_) {} }
-  let ui = { tab: 'today', focus: null, sel: new Set(), open: new Set(), reviewIdx: 0, laterOpen: false, datePick: false, trayOpen: false, trayOff: new Set(), reviewPaused: false, rvNote: { id: null, text: '' }, remOpen: null, dueOpen: null, sinceOpen: null,
+  let ui = { tab: 'today', focus: null, focusAt: null, sel: new Set(), open: new Set(), reviewIdx: 0, laterOpen: false, datePick: false, trayOpen: false, trayOff: new Set(), reviewPaused: false, rvNote: { id: null, text: '' }, remOpen: null, dueOpen: null, sinceOpen: null,
              railOpen: !window.matchMedia('(max-width: 860px)').matches, chatDrawer: false,
              page: null, pageScroll: 0, pageMore: false, pageLater: false,      // the task page: its id, the list's scroll, a phone's More and Later open
              bulkMore: false,      // the phone's short bar shows its second line (back to false when nothing is selected)
@@ -1426,6 +1426,9 @@
     const held = heldDraftBox(p);
     taskPlacesDrawn.clear(); editorsDrawn.clear();
     p.innerHTML = ui.page !== null ? taskPageHtml() : starterHtml() + pendingHtml() + fns[ui.tab]();
+    // The focus mark on the copy j / k reached, not on every copy of a task drawn twice
+    const rowsNow = [...p.querySelectorAll('.row')];
+    if (ui.focusAt != null && rowsNow[ui.focusAt] && +rowsNow[ui.focusAt].dataset.id === ui.focus) rowsNow.forEach((r, n) => { if (n !== ui.focusAt) r.classList.remove('focus'); });
     restoreDraftBox(held);
     p.querySelectorAll('textarea.grow').forEach(grow);
     document.querySelectorAll('#tabs button').forEach(b => { b.setAttribute('aria-selected', b.dataset.tab === ui.tab); if (b.dataset.tab === ui.tab && PHONE() && b.scrollIntoView) b.scrollIntoView({ block: 'nearest', inline: 'center' }); });
@@ -3511,7 +3514,7 @@
       const id = +r.dataset.id;
       // A plain tap selects (phones have no shift); the checkbox is the same selection. Keyboard
       // focus follows the last tap so j/k keep working.
-      const toggleSel = () => { ui.sel.has(id) ? ui.sel.delete(id) : ui.sel.add(id); ui.focus = id; render(); };
+      const toggleSel = () => { ui.sel.has(id) ? ui.sel.delete(id) : ui.sel.add(id); ui.focus = id; ui.focusAt = [...panel.querySelectorAll('.row')].indexOf(r); render(); };
       // Two taps on the same row within 400 ms are a double-click: the first tap's selection flip
       // is undone and the details open. Tracked by hand because render() replaces the DOM node
       // between the two clicks, so the browser's dblclick event would not fire.
@@ -3918,8 +3921,12 @@
     if (ui.tab === 'review') { const map = { d: 'done', k: 'keep', s: 'later', x: 'drop', t: 'top', l: 'longterm' }; if (map[e.key]) { e.preventDefault(); reviewAct(map[e.key]); } return; }
     const visible = [...document.querySelectorAll('#panel .row')].map(r => +r.dataset.id); if (!visible.length) return;
     const i = visible.indexOf(ui.focus);
-    if (e.key === 'j') { ui.focus = visible[Math.min(visible.length - 1, i + 1)]; render(); }
-    else if (e.key === 'k') { ui.focus = visible[Math.max(0, i - 1)]; render(); }
+    // j / k walk the rows as drawn: a task drawn twice (the Linked view, Timeline's sections) has two places, and
+    // the cursor is the place (focusAt), so it moves past the first copy; d, x, s, e act on the focused task.
+    const at = ui.focusAt != null && visible[ui.focusAt] === ui.focus ? ui.focusAt : i;
+    const step = n => { ui.focusAt = n; ui.focus = visible[n]; render(); };
+    if (e.key === 'j') step(Math.min(visible.length - 1, at + 1));
+    else if (e.key === 'k') step(Math.max(0, at - 1));
     // i < 0: the focused row is in a folded section or on another tab; a key must never act on a row that is not on screen
     else if (e.key === 'e' && i >= 0) { ui.open.has(ui.focus) ? ui.open.delete(ui.focus) : ui.open.add(ui.focus); render(); }
     else if (i >= 0 && { d: 'done', x: 'drop', s: 'snooze', t: 'top', l: 'longterm' }[e.key]) { act(ui.focus, { d: 'done', x: 'drop', s: 'snooze', t: 'top', l: 'longterm' }[e.key]); }
