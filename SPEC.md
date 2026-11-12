@@ -46,6 +46,8 @@ Four causes, none of them the user's discipline:
   logged as such: evidence-based automatic closes, and a ripple's rewrite of a linked task's text (§8.6),
   applied as its own batch with source `ripple` and its cause, shown in History, undone with one tap, and
   undone with its cause while the text is untouched. Everything else a ripple proposes waits on Review.
+  A third exception (stage 6, 2026-11-11): a task added by hand exists the moment Enter is pressed, as its
+  own `ui` batch (§9), and its Undo drops it; edits to a task still stage.
 - **Links between tasks are task state, so they ride in batches** (stage 4a, 2026-11-10): `link`,
   `unlink`, `merge`, `add_note` and a create that carries links are ops of `batches.apply`, each undoable.
   Chat's Create is a batch too. A link proposed in a chat turn is never applied at once (it lands in the
@@ -338,12 +340,35 @@ Message Content intent.
 
 **Commands.** The email command channel is retired. Voice stays (§8.1 applies spoken
 instructions, including reminder and tier verbs). The UI grammar handles
-`done|drop|snooze|push|defer|top|longterm <ids…> [to <when>]` with no Claude run. A command whose
+`<verb> <ids…> [to <when>]` with no Claude run. The verbs and their aliases: `done` (`finished`,
+`complete`, `completed`), `drop` (`remove`, `delete`, `cancel`), `snooze`, `push` (`defer`, `postpone`,
+`move`), `nodue` (`undate`, `undue`), `top` (`pin`), `unpin`, `longterm` (`long-term`, `lt`), `start`,
+`reopen`. A command whose
 verb takes no date (`done`, `drop`, `top`, `unpin`, `longterm`, `start`, `reopen`, `nodue`) with words
 left over after the task numbers (a `to <when>` tail included) is not a command and goes to Chat
 (2026-11-10): `done 12 duplicate of 14` must not close Task-12 and drop the rest. `and` and commas
 between numbers are separators (`done 12 and 14` is a command). `snooze` with words it cannot read
 as a date is not a command either; it no longer silently means "tomorrow".
+
+**The add line** (stage 6, 2026-11-11, design §12.7). `add` / `new` / a leading `+` (a bare one too) makes
+a task; it is never a tray command (`commands.parse` returns None for it) and is read by
+`commands.parse_add`. The New task line and the phone sheet send no verb; the Today command box sends
+`verb: true` and the verb is stripped. Parts: `#project` (compared with each configured project name
+lowercased and stripped of everything but letters and digits; an exact match wins, else a unique prefix of
+at least 2 characters, else refused as `no project matches #x` or `#x could be A or B`; `#` with only digits
+is not a project), `~effort` and a lone `!` (hard) are read anywhere after the verb; a date phrase (today,
+tomorrow, weekday names, `next <weekday>`, `next week`, `<month> <day>`, ISO; `by` / `due` go with it),
+`after N` (waits on Task-N) and `under N` (a step of Task-N) are read only in the trailing run, so "Plan
+monday meeting fri" keeps "monday" in the name. A kind named twice: the last wins and the earlier stays in
+the name. A refused part (an unknown project, an impossible date, a task that does not exist or whose link
+the rules refuse) stays in the name and is shown with its reason; Enter still adds the task, and the toast
+repeats the refusal. `GET /api/add/preview?text=&verb=` answers with the parse and the checked tasks
+(selects by primary key, no write). `POST /api/add` takes `{text, verb?}` or `{fields}` plus a client `key`:
+one `batches.apply` with source `ui` (the task's Source is `Manual`), `source_key` `add:<key>`, under a lock,
+so a second Enter or a retry answers `already: true` with the first task. `python -m factotum add TEXT
+[--dry-run]` does the same from the terminal. Search: `GET /api/search?q=&limit=` over every status (a number
+or `Task-12` / `#12` matches that id first, then ids starting with it; words must all appear in the name or
+project; open first, then closed newest first; 12, at most 30); `python -m factotum find Q`.
 
 ## 7. Outputs (each with an `enabled` flag)
 
@@ -583,6 +608,25 @@ related emails" and "Draft reply" are chat turns with a canned prompt (`prompts/
 about that task are staged straight into the review batch. Every turn is a `runs` row (`chat-turn`)
 with its cost; prompt and result live under `data/runs/chat/<thread>-<message>/`.
 
+**Places, and what a turn carries (stage 6, 2026-11-11, design §12.6).** A conversation has a place:
+`chat_threads.origin` (`review`, `today`, `task`; NULL for a Chat-tab thread) and `task_id`. A Review card
+and an opened task share one thread per task (the newest with that `task_id` and origin `review` or `task`);
+the Today box continues the newest `today` thread whose last message is under 12 hours old (`fresh: true`
+starts another); `GET /api/chat/place` answers which. `POST /api/chat/turn` resolves the thread under a lock
+and answers 409 while that thread has a turn running. `chat.PLACE_TEXT` tells the model where the user is.
+A turn's result also carries `read` (what the run read, stored in `chat_messages.read_json`) and `named`
+(the tasks its proposals name, with their names), `origin` and `task_id`. A `link` proposal may name, as
+`other`, the `ref` of a `create` in the same reply, so an existing task can wait on a new one. Everything a
+reply proposes can be staged together: a chat `create` goes to the tray as `{op: "create", from_chat:
+{message_id, index}}`; the server replaces its fields with the stored, validated proposal (the page cannot
+forge one), keys it `chat:<message>:<index>` like Create (so Create and Stage never make two), gives it
+Source `Chat` and marks the proposal applied (`chat.resolve_staged`, `mark_staged`). In the tray its `ref` is
+scoped to its message (`m<message>-<index>`), never the model's `s1`, which another message may use too; a
+link may name a sibling's ref only inside one batch with that create, or once Create made it. One canned
+prompt, `split` (`prompts/chat-split.md`), serves "Split into steps" and "Make them tasks": it turns steps
+the text lists into tasks, or drafts two to six, as creates with `ref`s, `part_of` the goal and `waits_on`
+only where order is real.
+
 ## 9. The UI
 
 One page, phone-friendly, served by the service. Tabs: **Today · Timeline · Projects · Review ·
@@ -796,6 +840,33 @@ linked tasks brought up to date" with See changes and Undo. A Review card a ripp
 date, with See what changed and Undo; a ripple's proposal reads "Ripple suggests" with Accept and Dismiss.
 History and the Log say when a rewrite became a note and when a ripple's cause was undone. Settings →
 Claude has the Ripples controls and says when ripples wait because this instance runs no scheduler.
+
+**In place, by hand (stage 6, 2026-11-11).** *The conversation in place.* One component (`placeHtml`) is
+drawn in three places: on a Review card, under the box on Today / Timeline / Projects (typing plain text
+there continues the `today` conversation without changing tab; the Chat tab's own box is unchanged), and in
+an opened task (its canned buttons now answer there instead of switching to Chat). Proposals are listed in
+the order Claude gave them with a hint on each kind; Review's button reads "Stage all N with this decision",
+elsewhere "Stage N"; a create row also has Create (at once) and Edit first (it fills the New task line). One
+turn runs at a time on the page; a follow-up while one runs is refused with the text kept.
+*New task.* On desktop a New task line (`n` or the button) with the add line's live preview ("Will be added
+as", chips, a legend of what each part meant, refused parts with their reasons); Enter adds at once, the
+toast says "Added Task-N" with Open and Undo, and "Add and open" opens it. Edit first moves a proposed task
+into this line. On a phone a round button at the bottom opens a sheet (a name, then taps for the date,
+project, effort and a link; Add at once, or let Claude file a typed or dictated sentence). On a phone one
+thing sits at the bottom (the tray, the short bar, the pinned bars, the round button) and none shows while
+a box has focus (`body.kb-open`), so nothing covers the box.
+*The editor.* An opened open task is its own editor: name, where it stands (`context`), due and hard
+deadline, project, effort and one "who" field with a choice `is for` / `waiting on` (it writes `counterpart`
+or `waiting_on`, never both; changing the choice moves the text). Each edit stages under its own key
+(`<id>:edit-<field>`) and shows on the row before Apply; a text edit carries `expect`; the task's own staged
+line applies or discards just its changes; a closed task is read-only.
+*Linking by hand.* "Link a task" finds any task and offers is a step of it / waits on it / is the same task;
+a link shows a Remove; "Add a step" (on every open task that is not itself a step) adds a task under it at
+once; More holds Split into steps, Duplicate and Merge into another; two selected rows offer Link in the
+bulk bar; a Linked-view goal whose text lists at least two steps offers Make them tasks.
+*Find any task.* `/` or "Find any task" opens a finder over `GET /api/search` (closed tasks too);
+`python -m factotum find`. *The empty Today tab* says how to add a first task (and no longer tells a
+newcomer to run the Notion import first).
 
 ## 10. Reminders and push
 

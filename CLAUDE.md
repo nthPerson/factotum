@@ -65,7 +65,9 @@ link-aware order, the opened task with History, the task page and its trail, Rev
 suggestions, the Log in words, "Free now" after a reminder's Done). Stage 5 (2026-11-11): ripples (`factotum/ripple.py`,
 `prompts/ripple.md`: a closed, changed or merged task queues its linked tasks, one light run with no tools
 rewrites their text as an undoable `ripple` batch and stages everything else on Review), the outcome
-question on close, "Task-N is free now", the Review block and Settings controls. Retiring the old Notion
+question on close, "Task-N is free now", the Review block and Settings controls. Stage 6 (2026-11-11): in place and by hand (the conversation on a Review card,
+under the Today box and in an opened task; New task on Enter with its preview and the phone sheet; the editor; linking
+by hand; Find any task). Retiring the old Notion
 pages and plaud-sync is the user's checklist (SETUP §15). Update this paragraph when something lands.
 
 ## Where things live
@@ -117,6 +119,9 @@ pages and plaud-sync is the user's checklist (SETUP §15). Update this paragraph
 | ripples: what queues, the run, what applies, the guard, undo following the cause | design §8, SPEC §8.6 | `factotum/ripple.py` (`enqueue`, `next_group`, `bundle`, `parse`, `guard`, `clean_proposal`, `apply`, `run`, `since`, `status`), `batches.py` (`apply`, `undo`), `scheduler.py` (`_ripples`), `prompts/ripple.md` |
 | the outcome question, Free now | design §8.5, §14 | `api._page`, `reminders.save_outcome`, `reminders.free_now`, `web/app.js` (`askOutcome`, `saveOutcome`, `watchRipple`, `sinceHtml`) |
 | the claude.ai connector: metadata, registration, consent gate, arming, tokens, `/mcp` auth | SPEC §15, SETUP §16 | `factotum/oauth.py` (`consent_identity`, `verify_access_jwt`, `armed`, `token`, `check_access`), `api.py` (`/oauth/*`, `/api/connectors`) |
+| the add line, adding at once, search | design §12.7, §12.9, SPEC §6 "The add line" | `factotum/commands.py` (`ADD_RE`, `parse_add`, `link_refusal`), `factotum/by_hand.py` (`preview`, `add`, `search`), `api.py` (`/api/add*`, `/api/search`) |
+| the conversation in place | design §12.6, SPEC §8.3 | `chat.py` (`place_thread`, `PLACE_TEXT`, `resolve_staged`, `mark_staged`), `api.py` (`/api/chat/turn`, `/api/chat/place`), `web/app.js` (`placeOf`, `loadPlace`, `sendTurn`, `placeHtml`, `stagePlace`) |
+| New task, the sheet, the editor, linking by hand, Find | design §12.7–§12.9 | `web/app.js` (`addTask`, `previewAdd`, `addPreviewHtml`, `sheetHtml`, `editorHtml`, `editKey`, `keysFor`, `pickerHtml`, `searchTasks`, `findHtml`) |
 | the installable app: manifest, icons, the page head | design §13, SPEC §9 | `factotum/web/manifest.webmanifest`, `index.html`, `tools/make_icons.py` |
 | addresses, Back, the phone task page, the short bar, signed out, return and update | SPEC §9 | `web/app.js` (`parseAddress`, `setAddress`, `go`, `applyAddress`, `openTask`, `closeTask`, `taskPageHtml`, `signedOut`, `typingNow`, `onReturn`), `api.py` (`PAGE_TABS`, `STAMPED`, `build_stamp`, `BuildStamp`, `_index_html`) |
 | the starter, code defaults, absent means off, `effective` | SPEC §9 "Configuration", SETUP §18 | `factotum/config.py` (`STARTER_CONFIG`, `DEFAULTS`, `PAID_SWITCHES`, `value`, `explain`), `config/factotum.starter.yaml`, `__main__.py` (`_effective`), `web/app.js` (`starterHtml`, `settingsDirty`), `tests/test_stage3.py` (`_code_defaults`) |
@@ -414,6 +419,22 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
   error or no network opens the task page.
 - **A device's links are built on its own origin** (2026-11-10, `push_subscriptions.origin`), so the
   dev instance's test notifications open the dev instance.
+- **A task added by hand exists on Enter** (2026-11-11; `POST /api/add`, one `ui` batch, Source `Manual`);
+  everything else a person edits stages. Its `key` makes a retry or a second Enter the same task
+  (`source_key` `add:<key>`); a new line needs a new key (`newKey()`).
+- **An add line is never a tray command** (2026-11-11): `commands.parse` returns None for it; `parse_add`
+  reads it, a refused part stays in the name, and the page sends add lines to `/api/add` before `/api/commands`.
+- **A chat create in the tray is `from_chat`** (2026-11-11): the server takes its fields from the stored
+  proposal and sets `source_key` and `created_source`; the API strips both from what the page sends. A link may
+  name a sibling create's `ref` only inside one batch with that create (or once Create made it); in the tray
+  that ref is `m<message>-<index>`, never the model's `s1`, which another message may use too.
+- **One thread per task for a Review card and an opened task; one turn per thread** (2026-11-11; 409): the
+  page runs one turn at a time and gives the text back when it cannot send.
+- **A new text box in the page needs `isDraftBox`** (2026-11-11; `DRAFT_BOXES` or the `ed-…-<id>` /
+  `step-line-<id>` forms), a `draft` entry and its `typingNow` count.
+- **On a phone one thing at the bottom** (2026-11-11: tray, short bar, pinned bars, the round button;
+  `body.fab-on`), and `body.kb-open` hides them all while a box has focus; a new bottom bar must join both rules.
+- **The `who` field writes `counterpart` or `waiting_on`** (2026-11-11), never both.
 
 ## Gotchas carried over from plaud-sync (dates are when they were learned)
 
