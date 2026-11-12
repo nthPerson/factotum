@@ -384,6 +384,13 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
   ripple prompt `html.escape`d task text, and a rewrite that kept the owner's words wrote "Q&amp;A" into the
   text (and an address with `&` came back changed, so the guard turned the rewrite into a note). `ripple._q` is
   one JSON string with `<`, `>` and the line-break characters as JSON escapes, which a reader turns back.
+- **Every prompt builder fills its `{{placeholders}}` with `prompts.fill`, in one pass** (polish 2026-11-11): filling
+  them one after another pasted the row list into a task name that held "{{rows}}". A value written on one line of a
+  record goes through `prompts.one_line` / `esc_line` (or `sync_file.flat`), which removes every character
+  `str.splitlines()` splits on (`\r`, U+2028 and U+0085 started forged evidence lines in the planner's prompt; a
+  `.replace("\n", " ")` is not enough); JSON in a prompt gets `prompts.json_breaks`. The planner's, the summary's and
+  mail triage's lines stay HTML-escaped (tests pin it), so their replies go through `prompts.unescape_reply` before
+  anything is stored ("Q&amp;A" became a card's name).
 - **Never pipe the dev or service start script's output through `tail` / `head` when it leaves a server
   running** (2026-11-11): the pipe never closes and the command hangs. And `GET /api/review` is loaded once
   per page (the in-flight flag in `app.js`) because its `last_offered_at` stamp commits on the shared

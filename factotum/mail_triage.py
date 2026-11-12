@@ -19,7 +19,6 @@ nothing is asked about twice. A failed run judges nothing and the batch waits fo
 """
 from __future__ import annotations
 
-import html
 import json
 import re
 import sqlite3
@@ -27,7 +26,7 @@ import time
 from datetime import date, timedelta
 from pathlib import Path
 
-from . import config as C
+from . import config as C, prompts as P
 from .db import get_settings, log_run, now_iso, rows, set_setting
 from .relations import LINK_KINDS
 
@@ -42,7 +41,8 @@ HEAD_RE = re.compile(r"^from (.*) <([^<>\s]+@[^<>\s]+)>")
 
 
 def _esc(v) -> str:
-    return html.escape(str(v or ""), quote=False)
+    """One field of a one-line record: every line separator gone, then HTML-escaped (apply unescapes the reply)."""
+    return P.esc_line(v)
 
 
 def _norm(v) -> str:
@@ -69,17 +69,14 @@ def build_prompt(cfg: dict, conn: sqlite3.Connection, cands: list[dict], today: 
     blocks = []
     for c in cands:
         head, _, body = str(c.get("excerpt") or "").partition("\n")
-        blocks.append(f"evidence {c['id']} | {str(c.get('at') or '')[:16]} | {_esc(c.get('account'))} | {_esc(c.get('label'))[:200]}\n"
-                      f"  {_esc(head)[:300]}\n  {_esc(' '.join(body.split()))[:1500]}")
+        blocks.append(f"evidence {c['id']} | {_esc(str(c.get('at') or '')[:16])} | {_esc(c.get('account'))} | {_esc(c.get('label'))[:200]}\n"
+                      f"  {_esc(head)[:300]}\n  {_esc(body)[:1500]}")
     waiting = rows(conn, "SELECT label FROM evidence WHERE kind = 'proposal' AND judged_at IS NULL ORDER BY id DESC LIMIT 20")
     fill = {"today": today.strftime("%A %Y-%m-%d") + (f" · it is {clock}" if clock else ""),
             "taxonomy": taxonomy_text(cfg), "efforts": ", ".join(C.get(cfg, "taxonomy.efforts", []) or ["XS", "S", "M", "L"]),
             "rows": open_rows_text(conn), "pending": "\n".join("- " + _esc(flat(w["label"]))[:160] for w in waiting) or "(nothing)",
             "mail": "\n\n".join(blocks)}
-    tpl = PROMPT.read_text(encoding="utf-8")
-    for k, v in fill.items():
-        tpl = tpl.replace("{{" + k + "}}", v)
-    return tpl
+    return P.fill(PROMPT.read_text(encoding="utf-8"), fill)      # one pass: a subject holding "{{mail}}" stays text
 
 
 def _mail(e: dict) -> dict:
@@ -112,6 +109,7 @@ def _follow_waiting(conn: sqlite3.Connection, task_id: int, conv) -> bool:
 def apply(conn: sqlite3.Connection, cfg: dict, data: dict, cands: list[dict]) -> dict:
     from .planner import _same_suggestion
     from .sync_file import _clean_task_fields, slice_rows
+    data = P.unescape_reply(data)                    # the mail went in HTML-escaped; a name copied from it is stored as the text itself
     by = {c["id"]: c for c in cands}
     shown = {r["id"] for r in slice_rows(conn) if r["status"] == "open"}      # faded and lapsed rows are listed, never named
     taken = {_norm(r["name"]) for r in rows(conn, "SELECT name FROM tasks WHERE status = 'open'")}

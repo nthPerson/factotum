@@ -15,7 +15,7 @@ import sqlite3
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from . import batches, config as C, relations, suggestions
+from . import batches, config as C, prompts as P, relations, suggestions
 from .db import now_iso, rows
 
 PROMPT = C.ROOT / "prompts" / "sync-file.md"
@@ -124,16 +124,14 @@ def build_prompt(cfg: dict, conn: sqlite3.Connection, rec: dict, received: str, 
         "closed_tasks": closed_rows_text(conn, today),
         "max_undated": f"{cap} undated",
         "rec_id": rec["id"],
-        "rec_name": html.escape(str(rec.get("name") or ""), quote=False),
-        "rec_when": _when(rec),
-        "received": str(received or ""),
+        "rec_name": html.escape(flat(rec.get("name")), quote=False),      # one line: a title cannot start a record
+        "rec_when": flat(_when(rec)),
+        "received": flat(received),
         "today": today.strftime("%A %Y-%m-%d"),
         "summary_path": str(Path(files.summary)),
         "transcript_path": str(Path(files.transcript)),
     }
-    for k, v in fill.items():
-        tpl = tpl.replace("{{" + k + "}}", v)
-    return tpl
+    return P.fill(tpl, fill)      # one pass: a task name holding "{{closed_tasks}}" stays text
 
 
 # --- applying what Claude returned (SPEC.md §8.1): Python writes --------------------------------

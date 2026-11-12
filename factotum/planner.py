@@ -21,14 +21,13 @@ card, whatever it cites.
 """
 from __future__ import annotations
 
-import html
 import json
 import sqlite3
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from . import batches, config as C, lifecycle, relations, suggestions
+from . import batches, config as C, lifecycle, prompts as P, relations, suggestions
 from .db import add_link, add_mention, get_settings, log_run, now_iso, rows, upsert_task
 from .sync_file import _clean_task_fields
 
@@ -72,15 +71,17 @@ def bundle(conn: sqlite3.Connection, cfg: dict, today: date, events: list[dict] 
 
 
 def _esc(v) -> str:
-    return html.escape(str(v or ""), quote=False).replace("\n", " ")
+    """One field of a one-line record: every line separator gone (prompts.one_line), then HTML-escaped. The
+    reply's strings are unescaped before anything is stored (apply), so "Q&A" is never kept as "Q&amp;A"."""
+    return P.esc_line(v)
 
 
 def sections(b: dict, today: date) -> dict[str, str]:
     """The bundle as prompt text, one entry per {{placeholder}}; the Today summary's prompt uses the same."""
     row_lines = []
     for t in b["rows"]:
-        due = (f"due {str(t['due'])[:16]}" + (" hard" if t.get("hard") else "")) if t.get("due") else "undated"
-        bits = [f"Task-{t['id']}", f"{t['score']} {t['priority']}", t.get("project") or "—", due, _esc(t["name"])[:90], _esc(t.get("context"))[:140]]
+        due = (f"due {_esc(str(t['due'])[:16])}" + (" hard" if t.get("hard") else "")) if t.get("due") else "undated"
+        bits = [f"Task-{t['id']}", f"{t['score']} {t['priority']}", _esc(t.get("project")) or "—", due, _esc(t["name"])[:90], _esc(t.get("context"))[:140]]
         if t.get("top_rank"):
             bits.insert(2, f"top {t['top_rank']}")
         if t.get("waiting_on"):
@@ -88,10 +89,10 @@ def sections(b: dict, today: date) -> dict[str, str]:
         if w := relations.words(t):
             bits.insert(-1, w)
         row_lines.append(" | ".join(bits))
-    cand_lines = [f"evidence {c['id']} | {c['kind']} | {c.get('account') or '—'} | " + (f"Task-{c['task_id']} ({_esc(c.get('task_name'))[:60]})" if c.get("task_id") else "no task") + f" | {_esc(c.get('label'))[:120]} | {_esc(c.get('excerpt'))[:500]}" for c in b["candidates"]]
-    ann_lines = [f"{a.get('when') or '?'} | {_esc(a.get('project'))} | {_esc(a.get('title'))[:120]} | {_esc(a.get('text'))[:400]}" for a in b["announcements"]]
+    cand_lines = [f"evidence {c['id']} | {_esc(c['kind'])} | {_esc(c.get('account')) or '—'} | " + (f"Task-{c['task_id']} ({_esc(c.get('task_name'))[:60]})" if c.get("task_id") else "no task") + f" | {_esc(c.get('label'))[:120]} | {_esc(c.get('excerpt'))[:500]}" for c in b["candidates"]]
+    ann_lines = [f"{_esc(a.get('when')) or '?'} | {_esc(a.get('project'))} | {_esc(a.get('title'))[:120]} | {_esc(a.get('text'))[:400]}" for a in b["announcements"]]
     rem_lines = [f"reminder {r['fire_at'][11:16]} Task-{r['id']} {_esc(r['name'])[:70]} ({_esc(r.get('label'))[:60]})" for r in b["reminders"]]
-    ev_lines = [f"event {e.get('start')}{'' if e.get('all_day') else '–' + str(e.get('end') or '')[11:16]} {_esc(e.get('summary'))[:80]}" + (" (accepted)" if e.get("self_status") == "accepted" else "") for e in b["events"]]
+    ev_lines = [f"event {_esc(e.get('start'))}{'' if e.get('all_day') else '–' + _esc(str(e.get('end') or '')[11:16])} {_esc(e.get('summary'))[:80]}" + (" (accepted)" if e.get("self_status") == "accepted" else "") for e in b["events"]]
     wait_lines = [f"waiting Task-{t['id']} {_esc(t['name'])[:70]} on {_esc(t['waiting_on'])[:60]}" for t in b["waiting"]]
     link_lines = [f"Task-{s.get('a')} ~ Task-{s.get('b')}: {relations.WORDS.get(s.get('kind'), 'linked to')}? ({_esc(' '.join(str(s.get('why') or '').split()))[:100]})"
                   for s in b.get("link_candidates") or []]          # a why may be a model's words: every line break (\r, \u2028 too) becomes a space
@@ -105,10 +106,7 @@ def sections(b: dict, today: date) -> dict[str, str]:
 
 
 def build_prompt(cfg: dict, b: dict, today: date) -> str:
-    tpl = PROMPT.read_text(encoding="utf-8")
-    for k, v in sections(b, today).items():
-        tpl = tpl.replace("{{" + k + "}}", v)
-    return tpl
+    return P.fill(PROMPT.read_text(encoding="utf-8"), sections(b, today))      # one pass: a name holding "{{rows}}" stays text
 
 
 def _norm(v) -> str:
@@ -126,6 +124,7 @@ def _same_suggestion(a: dict, b: dict) -> bool:
 
 
 def apply(conn: sqlite3.Connection, cfg: dict, data: dict, b: dict, today: date) -> dict:
+    data = P.unescape_reply(data)                    # the prompt's text is HTML-escaped; what is stored is the text itself
     allowed = {t["id"] for t in b["rows"]}
     # Suggestions already waiting in Review. The prompt lists them, but the planner now runs more than
     # once a day and a model can repeat itself: Python never stages the same card twice.

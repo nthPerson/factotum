@@ -17,7 +17,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from . import config as C
-from . import relations, suggestions
+from . import prompts as P, relations, suggestions
 from .db import get_settings, log_run, now_iso, one, rows, set_setting
 from .relations import LINK_KINDS, WORDS
 from .sync_file import flat, slice_rows, taxonomy_text
@@ -41,16 +41,13 @@ def _unset(task: dict, field: str) -> bool:
 
 
 def build_prompt(cfg: dict, conn, task: dict, rows_: list[dict]) -> str:
-    lines = [f"Task-{r['id']} | {flat(r['project']) or '—'} | {flat(str(r['due'])[:16]) if r['due'] else 'undated'} | {flat(r['name'])[:90]}"
+    lines = [f"Task-{r['id']} | {flat(r['project']) or '—'} | {flat(str(r['due']))[:16] if r['due'] else 'undated'} | {flat(r['name'])[:90]}"
              for r in rows_ if r["id"] != task["id"]]
-    vals = {"task_id": str(task["id"]), "made": str(task.get("created_at") or "")[:10],
-            "due": f"due {task['due']}" if task.get("due") else "undated",
+    vals = {"task_id": str(task["id"]), "made": flat(task.get("created_at"))[:10],
+            "due": f"due {flat(task['due'])}" if task.get("due") else "undated",
             "name": html.escape(flat(task.get("name"))), "taxonomy": taxonomy_text(cfg),
             "efforts": ", ".join(_efforts(cfg)), "rows": "\n".join(lines) or "(no other open tasks)"}
-    tpl = PROMPT.read_text(encoding="utf-8")
-    for k, v in vals.items():
-        tpl = tpl.replace("{{" + k + "}}", v)
-    return tpl
+    return P.fill(PROMPT.read_text(encoding="utf-8"), vals)      # one pass: the name is filled first and may hold "{{rows}}"
 
 
 def _field(conn, task: dict, field: str, v, valid: list[str], noun: str, stored: list, dropped: list) -> None:

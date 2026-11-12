@@ -20,7 +20,7 @@ import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from . import config as C, relations
+from . import config as C, prompts as P, relations
 from .db import get_settings, log_run, rows, set_setting
 from .lifecycle import parse_date
 
@@ -148,10 +148,7 @@ def build_prompt(cfg: dict, b: dict, today: date) -> str:
     from .planner import sections
     fill = sections(b, today)
     fill["now"] = fill.pop("today")
-    tpl = PROMPT.read_text(encoding="utf-8")
-    for k, v in fill.items():
-        tpl = tpl.replace("{{" + k + "}}", v)
-    return tpl
+    return P.fill(PROMPT.read_text(encoding="utf-8"), fill)      # one pass: a name holding "{{rows}}" stays text
 
 
 def run(conn: sqlite3.Connection, cfg: dict, today: date, *, runner=None, calendar=None, at: str | None = None) -> dict:
@@ -174,7 +171,7 @@ def run(conn: sqlite3.Connection, cfg: dict, today: date, *, runner=None, calend
     res = runner(cfg, "today_summary", prompt, allowed_tools=[], workdir=workdir)
     (workdir / "result.txt").write_text(res.result_text or "", encoding="utf-8")
     ms = int((time.monotonic() - started) * 1000)
-    text = str(res.data.get("summary") or "").strip() if res.ok and isinstance(res.data, dict) else ""
+    text = P.unescape_reply(str(res.data.get("summary") or "")).strip() if res.ok and isinstance(res.data, dict) else ""      # the sections are HTML-escaped
     if not text:
         err = (res.error or "the reply had no summary")[:1000]
         log_run(conn, "today-summary", ms, ok=False, summary="summary", error=err, cost_usd=res.cost_usd)

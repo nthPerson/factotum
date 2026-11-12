@@ -36,6 +36,7 @@ from pathlib import Path
 from . import batches, config as C, mcp_server, relations
 from .claude import runner as R
 from .db import add_mention, get_task, log_run, now_iso, one, rows
+from .prompts import json_breaks
 from .sync_file import _clean_task_fields
 
 PROMPTS = C.ROOT / "prompts"
@@ -188,7 +189,8 @@ def build_prompt(cfg: dict, conn: sqlite3.Connection, text: str, attached_ids: l
     if place and place[0] in PLACE_TEXT:
         parts.append("## Where the user asked\n\n" + PLACE_TEXT[place[0]].format(id=place[1]))
     att = attached_rows(conn, cfg, attached_ids, today)
-    parts.append("## Attached tasks\n\n" + (json.dumps(att, ensure_ascii=False, indent=1, default=str) if att else "none — use tasks_query if the message is about a task"))
+    # JSON escapes \n, \r and the other control characters; U+0085, U+2028 and U+2029 too (prompts.json_breaks)
+    parts.append("## Attached tasks\n\n" + (json_breaks(json.dumps(att, ensure_ascii=False, indent=1, default=str)) if att else "none — use tasks_query if the message is about a task"))
     if history:
         # Each message is one JSON string on its own line: an earlier reply may quote a mail or a task's
         # text, and a raw newline from it must never start a line of this prompt (a forged heading).
