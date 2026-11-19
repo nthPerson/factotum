@@ -308,6 +308,51 @@ def tasks_query(ctx: Context, args: dict) -> dict:
     return res
 
 
+@tool("tasks_search", "Search every task, open or closed, the way the Search tab does. `q` is words (every one must match; \"a phrase\"; -word leaves rows "
+      "out; a lone number is that task) looked for in the name, project, people, text and outcome; `mode` fuzzy also takes close spellings and shared "
+      "stems, and match answers with them when nothing matches as written (`fell_back`). Narrow by `status`, `project`, `source`, `effort`, a date range "
+      "(`date_field` due, created, closed or changed, with `date_from` / `date_to`) and `flags` (hard, undated, waiting, top, longterm, linked, later, "
+      "reminder). Rows: id, name, status, project, due, hard, effort, source, people, the closing date and outcome of a closed one, and `snippet` "
+      "(the matched text). `total` counts every match; `cut` counts rows left out to keep the result small.",
+      {"q": {"type": "string"}, "mode": {"type": "string", "enum": ["match", "fuzzy"]},
+       "within": {"type": "string", "enum": ["all", "name", "text", "people"]},
+       "status": {"type": "array", "items": {"type": "string", "enum": ["open", "done", "dropped", "faded", "lapsed"]}, "description": "any of these; empty: every status"},
+       "project": {"type": "array", "items": {"type": "string"}, "description": "exact project names"},
+       "source": {"type": "array", "items": {"type": "string"}}, "effort": {"type": "array", "items": {"type": "string"}},
+       "date_field": {"type": "string", "enum": ["due", "created", "closed", "changed"]},
+       "date_from": {"type": "string", "description": "YYYY-MM-DD, inclusive"}, "date_to": {"type": "string", "description": "YYYY-MM-DD, inclusive"},
+       "flags": {"type": "array", "items": {"type": "string", "enum": ["hard", "undated", "waiting", "top", "longterm", "linked", "later", "reminder"]}},
+       "sort": {"type": "string", "enum": ["relevance", "due", "created", "closed", "changed"]}, "limit": {"type": "integer"}})
+def tasks_search(ctx: Context, args: dict) -> dict:
+    from . import search
+    for key in ("status", "project", "source", "effort", "flags"):
+        if args.get(key) is not None and not isinstance(args[key], (list, str)):
+            raise ToolError(f"{key} must be a list")
+    limit = _int(args, "limit", 25, 1, ROW_CAP)
+    r = search.run(ctx.conn, ctx.cfg, ctx.today, q=_str(args, "q", "", 200), mode=args.get("mode"), within=args.get("within"), status=args.get("status"),
+                   project=args.get("project"), source=args.get("source"), effort=args.get("effort"), date_field=args.get("date_field"),
+                   date_from=args.get("date_from"), date_to=args.get("date_to"), flags=args.get("flags"), sort=args.get("sort"), limit=limit)
+    out = []
+    for x in r["results"]:
+        row = {k: x.get(k) for k in ("id", "name", "status", "project", "due", "hard", "effort", "source", "counterpart", "waiting_on")}
+        row["created_at"] = (x.get("created_at") or "")[:10]
+        if x["status"] != "open":
+            row["closed"] = (x.get("completed_at") or "")[:10] or None
+            if x.get("outcome"):
+                row["outcome"] = x["outcome"]
+            if x.get("merged_into"):
+                row["same_as"] = x["merged_into"]
+        if x.get("snippet"):
+            row["snippet"] = x["snippet"]["text"]
+        out.append({k: v for k, v in row.items() if v not in (None, "")})
+    res = {"tasks": out, "total": r["total"], "searched": r["said"], "fell_back": r["fell_back"], "cut": 0}
+    while res["tasks"] and len(json.dumps(res, ensure_ascii=False, default=str)) > TOOL_BUDGET:     # whole rows from the end, never mid-JSON
+        res["tasks"].pop()
+        res["cut"] += 1
+    _seen_tasks(ctx, (t["id"] for t in res["tasks"]))
+    return res
+
+
 LINKED_CAP, EVIDENCE_CAP = 20, 5
 
 

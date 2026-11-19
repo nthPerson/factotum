@@ -47,7 +47,7 @@ CHAT_OPS = {"set", "done", "drop", "pin_top", "longterm", "add_reminder", "add_n
 LINKED_CAP = 10
 PROPOSAL_CAP = 12
 TITLE_CAP = 60
-FRIENDLY = {"tasks_query": "Looking at tasks", "task_get": "Reading a task", "reminders_list": "Checking reminders", "mail_search": "Searching mail",
+FRIENDLY = {"tasks_query": "Looking at tasks", "tasks_search": "Searching tasks", "task_get": "Reading a task", "reminders_list": "Checking reminders", "mail_search": "Searching mail",
             "mail_thread": "Reading a thread", "mail_message": "Reading a message", "mail_draft_reply": "Drafting a reply", "mail_draft_new": "Drafting a message",
             "calendar_events": "Checking the calendar", "plaud_search": "Searching recordings", "plaud_summary": "Reading a recording",
             "task_neighbours": "Looking at linked tasks", "waiting_tasks": "Checking what waits", "twin_candidates": "Looking for twins", "goal_tree": "Reading a goal"}

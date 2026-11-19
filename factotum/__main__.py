@@ -178,6 +178,18 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dry-run", action="store_true")
     p = sub.add_parser("find", help="find any task, open or closed, by number or words")
     p.add_argument("q")
+    p = sub.add_parser("search", help="search every task as the Search tab does: words, close spellings, dates and filters")
+    p.add_argument("q", nargs="?", default="")
+    p.add_argument("--fuzzy", action="store_true", help="close spellings and shared stems too")
+    p.add_argument("--within", choices=["all", "name", "text", "people"], default="all")
+    p.add_argument("--status", nargs="*", default=[], help="open done dropped faded lapsed (any of them; none given: every status)")
+    p.add_argument("--project", nargs="*", default=[])
+    p.add_argument("--date-field", choices=["due", "created", "closed", "changed"], default="due")
+    p.add_argument("--from", dest="date_from", default=None, help="YYYY-MM-DD, inclusive")
+    p.add_argument("--to", dest="date_to", default=None, help="YYYY-MM-DD, inclusive")
+    p.add_argument("--only", nargs="*", default=[], help="hard undated waiting top longterm linked later reminder")
+    p.add_argument("--sort", choices=["relevance", "due", "created", "closed", "changed"], default="relevance")
+    p.add_argument("--limit", type=int, default=30)
     sub.add_parser("mcp", help="the MCP server a chat turn talks to, over stdio (started by the runner; `chat-check` exercises it)")
     p = sub.add_parser("chat", help="one chat turn from the terminal: a real Claude run (~$0.20), stored like a turn from the UI")
     p.add_argument("text", nargs="?", default="")
@@ -297,6 +309,16 @@ def main(argv: list[str] | None = None) -> int:
             when = f" {r['completed_at'][:10]}" if r["completed_at"] else ""
             merged = f" merged into Task-{r['merged_into']}" if r["merged_into"] else ""
             print(f"Task-{r['id']}  {r['status']}{when}{merged}  {r['name']}")
+    elif a.cmd == "search":
+        from . import search
+        r = search.run(conn, ecfg, date.today(), q=a.q, mode="fuzzy" if a.fuzzy else "match", within=a.within, status=a.status, project=a.project,
+                       date_field=a.date_field, date_from=a.date_from, date_to=a.date_to, flags=a.only, sort=a.sort, limit=a.limit)
+        print(f"{r['total']} match{'' if r['total'] == 1 else 'es'}: {r['said']}" + (" (nothing as written; these are close)" if r["fell_back"] else ""))
+        for x in r["results"]:
+            when = f" {x['completed_at'][:10]}" if x["status"] != "open" and x["completed_at"] else f" due {x['due'][:10]}" if x["status"] == "open" and x["due"] else ""
+            print(f"Task-{x['id']}  {x['status']}{when}  {x['name']}" + (f"\n    {x['snippet']['text']}" if x["snippet"] else ""))
+        if r["more"]:
+            print(f"… and {r['total'] - len(r['results'])} more (--limit)")
     elif a.cmd == "mcp":
         from . import mcp_server
         mcp_server.serve_stdio()            # stdout is the protocol from here on; logs go to stderr

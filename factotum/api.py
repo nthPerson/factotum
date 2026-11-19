@@ -36,7 +36,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from fastapi import Body, FastAPI, HTTPException, Request
+from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from html import escape
 from urllib.parse import urlparse
@@ -45,12 +45,12 @@ from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
 from .claude import runner as claude_runner
-from . import app_push, batches, by_hand, commands, config as C, filing, lifecycle, oauth, relations, reminders, review_queue, ripple, suggestions, summary
+from . import app_push, batches, by_hand, commands, config as C, filing, lifecycle, oauth, relations, reminders, review_queue, ripple, search, suggestions, summary
 from .db import connect, get_settings, get_task, init_db, now_iso, rows, seed_accounts, set_setting
 from .dates import parse_date
 
 WEB = Path(__file__).resolve().parent / "web"
-PAGE_TABS = ("today", "timeline", "projects", "review", "chat", "log", "settings")
+PAGE_TABS = ("today", "timeline", "projects", "review", "search", "chat", "log", "settings")
 # Page addresses that are not tabs: /new opens Today with New task (the app's long-press shortcut, stage 8).
 SHORTCUT_PATHS = ("new",)
 STAMPED = ("index.html", "app.js", "app.css", "manifest.webmanifest")
@@ -423,6 +423,16 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
     @app.get("/api/search")
     def search_tasks(q: str = "", limit: int = 12):
         return by_hand.search(conn, q, limit)
+
+    @app.get("/api/search/advanced")
+    def search_advanced(q: str = "", mode: str = "match", within: str = "all", status: list[str] = Query(default=[]), project: list[str] = Query(default=[]),
+                        source: list[str] = Query(default=[]), effort: list[str] = Query(default=[]), date_field: str = "due",
+                        date_from: str | None = None, date_to: str | None = None, flags: list[str] = Query(default=[]), sort: str = "relevance",
+                        limit: int = 50, offset: int = 0):
+        """The Search tab's search (search.run): words as written or close spellings, a date range, filters, with the
+        counts beside each filter. Reads only; `/api/search` above stays the picker's."""
+        return search.run(conn, eff_cfg(), date.today(), q=q, mode=mode, within=within, status=status, project=project, source=source, effort=effort,
+                          date_field=date_field, date_from=date_from, date_to=date_to, flags=flags, sort=sort, limit=limit, offset=offset)
 
     @app.post("/api/add")
     def add_task(body: AddBody):
