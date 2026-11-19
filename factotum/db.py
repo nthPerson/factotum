@@ -186,7 +186,7 @@ def connect(path: str | Path, shared: bool = False) -> sqlite3.Connection:
 # alone, so init_db adds these to databases created before them.
 MIGRATIONS = {"reminders": {"repeat": "TEXT", "sent_at": "TEXT"}, "tasks": {"last_offered_at": "TEXT", "mirrored_at": "TEXT", "close_on_sent_since": "TEXT", "close_on_sent_to": "TEXT", "outcome": "TEXT", "neighbours_seen_at": "TEXT"},
               "batches": {"cause_json": "TEXT"}, "changes": {"note": "TEXT"},
-              "chat_threads": {"origin": "TEXT", "task_id": "INTEGER"},
+              "chat_threads": {"origin": "TEXT", "task_id": "INTEGER", "card_id": "INTEGER"},      # card_id: the suggestion card (evidence id) a `suggestion` thread is about
               "chat_messages": {"drafts_json": "TEXT", "rejected_json": "TEXT", "error": "TEXT", "duration_ms": "INTEGER", "read_json": "TEXT"}}
 
 

@@ -25,6 +25,7 @@ from memory.
 | Need | Tool |
 |---|---|
 | open tasks, by project or keyword, scored | `tasks_query` (status open by default; `q`, `project`, `limit`; `rel` shows a row's links; `ready`, `linked_to`, `goal` filter by links; `cut` says how many rows were dropped to fit) |
+| any task, open or closed: by words (close spellings with `mode: fuzzy`), a date range (`date_field` due / created / closed / changed), status, project, flags | `tasks_search` (the Search tab's search; rows carry `snippet`, the matched text; `total` counts every match) |
 | how tasks are linked | `task_neighbours` (one task's links and nearby tasks), `waiting_tasks` (tasks waiting on another), `twin_candidates` (likely duplicates), `goal_tree` (a goal and its steps) |
 | one task in full: links, reminders, last changes | `task_get` |
 | pending reminders | `reminders_list` |

@@ -3,7 +3,7 @@
   'use strict';
   const PLAUD = 'https://web.plaud.ai/file/';
   const NOTION = 'https://app.notion.com/p/';
-  const TABS = ['today', 'timeline', 'projects', 'review', 'chat', 'log', 'settings'];
+  const TABS = ['today', 'timeline', 'projects', 'review', 'search', 'chat', 'log', 'settings'];
 
   let data = { tasks: [], projects: [], today: new Date().toISOString().slice(0, 10), top_cap: 7 };
   let review = null;        // /api/review payload
@@ -23,7 +23,9 @@
                   newLine: '', newName: '',      // the New task line; the phone sheet's "What needs doing" (stage 6)
                   findQ: '', picks: {},      // Find any task's box; the shared task picker's boxes by slot (stage 6)
                   edit: {},      // the editor's typed text by task id: {name?, context?, who?} until it is staged (stage 6)
-                  step: {} };    // an Add a step line's text by task id (stage 6)
+                  step: {},      // an Add a step line's text by task id (stage 6)
+                  searchQ: '', askSearch: '',      // the Search tab's box and its question to Claude (2026-11-18)
+                  sg: {}, askSg: '', askSgFor: null };      // a Review suggestion card's draft by evidence id, and the question on that card (2026-11-18)
   let asking = null;        // {id, name} of the task whose outcome the toast asks (ripples (stage 5): the outcome question)
   try { draft.cmd = sessionStorage.getItem('factotum.cmd') || ''; sessionStorage.removeItem('factotum.cmd'); } catch (_) {}   // kept by reloadKeepingDraft
   const TOUCH = () => window.matchMedia('(hover: none)').matches;
@@ -51,9 +53,13 @@
              edWho: {},            // the editor's "is for" / "waiting on" choice by task id, kept only while its field is empty (stage 6)
              linkFor: null, linkHit: null,      // the opened task whose Link a task is open, and the task its picker found (stage 6)
              moreFor: null, mergeFor: null,     // the opened task whose More is open, and whose Merge into another picker shows (stage 6)
-             bulkLink: false, bulkSwap: false }; // two selected rows: the Link line is open, and its two tasks are swapped (stage 6)
+             bulkLink: false, bulkSwap: false,   // two selected rows: the Link line is open, and its two tasks are swapped (stage 6)
+             rvEdit: false,                      // Review: the card's editor is open (kept in this browser; 2026-11-18)
+             sgLinkFor: null, sgLinkHit: null,   // the suggestion card whose Link a task is open, and the task its picker found
+             searchFilters: false };             // a phone's Search filters are unfolded
   try { ui.tab = parseAddress().tab; } catch (_) {}
   try { const r = localStorage.getItem('factotum.rail'); if (r === '0' || r === '1') ui.railOpen = r === '1'; } catch (_) {}
+  try { ui.rvEdit = localStorage.getItem('factotum.rvedit') === '1'; } catch (_) {}
   try { const s = JSON.parse(localStorage.getItem('factotum.staged') || '[]'); staged = new Map(s); } catch (_) {}
   for (const [k, v] of staged) { if (!v || typeof v !== 'object') staged.delete(k); else if (v.task_id == null && v.op !== 'create') v.task_id = typeof k === 'number' ? k : parseInt(k, 10); }  // trays saved before entries carried task_id (a new task has none)
 
@@ -386,6 +392,7 @@
     const was = sumBusy();
     data = await api('/api/tasks?status=open');
     find.cache.clear(); if (find.done) find.done.clear(); find.found = null;      // a search answered before this load may be out of date
+    srch.stale = true;      // the Search tab asks again when it is next drawn
     detailGen++; detailCache.forEach(d => { d.stale = true; });      // an opened task keeps what it shows until its new answer arrives
     try { pending = (await api('/api/proposals')).proposals; } catch (_) { pending = []; }
     try { summary = await api('/api/summary'); } catch (_) { summary = null; }
@@ -405,13 +412,14 @@
   // Focus in an empty draft-backed box does not count: its text lives in `draft` and render() puts the
   // focus and caret back, so a reload of the lists loses nothing (a box left focused and empty would
   // otherwise keep the lists stale on every return). render() uses the same list, through isDraftBox.
-  const DRAFT_BOXES = ['cmd', 'rv-ask', 'chat-pick', 'rv-note', 'today-ask', 'task-ask', 'new-line', 'find-q', 'pick-link', 'pick-merge', 'pick-sheet', 'new-name'];
+  const DRAFT_BOXES = ['cmd', 'rv-ask', 'chat-pick', 'rv-note', 'today-ask', 'task-ask', 'new-line', 'find-q', 'pick-link', 'pick-merge', 'pick-sheet', 'new-name', 'search-q', 'search-ask', 'sg-ask', 'pick-sglink'];
   // A box that can be closed with its text kept (the New task line, the phone sheet, an opened task's conversation,
   // Find) counts only while it is drawn: text kept out of sight must not keep the lists stale on every return.
   const drawn = id => !!document.getElementById(id);
   function typingNow() {
     const shown = [drawn('new-line') ? draft.newLine : '', drawn('new-name') ? draft.newName : '', drawn('task-ask') ? draft.askTask : '', ui.findOpen ? draft.findQ : ''];
-    if ([draft.cmd, draft.ask, draft.pick, draft.outcome, draft.askToday, ...shown, ...Object.values(draft.picks), ui.rvNote.text].some(s => (s || '').trim())) return true;
+    // The Search box's words are the search, not something half typed: they never count. Its question does, and a card's.
+    if ([draft.cmd, draft.ask, draft.pick, draft.outcome, draft.askToday, draft.askSearch, draft.askSg, ...shown, ...Object.values(draft.picks), ui.rvNote.text].some(s => (s || '').trim())) return true;
     if (Object.keys(draft.edit).some(id => edTyped(+id))) return true;      // an editor field typed in and not staged yet
     if (Object.values(draft.step).some(s => (s || '').trim())) return true;      // an Add a step line
     if (ui.remOpen !== null || ui.dueOpen !== null || chat.busy) return true;
@@ -633,7 +641,11 @@
       ui.sel.clear(); logData = null;
       if (ui.tab !== 'review') review = null;   // a stale Review page would still show the old due date; re-fetch on the next visit
       await load();
-      if (ui.tab === 'review') {
+      // Only edits from a Review card's editor (its own Apply: no decision and no verdict among them): the queue is
+      // read again and the card stays to be decided.
+      const editsOnly = !!keys && !picked.some(([k, s]) => typeof k === 'number' || s.op === 'judge_evidence');
+      if (ui.tab === 'review' && editsOnly) await loadReview();
+      else if (ui.tab === 'review') {
         // The decisions are in; today counts as reviewed (phase 2 skips the push), and the next
         // page waits for a click instead of appearing under the user's hands.
         await api('/api/review/finish', { method: 'POST' });
@@ -1238,18 +1250,20 @@
   const detailCache = new Map();     // id → the payload (+ stale: true after a load()), {id, missing: true} on 404, or {id, failed: <message>}
   const detailBusy = new Set();      // ids whose request is in flight
   let detailGen = 0;                 // bumped by load(): an answer to a request sent before it arrives stale
-  async function loadDetail(id, before) {
+  // `peek` (Review's editor): the task is read without stamping its neighbours as seen, so the card's reason stands.
+  async function loadDetail(id, before, peek = false) {
     if (detailBusy.has(id)) return;
     detailBusy.add(id);
     const gen = detailGen, more = before != null;
     let d;
     try {
-      const got = await api(`/api/tasks/${id}` + (more ? '?before=' + before : ''));
+      const got = await api(`/api/tasks/${id}` + (more ? '?before=' + before : peek ? '?peek=1' : ''));
+      if (peek) got.peeked = true;
       const had = detailCache.get(id);
       d = more && had && had.history
         ? Object.assign({}, got, { history: { entries: had.history.entries.concat(got.history.entries), more: got.history.more, next_before: got.history.next_before } })
         : got;
-      const t = byId(id); if (t && t.rel) t.rel.changed = null;      // the server just stamped it: the "updated by" badge goes
+      const t = byId(id); if (!peek && t && t.rel) t.rel.changed = null;      // the server just stamped it: the "updated by" badge goes
     } catch (e) {
       if (e.message === 'signed out' || more) {       // signed out has its own screen; a failed Earlier keeps what is shown
         detailBusy.delete(id);
@@ -1262,14 +1276,17 @@
     if (gen !== detailGen) d.stale = true;
     detailCache.set(id, d);
     // A task page still saying "Loading…" has no containers to swap (and no box to type in): it is drawn whole.
-    typingNow() && document.querySelector(`#panel [data-dhist="${id}"]`) ? swapDetail(id) : render();
+    typingNow() && document.querySelector(`#panel [data-dhist="${id}"], #panel [data-dlinks="${id}"]`) ? swapDetail(id) : render();
   }
   // Called at the end of render(): fetch what an opened row or the task page needs and has not got (or got
   // before a load()). The task page reads its task from here when no open list holds it.
   function ensureDetails() {
     const ids = PHONE() ? [] : [...ui.open].filter(id => document.querySelector(`#panel .row.open[data-id="${id}"]`));
     if (ui.page !== null) ids.push(ui.page);
-    for (const id of ids) { const d = detailCache.get(id); if ((!d || d.stale) && !detailBusy.has(id)) loadDetail(id); }
+    const rv = ui.page === null ? document.querySelector('#panel .review [data-rvedit]') : null;      // Review's editor lists the card's linked tasks
+    const peek = rv ? +rv.dataset.rvedit : null;
+    if (peek !== null && !ids.includes(peek)) ids.push(peek);
+    for (const id of ids) { const d = detailCache.get(id); if ((!d || d.stale || (d.peeked && id !== peek)) && !detailBusy.has(id)) loadDetail(id, undefined, id === peek); }
   }
   const tref = n => `<a class="tref" href="/t/${n}" data-open-task="${n}">Task-${n}</a>`;
   const linkTasks = s => esc(s).replace(/Task-(\d+)/g, (_, n) => tref(n));
@@ -1434,7 +1451,7 @@
     const bar = document.querySelector('header.bar'); if (bar) document.documentElement.style.setProperty('--bar-h', bar.offsetHeight + 'px');
     renderRail();
     const p = document.getElementById('panel');
-    const fns = { today: renderToday, timeline: renderTimeline, projects: renderProjects, review: renderReview, chat: renderChat, log: renderLog, settings: renderSettings };
+    const fns = { today: renderToday, timeline: renderTimeline, projects: renderProjects, review: renderReview, search: renderSearch, chat: renderChat, log: renderLog, settings: renderSettings };
     const held = heldDraftBox(p);
     taskPlacesDrawn.clear(); editorsDrawn.clear();
     p.innerHTML = ui.page !== null ? taskPageHtml() : starterHtml() + pendingHtml() + fns[ui.tab]();
@@ -1576,12 +1593,16 @@
       ${box}<div data-add-prev="cmd">${addPreviewHtml('cmd')}</div>
       <p class="hint keys">Tap a row to select it (the bulk bar appears) · <kbd>j</kbd><kbd>k</kbd> move · <kbd>d</kbd> done · <kbd>x</kbd> drop · <kbd>s</kbd> snooze · <kbd>t</kbd> top · <kbd>l</kbd> long-term · <kbd>e</kbd> details · double-click a row for details · <kbd>Esc</kbd> deselect</p>
       <p class="hint touch">${phone ? 'Tap a row to open it · tick the box to select it' : 'Tap a row to select it · double-tap or ▸ for details'}</p></div>
-      ${phone ? shortBar() : `<div class="bulk" id="bulk"><b id="bulk-n"></b> selected
+      ${bulkBarHtml()}`;
+  }
+  // The bar that acts on the ticked rows (the list tabs and Search): a phone's short one, a desktop's full one.
+  function bulkBarHtml() {
+    return PHONE() ? shortBar() : `<div class="bulk" id="bulk"><b id="bulk-n"></b> selected
         <button class="btn small" data-bulk="done">Done</button><button class="btn small" data-bulk="drop">Drop</button>
         <button class="btn small" data-bulk="snooze">Snooze to tomorrow</button>
         <span class="remform"><input type="date" id="bulk-date" aria-label="Due date"><button class="btn small" data-bulk="setdue">Set due</button><button class="btn small" data-bulk="cleardue">Remove due date</button></span>
         <button class="btn small" data-bulk="top">Pin to Top</button><button class="btn small" data-bulk="longterm">Long-term</button>${ui.sel.size === 2 ? `<button class="btn small" data-bulk="link" aria-expanded="${ui.bulkLink}">Link</button>` : ''}
-        <span class="spacer"></span><button class="btn small" data-bulk="clear">Clear</button>${bulkLinkHtml()}</div>`}`;
+        <span class="spacer"></span><button class="btn small" data-bulk="clear">Clear</button>${bulkLinkHtml()}</div>`;
   }
   // The phone's bulk bar: one line (Done, Drop, Snooze, More, ✕) that takes the tray's place at the
   // bottom while rows are selected; More opens a second line with the rest of desktop's actions.
@@ -1601,12 +1622,13 @@
     const shut = folded(g.key);
     return `<section class="group ${shut ? 'folded' : ''}"><h3 class="${g.cls || ''}"><button class="fold" data-fold="${esc(g.key)}" aria-expanded="${!shut}">${g.title}<span class="n">${g.rows.length}</span></button></h3>${shut ? '' : `<div class="rows">${g.rows.map(x => row(x, g.tag ? g.tag(x) : '')).join('')}</div>`}</section>`;
   }
-  function row(x, extraChip) {
+  // `more` (Search): {nameHtml: the name with the matched words marked, under: the matched text, drawn under the name}.
+  function row(x, extraChip, more = {}) {
     const cls = ['row', x.status === 'done' ? 'done' : '', x.status === 'dropped' ? 'drop' : '', ui.open.has(x.id) ? 'open' : '', ui.sel.has(x.id) ? 'sel' : '', ui.focus === x.id ? 'focus' : '', isWaiting(x) ? 'waiting' : '', x.under ? 'under' : ''].join(' ');
     return `<div class="${cls}" data-id="${x.id}">
       <div class="main">
         <input type="checkbox" id="ck-${x.id}" aria-label="Select" ${ui.sel.has(x.id) ? 'checked' : ''}>
-        <div class="title"><span class="code">Task-${x.id}</span> <span class="name">${esc(x.name)}</span></div>
+        <div class="title"><span class="code">Task-${x.id}</span> <span class="name">${more.nameHtml || esc(x.name)}</span>${more.under || ''}</div>
         <button class="chev" aria-label="Details" data-chev="${x.id}"></button>
         <div class="meta"${extraChip ? ` data-extra="${esc(extraChip)}"` : ''}>${chipsHtml(x, extraChip)}</div>
       </div>
@@ -1890,6 +1912,18 @@
     stageChange(c, '', { ev: eid });
     toast('Link staged · decide on the card, then Apply');
   }
+  // The chips under a Review card's name; drawn again in place when the card's editor stages a change (editRefresh).
+  function reviewSubHtml(x) {
+    const d = fmtDue(x.due);
+    return `<span class="code">Task-${x.id}</span><span class="chip proj">${esc(x.project || '—')}</span>${d ? `<span class="chip due ${d.days < 0 ? 'crit' : ''} ${x.hard ? 'hard' : ''}">${d.label}</span>` : '<span class="chip">no date</span>'}<span class="chip eff">${esc(x.effort || '?')}</span>${x.rel && x.rel.steps_total ? stepsChip(x.rel) : ''}<span class="chip">${x.mentions} mention${x.mentions === 1 ? '' : 's'}</span><span class="chip">score ${x.score}</span>`;
+  }
+  // Review's editor (2026-11-18): everything an opened task offers for changing it, in the card. The fields stage
+  // beside the decision (stageEdit); the linked tasks (with Remove) arrive with the task's own payload, read with
+  // `peek` so that looking here does not mark its neighbours seen; then Link a task, Add a step and More's line.
+  function rvEditHtml(x) {
+    const id = x.id;
+    return `<div class="rvedit" data-rvedit="${id}">${editorHtml(x)}<div data-dlinks="${id}">${detailAsyncHtml(id)}</div>${linkByHandHtml(x)}${moreHtml(x, true)}</div>`;
+  }
   function renderReview() {
     if (!review) {
       if (reviewFailed) return `<div class="empty">Could not load Review: ${esc(reviewFailed)} <button class="btn small" id="review-retry">Try again</button></div>`;
@@ -1914,14 +1948,17 @@
     const cls = REASON_CLS[primary] || (primary === 'last_call' ? 'crit' : primary === 'new' || primary === 'back' ? 'new' : 'warn');
     const idx = total - items.length;
     const note = ui.rvNote.id === x.id ? ui.rvNote.text : '';
+    const edit = ui.rvEdit && isOpenRow(x.id);      // the card's editor (2026-11-18): the same one an opened task has
     return `<div class="review">
       <div class="progress"><span>${idx + 1} of ${total}</span><div class="track"><div class="fill" style="width:${Math.round(100 * idx / total)}%"></div></div><span>~${Math.max(1, Math.ceil(items.length * 12 / 60))} min left</span></div>
       <div class="card" data-id="${x.id}">
         <div class="why ${cls}">${reasonText(items[0])}</div>
         <h2>${esc(x.name)}</h2>
-        <div class="sub"><span class="code">Task-${x.id}</span><span class="chip proj">${esc(x.project || '—')}</span>${d ? `<span class="chip due ${d.days < 0 ? 'crit' : ''} ${x.hard ? 'hard' : ''}">${d.label}</span>` : '<span class="chip">no date</span>'}<span class="chip eff">${esc(x.effort || '?')}</span>${x.rel && x.rel.steps_total ? stepsChip(x.rel) : ''}<span class="chip">${x.mentions} mention${x.mentions === 1 ? '' : 's'}</span><span class="chip">score ${x.score}</span></div>
+        <div class="sub" data-rvsub="${x.id}">${reviewSubHtml(x)}</div>
         ${sinceHtml(items[0])}
-        <p>${esc(x.why_now || (x.score_reasons || []).join(' · '))}</p>${x.context ? `<p class="ctx ${ui.ctxOpen === x.id ? 'open' : ''}">${esc(x.context)}</p><button class="btn small more" data-ctx-more="${x.id}">${ui.ctxOpen === x.id ? 'Less' : 'More'}</button>` : ''}
+        <p data-rvwhy="${x.id}">${esc(x.why_now || (x.score_reasons || []).join(' · '))}</p>${x.context && !edit ? `<p class="ctx ${ui.ctxOpen === x.id ? 'open' : ''}">${esc(x.context)}</p><button class="btn small more" data-ctx-more="${x.id}">${ui.ctxOpen === x.id ? 'Less' : 'More'}</button>` : ''}
+        <div class="rvedit-bar"><button class="btn small" data-rv-edit aria-expanded="${edit}">${edit ? 'Close the editor' : '✎ Edit this task'}</button>${edit ? '' : '<span class="hint">name, text, date, project, effort, who, links</span>'}</div>
+        ${edit ? rvEditHtml(x) : ''}
         <textarea id="rv-note" rows="2" placeholder="${PHONE() ? 'Note · Done or Drop: the outcome · Keep or Later: added to the text' : `Optional note · Done or Drop: the outcome (up to ${OUTCOME_MAX} characters) · Keep or Later: added to the text`}">${esc(note)}</textarea>
         <div class="links">${x.source_link ? `<a href="${esc(x.source_link)}" target="_blank" rel="noopener">${x.source === 'Plaud' ? 'Plaud note' : 'Source'}</a>` : ''}</div>
         <div class="big"><button class="done" data-rv="done">Done <kbd>d</kbd></button><button data-rv="keep">Keep <kbd>k</kbd></button><button class="later" data-rv="later">Later <kbd>s</kbd></button><button class="drop" data-rv="drop">Drop <kbd>x</kbd></button></div>
@@ -1939,26 +1976,170 @@
   function suggestionCard(sg, n) {
     const slack = sg.kind === 'slack_mention', mail = sg.mail, f = sg.fields || {}, rip = !slack && !mail && sg.by === 'ripple';
     const link = slack && f.source_link;
-    const d = f.due ? fmtDue(String(f.due)) : null;
+    const d = sgDraft(sg), edit = ui.rvEdit;
     const day = iso => new Date(iso.length > 10 && !/[zZ+]/.test(iso.slice(10)) ? iso + 'Z' : iso).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
-    // What Create would make, so the decision is about the task and not only its title.
-    const would = [f.counterpart ? `<span class="chip" title="The task's counterpart. A task named “Reply to …” closes itself when you answer in this thread; for anything else the planner reads what you sent.">↩ ${esc(f.counterpart)}</span>` : '', f.project ? `<span class="chip proj">${esc(f.project)}</span>` : '', d ? `<span class="chip due ${f.hard ? 'hard' : ''}">${d.label}${f.hard ? ' · hard' : ''}</span>` : (mail ? '<span class="chip">no date</span>' : ''), f.effort ? `<span class="chip eff">${esc(f.effort)}</span>` : ''].join('');
     return `<div class="review">
       <div class="progress"><span>${n} suggestion${n === 1 ? '' : 's'} waiting</span><div class="track"></div></div>
       <div class="card" data-sugg="${sg.id}">
         <div class="why ${rip ? 'chg' : 'new'}">${slack ? 'Mentioned in Slack' : mail ? 'From your mail' : rip ? 'Ripple suggests' : 'Planner suggests'}</div>
-        <h2>${esc(slack || mail ? f.name || sg.label : sg.label.replace(/^create:\s*/i, ''))}</h2>
-        ${would ? `<div class="sub">${would}</div>` : ''}
-        ${(sg.links || []).map(l => `<div class="sg-link">Will be ${l.kind === 'waits_on' ? 'waiting on' : 'a step of'} <a href="/t/${l.other}" data-open-task="${l.other}">Task-${l.other}</a>${l.other_name ? ' ' + esc(l.other_name) : ''}</div>`).join('')}
-        ${mail && f.context ? `<p>${esc(f.context)}</p>` : ''}
-        ${sg.reason ? `<p class="ctx">${esc(sg.reason)}</p>` : ''}
+        <h2>${esc(d.name)}</h2>
+        <div class="sub" data-sgsub="${sg.id}">${sgSubHtml(sg, d)}</div>
+        ${edit ? '' : d.links.map(l => `<div class="sg-link">Will be ${l.kind === 'waits_on' ? 'waiting on' : 'a step of'} <a href="/t/${l.other}" data-open-task="${l.other}">Task-${l.other}</a>${l.other_name ? ' ' + esc(l.other_name) : ''}</div>`).join('')}
+        ${!edit && d.context ? `<p>${esc(d.context)}</p>` : ''}
+        ${sg.reason && sg.reason !== d.context ? `<p class="ctx">${esc(sg.reason)}</p>` : ''}
         ${mail ? `<p class="hint from">✉ ${esc(mail.sender || '')} · “${esc(mail.subject || '')}”${mail.at ? ' · ' + day(String(mail.at)) : ''}${mail.account ? ` · to ${esc(mail.account)}` : ''}</p>` : ''}
-        <p class="hint">${sg.at && !mail ? (slack ? 'Posted ' : 'Suggested ') + new Date(sg.at).toLocaleDateString([], { month: 'short', day: 'numeric' }) : ''}${slack && f.project ? ` · files under ${esc(f.project)}` : ''}</p>
+        <p class="hint">${sg.at && !mail ? (slack ? 'Posted ' : 'Suggested ') + new Date(sg.at).toLocaleDateString([], { month: 'short', day: 'numeric' }) : ''}${slack && d.project ? ` · files under ${esc(d.project)}` : ''}</p>
         ${link ? `<div class="links"><a href="${esc(link)}" target="_blank" rel="noopener">Open in Slack</a></div>` : ''}
+        <div class="rvedit-bar"><button class="btn small" data-rv-edit aria-expanded="${edit}">${edit ? 'Close the editor' : '✎ Edit before creating'}</button>${edit ? '' : '<span class="hint">name, text, date, project, effort, who, links</span>'}</div>
+        ${edit ? sgFormHtml(sg, d) : ''}
+        <div data-sgstate="${sg.id}">${sgStateHtml(sg)}</div>
         <div class="big"><button class="done" data-sugg-create="${sg.id}">Create task</button><button class="drop" data-sugg-dismiss="${sg.id}">Dismiss</button></div>
         ${mail ? `<div class="extra"><button class="btn small" data-sugg-open="${sg.id}">✉ Show the message in Mailbird</button></div>` : ''}
+        ${sgPlaceHtml(sg.id)}
       </div>
       <div class="note">${mail ? 'Create makes an open task (source Mail) linked to this thread, so a reply or a message you send is noticed from then on. ' : `Create makes an open task (source ${slack ? 'Slack, the message linked' : rip ? 'Ripple: suggested after a linked task changed' : 'Planner'}) that shows as New in Review; `}Dismiss stages a change you can undo from the Log tab.</div></div>`;
+  }
+  // ---------- Review: a suggestion card is a draft (2026-11-18) ----------
+  // No task exists until Create, so nothing here stages: the card holds a draft (draft.sg[<evidence id>]) that starts
+  // as what Create would make and is changed by hand in the card's editor, or by its conversation (origin
+  // `suggestion`: a reply's `create` is the revised draft, taken over with "Use on this card"). Create sends the
+  // draft only when it differs from the suggestion; the server lays it over the card's own fields in the one batch.
+  const sgCard = id => (review && (review.suggestions || []).find(c => c.id === id)) || null;
+  function sgBase(sg) {
+    const f = sg.fields || {};
+    return { name: String(f.name || sg.label || '').replace(/^create:\s*/i, ''), context: String(f.context || sg.reason || ''), project: f.project || '', effort: f.effort || '',
+      due: f.due ? String(f.due).slice(0, 16) : '', hard: !!(f.hard && f.due), who: String(f.waiting_on || f.counterpart || ''), kind: f.waiting_on ? 'waiting' : 'for',
+      links: (sg.links || []).map(l => ({ kind: l.kind, other: l.other, other_name: l.other_name || '' })) };
+  }
+  function sgDraft(sg) {
+    if (!draft.sg[sg.id]) { const b = sgBase(sg); draft.sg[sg.id] = Object.assign(b, { base: JSON.stringify(b) }); }
+    return draft.sg[sg.id];
+  }
+  function sgDirty(sg) { const d = draft.sg[sg.id]; if (!d) return false; const { base, ...now } = d; return JSON.stringify(now) !== base; }
+  // The draft as the server takes it: `create` for Create's body, `draft` for a turn of the card's conversation.
+  function sgBody(d) {
+    const who = d.who.trim() || null;
+    const fields = { name: d.name.trim(), context: d.context.trim(), project: d.project || null, effort: d.effort || null, due: d.due || null, hard: !!(d.hard && d.due),
+      counterpart: d.kind === 'for' ? who : null, waiting_on: d.kind === 'waiting' ? who : null };
+    const links = d.links.map(l => ({ kind: l.kind, other: l.other }));
+    return { create: { fields, links }, draft: Object.assign({}, fields, { links }) };
+  }
+  // What Create would make, as chips, so the decision is about the task and not only its title.
+  function sgSubHtml(sg, d) {
+    const due = d.due ? fmtDue(d.due) : null;
+    return [d.who ? `<span class="chip" title="${d.kind === 'waiting' ? 'Who you are waiting on' : 'The task\'s counterpart. A task named “Reply to …” closes itself when you answer in this thread; for anything else the planner reads what you sent.'}">${d.kind === 'waiting' ? 'waiting on' : '↩'} ${esc(d.who)}</span>` : '',
+      d.project ? `<span class="chip proj">${esc(d.project)}</span>` : '', due ? `<span class="chip due ${d.hard ? 'hard' : ''}">${due.label}${d.hard ? ' · hard' : ''}</span>` : (sg.mail ? '<span class="chip">no date</span>' : ''),
+      d.effort ? `<span class="chip eff">${esc(d.effort)}</span>` : ''].join('');
+  }
+  function sgStateHtml(sg) {
+    return sgDirty(sg) ? `<div class="edstaged"><span class="edwords"><b>Edited.</b> Create task makes it as it stands here.</span><button class="btn small" data-sg-reset="${sg.id}">Back to the suggestion</button></div>` : '';
+  }
+  function sgFormHtml(sg, d) {
+    const id = sg.id, day = d.due ? d.due.slice(0, 10) : '';
+    const projects = (data.projects || []).slice(); if (d.project && !projects.includes(d.project)) projects.push(d.project);
+    const field = (label, inner) => `<label class="edf"><span class="edl">${label}</span>${inner}</label>`;
+    const links = d.links.map((l, i) => `<div class="lkrow"><span class="sg-link">Will be ${l.kind === 'waits_on' ? 'waiting on' : 'a step of'} <a href="/t/${l.other}" data-open-task="${l.other}">Task-${l.other}</a>${l.other_name ? ' ' + esc(l.other_name) : ''}</span><button class="btn small rm" data-sg-unlink="${i}">Remove</button></div>`).join('');
+    let pick = '';
+    if (ui.sgLinkFor === id) {
+      pick = pickerHtml('sglink', { placeholder: 'Link a task: a number, or a few words', closed: false, exclude: new Set(d.links.map(l => l.other)) });
+      if (ui.sgLinkHit != null) {
+        const h = sheetHitInfo(ui.sgLinkHit);
+        pick += `<div class="lkhit"><span class="code">Task-${h.id}</span> <span class="nm">${esc(h.name)}</span>${statusChip(h)}</div>
+          <div class="lkchoice"><span class="lkthis">The new task…</span><button class="btn small" data-sg-link-as="part_of">is a step of it</button><button class="btn small" data-sg-link-as="waits_on">waits on it</button></div>`;
+      }
+    }
+    return `<section class="editor sgform" data-sgform="${id}">
+      ${field('Name', `<input id="sg-name-${id}" class="edname" type="text" autocomplete="off" enterkeyhint="done" maxlength="80" value="${esc(d.name)}">`)}
+      ${field('What it is about', `<textarea id="sg-context-${id}" class="grow" rows="3">${esc(d.context)}</textarea>`)}
+      <div class="row2">
+        ${field('Due', `<input id="sg-due-${id}" type="date" value="${esc(day)}">`)}
+        ${field('Project', `<select id="sg-project-${id}"><option value="">No project</option>${projects.map(q => `<option value="${esc(q)}" ${q === d.project ? 'selected' : ''}>${esc(q)}</option>`).join('')}</select>`)}
+      </div>
+      <div class="row2">
+        <div class="edf"><span class="edl" id="sg-effl-${id}">Effort</span><div class="edeff" role="group" aria-labelledby="sg-effl-${id}">${EFFORTS.map(v => `<button type="button" data-sg-effort="${id}" data-v="${v}" aria-pressed="${d.effort === v}">${v}</button>`).join('')}</div></div>
+        <label class="edhard"><input type="checkbox" id="sg-hard-${id}" ${d.hard && day ? 'checked' : ''} ${day ? '' : 'disabled'}>Hard deadline: something breaks if this is late</label>
+      </div>
+      <div class="edf"><label class="edl" for="sg-who-${id}">Who is this for, or who are you waiting on</label>
+        <div class="edwho"><select id="sg-whokind-${id}" aria-label="Is this task for them, or are you waiting on them">${[['for', 'is for'], ['waiting', 'waiting on']].map(([v, l]) => `<option value="${v}" ${v === d.kind ? 'selected' : ''}>${l}</option>`).join('')}</select><input id="sg-who-${id}" type="text" autocomplete="off" enterkeyhint="done" value="${esc(d.who)}"></div></div>
+      <div class="edf sglinks"><span class="edl">Links</span>${links || '<span class="hint" style="margin:0">None: the task will stand on its own.</span>'}
+        <div><button class="btn small" data-sg-link-open="${id}" aria-expanded="${ui.sgLinkFor === id}">Link a task</button></div>${pick ? `<div class="linkpick">${pick}</div>` : ''}</div>
+    </section>`;
+  }
+  // The card's conversation, at the bottom of the card: it is told the draft as it stands at each turn.
+  function sgPlaceHtml(id) {
+    if (draft.askSgFor !== id) { draft.askSg = ''; draft.askSgFor = id; }
+    const pl = placeOf('suggestion', id);
+    if (!pl.loaded) loadPlace(pl);
+    return placeHtml(pl, { decision: false, title: 'Ask Claude to change this draft', hint: 'nothing is created until you press Create task',
+      box: { id: 'sg-ask', key: 'askSg', first: 'Say what to change, e.g. “a shorter name, under Personal, due Friday”', next: 'Ask for another change' } });
+  }
+  // A reply's `create` taken over by the card: each field it carries replaces the draft's.
+  function useOnCard(pl, mid, i) {
+    const pr = proposalsOf(mid)[i], sg = sgCard(pl.card_id); if (!pr || !sg) return;
+    const f = pr.fields || {}, d = sgDraft(sg);
+    if ('name' in f) d.name = String(f.name || '');
+    if ('context' in f) d.context = String(f.context || '');
+    if ('project' in f) d.project = f.project || '';
+    if ('effort' in f) d.effort = f.effort || '';
+    if ('due' in f) d.due = f.due ? String(f.due).slice(0, 16) : '';
+    if ('hard' in f || 'due' in f) d.hard = !!(('hard' in f ? f.hard : d.hard) && d.due);
+    if ('waiting_on' in f || 'counterpart' in f) { d.kind = f.waiting_on ? 'waiting' : 'for'; d.who = String(f.waiting_on || f.counterpart || ''); }
+    if (Array.isArray(f.links)) d.links = f.links.filter(l => l && Number.isInteger(l.other)).map(l => ({ kind: l.kind, other: l.other, other_name: ((pl.named || {})[l.other] || nameOf(l.other) || {}).name || '' }));
+    render();
+    toast('The card holds this draft now · check it, then Create task');
+  }
+  // What shows the draft outside its fields, redrawn in place (the fields keep the focus): the name, the chips, the
+  // Edited line, and the fields that follow others (hard needs a date; the effort taps).
+  function sgRefresh(id) {
+    const sg = sgCard(id), card = document.querySelector(`#panel .card[data-sugg="${id}"]`); if (!sg || !card) return;
+    const d = sgDraft(sg), h = card.querySelector('h2'); if (h) h.textContent = d.name;
+    afterPress('sg:' + id, () => {
+      const sub = card.querySelector('[data-sgsub]'); if (sub) patchHtml(sub, sgSubHtml(sg, d), () => {});
+      const st = card.querySelector('[data-sgstate]');
+      if (st && !!st.firstChild !== sgDirty(sg)) { st.innerHTML = sgStateHtml(sg); wireSgReset(st); }
+      const hard = card.querySelector(`#sg-hard-${id}`); if (hard) { hard.disabled = !d.due; hard.checked = !!(d.hard && d.due); }
+      card.querySelectorAll('[data-sg-effort]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.v === d.effort)));
+    });
+  }
+  function wireSgReset(root) {
+    root.querySelectorAll('[data-sg-reset]').forEach(b => b.onclick = () => { delete draft.sg[+b.dataset.sgReset]; ui.sgLinkFor = ui.sgLinkHit = null; render(); });
+  }
+  function wireSuggestion(panel) {
+    panel.querySelectorAll('[data-rv-edit]').forEach(b => b.onclick = () => {
+      ui.rvEdit = !ui.rvEdit; try { localStorage.setItem('factotum.rvedit', ui.rvEdit ? '1' : '0'); } catch (_) {}
+      if (!ui.rvEdit) ui.linkFor = ui.linkHit = ui.sgLinkFor = ui.sgLinkHit = ui.mergeFor = null;
+      render();
+    });
+    wireSgReset(panel);
+    panel.querySelectorAll('[data-sgform]').forEach(form => {
+      const id = +form.dataset.sgform, sg = sgCard(id); if (!sg) return;
+      const d = sgDraft(sg), $ = k => form.querySelector(`#sg-${k}-${id}`);
+      for (const k of ['name', 'context', 'who']) {
+        const el = $(k);
+        el.oninput = () => { d[k] = el.value; if (el.tagName === 'TEXTAREA') grow(el); sgRefresh(id); };
+        el.addEventListener('keydown', e => { if (e.key !== 'Escape') e.stopPropagation(); });
+      }
+      const due = $('due'), proj = $('project'), kind = $('whokind'), hard = $('hard');
+      due.onchange = due.onblur = () => { if (d.due.slice(0, 10) === due.value) return; d.due = due.value; if (!d.due) d.hard = false; sgRefresh(id); };
+      due.addEventListener('keydown', e => e.stopPropagation());
+      proj.onchange = () => { d.project = proj.value; sgRefresh(id); };
+      kind.onchange = () => { d.kind = kind.value; sgRefresh(id); };
+      hard.onchange = () => { d.hard = hard.checked; sgRefresh(id); };
+      form.querySelectorAll('[data-sg-effort]').forEach(b => b.onclick = () => { d.effort = d.effort === b.dataset.v ? '' : b.dataset.v; sgRefresh(id); });
+      form.querySelectorAll('[data-sg-unlink]').forEach(b => b.onclick = () => { d.links.splice(+b.dataset.sgUnlink, 1); render(); });
+      form.querySelectorAll('[data-sg-link-open]').forEach(b => b.onclick = () => {
+        const open = ui.sgLinkFor !== id;
+        ui.sgLinkFor = open ? id : null; ui.sgLinkHit = null; draft.picks.sglink = '';
+        render();
+        const el = open && document.getElementById('pick-sglink'); if (el) el.focus({ preventScroll: true });
+      });
+      form.querySelectorAll('[data-sg-link-as]').forEach(b => b.onclick = () => {
+        const other = ui.sgLinkHit; if (other == null) return;
+        d.links.push({ kind: b.dataset.sgLinkAs, other, other_name: sheetHitInfo(other).name || '' });
+        ui.sgLinkFor = ui.sgLinkHit = null;
+        render();
+      });
+    });
   }
   function stageJudge(evidenceId, taskId, verdict, label) { stageExtra('e:' + evidenceId, taskId, 'judge_evidence', { evidence_id: evidenceId, verdict }, label); }
 
@@ -2039,7 +2220,7 @@
   }
   async function loadChatThreads() { const r = await api('/api/chat/threads'); chat.threads = r.threads; if (chat.current === null && chat.threads.length) chat.current = chat.threads[0].id; if (chat.current !== null) await loadChatThread(chat.current); else render(); }
   async function loadChatThread(id) { try { const r = await api(`/api/chat/threads/${id}`); chat.current = id; chat.messages = r.messages; chat.scroll = true; } catch (_) { chat.current = null; chat.messages = []; } render(); }
-  const propKey = (p, mid, i) => stageKey(p, ['done', 'drop', 'pin_top', 'longterm'].includes(p.op) ? undefined : 'c' + mid + '-' + i);
+  const propKey = (p, mid, i) => stageKey(p, ['done', 'drop', 'reopen', 'pin_top', 'longterm'].includes(p.op) ? undefined : 'c' + mid + '-' + i);
   // An op the page cannot stage is left out (false), never turned into a `set`; the toast's count says so.
   // A new task is staged as `from_chat` (the server makes the stored proposal); a link to a new task of the
   // same reply names it by its tray ref, `m<message>-<index>`, and is labelled with its name.
@@ -2073,6 +2254,7 @@
     }
     const label = p.label || p.op;
     if (['done', 'drop'].includes(p.op)) stage(p.task_id, p.op, p.fields || {}, changeWords(p) || label);      // an outcome rides along
+    else if (p.op === 'reopen') stage(p.task_id, 'reopen', {}, 'reopened');      // a closed task a search found
     else if (['pin_top', 'longterm'].includes(p.op)) stage(p.task_id, p.op, {}, label);
     else if (p.op === 'add_reminder') stageExtra(p.task_id + ':r', p.task_id, 'add_reminder', p.fields, label);
     else if (['link', 'unlink', 'merge', 'add_note'].includes(p.op)) stageChange(p, label, {}, 'c' + mid + '-' + i);
@@ -2135,7 +2317,8 @@
   }
   // Where a thread was started (stage 6): a Review card, an opened task or the Today box; nothing for the Chat tab's own.
   function threadTag(t) {
-    const tag = t.origin === 'review' && t.task_id != null ? 'Review · Task-' + t.task_id : t.origin === 'task' && t.task_id != null ? 'Task-' + t.task_id : t.origin === 'today' ? 'Today' : '';
+    const tag = t.origin === 'review' && t.task_id != null ? 'Review · Task-' + t.task_id : t.origin === 'task' && t.task_id != null ? 'Task-' + t.task_id : t.origin === 'today' ? 'Today'
+      : t.origin === 'search' ? 'Search' : t.origin === 'suggestion' ? 'Review · a suggestion' : '';
     return tag ? `<span class="otag">${tag}</span> · ` : '';
   }
   const CANNED_SAID = { search_mail: 'Search related emails', draft_reply: 'Draft a reply', related: 'What else is related?', split: 'Split into steps' };      // a canned turn's own bubble
@@ -2194,7 +2377,7 @@
   // drafts, rejections, and a reply box that continues the same thread. One turn runs at a time on the page.
   // A text box whose text lives in `draft`: render() and swapPlace() put its focus and caret back. The second
   // form is the editor's fields and a step's line (`ed-name-12`, `step-line-12`).
-  function isDraftBox(id) { return DRAFT_BOXES.includes(id) || /^(ed-(name|context|who)|step-line)-\d+$/.test(id || ''); }
+  function isDraftBox(id) { return DRAFT_BOXES.includes(id) || /^(ed-(name|context|who|why)|sg-(name|context|who)|step-line)-\d+$/.test(id || ''); }
   let refocusing = false;      // focus is being put back after a redraw: the phone's keyboard handling leaves the scroll alone
   function heldDraftBox(root) {
     const a = document.activeElement;
@@ -2207,21 +2390,25 @@
     try { el.focus({ preventScroll: true }); try { el.setSelectionRange(held.a, held.b); } catch (_) {} } finally { refocusing = false; }
   }
   const places = new Map();      // key → place; the key is origin + ':' + task id ("review:30", "task:30", "today:")
-  function placeOf(origin, taskId) {
-    const key = origin + ':' + (taskId ?? '');
-    if (!places.has(key)) places.set(key, { key, origin, task_id: taskId ?? null, thread_id: null, messages: [], named: {}, live: null, loaded: false, off: new Set(), more: false, fresh: false });
+  // `id`: the task of a Review card or an opened task; the card (its evidence id) of a suggestion; nothing for a box.
+  function placeOf(origin, id) {
+    const key = origin + ':' + (id ?? ''), card = origin === 'suggestion';
+    if (!places.has(key)) places.set(key, { key, origin, task_id: card ? null : id ?? null, card_id: card ? id ?? null : null, thread_id: null, messages: [], named: {}, live: null, loaded: false, off: new Set(), more: false, fresh: false });
     return places.get(key);
   }
+  // A box on a tab (Today's, Search's): where its closed thread is remembered and where its question is typed.
+  const BOX_PLACE = { today: { closed: 'factotum.todayClosed', draft: 'askToday' }, search: { closed: 'factotum.searchClosed', draft: 'askSearch' } };
+  function closedBox(origin) { try { return +localStorage.getItem(BOX_PLACE[origin].closed) || null; } catch (_) { return null; } }
   // A second call while one loads gets the first's promise, so a sender can wait for the thread before its turn.
   function loadPlace(pl) {
     if (pl.loading) return pl.loading;
     return (pl.loading = (async () => {
       let r = null;
-      try { r = await api('/api/chat/place?origin=' + pl.origin + (pl.task_id != null ? '&task_id=' + pl.task_id : '')); }
+      try { r = await api('/api/chat/place?origin=' + pl.origin + (pl.task_id != null ? '&task_id=' + pl.task_id : '') + (pl.card_id != null ? '&card_id=' + pl.card_id : '')); }
       catch (e) { if (!(e && (e.message === 'signed out' || e.network))) console.error('Loading a conversation failed:', e); }
       pl.loading = null; pl.loaded = true;      // a failure shows the place empty rather than asking again on every redraw
       if (r && !pl.live) {      // while a turn runs its own answer is appended when it ends
-        if (pl.origin === 'today' && r.thread && r.thread.id === closedToday()) {      // closed here: not drawn, the next sentence starts anew
+        if (BOX_PLACE[pl.origin] && r.thread && r.thread.id === closedBox(pl.origin)) {      // closed here: not drawn, the next sentence starts anew
           Object.assign(pl, { thread_id: null, messages: [], named: {}, fresh: true });
         } else { pl.thread_id = r.thread ? r.thread.id : null; pl.messages = r.messages || []; pl.named = r.named || {}; }
       }
@@ -2248,7 +2435,12 @@
     if (chat.busy) { giveBack(); render(); toast('Claude is still answering · your text is kept'); return; }
     chat.busy = true; chat.place = pl.key; pl.live = { status: 'Starting…', texts: [] };
     render();
-    const body = { thread_id: pl.thread_id, origin: pl.origin, task_id: pl.task_id, fresh: pl.fresh, text, attached: pl.task_id ? [pl.task_id] : attached || attachedIds(), canned };
+    // Search carries only the ticked rows (the server adds the first results when none are) and what was searched;
+    // a suggestion card carries its draft as it stands, and no task.
+    const carried = pl.task_id ? [pl.task_id] : attached || (pl.origin === 'search' ? [...ui.sel] : pl.origin === 'suggestion' ? [] : attachedIds());
+    const body = { thread_id: pl.thread_id, origin: pl.origin, task_id: pl.task_id, fresh: pl.fresh, text, attached: carried, canned };
+    if (pl.origin === 'search') body.search = Object.assign({}, sq);
+    if (pl.origin === 'suggestion') { body.card_id = pl.card_id; const sg = sgCard(pl.card_id); if (sg) body.draft = sgBody(sgDraft(sg)).draft; }
     let result = null, error = null, refused = null, started = false;
     try {
       const resp = await fetch('/api/chat/turn', { method: 'POST', headers: { 'Content-Type': 'application/json' }, redirect: 'manual', body: JSON.stringify(body) });
@@ -2285,7 +2477,7 @@
   }
   // The words of a proposal: `main` (what it does), `sub` (where it hangs, and whether it is another task).
   const cut40 = s => { s = String(s == null ? '' : s); return s.length > 40 ? s.slice(0, 40) + '…' : s; };
-  const PLACE_OPS = new Set(['create', 'set', 'done', 'drop', 'pin_top', 'longterm', 'add_reminder', 'add_note', 'link', 'unlink', 'merge', 'link_thread']);      // what stageProposal stages
+  const PLACE_OPS = new Set(['create', 'set', 'done', 'drop', 'reopen', 'pin_top', 'longterm', 'add_reminder', 'add_note', 'link', 'unlink', 'merge', 'link_thread']);      // what stageProposal stages
   function proposalsOf(mid) {
     for (const pl of places.values()) { const m = pl.messages.find(x => x.id === mid); if (m) return m.proposals || []; }
     const m = chat.messages.find(x => x.id === mid); return (m && m.proposals) || [];
@@ -2307,6 +2499,7 @@
       else if (k === 'waiting_on') out.push(v ? 'waiting on ' + v : 'no longer waiting');
       else if (k === 'counterpart') out.push(v ? 'for ' + v : 'for nobody named');
       else if (k === 'snoozed_until') out.push(v ? 'later, back ' + dayWords(v) : 'back now');
+      else if (k === 'why_now') out.push(v ? `why now “${cut60(v)}”` : 'why now cleared');
       else if (k !== 'due_is_datetime') out.push(`${k} ${v == null ? 'cleared' : cut60(v)}`);
     }
     return out.join(', ');
@@ -2315,7 +2508,7 @@
     const f = p.fields || {}, props = (m && m.proposals) || [], T = 'Task-' + p.task_id, sub = [];
     let main;
     if (p.op === 'create') {
-      main = 'New task: ' + (f.name || '');
+      main = (cardDraft(pl, p) ? 'Revised draft: ' : 'New task: ') + (f.name || '');
       for (const l of f.links || []) {
         const word = l.kind === 'part_of' ? 'part of' : 'waits on';
         if (typeof l.other === 'string') { const s = siblingOf(props, l.other); sub.push(`${word} “${cut40(s ? s.name : l.other)}”`); }
@@ -2327,6 +2520,7 @@
     } else if (REL_OPS.includes(p.op)) main = `${T} ${changeWords(p)}`;
     else if (p.op === 'link_thread') main = `${T}: ${threadWords(f)}`;
     else if (p.op === 'set') main = `${T}: ${setWords(f)}`;
+    else if (p.op === 'reopen') main = `${T}: reopen it`;
     else main = (p.task_id != null ? T + ': ' : '') + (changeWords(p) || p.label || p.op);
     // Only a place about a task has another task; a create's task_id, once made, is the new task itself.
     if (pl.task_id != null && p.task_id != null && p.task_id !== pl.task_id && p.op !== 'create') sub.push('a change to another task, staged from here');
@@ -2341,6 +2535,8 @@
   }
   // Not staged, not made or applied yet: what the stage button stages (when ticked).
   const placeOpen = (p, mid, i) => PLACE_OPS.has(p.op) && !p.applied && !propApplied(mid, i) && !staged.has(placeKey(p, mid, i));
+  // On a suggestion card a proposed `create` is the card's revised draft: "Use on this card" takes it over.
+  const cardDraft = (pl, p) => pl.origin === 'suggestion' && p.op === 'create';
   const andList = a => a.length < 2 ? a.join('') : a.slice(0, -1).join(', ') + ' and ' + a[a.length - 1];
   function placeMsgHtml(pl, m, newest) {
     if (m.role === 'user') return `<div class="pmsg user">${esc(m.text)}</div>`;
@@ -2358,18 +2554,19 @@
         if (propApplied(m.id, i)) return `<div class="pprop"><span></span>${words}<span class="chip staged">applied</span></div>`;
         if (staged.has(placeKey(p, m.id, i))) return `<div class="pprop"><span></span>${words}<span class="chip staged">staged</span></div>`;
         if (!PLACE_OPS.has(p.op)) return `<div class="pprop"><span></span>${words}<span></span></div>`;
+        if (cardDraft(pl, p)) return `<div class="pprop"><span></span>${words}<span class="pbtns"><button class="btn small primary" data-sg-use="${esc(k)}">Use on this card</button></span></div>`;
         return `<label class="pprop"><input type="checkbox" data-pprop="${esc(k)}" ${pl.off.has(k) ? '' : 'checked'} aria-label="Stage this">${words}${p.op === 'create' ? `<span class="pbtns"><button class="btn small" data-place-create="${esc(k)}">Create</button><button class="btn small" data-edit-first="${esc(k)}">Edit first</button></span>` : '<span></span>'}</label>`;
       };
       const short = PHONE() && !pl.more && props.length > 2;
       const rows = (short ? props.slice(0, 2) : props).map((p, i) => row(p, i)).join('')
         + (short ? `<div class="pmore">and ${props.length - 2} more · <button class="linkish" data-place-more="${esc(pl.key)}">Show</button></div>` : '');
       let foot = '';
-      if (newest && props.some((p, i) => placeOpen(p, m.id, i))) {
+      if (newest && props.some((p, i) => placeOpen(p, m.id, i) && !cardDraft(pl, p))) {
         const n = props.filter((p, i) => placeTicked(pl, p, m.id, i) && placeLeftOut(pl, props, p, m.id) === null).length;
         const what = pl.opts.decision ? `Stage ${n > 1 ? 'all ' : ''}${n} with this decision` : `Stage ${n}`;
         foot = `<div class="pfoot"><button class="btn primary" data-place-stage="${esc(pl.key)}|${m.id}" ${n ? '' : 'disabled'}>${what}</button><span class="hint">One Apply, one Undo.</span></div>`;
       }
-      list = `<div class="pprops"><div class="pphead"><span>Proposals</span><span class="hint">untick any you do not want</span></div>${rows}${foot}</div>`;
+      list = `<div class="pprops"><div class="pphead"><span>Proposals</span><span class="hint">${props.some((p, i) => placeOpen(p, m.id, i) && !cardDraft(pl, p)) ? 'untick any you do not want' : ''}</span></div>${rows}${foot}</div>`;
     }
     const drafts = (m.drafts || []).length ? `<div class="pdrafts">${m.drafts.map((d, i) => `<div class="pdraft"><span>✉ draft ${esc(d.subject || (d.kind === 'reply' ? 'reply' : 'new message'))}${d.to && d.to.length ? ' → ' + esc(d.to.join(', ')) : ''}</span><button class="btn small" data-pdraft="${esc(pl.key)}|${m.id}|${i}">Open in Mailbird</button></div>`).join('')}</div>` : '';
     const rej = (m.rejected || []).length ? `<details class="prej"><summary>${m.rejected.length} proposal${m.rejected.length === 1 ? '' : 's'} rejected by Factotum</summary>${m.rejected.map(r => `<div>${esc(r)}</div>`).join('')}</details>` : '';
@@ -2393,7 +2590,7 @@
   // Every ticked, unstaged, unmade proposal of that message, into the tray.
   // A link to a new task of the same reply is left out when that task will not be in the tray (unticked, not
   // made, not staged): Apply could only skip it. The toast says so in words.
-  const placeTicked = (pl, p, mid, i) => placeOpen(p, mid, i) && !pl.off.has(`${pl.key}|${mid}|${i}`);
+  const placeTicked = (pl, p, mid, i) => placeOpen(p, mid, i) && !cardDraft(pl, p) && !pl.off.has(`${pl.key}|${mid}|${i}`);
   // The name of the new task a ref link waits for when that task will not be in the tray; null otherwise.
   function placeLeftOut(pl, props, p, mid) {
     const f = p.fields || {};
@@ -2438,6 +2635,7 @@
       el.querySelectorAll('[data-place-stage]').forEach(b => b.onclick = () => stagePlace(pl, +b.dataset.placeStage.split('|')[1], !!pl.opts.decision));
       el.querySelectorAll('[data-place-create]').forEach(b => b.onclick = e => { e.preventDefault(); const [, mid, i] = b.dataset.placeCreate.split('|'); placeCreate(+mid, +i); });
       el.querySelectorAll('[data-edit-first]').forEach(b => b.onclick = e => { e.preventDefault(); const [, mid, i] = b.dataset.editFirst.split('|'); editFirst(+mid, +i); });
+      el.querySelectorAll('[data-sg-use]').forEach(b => b.onclick = e => { e.preventDefault(); const [, mid, i] = b.dataset.sgUse.split('|'); useOnCard(pl, +mid, +i); });
       el.querySelectorAll('[data-pdraft]').forEach(b => b.onclick = async () => {
         const [, mid, i] = b.dataset.pdraft.split('|'); const m = pl.messages.find(x => x.id === +mid); const d = m && (m.drafts || [])[+i]; if (!d) return;
         try { await api('/api/chat/drafts/open', { method: 'POST', body: JSON.stringify({ draft: d }) }); toast('Shown in Mailbird'); }
@@ -2459,7 +2657,6 @@
   // runs. Loaded once per page load, so a conversation of the last 12 hours is there after a reload. Close
   // empties it here; the next sentence starts a new thread (`fresh`), the closed one stays in Chat. The closed
   // thread's id is remembered in this browser, so a reload does not draw it again; a newer thread is drawn.
-  function closedToday() { try { return +localStorage.getItem('factotum.todayClosed') || null; } catch (_) { return null; } }
   function todayPlaceHtml() {
     const pl = placeOf('today', null);
     if (!pl.loaded) loadPlace(pl);
@@ -2795,6 +2992,7 @@
           ${closed && r.outcome ? `<div class="outcome">Outcome: ${esc(r.outcome)}</div>` : ''}</div>`;
       }).join('') || '<div class="hint">No task matches.</div>';
       if (f.res.more && !f.res.error) rows += '<div class="hint">More match; add a word.</div>';
+      rows += '<div class="hint"><button class="linkish" data-find-search>Search the text too, with dates and filters</button></div>';
     }
     return `<div class="find"><input id="find-q" placeholder="A task number, or words from its name, open or closed" autocomplete="off" aria-label="Find any task" value="${esc(draft.findQ)}">${rows ? `<div class="hits">${rows}</div>` : ''}</div>`;
   }
@@ -2818,6 +3016,7 @@
       if (r && r.status !== 'open') openPage(id); else goTask(id);
     });
     panel.querySelectorAll('[data-find-reopen]').forEach(b => b.onclick = () => act(+b.dataset.findReopen, 'reopen'));
+    panel.querySelectorAll('[data-find-search]').forEach(b => b.onclick = () => { const q = draft.findQ.trim(); ui.findOpen = false; draft.findQ = ''; find.found = null; openSearch(q); });
     panel.querySelectorAll('input[id^="pick-"]').forEach(inp => {
       const slot = inp.id.slice(5);
       inp.oninput = e => { draft.picks[slot] = inp.value; if (pickOpts[slot] && pickOpts[slot].closed) wantSearch(inp.value, false); if (!e.isComposing) render(); };
@@ -2849,6 +3048,164 @@
     const hits = pickHits(slot), dr = opts.closed && find.done && find.done.get(q), closedErr = dr && dr.error;
     return `<div class="picker"><input id="pick-${slot}" value="${esc(draft.picks[slot] || '')}" placeholder="${esc(opts.placeholder)}" aria-label="${esc(opts.placeholder)}" autocomplete="off">
       <div class="hits">${hits.map(x => `<button data-picker="${slot}" data-hit="${x.id}"><span class="code">Task-${x.id}</span> <span class="nm">${esc(x.name)}</span>${statusChip(x)}</button>`).join('') || (q ? `<div class="hint">${closedErr ? 'Search failed: ' + esc(closedErr) : 'No ' + (opts.closed ? '' : 'open ') + 'task matches.'}</div>` : '')}</div></div>`;
+  }
+
+  // ---------- search (2026-11-18): the Search tab ----------
+  // GET /api/search/advanced over every task, open or closed (factotum/search.py). What is searched lives in `sq`
+  // (kept in this browser), the box's text in draft.searchQ; a change asks again (the words 250 ms after the last
+  // key) and only the newest answer is kept (`srch.res`). Open results are the ordinary rows, so ticking, opening,
+  // editing, linking, the bulk bar and j / k work as on the lists; a closed one is a read-only line with Open and
+  // Reopen. Under the box is the tab's conversation (origin `search`): it carries the ticked rows, else the first
+  // results, and the server tells the run what was searched.
+  const SEARCH_BLANK = { q: '', mode: 'match', within: 'all', status: [], project: [], source: [], effort: [], date_field: 'due', date_from: '', date_to: '', flags: [], sort: 'relevance' };
+  const SEARCH_PAGE = 50, SEARCH_MOST = 200;
+  let sq = Object.assign({}, SEARCH_BLANK);
+  try {
+    const kept = JSON.parse(localStorage.getItem('factotum.search') || 'null');
+    if (kept && typeof kept === 'object') for (const k of Object.keys(SEARCH_BLANK)) {
+      const v = kept[k], want = SEARCH_BLANK[k];
+      if (Array.isArray(want) ? Array.isArray(v) && v.every(x => typeof x === 'string') : typeof v === 'string') sq[k] = v;
+    }
+  } catch (_) {}
+  draft.searchQ = sq.q;
+  const srch = { res: null, error: '', loading: false, seq: 0, timer: null, limit: SEARCH_PAGE, stale: false };
+  const SEARCH_STATUS = [['open', 'Open'], ['done', 'Done'], ['dropped', 'Dropped'], ['faded', 'Faded'], ['lapsed', 'Lapsed']];
+  const SEARCH_FLAGS = [['hard', 'Hard deadline'], ['undated', 'No date'], ['waiting', 'Waiting on someone'], ['top', 'On Top'], ['longterm', 'Long-term'], ['linked', 'Linked'], ['later', 'Set for later'], ['reminder', 'Reminder set']];
+  const SEARCH_DATES = [['due', 'Due'], ['created', 'Created'], ['closed', 'Closed'], ['changed', 'Last changed']];
+  const SEARCH_SORTS = [['relevance', 'Best match'], ['due', 'Due date'], ['created', 'Newest'], ['closed', 'Recently closed'], ['changed', 'Recently changed']];
+  const SEARCH_WITHIN = [['all', 'Everything'], ['name', 'Names only'], ['text', 'Text and outcome'], ['people', 'People']];
+  const NO_VALUE = '(none)';      // a filter's value for rows with no project / source / effort (search.NONE)
+  function saveSearch() { try { localStorage.setItem('factotum.search', JSON.stringify(sq)); } catch (_) {} }
+  function searchQuery() {
+    const p = new URLSearchParams();
+    for (const [k, v] of Object.entries(sq)) { if (Array.isArray(v)) v.forEach(x => p.append(k, x)); else if (v) p.set(k, v); }
+    p.set('limit', srch.limit);
+    return p.toString();
+  }
+  async function runSearch() {
+    clearTimeout(srch.timer);
+    const n = ++srch.seq; srch.loading = true; srch.stale = false;
+    let r = null, err = '';
+    try { r = await api('/api/search/advanced?' + searchQuery()); }
+    catch (e) { if (e && e.message === 'signed out') { if (n === srch.seq) srch.loading = false; return; } err = (e && (e.detail || (e.network ? 'the server did not answer' : e.message))) || 'no answer'; }
+    if (n !== srch.seq) return;      // a newer search was asked: its answer wins
+    srch.loading = false; srch.error = err; if (r) srch.res = r;
+    if (ui.tab === 'search' && ui.page === null) render();
+  }
+  // A filter changed: ask at once, from the first page.
+  function setSearch(patch) { Object.assign(sq, patch); srch.limit = SEARCH_PAGE; saveSearch(); runSearch(); render(); }
+  // The Search tab with these words in its box (Find any task's "Search the text too").
+  function openSearch(q) { sq.q = draft.searchQ = q; srch.limit = SEARCH_PAGE; saveSearch(); srch.stale = true; go('search'); }
+  const toggled = (list, v) => list.includes(v) ? list.filter(x => x !== v) : list.concat(v);
+  const searchFilterCount = () => sq.status.length + sq.project.length + sq.source.length + sq.effort.length + sq.flags.length + (sq.date_from || sq.date_to ? 1 : 0) + (sq.within !== 'all' ? 1 : 0);
+  // Ranges offered beside From / To: ahead for a due date, back for the dates of things that happened.
+  function datePresets() {
+    const t = data.today;
+    if (sq.date_field === 'due') return [['Overdue', '', isoPlus(-1)], ['Today', t, t], ['Next 7 days', t, isoPlus(7)], ['Next 30 days', t, isoPlus(30)]];
+    return [['Today', t, t], ['Last 7 days', isoPlus(-7), t], ['Last 30 days', isoPlus(-30), t], ['Last 90 days', isoPlus(-90), t]];
+  }
+  // The matched words marked in a text: `spans` are [start, end) pairs in order (the server's).
+  function markHtml(text, spans) {
+    text = String(text == null ? '' : text);
+    let out = '', at = 0;
+    for (const [a, b] of spans || []) { if (!(a >= at && b > a && b <= text.length)) continue; out += esc(text.slice(at, a)) + '<mark>' + esc(text.slice(a, b)) + '</mark>'; at = b; }
+    return out + esc(text.slice(at));
+  }
+  const SNIP_SAID = { context: '', why_now: 'Why now: ', outcome: 'Outcome: ' };
+  const snipHtml = r => r.snippet ? `<span class="snip">${esc(SNIP_SAID[r.snippet.field] || '')}${markHtml(r.snippet.text, r.snippet.spans)}</span>` : '';
+  function searchRowHtml(r) {
+    const t = byId(r.id);
+    if (t) {      // an open task the lists hold: its ordinary row, with what is staged drawn in
+      const x = view(t);
+      return row(x, '', { nameHtml: x.name === r.name && (r.name_spans || []).length ? markHtml(r.name, r.name_spans) : '', under: snipHtml(r) });
+    }
+    const st = staged.get(r.id), closed = r.status !== 'open';
+    const reopen = !closed ? '' : st && st.op === 'reopen' ? '<span class="chip staged">reopen staged</span>' : `<button class="btn small" data-find-reopen="${r.id}">Reopen</button>`;
+    return `<div class="hit${closed ? ' closed' : ''}"><span class="code">Task-${r.id}</span><span class="nm">${markHtml(r.name, r.name_spans)}</span><span class="chips">${statusChip(r)}${r.project ? `<span class="chip proj">${esc(r.project)}</span>` : ''}</span>
+      <span class="acts"><button class="btn small" data-sres-open="${r.id}">Open</button>${reopen}</span>
+      ${closed && r.outcome && !(r.snippet && r.snippet.field === 'outcome') ? `<div class="outcome">Outcome: ${esc(r.outcome)}</div>` : ''}${r.snippet ? `<div class="outcome">${snipHtml(r)}</div>` : ''}</div>`;
+  }
+  // One filter with many values (project, source): what is chosen as chips, the rest in a list with their counts.
+  function facetPick(dim, label, counts) {
+    const chosen = sq[dim], low = label.toLowerCase();
+    const said = v => v === NO_VALUE ? 'No ' + low : v, n = v => counts[v === NO_VALUE ? '' : v] || 0;
+    const all = [...new Set(Object.keys(counts).map(k => k === '' ? NO_VALUE : k).concat(chosen))];
+    const rest = all.filter(v => !chosen.includes(v)).sort((a, b) => n(b) - n(a) || a.localeCompare(b));
+    return `<div class="sf"><span class="sfl">${label}</span><div class="sfv">${chosen.map(v => `<button class="schip on" data-sf-toggle="${dim}" data-v="${esc(v)}" aria-pressed="true" title="Remove this filter">${esc(said(v))}<span class="n">${n(v)}</span><span aria-hidden="true">×</span></button>`).join('')}
+      ${rest.length ? `<select data-sf-add="${dim}" aria-label="${chosen.length ? 'Add another ' + low : label}"><option value="">${chosen.length ? 'or…' : 'Any ' + low}</option>${rest.map(v => `<option value="${esc(v)}">${esc(said(v))} (${n(v)})</option>`).join('')}</select>` : ''}</div></div>`;
+  }
+  function searchFiltersHtml() {
+    const fc = (srch.res && srch.res.facets) || { status: {}, project: {}, source: {}, effort: {} };
+    const chip = (dim, v, label, n) => `<button class="schip${sq[dim].includes(v) ? ' on' : ''}" data-sf-toggle="${dim}" data-v="${esc(v)}" aria-pressed="${sq[dim].includes(v)}">${esc(label)}${n == null ? '' : `<span class="n">${n}</span>`}</button>`;
+    const statuses = SEARCH_STATUS.filter(([k], i) => i < 3 || fc.status[k] || sq.status.includes(k));
+    const efforts = [...new Set(EFFORTS.concat(Object.keys(fc.effort).filter(Boolean), sq.effort.filter(v => v !== NO_VALUE)))];
+    const dated = sq.date_from || sq.date_to;
+    const opts = (pairs, cur) => pairs.map(([v, l]) => `<option value="${v}" ${v === cur ? 'selected' : ''}>${l}</option>`).join('');
+    return `<div class="sfilters">
+      <div class="sf"><span class="sfl">Status</span><div class="sfv">${statuses.map(([k, l]) => chip('status', k, l, fc.status[k] || 0)).join('')}</div></div>
+      ${facetPick('project', 'Project', fc.project)}
+      ${facetPick('source', 'Source', fc.source)}
+      <div class="sf"><span class="sfl">Effort</span><div class="sfv">${efforts.map(k => chip('effort', k, k, fc.effort[k] || 0)).join('')}${chip('effort', NO_VALUE, 'not set', fc.effort[''] || 0)}</div></div>
+      <div class="sf"><span class="sfl">Dates</span><div class="sfv sdates"><select id="sf-datefield" aria-label="Which date">${opts(SEARCH_DATES, sq.date_field)}</select>
+        <label>from <input type="date" id="sf-from" value="${esc(sq.date_from)}"></label><label>to <input type="date" id="sf-to" value="${esc(sq.date_to)}"></label>
+        ${datePresets().map(([l, a, b]) => `<button class="schip${sq.date_from === a && sq.date_to === b ? ' on' : ''}" data-sf-preset="${a}|${b}" aria-pressed="${sq.date_from === a && sq.date_to === b}">${l}</button>`).join('')}
+        ${dated ? '<button class="btn small" data-sf-nodates>Any date</button>' : ''}</div></div>
+      <div class="sf"><span class="sfl">Only</span><div class="sfv">${SEARCH_FLAGS.map(([k, l]) => chip('flags', k, l)).join('')}</div></div>
+      <div class="sf"><span class="sfl">Search in</span><div class="sfv"><select id="sf-within" aria-label="Search in">${opts(SEARCH_WITHIN, sq.within)}</select></div></div>
+    </div>`;
+  }
+  function searchPlaceHtml() {
+    const pl = placeOf('search', null);
+    if (!pl.loaded) loadPlace(pl);
+    const n = [...ui.sel].length;
+    return `<div class="ptoday psearch">${placeHtml(pl, { decision: false, title: 'Ask Claude about these results', hint: n ? `about the ${n} you ticked` : 'about the first results · tick rows to ask about just those',
+      box: { id: 'search-ask', key: 'askSearch', first: PHONE() ? 'Ask about these, or ask it to look' : 'Ask about what you found, or ask it to look: “what did I promise Reza in October?”', next: 'Ask a follow-up' } })}${pl.messages.length || pl.live ? `<button class="btn small pclose" data-place-close="search:" ${pl.live ? 'disabled' : ''}>Close</button>` : ''}</div>`;
+  }
+  function renderSearch() {
+    const r = srch.res;
+    if ((!r || srch.stale) && !srch.loading && !(srch.error && !srch.stale)) runSearch();
+    const n = searchFilterCount(), phone = PHONE();
+    const opts = (pairs, cur) => pairs.map(([v, l]) => `<option value="${v}" ${v === cur ? 'selected' : ''}>${l}</option>`).join('');
+    const head = `<div class="sbar"><input id="search-q" type="search" enterkeyhint="search" autocomplete="off" placeholder="${phone ? 'Search every task' : 'Search every task, open or closed: words, &quot;a phrase&quot;, -not this, or a task number'}" aria-label="Search tasks" value="${esc(draft.searchQ)}">
+        <div class="seg" role="group" aria-label="How the words match"><button data-smode="match" aria-pressed="${sq.mode === 'match'}" title="Every word, as written">Match</button><button data-smode="fuzzy" aria-pressed="${sq.mode === 'fuzzy'}" title="Close spellings and words with the same stem too">Fuzzy</button></div></div>
+      <div class="stools">${phone ? `<button class="btn small" data-sfilters aria-expanded="${ui.searchFilters}">Filters${n ? ` (${n})` : ''}</button>` : ''}
+        <label class="ssort">Sort <select id="sf-sort" aria-label="Sort">${opts(SEARCH_SORTS, sq.sort)}</select></label>
+        <span class="spacer"></span>${n || sq.q ? '<button class="btn small" data-sf-clear>Clear the search</button>' : ''}</div>`;
+    let body;
+    if (!r) body = srch.error ? `<div class="empty">Search failed: ${esc(srch.error)} <button class="btn small" data-search-retry>Try again</button></div>` : '<div class="empty">Searching…</div>';
+    else {
+      const line = `<div class="sline"><span><b>${r.total}</b> task${r.total === 1 ? '' : 's'} · ${esc(r.said)}</span>${r.fell_back ? '<span class="chip fade">nothing matches as written · these are close</span>' : ''}${srch.error ? `<span class="hint warn" style="margin:0">not refreshed: ${esc(srch.error)}</span>` : ''}</div>`;
+      const none = sq.q && sq.mode === 'match' ? 'No task matches, not even a close spelling.' : 'No task matches.';
+      body = line + (r.results.length ? `<div class="rows sres">${r.results.map(searchRowHtml).join('')}</div>` : `<div class="empty">${none}${n ? ' Fewer filters may find it.' : ''}</div>`)
+        + (r.more && r.results.length < SEARCH_MOST ? `<p class="smore"><button class="btn" data-search-more>Show ${Math.min(SEARCH_PAGE, r.total - r.results.length, SEARCH_MOST - r.results.length)} more of the ${r.total - r.results.length} left</button></p>`
+          : r.more ? `<p class="hint">The first ${SEARCH_MOST} are shown; add a word or a filter for the rest.</p>` : '');
+    }
+    return `<div class="search">${head}${!phone || ui.searchFilters ? searchFiltersHtml() : ''}${searchPlaceHtml()}${bulkBarHtml()}${body}</div>`;
+  }
+  function wireSearch(panel) {
+    const q = document.getElementById('search-q');
+    if (q) {
+      q.oninput = () => { draft.searchQ = q.value; sq.q = q.value.trim(); srch.limit = SEARCH_PAGE; saveSearch(); clearTimeout(srch.timer); srch.timer = setTimeout(runSearch, 250); };
+      q.addEventListener('keydown', e => { if (e.key === 'Escape') return; if (enterKey(e)) { e.preventDefault(); runSearch(); } e.stopPropagation(); });
+    }
+    panel.querySelectorAll('[data-smode]').forEach(b => b.onclick = () => setSearch({ mode: b.dataset.smode }));
+    panel.querySelectorAll('[data-sf-toggle]').forEach(b => b.onclick = () => { const d = b.dataset.sfToggle; setSearch({ [d]: toggled(sq[d], b.dataset.v) }); });
+    panel.querySelectorAll('[data-sf-add]').forEach(el => el.onchange = () => { const d = el.dataset.sfAdd; if (el.value && !sq[d].includes(el.value)) setSearch({ [d]: sq[d].concat(el.value) }); });
+    for (const [id, key] of [['sf-datefield', 'date_field'], ['sf-from', 'date_from'], ['sf-to', 'date_to'], ['sf-within', 'within'], ['sf-sort', 'sort']]) {
+      const el = document.getElementById(id); if (!el) continue;
+      el.onchange = () => setSearch({ [key]: el.value });
+      el.addEventListener('keydown', e => { if (e.key !== 'Escape') e.stopPropagation(); });
+    }
+    panel.querySelectorAll('[data-sf-preset]').forEach(b => b.onclick = () => {
+      const [a, z] = b.dataset.sfPreset.split('|'), on = sq.date_from === a && sq.date_to === z;
+      setSearch(on ? { date_from: '', date_to: '' } : { date_from: a, date_to: z });
+    });
+    panel.querySelectorAll('[data-sf-nodates]').forEach(b => b.onclick = () => setSearch({ date_from: '', date_to: '' }));
+    panel.querySelectorAll('[data-sf-clear]').forEach(b => b.onclick = () => { draft.searchQ = ''; setSearch(Object.assign({}, SEARCH_BLANK, { mode: sq.mode, sort: sq.sort })); const el = document.getElementById('search-q'); if (el) el.focus(); });
+    panel.querySelectorAll('[data-sfilters]').forEach(b => b.onclick = () => { ui.searchFilters = !ui.searchFilters; render(); });
+    panel.querySelectorAll('[data-search-more]').forEach(b => b.onclick = () => { b.disabled = true; srch.limit = Math.min(SEARCH_MOST, srch.limit + SEARCH_PAGE); runSearch(); });
+    panel.querySelectorAll('[data-search-retry]').forEach(b => b.onclick = () => { srch.error = ''; runSearch(); render(); });
+    panel.querySelectorAll('[data-sres-open]').forEach(b => b.onclick = () => openPage(+b.dataset.sresOpen));
   }
 
   // ---------- by hand (stage 6): New task ----------
@@ -3175,7 +3532,7 @@
   // text lives in draft.edit until it is staged, on Enter (Ctrl+Enter in the text) or on leaving the field; a value
   // equal to the server's removes its key instead. Staging redraws what is around the fields (editRefresh), never
   // the fields, so the focus moving on to the next field is kept. A closed task stays read-only (whereHtml).
-  const EDIT_FIELDS = ['name', 'context', 'project', 'effort', 'hard', 'who'];
+  const EDIT_FIELDS = ['name', 'context', 'why_now', 'project', 'effort', 'hard', 'who'];
   const EFFORTS = ['XS', 'S', 'M', 'L'];
   function editKey(id, f) { return `${id}:edit-${f}`; }
   const isOpenRow = id => { const t = byId(id); return !!(t && t.status === 'open'); };      // the server's word, as on the task page
@@ -3229,6 +3586,7 @@
     return `<section class="editor" data-editor="${id}">
       ${field('Name', `<input id="ed-name-${id}" class="edname" type="text" autocomplete="off" enterkeyhint="done" value="${esc(edValue(x, 'name'))}">`)}
       ${field('Where this stands', `<textarea id="ed-context-${id}" class="grow" rows="4">${esc(edValue(x, 'context'))}</textarea>`)}
+      ${field('Why now', `<input id="ed-why-${id}" type="text" autocomplete="off" enterkeyhint="done" maxlength="300" placeholder="One line on why this matters now" value="${esc(edValue(x, 'why_now'))}">`)}
       <div class="row2">
         ${field('Due', `<input id="ed-due-${id}" type="date" value="${esc(due)}">`)}
         ${field('Project', `<select id="ed-project-${id}"><option value="">No project</option>${projects.map(p => `<option value="${esc(p)}" ${p === x.project ? 'selected' : ''}>${esc(p)}</option>`).join('')}</select>`)}
@@ -3276,6 +3634,13 @@
     if (el.value !== v) { el.value = v; grow(el); }
     stageEdit(id, 'context', { context: v }, 'text rewritten', { expect: textExpect(id, { context: v }) });
   }
+  function edWhy(id, el) {
+    if (!edHas(id, 'why_now')) return;
+    edForget(id, 'why_now');
+    const v = el.value.trim();
+    if (el.value !== v) el.value = v;
+    stageEdit(id, 'why_now', { why_now: v || null }, v ? `why now “${cut60(v)}”` : 'why now cleared');
+  }
   // A choice that differs from where the server keeps the name moves the text: the other column is emptied.
   function edWho(id, text, kind) {
     const t = byId(id); if (!t) return;
@@ -3307,6 +3672,11 @@
     afterPress('meta:' + id, () => {
       const t2 = byId(id); if (!t2) return;
       const x2 = view(t2);
+      // Review's card: its name, why-now line and chips stand above the editor, so a line more or less there moves the
+      // fields; they change only once the press that left a field has landed (the effort tap after typing was lost).
+      document.querySelectorAll(`#panel .review .card[data-id="${id}"] > h2`).forEach(el => { el.textContent = x2.name; });
+      document.querySelectorAll(`#panel [data-rvwhy="${id}"]`).forEach(el => { el.textContent = x2.why_now || (x2.score_reasons || []).join(' · '); });
+      document.querySelectorAll(`#panel [data-rvsub="${id}"]`).forEach(el => patchHtml(el, reviewSubHtml(x2), () => {}));
       document.querySelectorAll(`#panel .row[data-id="${id}"] > .main > .meta, #panel .taskpage[data-id="${id}"] > .meta`).forEach(el => {
         patchHtml(el, chipsHtml(x2, el.dataset.extra || ''), r => { wireBadges(r); wireDueChips(r); wireFilingChips(r); });
       });
@@ -3359,7 +3729,7 @@
   function wireEditors(root) {
     root.querySelectorAll('[data-editor]').forEach(ed => {
       const id = +ed.dataset.editor, $ = s => ed.querySelector(`#ed-${s}-${id}`);
-      const nm = $('name'), cx = $('context'), who = $('who'), kind = $('whokind'), due = $('due'), proj = $('project'), hard = $('hard');
+      const nm = $('name'), cx = $('context'), why = $('why'), who = $('who'), kind = $('whokind'), due = $('due'), proj = $('project'), hard = $('hard');
       // Text boxes: typed text into draft.edit; staged on Enter (Ctrl+Enter in the text) and on leaving the box. A box
       // redrawn with its typed text fires no `change` on leaving, so `blur` stages too (each is a no-op once staged).
       const box = (el, f, commit, enter) => {
@@ -3369,6 +3739,7 @@
       };
       box(nm, 'name', () => edName(id, nm), enterKey);
       box(cx, 'context', () => edContext(id, cx), e => enterKey(e) && (e.ctrlKey || e.metaKey));
+      box(why, 'why_now', () => edWhy(id, why), enterKey);
       box(who, 'who', () => { if (edHas(id, 'who')) edWho(id, who.value, kind.value); }, enterKey);
       kind.onchange = () => { if (who.value.trim()) edWho(id, who.value, kind.value); else ui.edWho[id] = kind.value; };
       due.onchange = due.onblur = () => edDue(id, due);
@@ -3404,8 +3775,8 @@
     return `<section class="dsec byhand"><div><button class="btn small" data-link-open="${id}" aria-expanded="${open}">Link a task</button></div>${open ? `<div class="linkpick">${pick}</div>` : ''}${step}</section>`;
   }
   // More's line under an opened task's actions; Merge into another opens its picker there.
-  function moreHtml(x) {
-    if (ui.moreFor !== x.id) return '';
+  function moreHtml(x, always = false) {      // `always`: Review's editor draws the line without a More button
+    if (!always && ui.moreFor !== x.id) return '';
     const id = x.id;
     return `<div class="more-row"><button class="btn small" data-more-split="${id}" title="A chat turn: Claude drafts the steps; one Apply creates and links them">Split into steps</button><button class="btn small" data-more-dup="${id}">Duplicate</button><button class="btn small" data-more-merge="${id}" aria-expanded="${ui.mergeFor === id}">Merge into another</button>
       ${ui.mergeFor === id ? pickerHtml('merge', { placeholder: 'Merge into: a number, or a few words', closed: true, exclude: new Set([id]) }) : ''}</div>`;
@@ -3426,6 +3797,7 @@
     toast('Link staged · press Apply in the tray');
   }
   pickers.link = id => { ui.linkHit = id; render(); };
+  pickers.sglink = id => { ui.sgLinkHit = id; render(); };      // a suggestion card's Link a task (Review)
   pickers.merge = id => {
     const from = ui.mergeFor; if (from == null) return;
     ui.mergeFor = ui.moreFor = null;
@@ -3441,13 +3813,13 @@
   }
   // A copy of what the server holds (not what is staged), under the same goal; opened in its editor. `/api/add` takes a
   // date, so a timed due is cut to its day (a refused one would take `hard` with it).
-  function duplicateTask(id) {
+  function duplicateTask(id, open = true) {
     const t = byId(id); if (!t) return;
     const due = t.due ? String(t.due).slice(0, 10) : null;
     const f = { name: t.name, project: t.project, effort: t.effort, due, hard: due && t.hard ? 1 : null, context: t.context,
       counterpart: t.counterpart, waiting_on: t.waiting_on, under: t.rel ? t.rel.goal_id : null };
     ui.moreFor = null;
-    addTask({ fields: Object.fromEntries(Object.entries(f).filter(([, v]) => v != null && v !== '')) }, { open: true });
+    addTask({ fields: Object.fromEntries(Object.entries(f).filter(([, v]) => v != null && v !== '')) }, { open });
   }
   // The task's conversation, shown in it, with its earlier messages loaded (so a `split` answer lands under them).
   async function taskConversation(id) {
@@ -3478,9 +3850,14 @@
     panel.querySelectorAll('[data-more]').forEach(b => b.onclick = () => { const id = +b.dataset.more; ui.moreFor = ui.moreFor === id ? null : id; ui.mergeFor = null; draft.picks.merge = ''; render(); });
     panel.querySelectorAll('[data-more-split]').forEach(b => b.onclick = async () => {
       const id = +b.dataset.moreSplit; ui.moreFor = null;
+      if (b.closest('.review')) {      // on a Review card the answer lands in the card's own conversation
+        const pl = placeOf('review', id);
+        if (!pl.loaded) await loadPlace(pl);
+        sendTurn(pl, '', 'split', 'ask'); return;
+      }
       sendTurn(await taskConversation(id), '', 'split', 'askTask');
     });
-    panel.querySelectorAll('[data-more-dup]').forEach(b => b.onclick = () => duplicateTask(+b.dataset.moreDup));
+    panel.querySelectorAll('[data-more-dup]').forEach(b => b.onclick = () => duplicateTask(+b.dataset.moreDup, !b.closest('.review')));      // Review stays on its card
     panel.querySelectorAll('[data-more-merge]').forEach(b => b.onclick = () => {
       const id = +b.dataset.moreMerge; ui.mergeFor = ui.mergeFor === id ? null : id; draft.picks.merge = '';
       render();
@@ -3642,7 +4019,9 @@
       // One review batch (the task, its links, the card's verdict): the toast's Undo drops the task and brings the card back;
       // Create on a card whose task that Undo dropped reopens it. The queue is re-read, so the new row's card is next.
       try {
-        const r = await api(`/api/review/suggestions/${id}/create`, { method: 'POST', body: '{}' });
+        const card = sgCard(id), edited = !!card && sgDirty(card);      // an untouched card is created exactly as suggested
+        const r = await api(`/api/review/suggestions/${id}/create`, { method: 'POST', body: JSON.stringify(edited ? sgBody(sgDraft(card)).create : {}) });
+        delete draft.sg[id];
         const sg = (review.suggestions || []).find(x => x.id === id); if (sg) sg.created = r.task_id;
         lastBatch = r.batch_id;
         if (r.batch_id != null) cardMade.set(r.batch_id, r.task_id);
@@ -3650,7 +4029,7 @@
         toast(said + ((r.skipped || []).length ? ' · ' + r.skipped[0] : ''), r.batch_id != null, { batch: r.batch_id, buttons: [{ text: 'Open', run: () => goTask(r.task_id) }] });
         await load(); await loadReview();
       }
-      catch (e) { toast('Create failed: ' + e.message); }
+      catch (e) { toast('Create failed: ' + (e.detail || e.message)); }
     });
     // The date is used only on the button: a date input's own change event fires while the phone's
     // wheel is still moving, which once staged a date nobody chose.
@@ -3677,9 +4056,10 @@
     });
     panel.querySelectorAll('[data-place-close]').forEach(b => b.onclick = () => {
       const pl = places.get(b.dataset.placeClose); if (!pl || pl.live) return;
-      if (pl.origin === 'today' && pl.thread_id) { try { localStorage.setItem('factotum.todayClosed', String(pl.thread_id)); } catch (_) {} }
+      const box = BOX_PLACE[pl.origin];
+      if (box && pl.thread_id) { try { localStorage.setItem(box.closed, String(pl.thread_id)); } catch (_) {} }
       Object.assign(pl, { thread_id: null, messages: [], named: {}, fresh: true, more: false }); pl.off.clear();
-      if (pl.origin === 'today') draft.askToday = '';
+      if (box) draft[box.draft] = '';
       render();
     });
     wireDetail(panel);
@@ -3707,6 +4087,8 @@
     wireFind(panel);
     wireEditors(panel);
     wireByHand(panel);
+    wireSearch(panel);
+    wireSuggestion(panel);
     placeReviewBar();
     const po = document.getElementById('chat-pick-open'); if (po) po.onclick = () => { ui.pickOpen = !ui.pickOpen; draft.pick = ''; render(); const el = document.getElementById('chat-pick'); if (el) el.focus(); };
     const pk = document.getElementById('chat-pick');
@@ -3943,6 +4325,7 @@
     }
     if (e.target.matches('input, select, textarea')) return;
     if (ui.sheet) return;      // the sheet covers the list: no key acts on what is under it
+    if (e.key === '/' && !e.ctrlKey && !e.metaKey && !e.altKey && ui.page === null && ui.tab === 'search') { e.preventDefault(); const el = document.getElementById('search-q'); if (el) { el.focus(); el.select(); } return; }
     if (e.key === '/' && !e.ctrlKey && !e.metaKey && !e.altKey && ui.page === null && LIST_TABS.includes(ui.tab)) { e.preventDefault(); openFind(); return; }
     if (ui.page !== null) return;      // the task page covers the tab: no key acts on what is under it
     // Before the returns below: Review has its own keys, and an empty list has no rows (and says "Press n").

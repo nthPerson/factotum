@@ -46,6 +46,7 @@ cd ~/factotum                                 # the checkout: the unit's Working
 .venv/bin/python -m factotum file-task ID [--dry-run]  # one filing run for Task-ID (a real run, ~$0.04); --dry-run prints the JSON and stores nothing
 .venv/bin/python -m factotum add "text" [--dry-run]    # a task by hand, as the New task line (#project ~effort ! a date, after N, under N); --dry-run shows how it would be filed
 .venv/bin/python -m factotum find "words or 412"       # any task, open or closed, by number or words
+.venv/bin/python -m factotum search "words" [--fuzzy] [--status open done] [--project NAME] [--date-field due|created|closed|changed --from D --to D] [--only hard linked …]   # the Search tab's search; reads only
 ```
 
 Every subcommand but `effective` and `links-check` runs the database's migrations first: from a new

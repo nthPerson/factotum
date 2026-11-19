@@ -31,7 +31,7 @@ End with exactly one fenced JSON object (nothing after it):
 ```json
 { "reply_md": "the answer, Markdown",
   "proposals": [
-    { "op": "set|done|drop|pin_top|longterm|add_reminder|add_note|link_thread|link|unlink|merge|create",
+    { "op": "set|done|drop|pin_top|longterm|add_reminder|add_note|link_thread|link|unlink|merge|create|reopen",
       "task_id": 388, "fields": {}, "label": "Task-388 → due Thu Nov 5",
       "evidence": [ { "kind": "mail_thread|mail_message|plaud_note", "ref": "<id>", "label": "Oct 29 15:03 from Max" } ] } ] }
 ```
@@ -48,6 +48,7 @@ End with exactly one fenced JSON object (nothing after it):
 - `link` / `unlink` fields: `kind` (`part_of` | `waits_on`), `other` (a task id; for `link`, also the `ref` of a `create` in this reply, so an existing task can wait on a new one), `why` (one line).
 - `merge` fields: `into` (the task kept; this one is dropped as the same task).
 - `done` / `drop` may carry `outcome` (one line on how it turned out).
+- `reopen` (no fields): a closed task (done, dropped, faded, lapsed) becomes open again. Only when the user asks for it or says the work is not finished.
 - `add_note` fields: `text` (appended, dated; prefer it to rewriting `context`).
 - `create` may carry `ref` and `links: [{kind, other}]` where `other` is a task id or another create's `ref`; both go
   inside `fields`: `{"op": "create", "fields": {"name": "…", "ref": "s1", "links": [{"kind": "part_of", "other": 412}]}}`.

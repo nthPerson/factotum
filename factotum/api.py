@@ -134,11 +134,19 @@ class TurnBody(BaseModel):
     origin: str | None = None            # a conversation in place (chat.ORIGINS); with no thread_id, the place's thread
     task_id: int | None = None
     fresh: bool = False                  # start a new thread in that place instead of continuing one
+    card_id: int | None = None           # origin `suggestion`: the Review suggestion card (its evidence id)
+    search: dict | None = None           # origin `search`: the Search tab's parameters, run again here for the prompt
+    draft: dict | None = None            # origin `suggestion`: the card's draft as it stands on the page
 
 
 class CreateBody(BaseModel):
     message_id: int
     index: int
+
+
+class SuggestionCreateBody(BaseModel):
+    fields: dict | None = None           # the card's draft as edited on the page: these values over the card's own
+    links: list | None = None            # the links to make instead of the card's: [{kind: part_of | waits_on, other: task id}]
 
 
 class DraftOpenBody(BaseModel):
@@ -386,7 +394,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         return {"entries": entries, "more": more, "next_before": entries[-1]["change_id"] if more else None}
 
     @app.get("/api/tasks/{task_id}")
-    def get_one(task_id: int, before: int | None = None, limit: int = 30):
+    def get_one(task_id: int, before: int | None = None, limit: int = 30, peek: bool = False):
         t = get_task(conn, task_id)
         if not t:
             raise HTTPException(404)
@@ -404,6 +412,8 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         t["history"] = history(task_id, before, limit)
         # The value before this request (the page marks what changed since), then the stamp that
         # clears the task's "changed" marker: opening a task is looking at its neighbours.
+        if peek:                                                 # Review's editor reads the task without having looked at its neighbours
+            return t
         with commit_lock:                                        # the read above stays outside
             conn.execute("UPDATE tasks SET neighbours_seen_at = ? WHERE id = ?", (now_iso(), task_id))
             conn.commit()
@@ -582,6 +592,11 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         return {"today": today.isoformat(), "last_review_at": st.get("state.last_review_at"),
                 "cap": cap, "total": len(full), "labels": lifecycle.REVIEW_LABELS, "items": page, "suggestions": cards}
 
+    def suggestion_row(evidence_id: int) -> dict | None:
+        """The evidence row behind a suggestion card (a create with no task behind it), judged or not."""
+        e = rows(conn, f"SELECT * FROM evidence WHERE id = ? AND kind IN ({','.join('?' * len(SUGGESTION_KINDS))}) AND task_id IS NULL", (evidence_id, *SUGGESTION_KINDS))
+        return e[0] if e else None
+
     def _suggestion_mail(e: dict) -> dict | None:
         """For a card the mail triage made (SPEC §8.5): the thread it came from, as Mailbird reported it."""
         if e["kind"] != "proposal":
@@ -621,7 +636,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         return f
 
     @app.post("/api/review/suggestions/{evidence_id}/create")
-    def create_suggestion(evidence_id: int):
+    def create_suggestion(evidence_id: int, body: SuggestionCreateBody | None = None):
         """Create the task a suggestion card describes (a planner create, a Slack mention, a task suggested
         from mail, a ripple's create) as ONE `review` batch: the `create` (Source Planner / Slack / Mail /
         Ripple, keyed by the card so a second tap is the same task), the links the card showed (a rule one
@@ -629,11 +644,15 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         and the card's verdict (`judge_evidence`). Its Undo drops the task, removes its links and brings the
         card back; Create after that Undo reopens the same task in one batch (`reopened`). A Slack card's
         message link is provenance, added beside the batch like Chat's cited threads. Two taps at once take
-        turns. Answers {task_id, batch_id (None when nothing was written), skipped: [why], reopened, already}."""
+        turns. Answers {task_id, batch_id (None when nothing was written), skipped: [why], reopened, already}.
+        The card is a draft the owner may edit first (2026-11-18): `fields` are the edited values, laid over the
+        card's own and cleaned by the same cleaner (a name is needed; a null date removes the date and its hard
+        flag), and `links`, when given, are made instead of the card's. Source, key, source link and account stay
+        the card's: nothing in the body sets them."""
         with commit_lock:
-            return _create_suggestion(evidence_id)
+            return _create_suggestion(evidence_id, body.fields if body else None, body.links if body else None)
 
-    def _create_suggestion(evidence_id: int) -> dict:
+    def _create_suggestion(evidence_id: int, edited: dict | None = None, links: list | None = None) -> dict:
         from .db import add_link
         e = rows(conn, f"SELECT * FROM evidence WHERE id = ? AND kind IN ({','.join('?' * len(SUGGESTION_KINDS))}) AND task_id IS NULL", (evidence_id, *SUGGESTION_KINDS))
         if not e:
@@ -643,15 +662,24 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         mail = _suggestion_mail(e)
         by_ripple = e.get("account") == ripple.ACCOUNT and not is_slack and not mail
         key = f"{'slack-mention' if is_slack else 'mail-suggestion' if mail else 'ripple-suggestion' if by_ripple else 'planner-suggestion'}:{evidence_id}"
-        card_links = _suggestion_links(e)[:3]
         why = "from the mail it came from"
+        card_links = [dict(l, why=why) for l in _suggestion_links(e)[:3]]
+        ecfg = eff_cfg()
+        over = chat.clean_draft(conn, ecfg, dict(edited or {}, **({"links": links} if links is not None else {})))
+        if links is not None:                   # the owner's links instead of the card's; one the card had keeps its reason
+            had = {(l["kind"], l["other"]) for l in card_links}
+            card_links = [dict(l, **({"why": why} if (l["kind"], l["other"]) in had else {})) for l in over.pop("links")][:6]
+        if edited and "name" in edited and not over.get("name"):
+            raise HTTPException(400, "a task needs a name")
+        if "due" in over and not over["due"]:
+            over["hard"] = 0                    # no date: no hard deadline
 
         def thread(tid) -> list[dict]:          # a mail card's thread, followed from the mail it came from (the new task's ref or an id)
             return [{"op": "follow_thread", "task_id": tid, "fields": {"conversation_id": str(mail["ref"]), "subject": mail.get("subject"),
                                                                         "account": mail.get("account"), "at": mail.get("at")}}] if mail else []
 
         def follow(tid) -> list[dict]:          # the thread and the links the card showed, on an existing task
-            return thread(tid) + [{"op": "link", "task_id": tid, "fields": {"kind": l["kind"], "other": l["other"], "why": why}} for l in card_links]
+            return thread(tid) + [{"op": "link", "task_id": tid, "fields": {k: l[k] for k in ("kind", "other", "why") if k in l}} for l in card_links]
 
         judge = {"op": "judge_evidence", "task_id": None, "fields": {"evidence_id": evidence_id, "verdict": "applied"}}
         ex = rows(conn, "SELECT id, status, closed_by FROM tasks WHERE source_key = ?", (key,))
@@ -662,18 +690,24 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
             # The card is back: its create was undone (the task dropped by undo: reopen it, never a second task),
             # or the create's undo was refused because the task had been closed since (leave it; judge the card).
             undone = t["status"] == "dropped" and t["closed_by"] == "undo"
-            changes = ([{"op": "reopen", "task_id": t["id"]}] + follow(t["id"]) if undone else []) + [judge]
+            # A draft edited before this second Create: the edits land on the reopened task, in the same batch.
+            sets = [{"op": "set", "task_id": t["id"], "fields": over}] if undone and over else []
+            changes = ([{"op": "reopen", "task_id": t["id"]}] + sets + follow(t["id"]) if undone else []) + [judge]
             res = batches.apply(conn, changes, "review", date.today())
             return {"task_id": t["id"], "batch_id": res["batch_id"], "skipped": [s["why"] for s in res["skipped"]], "reopened": undone, "already": not undone}
         if e["judged_at"]:
             raise HTTPException(404, "this suggestion was already judged")
         from .sync_file import _clean_task_fields
-        ecfg = eff_cfg()
         want = _suggestion_fields(ecfg, e)
         f = _clean_task_fields(ecfg, want)
         f["context"] = f.get("context") or (e["excerpt"] or None)
+        f.update(over)                          # what the owner changed on the card
+        if "due" in over:
+            f["due_is_datetime"] = 1 if over["due"] and "T" in str(over["due"]) else 0
+        if "project" in over:
+            f["area"] = _clean_task_fields(ecfg, {"project": over["project"]}).get("area") if over["project"] else None
         f["ref"] = "card"
-        f["links"] = [{"kind": l["kind"], "other": l["other"], "why": why} for l in card_links]
+        f["links"] = [{k: l[k] for k in ("kind", "other", "why") if k in l} for l in card_links]
         create = {"op": "create", "fields": f, "source_key": key, "created_source": "Slack" if is_slack else "Mail" if mail else "Ripple" if by_ripple else "Planner",
                   "source_link": want.get("source_link"), "account": e.get("account") if is_slack else mail.get("account") if mail else None}
         res = batches.apply(conn, [create] + thread("card") + [judge], "review", date.today())
@@ -864,13 +898,14 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         return {"thread": th[0], "messages": chat.messages(conn, thread_id)}
 
     @app.get("/api/chat/place")
-    def chat_place(origin: str, task_id: int | None = None):
-        """The conversation a place continues (a Review card, an opened task, the Today box), with every
-        task its messages read, attached or proposed named; `thread` is None when the place has none yet."""
+    def chat_place(origin: str, task_id: int | None = None, card_id: int | None = None):
+        """The conversation a place continues (a Review card, an opened task, the Today box, the Search tab's box,
+        a suggestion card), with every task its messages read, attached or proposed named; `thread` is None when
+        the place has none yet."""
         if origin not in chat.ORIGINS:
             raise HTTPException(400, "unknown origin")
-        tid = chat.place_thread(conn, origin, None if origin == "today" else task_id)
-        found = rows(conn, "SELECT id, title, origin, task_id, created_at FROM chat_threads WHERE id = ?", (tid,)) if tid is not None else []
+        tid = chat.place_thread(conn, origin, task_id if origin in ("review", "task") else None, card_id=card_id if origin == "suggestion" else None)
+        found = rows(conn, "SELECT id, title, origin, task_id, card_id, created_at FROM chat_threads WHERE id = ?", (tid,)) if tid is not None else []
         if not found:                                        # none yet, or deleted between the two reads
             return {"thread": None, "messages": [], "named": {}, "busy": False}
         th = found[0]
@@ -909,28 +944,48 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
             elif body.origin is not None:
                 if body.origin not in chat.ORIGINS:
                     raise HTTPException(400, "unknown origin")
-                task_id = None if body.origin == "today" else body.task_id
-                if body.origin != "today" and (task_id is None or not get_task(conn, task_id)):
+                of_task = body.origin in ("review", "task")
+                task_id = body.task_id if of_task else None
+                card_id = body.card_id if body.origin == "suggestion" else None
+                if of_task and (task_id is None or not get_task(conn, task_id)):
                     raise HTTPException(404, "no such task")
-                found = None if body.fresh else chat.place_thread(conn, body.origin, task_id)
+                if body.origin == "suggestion" and (card_id is None or not suggestion_row(card_id)):
+                    raise HTTPException(404, "no such suggestion")
+                found = None if body.fresh else chat.place_thread(conn, body.origin, task_id, card_id=card_id)
                 if not found:
                     with commit_lock:
-                        found = chat.new_thread(conn, None, body.origin, task_id)
+                        found = chat.new_thread(conn, None, body.origin, task_id, card_id)
                 thread_id = found
             else:
                 with commit_lock:
                     thread_id = chat.new_thread(conn)
             if thread_id in app.state.chat_busy:
                 raise HTTPException(409, "Claude is still answering in this conversation")
+            # What the place adds to the prompt, read before the run: the search as the server runs it (with the first
+            # results when nothing is ticked), or the card's draft (with the tasks it links to).
+            attached, place_note = list(body.attached), None
+            th = rows(conn, "SELECT origin, card_id FROM chat_threads WHERE id = ?", (thread_id,))[0]
+            if body.origin != th["origin"]:
+                pass                                         # continued from the Chat tab: no search and no card in view there
+            elif th["origin"] == "search":
+                attached, place_note = chat.search_place(conn, eff_cfg(), date.today(), body.search, attached)
+            elif th["origin"] == "suggestion":
+                e = suggestion_row(th["card_id"]) if th["card_id"] is not None else None
+                if e:
+                    ecfg = eff_cfg()
+                    draft = body.draft if body.draft is not None else dict(_suggestion_fields(ecfg, e), links=_suggestion_links(e))
+                    linked, place_note = chat.suggestion_place(conn, ecfg, {"why": e["label"], "reason": e["excerpt"], "mail": _suggestion_mail(e)}, draft)
+                    attached = attached + [i for i in linked if i not in attached]
             app.state.chat_busy.add(thread_id)
         q: queue.Queue = queue.Queue()
         runner = app.state.chat_runner
 
         def work():
             try:
-                res = chat.turn(conn, eff_cfg(), thread_id, body.text, body.attached, today=date.today(), canned=body.canned, runner=runner, on_event=q.put,
+                res = chat.turn(conn, eff_cfg(), thread_id, body.text, attached, today=date.today(), canned=body.canned, runner=runner, on_event=q.put,
                                  asked=(body.origin, body.task_id),      # the prompt says where it was asked (a card and a task share a thread)
-                                 lock=commit_lock)                       # taken for each write, never across the run
+                                 lock=commit_lock,                       # taken for each write, never across the run
+                                 place_note=place_note)
                 q.put({"type": "done", "result": res} if res.get("ok") else {"type": "error", "error": res.get("error") or "run failed", "result": res})
             except Exception as e:   # noqa: BLE001 — the stream must end with a reason, never hang
                 try:

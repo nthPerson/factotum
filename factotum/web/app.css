@@ -968,3 +968,71 @@ body.sheet-on .toast { z-index: 10; bottom: auto; top: calc(12px + env(safe-area
   .sheet .seffort .stog { min-width: 44px; }
   .place a.tref, .pchips a { padding-block: 15px; margin-block: -15px; }
 }
+
+/* ---------- Search (2026-11-18): the tab, its filters, its results ---------- */
+.search .sbar { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+.search #search-q { flex: 1; min-width: 0; font: inherit; font-size: 15px; padding: 10px 12px; min-height: 44px; border: 1px solid var(--accent); border-radius: var(--radius); background: var(--surface); color: var(--fg); }
+.search .seg { display: inline-flex; flex: none; background: var(--surface-2); border-radius: 8px; padding: 3px; gap: 2px; }
+.search .seg button { font: inherit; border: 0; background: none; color: var(--muted); padding: 8px 12px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
+.search .seg button[aria-pressed="true"] { background: var(--surface); color: var(--fg); font-weight: 500; box-shadow: 0 0 0 1px var(--line); }
+.search .stools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; font-size: 12px; color: var(--muted); }
+.search .stools .spacer { flex: 1; }
+.search .ssort { display: inline-flex; align-items: center; gap: 6px; }
+.search .sbar ~ .stools select, .sfilters select, .sfilters input[type=date] { font: inherit; font-size: 13px; min-height: 32px; padding: 4px 8px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); color: var(--fg); max-width: 100%; }
+.sfilters { display: grid; gap: 8px; padding: 12px; margin-bottom: 14px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }
+.sf { display: grid; grid-template-columns: 76px minmax(0, 1fr); gap: 10px; align-items: center; }
+.sfl { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; }
+.sfv { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; min-width: 0; }
+.sdates label { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+.schip { font: inherit; font-size: 12px; padding: 4px 10px; min-height: 28px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); color: var(--fg); cursor: pointer; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.schip .n { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.schip.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 500; }
+.schip.on .n { color: inherit; }
+.schip:focus-visible, .search .seg button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.search .psearch { margin-bottom: 14px; }
+.search .psearch .place .phead { padding-right: 0; }
+.search .psearch:has(.pclose) .place .phead { padding-right: 72px; }
+.search .sline { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 13px; color: var(--muted); margin: 0 0 8px; }
+.search .sline b { color: var(--fg); font-family: var(--mono); font-weight: 500; }
+.search .smore { text-align: center; margin: 14px 0; }
+.snip { display: block; font-size: 12px; color: var(--muted); font-weight: 400; margin-top: 2px; overflow-wrap: anywhere; }
+mark { background: var(--warn-soft); color: inherit; border-radius: 2px; padding: 0 1px; }
+.sres .hit { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; gap: 4px 10px; align-items: center; padding: 8px 10px 8px 42px; border-top: 1px solid var(--line); }
+.sres > :first-child { border-top: 0; }
+.sres .hit .code { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.sres .hit .nm { min-width: 0; overflow-wrap: anywhere; }
+.sres .hit.closed .nm { color: var(--muted); }
+.sres .hit .chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.sres .hit .acts { display: flex; gap: 6px; align-items: center; }
+.sres .hit .outcome { grid-column: 2 / -1; font-size: 12px; color: var(--muted); }
+.sres .hit .outcome .snip { margin-top: 0; }
+@media (max-width: 700px) {
+  .search .sbar { flex-wrap: wrap; }
+  .search #search-q { flex-basis: 100%; }
+  .search .seg { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); width: 100%; }
+  .search .seg button { min-height: 44px; }
+  .search .stools .btn, .search .stools select { min-height: 40px; }
+  .sf { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .schip { min-height: 36px; padding: 6px 12px; }
+  .sfilters select, .sfilters input[type=date] { min-height: 40px; }
+  .sres .hit { grid-template-columns: auto minmax(0, 1fr); padding-left: 12px; }
+  .sres .hit .chips, .sres .hit .acts, .sres .hit .outcome { grid-column: 1 / -1; }
+  .sres .hit .acts .btn { min-height: 44px; }
+}
+
+/* ---------- Review: the editor in a card, a suggestion card as a draft (2026-11-18) ---------- */
+.card .rvedit-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 10px 0; }
+.card .rvedit-bar .hint { margin: 0; }
+.card .rvedit, .card .sgform { display: grid; gap: 14px; padding: 14px; margin: 0 0 12px; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; min-width: 0; }
+.card .rvedit .editor input[type=text], .card .rvedit .editor input[type=date], .card .rvedit .editor select, .card .rvedit .editor textarea,
+.card .sgform input[type=text], .card .sgform input[type=date], .card .sgform select, .card .sgform textarea { background: var(--surface); }
+.card .rvedit p, .card .sgform p { max-width: none; }
+.card .rvedit .more-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.card .sgform .sg-link { margin: 0; }
+.card .sgform .sglinks { gap: 8px; }
+.card [data-sgstate]:empty { display: none; }
+.card [data-sgstate] .edstaged { margin: 0 0 4px; }
+@media (max-width: 700px) {
+  .card .rvedit, .card .sgform { padding: 12px 10px; }
+  .card .rvedit-bar .btn { min-height: 40px; }
+}

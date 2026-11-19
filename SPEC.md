@@ -755,6 +755,19 @@ prompt, `split` (`prompts/chat-split.md`), serves "Split into steps" and "Make t
 the text lists into tasks, or drafts two to six, as creates with `ref`s, `part_of` the goal and `waits_on`
 only where order is real.
 
+**Two more places (2026-11-18).** The Search tab's box is a conversation in place with origin `search`: like
+Today's it continues its newest thread for 12 hours and Close starts a new one. The page sends the search it
+shows; the server runs it again (`chat.search_place`), so the prompt's words are its own: what was searched,
+how many tasks match, and whether the attached tasks are the ticked rows or, with nothing ticked, the first
+ten results. A suggestion card on Review has one too, origin `suggestion`, one thread per card
+(`chat_threads.card_id`, the card's evidence id): the prompt carries the card's draft as it stands on the page
+(`chat.clean_draft`: only what a create may carry, links only to tasks that exist) and where the suggestion
+came from, each as one JSON value, and asks for exactly one `create` holding the whole revised draft. On that
+card a `create` is never staged or made from the conversation: "Use on this card" copies it into the draft. A
+thread of either kind continued from the Chat tab gets no place text (no search and no card is in view there).
+The tool `tasks_search` (`search.run`, closed tasks included) is listed for every chat turn, skill and
+connector, and a reply may propose `reopen` for a closed task (rejected when the task is open).
+
 ## 9. The UI
 
 One page, phone-friendly, served by the service. Tabs: **Today · Timeline · Projects · Review ·
@@ -1082,6 +1095,45 @@ lazily, so new shortcuts may need a reinstall to appear. Firefox has no Badging 
 no number from it. On a desktop only the installed app shows the number, not a browser tab. The number is as
 fresh as the last time the app was open or the last push it received. Before Review is opened on a day the
 count may differ from Review's own by that day's link suggestions, which opening Review adds.
+
+**Search (2026-11-18).** Its own tab at `/search`, between Review and Chat, over every task of every status
+(`factotum/search.py`, `GET /api/search/advanced`; reads only). The rows are read once and matched in Python,
+which at this size is milliseconds and keeps ranking, close spellings and the matched text plain code with
+no second copy of the text to maintain.
+
+- *Words.* Every word must match somewhere in the name, project, people, text, why-now line or outcome (case
+  and accents folded); `"a phrase"`; `-word` leaves rows out; a lone `412`, `#412` or `Task-412` is that task
+  first. **Match** takes the words as written. **Fuzzy** also takes a word spelt nearly the same (one slip in
+  a word of 4 to 6 letters, two in a longer one) or sharing a stem of five letters or more. When Match finds
+  nothing the answer is the fuzzy one and the page says so. "Search in" narrows to names, text or people.
+- *Filters.* Status, project, source and effort (each with the count it would give, the other filters
+  applied); a date range on the due, created, closed or last-changed date, as days where the owner is, with
+  presets; and Only: hard deadline, no date, waiting on someone, on Top, long-term, linked, set for later,
+  reminder set. Sort: best match (name over project and people over text over outcome; a whole word over a
+  part; exact over close), due date, newest, recently closed, recently changed.
+- *Results.* An open task is its ordinary row (tick, open, edit, link, the bulk bar, `j` / `k`), with the
+  matched words marked and the matched text under the name. A closed one is a read-only line with Open and
+  Reopen. Fifty at a time, two hundred at most.
+- *Ask Claude about these results* is the tab's conversation (§8.3). What is searched is kept in this browser.
+  `/` focuses the box; Find any task (`/` on a list tab) stays the quick picker and offers "Search the text
+  too". `python -m factotum search` and the `tasks_search` tool run the same search.
+
+**Editing on Review (2026-11-18).** A card's whole content can be changed where it is decided.
+
+- *A task's card.* "Edit this task" (remembered in this browser) opens, in the card, the editor an opened task
+  has (name, where this stands, why now, due, project, effort, hard, who), its linked tasks with Remove, Link
+  a task, Add a step, and Split into steps / Duplicate / Merge into another. Everything stages beside the
+  decision; the card's name, why-now line and chips follow what is staged. Apply on the editor's own line
+  applies those edits alone and the card stays to be decided (the queue is read again, so a card whose reason
+  the edit removed, such as a slipped date moved forward, leaves). The task's payload is read with `?peek=1`,
+  which does not mark its neighbours seen. Why now is a field of the editor everywhere.
+- *A suggestion card.* The card is a draft (`draft.sg`): "Edit before creating" opens name, text, due, hard,
+  project, effort, who and its links (remove one; add one as "a step of" or "waits on" with the task picker).
+  Nothing stages, because no task exists. Create sends the draft only when it differs from the suggestion;
+  `POST /api/review/suggestions/{id}/create` lays `fields` over the card's own through the same cleaner and
+  makes `links` instead of the card's, still one `review` batch with one Undo (Create after that Undo reopens
+  the task with the edits). Source, key, source link and account are never the body's. By prompt it is the
+  card's conversation (§8.3).
 
 ## 10. Reminders and push
 

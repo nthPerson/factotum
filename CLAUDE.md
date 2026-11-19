@@ -68,7 +68,11 @@ suggestions, the Log in words, "Free now" after a reminder's Done). Stage 5 (202
 rewrites their text as an undoable `ripple` batch and stages everything else on Review), the outcome
 question on close, "Task-N is free now", the Review block and Settings controls. Stage 6 (2026-11-11): in place and by hand (the conversation on a Review card,
 under the Today box and in an opened task; New task on Enter with its preview and the phone sheet; the editor; linking
-by hand; Find any task). Stage 7 (2026-11-11): suggested links (`factotum/suggestions.py`: twins, shared threads and "Task-N" in text as `link_suggestion` cards, one per pair ever, at most `links.suggestions_per_review` offered a day), links proposed by the planner, a recording and mail triage (`follow_thread`), and `factotum/filing.py`: a task made by hand is filed by one small no-tools run into dashed chips. Stage 8 (2026-11-11): app extras: the Review count on the installed app's icon (one read-only count, `review_queue`, for the tab, the icon and the pushes that are sent anyway; `notify.app.badge`) and long-press shortcuts to New task (`/new`) and Review. The polish pass and final review (2026-11-11): Create on a Review card is one undoable batch; ripples and filing are on by default; every writer on the API's shared connection takes one lock; `links-check` reads only (no migration); a run kind the config names no budget or timeout for gets the example's (`runner.BUDGETS_USD`, `TIMEOUTS_S`). Retiring the old Notion
+by hand; Find any task). Stage 7 (2026-11-11): suggested links (`factotum/suggestions.py`: twins, shared threads and "Task-N" in text as `link_suggestion` cards, one per pair ever, at most `links.suggestions_per_review` offered a day), links proposed by the planner, a recording and mail triage (`follow_thread`), and `factotum/filing.py`: a task made by hand is filed by one small no-tools run into dashed chips. Stage 8 (2026-11-11): app extras: the Review count on the installed app's icon (one read-only count, `review_queue`, for the tab, the icon and the pushes that are sent anyway; `notify.app.badge`) and long-press shortcuts to New task (`/new`) and Review. The polish pass and final review (2026-11-11): Create on a Review card is one undoable batch; ripples and filing are on by default; every writer on the API's shared connection takes one lock; `links-check` reads only (no migration); a run kind the config names no budget or timeout for gets the example's (`runner.BUDGETS_USD`, `TIMEOUTS_S`). Search and editing on Review (2026-11-18,
+`docs/superpowers/specs/2026-11-18-search-and-review-editing-design.md`): the Search tab (`factotum/search.py`: words, close spellings, a date range,
+filters with counts; `GET /api/search/advanced`, the `tasks_search` tool, `python -m factotum search`; its own conversation, origin `search`), the editor and
+the link tools in a Review card, a suggestion card as an editable draft with its own conversation (origin `suggestion`, `chat_threads.card_id`), Why now in
+the editor, `reopen` as a chat proposal; and the Plaud trigger looking at its mailbox every minute, pushed or not. Retiring the old Notion
 pages and plaud-sync is the user's checklist (SETUP §15). Update this paragraph when something lands.
 
 ## Where things live
@@ -127,6 +131,9 @@ pages and plaud-sync is the user's checklist (SETUP §15). Update this paragraph
 | the add line, adding at once, search | design §12.7, §12.9, SPEC §6 "The add line" | `factotum/commands.py` (`ADD_RE`, `parse_add`, `link_refusal`), `factotum/by_hand.py` (`preview`, `add`, `search`), `api.py` (`/api/add*`, `/api/search`) |
 | the conversation in place | design §12.6, SPEC §8.3 | `chat.py` (`place_thread`, `PLACE_TEXT`, `resolve_staged`, `mark_staged`), `api.py` (`/api/chat/turn`, `/api/chat/place`), `web/app.js` (`placeOf`, `loadPlace`, `sendTurn`, `placeHtml`, `stagePlace`) |
 | New task, the sheet, the editor, linking by hand, Find | design §12.7–§12.9 | `web/app.js` (`addTask`, `previewAdd`, `addPreviewHtml`, `sheetHtml`, `editorHtml`, `editKey`, `keysFor`, `pickerHtml`, `searchTasks`, `findHtml`) |
+| the Search tab: the engine, its route, the tool, the command | SPEC §9 "Search" | `factotum/search.py` (`parse`, `closeness`, `run`, `said`), `api.py` (`/api/search/advanced`), `mcp_server.tasks_search`, `web/app.js` (`sq`, `srch`, `runSearch`, `setSearch`, `renderSearch`, `searchRowHtml`, `searchFiltersHtml`, `wireSearch`, `markHtml`, `bulkBarHtml`) |
+| the Search tab's conversation, a suggestion card's conversation | SPEC §8.3 "Two more places" | `chat.py` (`BOX_ORIGINS`, `search_place`, `clean_draft`, `suggestion_place`, `place_thread`), `api.py` (`chat_turn`, `suggestion_row`), `web/app.js` (`BOX_PLACE`, `searchPlaceHtml`, `sgPlaceHtml`, `cardDraft`, `useOnCard`) |
+| editing on Review: a task's card, a suggestion card's draft, Create with the draft | SPEC §9 "Editing on Review" | `web/app.js` (`rvEditHtml`, `reviewSubHtml`, `sgDraft`, `sgBody`, `sgFormHtml`, `sgRefresh`, `wireSuggestion`), `api.py` (`_create_suggestion`, `get_one` `peek`), `chat.clean_draft` |
 | the installable app: manifest, icons, the page head | design §13, SPEC §9 | `factotum/web/manifest.webmanifest`, `index.html`, `tools/make_icons.py` |
 | addresses, Back, the phone task page, the short bar, signed out, return and update | SPEC §9 | `web/app.js` (`parseAddress`, `setAddress`, `go`, `applyAddress`, `openTask`, `closeTask`, `taskPageHtml`, `signedOut`, `typingNow`, `onReturn`), `api.py` (`PAGE_TABS`, `STAMPED`, `build_stamp`, `BuildStamp`, `_index_html`) |
 | the starter, code defaults, absent means off, `effective` | SPEC §9 "Configuration", SETUP §18 | `factotum/config.py` (`STARTER_CONFIG`, `DEFAULTS`, `PAID_SWITCHES`, `value`, `explain`), `config/factotum.starter.yaml`, `__main__.py` (`_effective`), `web/app.js` (`starterHtml`, `settingsDirty`), `tests/test_stage3.py` (`_code_defaults`) |
@@ -162,6 +169,7 @@ pages and plaud-sync is the user's checklist (SETUP §15). Update this paragraph
 .venv/bin/python -m factotum sweep links                 # one detector pass now (free); "<n> suggested: …"; the scheduler's first tick after a start runs one by itself
 .venv/bin/python -m factotum add "text" [--dry-run]       # a task by hand from one line, as New task (#project ~effort ! a date, after N, under N); --dry-run prints how it would be filed
 .venv/bin/python -m factotum find "words or 412"          # any task, open or closed, by number or words
+.venv/bin/python -m factotum search "words" [--fuzzy] [--status open done] [--project NAME] [--date-field due|created|closed|changed --from D --to D] [--only hard linked …]   # the Search tab's search; reads only
 .venv/bin/python -m factotum file-task ID [--dry-run]    # one filing run for a task (a real run, ~$0.04 on sonnet, the default; measured 2026-11-11); --dry-run writes nothing
 # every sweep and the planner at once: Refresh on the Today tab (the scheduler runs it; a `refresh` row in the Log)
 sudo systemctl restart factotum                    # after code changes; see the restart rule below
@@ -397,6 +405,28 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
   minutes late; one five hours late, by which time the recording was gone from Plaud). `PlaudTrigger.watch_once`
   looks after every idle, pushed or not, at most `LOOK_EVERY_S` apart, and `look` repeats until a pass starts
   nothing. Never make a look conditional on `idle_check`'s responses again.
+- **Search reads every task and matches in Python** (2026-11-18, `search.run`): no index and no second copy of the text. A new
+  searchable column goes in `search.COLS`, `WITHIN` and `WEIGHT`; a new filter in `normalise`, `said`, the route, the `tasks_search` schema and
+  `web/app.js` `SEARCH_BLANK`. `fold` keeps one character for one character, because the marks sent to the page are positions in the text as
+  written. `(none)` is the filter value for rows with no project, source or effort. `/api/search` (Find, the task picker) is another function and
+  keeps its own order.
+- **What a place adds to a chat prompt is the server's words** (2026-11-18): a turn from Search sends the search's parameters and the server runs
+  it again (`chat.search_place`); a turn from a suggestion card sends the draft and the server cleans it (`chat.clean_draft`). Each lands as one
+  JSON value on one line. Never paste a sentence the page wrote into a prompt.
+- **A suggestion card's draft never stages** (2026-11-18): no task exists, so it lives in `draft.sg[<evidence id>]` and rides in Create's body only
+  when it differs from the suggestion (`sgDirty`); an untouched card is created exactly as before. On that card a reply's `create` is the revised
+  draft (`cardDraft`): "Use on this card", never Create or Stage, or the card would stay and a second task would be made. The body can set only
+  what `chat.clean_draft` keeps; source, key, source link and account are the card's.
+- **`chat_threads.card_id` is a suggestion card's evidence id, `task_id` a task's** (2026-11-18): a `suggestion` thread has no `task_id`, and
+  `place_thread` finds it only by `card_id`. A `search` or `suggestion` thread continued from the Chat tab gets no place text.
+- **Review's editor reads the task with `?peek=1`** (2026-11-18): the plain `GET /api/tasks/{id}` stamps `neighbours_seen_at`, which would take a
+  "linked task changed" card out of the queue for having been edited. `ensureDetails` reads a peeked answer again when the task is really opened.
+- **What stands above the editor in a Review card is redrawn through `afterPress`** (2026-11-18): the name, the why-now line and the chips. A line
+  more or less there moved the fields between the mousedown and the click that left one, and the effort tap after typing was lost.
+- **Apply on a Review card's editor line is not a decision** (2026-11-18, `applyAll` `editsOnly`): no `review/finish`, no pause; the queue is read
+  again and the card stays unless the edit removed its reason.
+- **`pickers.<slot> = …` goes after `const pickers`** (2026-11-18): the page script is one function and a `const` used above its line throws at
+  load, so nothing draws at all (the first browser run of the Search tab). `node --check` does not see it; a page load does.
 - **Never pipe the dev or service start script's output through `tail` / `head` when it leaves a server
   running** (2026-11-11): the pipe never closes and the command hangs. And `GET /api/review` is loaded once
   per page (the in-flight flag in `app.js`) because its `last_offered_at` stamp commits on the shared
