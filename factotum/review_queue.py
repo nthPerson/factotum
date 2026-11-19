@@ -26,6 +26,42 @@ def queue(conn, cfg: dict, today: date, open_tasks: list[dict] | None = None, fl
     return lifecycle.build_review_queue(open_tasks, today, cfg, last, flags_by_id=flags, cap=10**9)
 
 
+def today(cfg: dict) -> date:
+    """Review's day: the date where the owner is (`owner.timezone`), never the machine's. Every Review route,
+    the decision rule, the tray's finish write and the connector use it."""
+    from . import reminders                  # lazy, like the rest of this module's heavier neighbours
+    return reminders.local_now(cfg).date()
+
+
+def items(conn, cfg: dict, today: date) -> dict:
+    """The whole queue as GET /api/review ships it, built once for every reader: `tasks`, each
+    {key: "t:<id>", task (decorated, `rel` compacted), reasons, primary, texts, link_suggestions, since
+    (only for "linked_changed"), flags, evidence}, in Review's order; and `cards`, each with `key: "s:<id>"`
+    (review_cards). No cap, no exclusion, nothing left out for being decided. Reads only: the day's link
+    suggestions (suggestions.session) are the caller's to write first."""
+    from . import review_cards, ripple       # lazy: ripple imports the planner, and the scheduler imports this module
+    from .mail_sweep import review_flags
+    open_tasks = relations.decorate(conn, rows(conn, "SELECT * FROM tasks WHERE status = 'open'"), today, cfg)
+    flags = review_flags(conn)
+    full = queue(conn, cfg, today, open_tasks, flags)
+    names = {k: v["name"] for k, v in relations.briefs(conn, {s["other"] for i in full for s in i["task"]["rel"]["suggestions"]}).items()}
+    for i in full:                                           # from the full rel (a text may name a closed task it waited on)
+        i["texts"] = lifecycle.reason_texts(i["task"], i["reasons"])
+        i["link_suggestions"] = [dict(s, other_name=names.get(s["other"])) for s in i["task"]["rel"]["suggestions"]]
+    for i in full:
+        if "linked_changed" in i["reasons"]:
+            i["since"] = ripple.since(conn, i["task"]["id"], i["task"]["rel"].get("changed"))
+    for t in open_tasks:
+        relations.ship(t)
+    by_task = review_cards.evidence_by_task(conn)
+    out = []
+    for i in full:
+        i["flags"] = flags.get(i["task"]["id"], {})
+        i["evidence"] = by_task.get(i["task"]["id"], [])      # judged in the same batch as the decision; a proposal's change can be accepted
+        out.append({"key": f"t:{i['task']['id']}", **i})
+    return {"tasks": out, "cards": review_cards.cards(conn, cfg)}
+
+
 def is_card(e: dict) -> bool:
     return e["task_id"] is None and e["kind"] in SUGGESTION_KINDS
 

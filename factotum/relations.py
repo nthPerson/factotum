@@ -436,6 +436,38 @@ def scored(db: Db, tasks: list[dict], today: date, cfg: dict, *, all_rows: bool 
     return tasks
 
 
+def decorate(db: Db, ts: list[dict], today: date, cfg: dict) -> list[dict]:
+    """Annotated and scored (`scored`, every status), then today's lifecycle keys: what the API ships of a
+    task row (GET /api/tasks, GET /api/tasks/{id}, Review's items). In place; returns `ts`."""
+    from . import lifecycle                    # lazy: lifecycle imports this module
+    from .dates import parse_date
+    scored(db, ts, today, cfg, all_rows=True)
+    for t in ts:
+        t["tier"] = lifecycle.tier(t)
+        t["longterm_effective"] = lifecycle.is_long_term(t, cfg)
+        fa = lifecycle.fade_at(t, cfg)
+        lc = lifecycle.last_call_at(t, cfg)
+        t["fade_at"] = fa.isoformat() if fa else None
+        t["last_call_at"] = lc.isoformat() if lc else None
+        t["days_until_due"] = (parse_date(t["due"]) - today).days if t.get("due") and parse_date(t["due"]) else None
+    return ts
+
+
+def ship(t: dict) -> None:
+    """Replace an annotated row's `rel` with the compact one the API ships, or drop the key when it says nothing."""
+    rel = compact(t.pop("rel", None) or {})
+    if rel is not None:
+        t["rel"] = rel
+
+
+def briefs(db: Db, ids: set[int]) -> dict[int, dict]:
+    """The few keys the page shows of a task it names but did not load, in one query."""
+    if not ids:
+        return {}
+    return {r["id"]: dict(r) for r in db.execute("SELECT id, name, status, due, completed_at, outcome FROM tasks WHERE id IN (SELECT value FROM json_each(?))",
+                                                 (json.dumps(sorted(ids)),))}
+
+
 def score_one(task: dict, today: date, cfg: dict) -> tuple[int, str, list[str]]:
     """`scoring.score` for one row its caller already annotated (the Notion mirror's `properties`)."""
     return scoring.score(task, today, cfg)

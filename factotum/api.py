@@ -45,9 +45,8 @@ from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
 from .claude import runner as claude_runner
-from . import app_push, batches, by_hand, commands, config as C, filing, lifecycle, oauth, relations, reminders, review_queue, ripple, search, suggestions, summary
+from . import app_push, batches, by_hand, commands, config as C, filing, lifecycle, oauth, relations, reminders, review_cards, review_queue, ripple, search, suggestions, summary
 from .db import connect, get_settings, get_task, init_db, now_iso, rows, seed_accounts, set_setting
-from .dates import parse_date
 
 WEB = Path(__file__).resolve().parent / "web"
 PAGE_TABS = ("today", "timeline", "projects", "review", "search", "chat", "log", "settings")
@@ -301,32 +300,6 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
     app.add_middleware(JsonOnlyMutations)
     app.add_middleware(BuildStamp)
 
-    def decorate_all(ts: list[dict], today: date, ecfg: dict) -> list[dict]:
-        """Annotated and scored (relations.scored, every status), then today's lifecycle keys."""
-        relations.scored(conn, ts, today, ecfg, all_rows=True)
-        for t in ts:
-            t["tier"] = lifecycle.tier(t)
-            t["longterm_effective"] = lifecycle.is_long_term(t, ecfg)
-            fa = lifecycle.fade_at(t, ecfg)
-            lc = lifecycle.last_call_at(t, ecfg)
-            t["fade_at"] = fa.isoformat() if fa else None
-            t["last_call_at"] = lc.isoformat() if lc else None
-            t["days_until_due"] = (parse_date(t["due"]) - today).days if t.get("due") and parse_date(t["due"]) else None
-        return ts
-
-    def ship_rel(t: dict) -> None:
-        """Replace an annotated row's `rel` with the compact one the API ships, or drop the key when it says nothing."""
-        rel = relations.compact(t.pop("rel", None) or {})
-        if rel is not None:
-            t["rel"] = rel
-
-    def task_briefs(ids: set[int]) -> dict[int, dict]:
-        """The few keys the page shows of a task it names but did not load, in one query."""
-        if not ids:
-            return {}
-        return {r["id"]: r for r in rows(conn, "SELECT id, name, status, due, completed_at, outcome FROM tasks WHERE id IN (SELECT value FROM json_each(?))",
-                                         (json.dumps(sorted(ids)),))}
-
     @app.get("/api/tasks")
     def list_tasks(status: str = "open", project: str | None = None):
         today = date.today()
@@ -339,7 +312,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
             where.append("project = ?")
             params += (project,)
         cond = " WHERE " + " AND ".join(where) if where else ""
-        out = decorate_all(rows(conn, "SELECT * FROM tasks" + cond + " ORDER BY COALESCE(due, '9999'), id", params), today, ecfg)
+        out = relations.decorate(conn, rows(conn, "SELECT * FROM tasks" + cond + " ORDER BY COALESCE(due, '9999'), id", params), today, ecfg)
         links = rows(conn, f"SELECT task_id, kind, ref, label, account FROM links WHERE kind != 'task' AND task_id IN (SELECT id FROM tasks{cond})", params)
         rem = rows(conn, "SELECT task_id, id, fire_at, label, repeat, status FROM reminders WHERE status IN ('pending','snoozed')")
         by_l: dict[int, list] = {}
@@ -350,7 +323,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
             by_r.setdefault(r["task_id"], []).append(r)
         named: set[int] = set()
         for t in out:
-            ship_rel(t)
+            relations.ship(t)
             t["links"] = by_l.get(t["id"], [])
             t["reminders"] = by_r.get(t["id"], [])
             rel = t.get("rel") or {}
@@ -358,7 +331,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
             named.update(x["other"] for x in rel.get("suggestions") or [])
             if (rel.get("changed") or {}).get("by") is not None:
                 named.add(rel["changed"]["by"])
-        neighbours = task_briefs(named - {t["id"] for t in out})
+        neighbours = relations.briefs(conn, named - {t["id"] for t in out})
         chips = filing.chips(conn, {t["id"] for t in out})
         for t in out:
             if t["id"] in chips:
@@ -399,7 +372,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         if not t:
             raise HTTPException(404)
         limit = max(1, min(int(limit), 100))
-        decorate_all([t], date.today(), eff_cfg())
+        relations.decorate(conn, [t], date.today(), eff_cfg())
         t["rel"] = relations.compact(t.get("rel") or {}, keep_empty=True)
         t["links"] = rows(conn, "SELECT * FROM links WHERE task_id = ? AND kind != 'task'", (task_id,))
         t["reminders"] = rows(conn, "SELECT * FROM reminders WHERE task_id = ?", (task_id,))
@@ -537,49 +510,18 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
     def review_count(exclude: str | None = None):
         """The number beside Review and on the app's icon (review_queue.count). Reads only; no lock needed."""
         skip = exclude_ids(exclude)
-        return {"count": review_queue.count(conn, eff_cfg(), date.today(), exclude=skip)}
+        ecfg = eff_cfg()
+        return {"count": review_queue.count(conn, ecfg, review_queue.today(ecfg), exclude=skip)}
 
     def _review(exclude: str | None):
-        today = date.today()
         ecfg = eff_cfg()
+        today = review_queue.today(ecfg)
         st = get_settings(conn)
         skip = exclude_ids(exclude)
-        suggestions.session(conn, today, suggestions.per_review(ecfg))   # today's few link suggestions
+        suggestions.session(conn, today, suggestions.per_review(ecfg))   # today's few link suggestions, written before the queue reads them
         conn.commit()
-        open_tasks = decorate_all([t for t in rows(conn, "SELECT * FROM tasks WHERE status = 'open'") if t["id"] not in skip], today, ecfg)
-        from .mail_sweep import review_flags
-        flags = review_flags(conn)
-        full = review_queue.queue(conn, ecfg, today, open_tasks, flags)
-        names = {k: v["name"] for k, v in task_briefs({s["other"] for i in full for s in i["task"]["rel"]["suggestions"]}).items()}
-        for i in full:                                           # from the full rel (a text may name a closed task it waited on)
-            i["texts"] = lifecycle.reason_texts(i["task"], i["reasons"])
-            i["link_suggestions"] = [dict(s, other_name=names.get(s["other"])) for s in i["task"]["rel"]["suggestions"]]
-        for i in full:
-            if "linked_changed" in i["reasons"]:
-                i["since"] = ripple.since(conn, i["task"]["id"], i["task"]["rel"].get("changed"))
-        for t in open_tasks:
-            ship_rel(t)
-        pending = rows(conn, "SELECT id, task_id, kind, ref, account, label, excerpt, at FROM evidence WHERE judged_at IS NULL ORDER BY id")
-        by_task: dict[int, list] = {}
-        for e in pending:
-            if e["task_id"] is not None and e["kind"] not in ("link_suggestion", "filing"):     # a suggested link is its own card list, not evidence on the decision
-                change = None
-                if e["kind"] == "proposal":
-                    try:
-                        change = json.loads(e["ref"]) if e["ref"] else None
-                    except ValueError:
-                        change = None
-                by_task.setdefault(int(e["task_id"]), []).append({"id": e["id"], "kind": e["kind"], "label": e["label"], "reason": e["excerpt"], "change": change, "at": e["at"], "by": "ripple" if e["account"] == "ripple" else None})
-        for i in full:
-            i["flags"] = flags.get(i["task"]["id"], {})
-            i["evidence"] = by_task.get(i["task"]["id"], [])      # judged in the same batch as the decision; a proposal's change can be accepted
-        # Planner creates with no task (an announcement, a hunch) and Slack mentions naming no task:
-        # suggestion cards with Create / Dismiss.
-        cards = [{"id": e["id"], "kind": e["kind"], "label": e["label"], "reason": e["excerpt"], "at": e["at"], "fields": _suggestion_fields(ecfg, e), "mail": _suggestion_mail(e),
-                  "links": _suggestion_links(e), "by": "ripple" if e["account"] == ripple.ACCOUNT else None} for e in pending if review_queue.is_card(e)]
-        others = task_briefs({l["other"] for c in cards for l in c["links"]})
-        for c in cards:                                          # a mail suggestion's link, made when Create is pressed
-            c["links"] = [dict(l, other_name=(others.get(l["other"]) or {}).get("name")) for l in c["links"]]
+        q = review_queue.items(conn, ecfg, today)
+        full = [i for i in q["tasks"] if i["task"]["id"] not in skip]
         cap = int(C.get(ecfg, "lifecycle.review_cap", 15))
         page = full[:cap]
         if page:
@@ -589,51 +531,10 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
             conn.commit()
             for i in page:
                 i["task"]["last_offered_at"] = today.isoformat()
+        # `suggestions`: planner creates with no task (an announcement, a hunch), Slack mentions naming no
+        # task, mail and ripple creates: cards with Create / Dismiss (review_cards).
         return {"today": today.isoformat(), "last_review_at": st.get("state.last_review_at"),
-                "cap": cap, "total": len(full), "labels": lifecycle.REVIEW_LABELS, "items": page, "suggestions": cards}
-
-    def suggestion_row(evidence_id: int) -> dict | None:
-        """The evidence row behind a suggestion card (a create with no task behind it), judged or not."""
-        e = rows(conn, f"SELECT * FROM evidence WHERE id = ? AND kind IN ({','.join('?' * len(SUGGESTION_KINDS))}) AND task_id IS NULL", (evidence_id, *SUGGESTION_KINDS))
-        return e[0] if e else None
-
-    def _suggestion_mail(e: dict) -> dict | None:
-        """For a card the mail triage made (SPEC §8.5): the thread it came from, as Mailbird reported it."""
-        if e["kind"] != "proposal":
-            return None
-        try:
-            m = (json.loads(e["ref"]) if e.get("ref") else {}).get("mail")
-        except (ValueError, AttributeError):
-            return None
-        return m if isinstance(m, dict) and m.get("ref") else None
-
-    def _suggestion_links(e: dict) -> list[dict]:
-        """The links a mail suggestion carries (mail_triage.py kept only those to rows its run was shown)."""
-        if e["kind"] != "proposal":
-            return []
-        try:
-            ls = (json.loads(e["ref"]) if e.get("ref") else {}).get("links")
-        except (ValueError, AttributeError):
-            return []
-        return [{"kind": l.get("kind"), "other": l["other"]} for l in ls if isinstance(l, dict) and type(l.get("other")) is int] if isinstance(ls, list) else []
-
-    def _suggestion_fields(ecfg: dict, e: dict) -> dict:
-        """What Create would make: the planner's fields for an uncited create (evidence.ref holds
-        them; older rows have only a label), or for a Slack mention the message's text as the name,
-        the workspace's project and the permalink as context and source link."""
-        if e["kind"] == "slack_mention":
-            ws = next((w for w in (C.get(ecfg, "sources.slack.workspaces", []) or []) if str(w.get("name") or "").strip() == (e.get("account") or "")), {})
-            name = str(e.get("label") or "").split(": ", 1)[-1].strip()[:80] or "(untitled)"
-            project = ws.get("project") if ws.get("project") in C.project_names(ecfg) else None     # a name outside the taxonomy would become Unknown
-            return {"name": name, "project": project, "context": f"{e.get('excerpt') or ''}\n{e.get('ref') or ''}".strip(), "source_link": e.get("ref")}
-        try:
-            d = json.loads(e["ref"]) if e.get("ref") else {}
-        except ValueError:
-            d = {}
-        f = dict((d or {}).get("fields") or {})
-        if not f.get("name"):
-            f["name"] = str(e.get("label") or "").split(":", 1)[-1].strip()[:80] or "(untitled)"
-        return f
+                "cap": cap, "total": len(full), "labels": lifecycle.REVIEW_LABELS, "items": page, "suggestions": q["cards"]}
 
     @app.post("/api/review/suggestions/{evidence_id}/create")
     def create_suggestion(evidence_id: int, body: SuggestionCreateBody | None = None):
@@ -659,11 +560,11 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
             raise HTTPException(404, "no such suggestion")
         e = e[0]
         is_slack = e["kind"] == "slack_mention"
-        mail = _suggestion_mail(e)
+        mail = review_cards.suggestion_mail(e)
         by_ripple = e.get("account") == ripple.ACCOUNT and not is_slack and not mail
         key = f"{'slack-mention' if is_slack else 'mail-suggestion' if mail else 'ripple-suggestion' if by_ripple else 'planner-suggestion'}:{evidence_id}"
         why = "from the mail it came from"
-        card_links = [dict(l, why=why) for l in _suggestion_links(e)[:3]]
+        card_links = [dict(l, why=why) for l in review_cards.suggestion_links(e)[:3]]
         ecfg = eff_cfg()
         over = chat.clean_draft(conn, ecfg, dict(edited or {}, **({"links": links} if links is not None else {})))
         if links is not None:                   # the owner's links instead of the card's; one the card had keeps its reason
@@ -693,12 +594,12 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
             # A draft edited before this second Create: the edits land on the reopened task, in the same batch.
             sets = [{"op": "set", "task_id": t["id"], "fields": over}] if undone and over else []
             changes = ([{"op": "reopen", "task_id": t["id"]}] + sets + follow(t["id"]) if undone else []) + [judge]
-            res = batches.apply(conn, changes, "review", date.today())
+            res = batches.apply(conn, changes, "review", review_queue.today(ecfg))
             return {"task_id": t["id"], "batch_id": res["batch_id"], "skipped": [s["why"] for s in res["skipped"]], "reopened": undone, "already": not undone}
         if e["judged_at"]:
             raise HTTPException(404, "this suggestion was already judged")
         from .sync_file import _clean_task_fields
-        want = _suggestion_fields(ecfg, e)
+        want = review_cards.suggestion_fields(ecfg, e)
         f = _clean_task_fields(ecfg, want)
         f["context"] = f.get("context") or (e["excerpt"] or None)
         f.update(over)                          # what the owner changed on the card
@@ -710,7 +611,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         f["links"] = [{k: l[k] for k in ("kind", "other", "why") if k in l} for l in card_links]
         create = {"op": "create", "fields": f, "source_key": key, "created_source": "Slack" if is_slack else "Mail" if mail else "Ripple" if by_ripple else "Planner",
                   "source_link": want.get("source_link"), "account": e.get("account") if is_slack else mail.get("account") if mail else None}
-        res = batches.apply(conn, [create] + thread("card") + [judge], "review", date.today())
+        res = batches.apply(conn, [create] + thread("card") + [judge], "review", review_queue.today(ecfg))
         if not res["created"]:
             made = rows(conn, "SELECT id FROM tasks WHERE source_key = ?", (key,))
             if made:                            # made meanwhile by another process: that task is the answer
@@ -728,7 +629,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         is read back, written or sent). Only a conversation a waiting card names can be asked for."""
         from . import mailbird
         e = rows(conn, "SELECT * FROM evidence WHERE id = ? AND kind = 'proposal' AND task_id IS NULL", (evidence_id,))
-        mail = _suggestion_mail(e[0]) if e else None
+        mail = review_cards.suggestion_mail(e[0]) if e else None
         if not mail:
             raise HTTPException(404, "no mail behind this suggestion")
         try:
@@ -744,7 +645,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
     @app.post("/api/review/finish")
     def finish_review():
         with commit_lock:
-            set_setting(conn, "state.last_review_at", date.today().isoformat())
+            set_setting(conn, "state.last_review_at", review_queue.today(eff_cfg()).isoformat())
             conn.commit()
         return {"ok": True}
 
@@ -949,7 +850,7 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
                 card_id = body.card_id if body.origin == "suggestion" else None
                 if of_task and (task_id is None or not get_task(conn, task_id)):
                     raise HTTPException(404, "no such task")
-                if body.origin == "suggestion" and (card_id is None or not suggestion_row(card_id)):
+                if body.origin == "suggestion" and (card_id is None or not review_cards.row(conn, card_id)):
                     raise HTTPException(404, "no such suggestion")
                 found = None if body.fresh else chat.place_thread(conn, body.origin, task_id, card_id=card_id)
                 if not found:
@@ -970,11 +871,11 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
             elif th["origin"] == "search":
                 attached, place_note = chat.search_place(conn, eff_cfg(), date.today(), body.search, attached)
             elif th["origin"] == "suggestion":
-                e = suggestion_row(th["card_id"]) if th["card_id"] is not None else None
+                e = review_cards.row(conn, th["card_id"]) if th["card_id"] is not None else None
                 if e:
                     ecfg = eff_cfg()
-                    draft = body.draft if body.draft is not None else dict(_suggestion_fields(ecfg, e), links=_suggestion_links(e))
-                    linked, place_note = chat.suggestion_place(conn, ecfg, {"why": e["label"], "reason": e["excerpt"], "mail": _suggestion_mail(e)}, draft)
+                    draft = body.draft if body.draft is not None else dict(review_cards.suggestion_fields(ecfg, e), links=review_cards.suggestion_links(e))
+                    linked, place_note = chat.suggestion_place(conn, ecfg, {"why": e["label"], "reason": e["excerpt"], "mail": review_cards.suggestion_mail(e)}, draft)
                     attached = attached + [i for i in linked if i not in attached]
             app.state.chat_busy.add(thread_id)
         q: queue.Queue = queue.Queue()
