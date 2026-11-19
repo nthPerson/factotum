@@ -470,6 +470,67 @@ def test_trigger_does_not_depend_on_the_unread_flag(cfg, conn):
     assert t3.process_mailbox(server3) == 1 and handled[-1] == "[Plaud-AutoFlow] missed by the race"
 
 
+class IdleImap(FakeImap):
+    """FakeImap that can idle: `pushes` is what each idle_check returns (a push, or [] for a timeout),
+    `hidden` are uids a search does not show yet (Gmail's FROM search lagging its own push)."""
+    def __init__(self, mails, pushes=()):
+        super().__init__(mails)
+        self.pushes, self.hidden, self.idles, self.timeouts = list(pushes), set(), 0, []
+
+    def search(self, criteria):
+        return [u for u in super().search(criteria) if u not in self.hidden]
+
+    def idle(self):
+        self.idles += 1
+
+    def idle_check(self, timeout=None):
+        self.timeouts.append(timeout)
+        return self.pushes.pop(0) if self.pushes else []
+
+    def idle_done(self):
+        return None
+
+
+def _watching(cfg, conn, server, handler=None):
+    from factotum import plaud_trigger
+    from factotum.db import set_setting
+    cfg["sources"]["plaud"]["sender"] = "no-reply@plaud.ai"
+    set_setting(conn, "state.plaud_trigger.last_uid.a@b", 9); conn.commit()
+    handled = []
+    t = plaud_trigger.PlaudTrigger(cfg, conn, handler=handler or (lambda s, r: (handled.append(s), {"ok": True})[1]), account="a@b", log=lambda m: None)
+    return t, handled
+
+
+def test_trigger_looks_at_the_mailbox_when_an_idle_ends_without_a_push(cfg, conn):
+    """2026-11-18: a mail whose push found nothing (the search did not show it yet) waited for the
+    next unrelated mailbox event, 4 to 22 minutes on most days and five hours once. Every idle ends
+    in a look, pushed or not, and an idle is short."""
+    from factotum import plaud_trigger
+    server = IdleImap([_mail(10, '"PLAUD.AI" <no-reply@plaud.ai>', "[Plaud-AutoFlow] not searchable at its push")], pushes=[[(1, b"EXISTS")]])
+    server.hidden = {10}
+    t, handled = _watching(cfg, conn, server)
+    assert t.watch_once(server) == 0 and handled == []                 # the push came, the search showed nothing
+    server.hidden = set()
+    assert t.watch_once(server) == 1 and handled == ["[Plaud-AutoFlow] not searchable at its push"]   # no push this time: the idle just ended
+    assert server.idles == 2 and server.timeouts == [plaud_trigger.LOOK_EVERY_S] * 2 and plaud_trigger.LOOK_EVERY_S <= 120
+
+
+def test_trigger_looks_again_after_handling_a_mail(cfg, conn):
+    """A mail that lands while another is being handled was announced outside IDLE, so no later
+    idle reports it: the mailbox is looked at until a look finds nothing."""
+    server = IdleImap([_mail(10, '"PLAUD.AI" <no-reply@plaud.ai>', "[Plaud-AutoFlow] the meeting")], pushes=[[(1, b"EXISTS")]])
+    handled = []
+
+    def handler(subject, received):
+        handled.append(subject)
+        if len(handled) == 1:                                           # arrives during the first run
+            server.mails[11] = _mail(11, '"PLAUD.AI" <no-reply@plaud.ai>', "[Plaud-AutoFlow] landed meanwhile")[1]
+        return {"ok": True}
+    t, _ = _watching(cfg, conn, server, handler)
+    assert t.watch_once(server) == 2 and server.idles == 1
+    assert handled == ["[Plaud-AutoFlow] the meeting", "[Plaud-AutoFlow] landed meanwhile"] and t.watermark() == 11
+
+
 def test_apply_result_ignores_foreign_source_keys_and_targets_outside_the_prompt(conn, cfg):
     from factotum import sync_file
     from factotum.db import one

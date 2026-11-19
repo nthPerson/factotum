@@ -392,6 +392,11 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
   `.replace("\n", " ")` is not enough); JSON in a prompt gets `prompts.json_breaks`. The planner's, the summary's and
   mail triage's lines stay HTML-escaped (tests pin it), so their replies go through `prompts.unescape_reply` before
   anything is stored ("Q&amp;A" became a card's name).
+- **A push is not the trigger's queue either** (2026-11-18): the search right after Gmail's push often did not
+  show the mail it announced, so most recordings were synced at the next unrelated mailbox event (4 to 22
+  minutes late; one five hours late, by which time the recording was gone from Plaud). `PlaudTrigger.watch_once`
+  looks after every idle, pushed or not, at most `LOOK_EVERY_S` apart, and `look` repeats until a pass starts
+  nothing. Never make a look conditional on `idle_check`'s responses again.
 - **Never pipe the dev or service start script's output through `tail` / `head` when it leaves a server
   running** (2026-11-11): the pipe never closes and the command hangs. And `GET /api/review` is loaded once
   per page (the in-flight flag in `app.js`) because its `last_offered_at` stamp commits on the shared

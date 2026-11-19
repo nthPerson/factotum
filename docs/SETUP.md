@@ -266,7 +266,7 @@ link existed.
 
 The service watches the `plaud_trigger` mailbox (`IMAP_*` in `.env`, the account under
 `sources.accounts` with that role) with IMAP IDLE. A Plaud "AutoFlow" mail starts one sync within
-seconds: `plaud search` finds the recording by title, the summary and transcript land under
+seconds, a minute at most (the mailbox is also looked at every minute, whatever was pushed): `plaud search` finds the recording by title, the summary and transcript land under
 `data/runs/<id>/`, one headless Claude run reads them, and Python writes the tasks, reminders,
 calendar events and the Notion note page. The Log tab shows each run with its cost.
 

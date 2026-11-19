@@ -24,7 +24,7 @@ from email.utils import parseaddr, parsedate_to_datetime
 from . import config as C
 from .db import get_settings, now_iso, set_setting
 
-IDLE_TIMEOUT_S = 29 * 60      # re-issue IDLE before Gmail's ~30 min cutoff
+LOOK_EVERY_S = 60             # one IDLE lasts at most this long, then the mailbox is looked at, pushed or not (2026-11-18)
 RECONNECT_S = 15
 DEFAULT_AUTHSERV = "mx.google.com"
 
@@ -213,6 +213,27 @@ class PlaudTrigger:
             self._set_watermark(max(uids))
         return started
 
+    def look(self, server) -> int:
+        """Passes over the mailbox until one starts nothing. A mail that lands while another is being
+        handled is announced outside IDLE, so no later idle reports it; it is in the next pass."""
+        total = 0
+        while not self._stop.is_set():
+            started = self.process_mailbox(server)
+            total += started
+            if not started:
+                break
+        return total
+
+    def watch_once(self, server) -> int:
+        """One IDLE, then a look whether or not anything was pushed. The push is only what makes the
+        look early: the search behind it can miss the mail it announces (2026-11-18: most mails were
+        handled at the next unrelated mailbox event, 4 to 22 minutes late, and one five hours late),
+        so a look also happens every LOOK_EVERY_S. Returns how many runs started."""
+        server.idle()
+        server.idle_check(timeout=LOOK_EVERY_S)
+        server.idle_done()
+        return self.look(server)
+
     # ---- the thread --------------------------------------------------------------------------
 
     def run_forever(self, imap_settings: dict) -> None:
@@ -223,13 +244,9 @@ class PlaudTrigger:
                     server.login(imap_settings["user"], imap_settings["password"])
                     server.select_folder(imap_settings.get("folder") or "INBOX")
                     self.log(f"trigger: connected as {imap_settings['user']}; clearing the backlog, then idling")
-                    self.process_mailbox(server)
+                    self.look(server)
                     while not self._stop.is_set():
-                        server.idle()
-                        responses = server.idle_check(timeout=IDLE_TIMEOUT_S)
-                        server.idle_done()
-                        if responses:
-                            self.process_mailbox(server)
+                        self.watch_once(server)
             except Exception as e:
                 self.log(f"trigger: connection error ({type(e).__name__}: {e}); reconnecting in {RECONNECT_S}s")
                 self._stop.wait(RECONNECT_S)

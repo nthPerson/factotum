@@ -264,8 +264,11 @@ need fetching by hand").
 
 ## 6. Inputs (each with an `enabled` flag)
 
-**Plaud.** IMAP IDLE on the account with the `plaud_trigger` role (instant and reliable; Mailbird
-has no push), a thread in the service next to the scheduler. A mail counts only when Gmail's own
+**Plaud.** IMAP IDLE on the account with the `plaud_trigger` role (Mailbird has no push), a thread in
+the service next to the scheduler. The push only makes the look early: every idle ends in a look at the
+mailbox, pushed or not, at most a minute apart, and a look repeats until it starts nothing (2026-11-18:
+the search behind a push often did not show the mail it announced, and a mail that landed while another
+was handled was never announced again). A mail counts only when Gmail's own
 `Authentication-Results` header (authserv-id `sources.plaud.auth_server`) shows DKIM or DMARC pass
 for the sender's domain and the parsed `From` equals `sources.plaud.sender`; the subject only
 locates the recording (`plaud search`, same title within a day of the mail) and never enters the
