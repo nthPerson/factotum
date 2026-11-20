@@ -470,6 +470,13 @@ def test_nothing_the_user_or_the_agent_reads_says_blocked_or_dependency(conn, cf
     for _, key, option, args, _, _ in _cases():
         p = _plan(conn, cfg, key.format(**F), option.format(**F), args)
         texts += [e.get("label") or "" for _, e, _ in p.puts] + [p.said]
+    # The pass (spoken Review stage 2a): its fixed words, and every option label it offers on the table's items.
+    from datetime import date
+    from factotum import review_pass
+    texts += list(review_pass.WORDS.values())
+    for key in ["t:1"] + [f"s:{F[n]}" for n in ("c_plan", "c_mail", "c_slack")]:
+        item = review_decide.load_item(conn, cfg, date(2026, 11, 19), key)
+        texts += [o["label"] for o in review_pass.options(item, None, [], date(2026, 11, 19))]
     for t in texts:
         assert not re.search(r"\bblocked\b|\bdependenc", t, re.I), t[:120]
 

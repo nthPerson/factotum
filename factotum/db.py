@@ -167,6 +167,32 @@ CREATE TABLE IF NOT EXISTS tray_carried (          -- what a browser's old tray 
   fp TEXT PRIMARY KEY,                             -- sha256 of key + canonical entry JSON
   carry_id TEXT NOT NULL, at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS review_passes (         -- one walk through the Review queue: its order and where the owner stands (factotum/review_pass.py)
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  day TEXT NOT NULL,                               -- Review's day when it began; a pass from another day is over
+  started_at TEXT NOT NULL, started_by TEXT,       -- "page · iPhone", "connector", "skill"
+  cursor_key TEXT,                                 -- the item in front; NULL in the states 'end' and 'empty'
+  state TEXT NOT NULL DEFAULT 'item',              -- item | checkpoint | end | empty
+  lap INTEGER NOT NULL DEFAULT 1,                  -- +1 each time Next came round to the start
+  looked INTEGER NOT NULL DEFAULT 0,               -- items arrived at since the start or the last checkpoint
+  rev INTEGER NOT NULL DEFAULT 1,                  -- +1 on every write to this pass or its items
+  moved_at TEXT, moved_by TEXT,                    -- the last move and its driver (the labels of started_by)
+  drivers_json TEXT,                               -- {driver: {tray_rev, decided: [item keys], cursor, at}}: what each driver last saw
+  ended_at TEXT, end_why TEXT                      -- applied | finished | replaced | another_day
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_review_pass_live ON review_passes((ended_at IS NULL)) WHERE ended_at IS NULL;
+CREATE TABLE IF NOT EXISTS review_pass_items (
+  pass_id INTEGER NOT NULL REFERENCES review_passes(id),
+  key TEXT NOT NULL,                               -- an item key: t:<task id>, s:<evidence id>, g:… (a group)
+  pos REAL NOT NULL,                               -- the order; an arrival placed after the cursor takes a position between two
+  kind TEXT NOT NULL,                              -- task | card | group
+  members_json TEXT,                               -- a group's task ids in order; NULL otherwise
+  added_at TEXT NOT NULL,
+  arrived_at TEXT,                                 -- the first time it was in front (shown or spoken): the offered stamp was written then
+  passed_at TEXT, passes INTEGER NOT NULL DEFAULT 0,   -- left undecided with Next
+  done_batch_id INTEGER,                           -- the Apply that wrote its decision
+  PRIMARY KEY (pass_id, key)
+);
 """
 
 TASK_FIELDS = [

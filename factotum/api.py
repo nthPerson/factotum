@@ -9,6 +9,7 @@
   POST /api/batches/apply {source, changes}   the one write path
   POST /api/batches/{id}/undo
   GET  /api/review?exclude=1,2           one page of the review queue + total, each card's pending evidence, planner suggestions
+  GET  /api/review/pass · /api/review/pass/now · POST /api/review/pass {fresh, device} · POST /api/review/pass/{id}/move {to, key?, from?, device}   Review as a pass: one order, one cursor
   POST /api/review/suggestions/{id}/create   the task a suggestion card describes, as one undoable review batch (evidence judged applied)
   GET  /api/settings · PUT /api/settings  Settings-tab overrides (whitelisted keys), accounts
   GET  /api/push · POST /api/push/subscribe|unsubscribe|test   this device's notifications: the public key, the devices, a test (stage 2)
@@ -42,10 +43,10 @@ from html import escape
 from urllib.parse import urlparse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from .claude import runner as claude_runner
-from . import app_push, batches, by_hand, commands, config as C, filing, lifecycle, oauth, relations, reminders, review_cards, review_decide, review_queue, ripple, search, suggestions, summary, tray
+from . import app_push, batches, by_hand, commands, config as C, filing, lifecycle, oauth, relations, reminders, review_cards, review_decide, review_pass, review_queue, ripple, search, suggestions, summary, tray
 from .db import connect, get_settings, get_task, init_db, now_iso, rows, seed_accounts, set_setting
 
 WEB = Path(__file__).resolve().parent / "web"
@@ -177,6 +178,19 @@ class DecideBody(BaseModel):
     args: dict[str, Any] | None = None
     note: str | None = None              # laid into args
     from_chat: dict[str, Any] | None = None   # {message_id, index}: a decision proposed in the card's conversation
+    device: str | None = None
+
+
+class PassBody(BaseModel):
+    fresh: bool = False                  # end the live pass (`replaced`) and begin a new one
+    device: str | None = None
+
+
+class MoveBody(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    to: str                              # next | back | goto | first | continue | end
+    key: str | None = None               # goto's item
+    from_key: str | None = Field(None, alias="from")   # next / back: the item the client believes is in front
     device: str | None = None
 
 
@@ -647,9 +661,17 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
     def _device(d) -> str | None:
         return d.strip()[:80] if isinstance(d, str) and d.strip() else None
 
-    def _tray_error(status: int, words: str, **more) -> JSONResponse:
+    def _tray_error(status: int, words: str, with_pass: bool = False, **more) -> JSONResponse:
         conn.rollback()                              # nothing half-written stays in the shared transaction
-        return JSONResponse(dict({"detail": words}, **more, tray=tray.read(conn)), status_code=status)
+        out = dict({"detail": words}, **more, tray=tray.read(conn))
+        if with_pass:                                # the decide route: what the pass now is, read after the rollback
+            ecfg = eff_cfg()
+            out["pass"] = review_pass.view(conn, ecfg, review_queue.today(ecfg))
+        return JSONResponse(out, status_code=status)
+
+    def _by(device: str | None) -> str:
+        """A pass's driver label for this page: "page · <device>", or "page"."""
+        return f"page · {device}" if device else "page"
 
     @app.get("/api/tray")
     def tray_read(since: int | None = None):
@@ -714,27 +736,95 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
 
     @app.post("/api/review/decide")
     def review_decide_route(body: DecideBody):
-        """One option on one Review item, staged by the rule (review_decide.stage): {tray, keys, removed, said}.
-        400 refused, 404 gone, 409 answered since, each with the tray beside `detail`."""
+        """One option on one Review item, staged by the rule: {tray, keys, removed, said, pass}. With a live pass of
+        Review's day it goes through the pass (review_pass.decide: a decision on the item in front moves on, `undecide`
+        puts the item in front); without one (a pass from another day is ended `another_day` first) through
+        review_decide.stage, and `pass` is null. 400 refused, 404 gone, 409 answered since, each with the tray and the
+        pass beside `detail`."""
         args = {k: v for k, v in (body.args or {}).items() if k not in review_decide.FROM_CHAT_ARGS}
         if body.note is not None:
             args["note"] = body.note
         ecfg = eff_cfg()
+        today = review_queue.today(ecfg)
+        dev = _device(body.device)
         with commit_lock:
             try:
-                out = review_decide.stage(conn, ecfg, body.key, body.option, args, review_queue.today(ecfg), origin="page",
-                                          device=_device(body.device), from_chat=body.from_chat)
-            except review_decide.Gone as e:
-                return _tray_error(404, str(e))
-            except review_decide.Stale as e:
-                return _tray_error(409, str(e))
+                live = review_pass.live(conn)
+                if live is not None and live["day"] != today.isoformat():
+                    review_pass.end(conn, live["id"], "another_day")
+                    live = None
+                if live is not None:
+                    out = review_pass.decide(conn, ecfg, today, live["id"], body.key, body.option, args=args, from_chat=body.from_chat,
+                                             origin="page", device=dev, by=_by(dev))
+                else:
+                    out = review_decide.stage(conn, ecfg, body.key, body.option, args, today, origin="page", device=dev, from_chat=body.from_chat)
+            except (review_decide.Gone, review_pass.NoPass) as e:
+                return _tray_error(404, str(e), with_pass=True)
+            except (review_decide.Stale, review_pass.Ended) as e:
+                return _tray_error(409, str(e), with_pass=True)
             except ValueError as e:                  # review_decide.Refused, or a row the tray refuses
-                return _tray_error(400, str(e))
+                return _tray_error(400, str(e), with_pass=True)
             except Exception:
                 conn.rollback()
                 raise
             conn.commit()
-            return dict(out, tray=tray.read(conn))
+            return dict(out, tray=tray.read(conn), **{"pass": review_pass.view(conn, ecfg, today)})
+
+    # ---- Review as a pass on the server (spoken Review stage 2a, design §6.1-6.6) ------------------------
+    # The order and one cursor every device moves (review_pass). Every write takes SQLite's write lock first
+    # (db.begin_write, inside commit_lock here) and the routes roll back on any exception they do not answer.
+    @app.get("/api/review/pass")
+    def review_pass_read():
+        """{pass: the View of the live pass of Review's day, or null}. Reads only (a pass from another day reads
+        as null; the next begin ends it). Under commit_lock for one consistent snapshot."""
+        ecfg = eff_cfg()
+        with commit_lock:
+            return {"pass": review_pass.view(conn, ecfg, review_queue.today(ecfg))}
+
+    @app.get("/api/review/pass/now")
+    def review_pass_now():
+        """{pass_id, rev, state, cursor_key, tray_rev, speaking, day}: what a page following the pass compares. Two
+        small reads; no lock (like /api/review/count)."""
+        return review_pass.now(conn)
+
+    @app.post("/api/review/pass")
+    def review_pass_begin(body: PassBody):
+        """Begin a pass, or resume the live one of Review's day: {pass: View}. `fresh` ends the live one first."""
+        ecfg = eff_cfg()
+        with commit_lock:
+            try:
+                v = review_pass.begin_or_resume(conn, ecfg, review_queue.today(ecfg), by=_by(_device(body.device)), fresh=body.fresh)
+            except Exception:
+                conn.rollback()                      # never leave the write lock held on the shared connection
+                raise
+            conn.commit()
+            return {"pass": v}
+
+    @app.post("/api/review/pass/{pass_id}/move")
+    def review_pass_move(pass_id: int, body: MoveBody):
+        """One move (review_pass.move): {moved, why?, came_round?, left?, by?, pass}. `next` and `back` carry `from`, the
+        item the page shows in front; when it is not, {moved: false, why: "moved"} and nothing moves. 404 an unknown
+        pass, 409 a pass that has ended or is from another day (with the live pass of today, or null), 400 a bad move."""
+        ecfg = eff_cfg()
+        today = review_queue.today(ecfg)
+        with commit_lock:
+            try:
+                out = review_pass.move(conn, ecfg, today, pass_id, body.to, key=body.key, from_key=body.from_key, by=_by(_device(body.device)))
+            except review_pass.NoPass as e:
+                conn.rollback()
+                return JSONResponse({"detail": str(e)}, status_code=404)
+            except (review_pass.Ended, ValueError) as e:     # ValueError: review_decide.Refused
+                conn.rollback()
+                return JSONResponse({"detail": str(e), "pass": review_pass.view(conn, ecfg, today)},
+                                    status_code=409 if isinstance(e, review_pass.Ended) else 400)
+            except Exception:
+                conn.rollback()
+                raise
+            if out.get("moved") is False:
+                conn.rollback()                      # a move from a stale item writes nothing
+            else:
+                conn.commit()
+            return dict(out, **{"pass": review_pass.view(conn, ecfg, today)})
 
     @app.get("/api/settings")
     def settings():

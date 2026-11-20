@@ -416,6 +416,17 @@ def test_a_proposal_from_another_tasks_thread_is_refused(conn, cfg, world):
             R.stored_proposal(conn, 1, mid, i)
 
 
+def test_an_applied_proposal_is_refused(conn, cfg, world):
+    """A proposal the server marked applied (a chat create, a followed thread) is never staged again from the reply
+    (stage 1 review, note 5: the connector will send from_chat itself)."""
+    props = [{"op": "done", "task_id": 1, "fields": {}, "label": "done", "evidence": [], "applied": True},
+             {"op": "keep", "task_id": 1, "fields": {}, "label": "keep", "evidence": [], "applied": False}]
+    mid = _reply(conn, "review", 1, props)
+    with pytest.raises(R.Refused, match="applied already"):
+        R.stored_proposal(conn, 1, mid, 0)
+    assert R.stored_proposal(conn, 1, mid, 1)["op"] == "keep"
+
+
 def test_labels_are_the_pages_words():
     assert R.cut60("a" * 60) == "a" * 60 and R.cut60("a" * 61) == "a" * 60 + "…" and R.cut60(None) == ""
     assert R.cut60("😀" * 31) == "😀" * 30 + "…"                                # JavaScript counts UTF-16 units

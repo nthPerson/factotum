@@ -354,6 +354,20 @@ def finishes(rows: list, whole_tray: bool) -> bool:
     return bool(whole_tray) or any((m or {}).get("decides") or (e or {}).get("op") == "judge_evidence" for _, e, m in rows)
 
 
+def _after_apply(conn: sqlite3.Connection, cfg: dict, today: date, decided: set[str], batch_id) -> None:
+    """The live Review pass learns what the batch applied (review_pass.after_apply), inside a savepoint: the batch is
+    committed already, so a failure here lets go of only its own writes and never fails the Apply (its items then read
+    as gone, which is harmless). review_pass imports this module, so it is imported here, lazily."""
+    from . import review_pass
+    begin_write(conn)                              # chat.mark_staged committed: a new write starts here
+    conn.execute("SAVEPOINT after_apply")
+    try:
+        review_pass.after_apply(conn, decided, batch_id, cfg=cfg, today=today)
+    except Exception:
+        conn.execute("ROLLBACK TO after_apply")
+    conn.execute("RELEASE after_apply")
+
+
 def apply(conn: sqlite3.Connection, cfg: dict, today: date, *, keys: list[str] | None = None, seen_rev: int | None = None,
           source: str = "review", finish: bool = False, whole_tray: bool = True, cause: dict | None = None) -> dict:
     """Apply the tray (or `keys` of it) as one batch, then the follow-up writes; commits (design §5.3).
@@ -362,7 +376,8 @@ def apply(conn: sqlite3.Connection, cfg: dict, today: date, *, keys: list[str] |
        two Applies never make one twice). 3. Delete the rows (the count must match, else Stale). 4. Nothing left
        to apply: commit and answer the empty batch. 5. `batches.apply` (it commits, also when everything was
        skipped; on an error its rollback puts the rows back). 6. The follow-ups: chat proposals marked applied, a
-       Slack card's message link, the day marked reviewed when `finish` and `finishes`. 7. The answer:
+       Slack card's message link, the live Review pass told (`review_pass.after_apply`: the items it decided get the
+       batch, and a pass left with nothing undecided ends `applied`), the day marked reviewed when `finish` and `finishes`. 7. The answer:
        batches.apply's, with `skipped` holding every reason, plus `gone`, `cards`, `finished` and `tray`.
     Raises Stale, and ValueError for a row that names no stored chat create."""
     from . import chat                             # lazy: chat pulls in the MCP server and the runner
@@ -411,6 +426,7 @@ def apply(conn: sqlite3.Connection, cfg: dict, today: date, *, keys: list[str] |
                 for p in plan.post:                    # a Slack card's message link: provenance, beside the batch
                     add_link(conn, tid, p["kind"], p["ref"], label=p["label"], account=p["account"])
         made.append({"evidence_id": c["evidence_id"], "task_id": tid, "reopened": bool(s.get("reopened")), "already": already})
+    _after_apply(conn, cfg, today, {m["decides"] for _, _, m in rows if m["decides"]}, res["batch_id"])
     finished = bool(finish and finishes(rows, whole_tray))
     if finished:
         set_setting(conn, "state.last_review_at", today.isoformat())

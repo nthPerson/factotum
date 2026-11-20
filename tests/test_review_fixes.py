@@ -79,7 +79,9 @@ _WRITERS = {("batches", "apply"), ("batches", "undo"), (None, "set_setting"), (N
             ("chat", "create_from_proposal"), ("chat", "mark_staged"), ("by_hand", "add"), ("reminders", "act"), ("reminders", "save_outcome"),
             ("app_push", "keys"), ("app_push", "subscribe"), ("app_push", "unsubscribe"), ("app_push", "send_test"),
             ("summary", "request_refresh"), ("oauth", "arm"), ("oauth", "revoke_client"), ("suggestions", "session"),
-            ("tray", "write"), ("tray", "carry"), ("tray", "apply"), ("review_decide", "stage")}
+            ("tray", "write"), ("tray", "carry"), ("tray", "apply"), ("review_decide", "stage"),
+            ("review_pass", "begin_or_resume"), ("review_pass", "move"), ("review_pass", "decide"), ("review_pass", "regroup"),
+            ("review_pass", "end"), ("review_pass", "after_apply"), ("review_pass", "seen")}
 _DML = ("INSERT", "UPDATE", "DELETE", "REPLACE")
 
 

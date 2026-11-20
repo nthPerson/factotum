@@ -286,6 +286,8 @@ def stored_proposal(conn: sqlite3.Connection, task_id: int, message_id, index) -
         props = []
     if not isinstance(props, list) or index >= len(props) or not isinstance(props[index], dict):
         raise Refused("that reply has no such proposal")
+    if props[index].get("applied"):                        # a chat create or a followed thread the server applied (stage 1 review, note 5)
+        raise Refused("that proposal was applied already")
     return props[index]
 
 
