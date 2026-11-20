@@ -16,12 +16,13 @@ from __future__ import annotations
 
 import json
 import re
+import secrets
 import sqlite3
 from contextlib import contextmanager
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from . import batches, dates, reminders, review_decide, review_pass, review_queue, spoken, tray
-from .db import begin_write
+from .db import begin_write, set_setting
 from .ripple import EMAIL_RE, _web_spans
 
 SPEAK_CAP = 700                  # characters of one spoken string unless a caller says otherwise
@@ -87,9 +88,15 @@ SAID = {
     "not_a_choice": "That isn't one of the choices here: {choices}.", "no_rec": "There's no suggested answer on this one. The choices: {choices}.",
     "say_what": "Say what to do with it: {choices}.",
     "bad_except": "Each exception names one of this group's tasks and keep, done, drop or later.",
-    "not_read": "That's {name}, not looked at yet. Go to it first.",
-    "risky_close": "That one needs a question first, and for now only the screen asks it: {why}. Decide it there, or choose another answer.",
-    "risky_merge": "Merging needs a question first, and for now only the screen asks it. Decide it there, or choose another answer.",
+    "not_read": "That's {name}, not looked at yet.",
+    "ask_again": "That question lapsed or something changed meanwhile, so here it is again.",
+    "is_that_right": "Is that right?", "ex_why": "{Name}: {why}.", "merge_ask": "Merge {gone} into {stays}? {Stays} is the one that stays.",
+    "q_keep": "keep it", "q_done": "mark it done", "q_done_n": "mark {name} done", "q_drop": "drop it", "q_drop_n": "drop {name}",
+    "q_later": "put it off until {day}", "q_create": "create it", "q_dismiss_card": "dismiss it", "q_turned_down": "turn the suggestion down",
+    "q_accept": "take the suggestion", "q_follow": "follow its mail thread", "q_not_about": "say it isn't about this mail",
+    "q_linked": "link it as suggested", "q_not_related": "say they're not related", "q_merged": "merge them", "q_other": "stage that",
+    "q_pin": "pin it to Top", "q_unpin": "take it off Top", "q_longterm": "mark it long-term", "q_not_longterm": "stop marking it long-term",
+    "q_due": "make it due {day}", "q_no_due": "remove its date", "q_remind": "add a reminder {day}",
     "changed": "That changed meanwhile; here it is again.", "settled": "That one's already settled; moving on.",
     "cant": "That can't be staged here: {why}.", "cant_plain": "That can't be staged here.",
     "replaced": "Changed from {old} to {new}.", "replaced_screen": "Changed from {old} on the screen to {new}.",
@@ -634,22 +641,141 @@ def _merges(e: dict, opt: str) -> bool:
     return False
 
 
-def _risk(e: dict, steps: list[str], today: date, member_tasks: dict | None = None, excepts: list | None = None) -> str | None:
-    """The question a step needs before it may be staged (design §7.5), as the sentence refusing it until the confirm
-    round trip exists: a close of a task `review_queue.risky_close` names a reason for, or any merge."""
-    for st in steps:
+# --- the question before a risky step (design §7.5) ---------------------------------------------------------
+
+CONFIRM_KEY = "state.review.confirm"     # the one outstanding question: a settings row (design §15 call 18)
+CONFIRM_S = 600                          # a yes counts for ten minutes
+
+
+def _canon(x) -> str:
+    return json.dumps(x, sort_keys=True, default=str, separators=(",", ":"))
+
+
+def _confirm_ask(w, what: str, **bound) -> str:
+    """Ask one question: a new single-use token bound to `what` and the arguments it is about (and the tray's revision,
+    which the caller passes), replacing any question asked before. Writes one settings row; no commit."""
+    token = secrets.token_urlsafe(12)
+    set_setting(w, CONFIRM_KEY, dict(bound, token=token, what=what, at=datetime.now(timezone.utc).isoformat(timespec="seconds")))
+    return token
+
+
+def _confirm_take(w, token, what: str, **bound) -> bool:
+    """Whether `token` is the outstanding question's, about `what` and the same arguments, asked under CONFIRM_S ago:
+    then it is used up (the row deleted) and True. Anything else is False and leaves the row as it is. No commit."""
+    if not isinstance(token, str) or not token:
+        return False
+    r = w.execute("SELECT value_json FROM settings WHERE key = ?", (CONFIRM_KEY,)).fetchone()
+    try:
+        q = json.loads(r[0]) if r else None
+    except ValueError:
+        q = None
+    if not isinstance(q, dict) or not secrets.compare_digest(str(q.get("token") or ""), token) or q.get("what") != what:
+        return False
+    try:
+        at = datetime.fromisoformat(str(q.get("at")).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=timezone.utc)
+    if not 0 <= (datetime.now(timezone.utc) - at).total_seconds() < CONFIRM_S:
+        return False
+    if _canon({k: q.get(k) for k in bound}) != _canon(bound) or set(q) - set(bound) - {"token", "what", "at"}:
+        return False
+    w.execute("DELETE FROM settings WHERE key = ?", (CONFIRM_KEY,))
+    return True
+
+
+def _names_of(e: dict) -> dict:
+    """{task id: its short name} for the item's own task and the other ends of its suggested links."""
+    it = e.get("item") or {}
+    out = {}
+    t = it.get("task") or {}
+    if t.get("id") is not None:
+        out[t["id"]] = t.get("name")
+    for s_ in it.get("link_suggestions") or []:
+        out.setdefault(s_.get("other"), s_.get("other_name"))
+    return {k: speakable(spoken.short(v), 120) or SAID["this_one"] for k, v in out.items()}
+
+
+def _merge_ask(w, cfg, e: dict, opt: str, today: date) -> str:
+    """The question before a merge, naming which task stays (the rule's survivor for this suggestion)."""
+    item = review_decide.load_item(w, cfg, today, e["key"])
+    p = review_decide.plan(w, cfg, item, opt, {}, tray.read(w), today)
+    names = _names_of(e)
+    for _, ent, _ in p.puts:
+        if ent.get("op") == "merge":
+            gone, stays = names.get(ent.get("task_id")), names.get((ent.get("fields") or {}).get("into"))
+            if gone and stays:
+                return SAID["merge_ask"].format(gone=gone, stays=stays, Stays=spoken._cap(stays))
+    return spoken._cap(SAID["q_merged"]) + "?"
+
+
+def _q_step(e: dict, step: str, args: dict, today: date, name: str | None) -> str:
+    """One step as a question's phrase: "mark it done", "put it off until Friday, November twentieth"; a close names
+    the task when `name` is given."""
+    nm, _, rest = step.partition(":")
+    if nm in ("done", "drop"):
+        return SAID[f"q_{nm}_n"].format(name=name) if name else SAID[f"q_{nm}"]
+    if nm == "keep":
+        return SAID["q_keep"]
+    if nm == "later":
+        return SAID["q_later"].format(day=day_said(args.get("until"), today))
+    if nm == "create":
+        return SAID["q_create"]
+    if nm == "dismiss":
+        return SAID["q_turned_down"] if rest else SAID["q_dismiss_card"]
+    if nm == "accept" and rest.isdigit():
+        ch = (_evidence(e, int(rest)) or {}).get("change") or {}
+        if ch.get("op") in ("done", "drop"):
+            return _q_step(e, ch["op"], {}, today, name)
+        return SAID["q_accept"]
+    return SAID.get({"follow": "q_follow", "not_about": "q_not_about", "link": "q_linked", "step": "q_linked", "waits": "q_linked",
+                     "not_related": "q_not_related", "merge": "q_merged", "same": "q_merged"}.get(nm, "q_other"))
+
+
+def _q_extra(opt: str, a: dict, today: date) -> str:
+    if opt in ("pin", "longterm"):
+        return SAID[{("pin", True): "q_pin", ("pin", False): "q_unpin", ("longterm", True): "q_longterm", ("longterm", False): "q_not_longterm"}[(opt, bool(a.get("on")))]]
+    if opt == "due":
+        return SAID["q_due"].format(day=day_said(a.get("due"), today)) if a.get("due") else SAID["q_no_due"]
+    return SAID["q_remind"].format(day=_remind_words(a.get("fire_at"), today))
+
+
+def _ask(w, cfg, e: dict, decision, steps: list[str] | None, dargs: dict, excepts: list, bes: list, unread: bool, today: date,
+         member_tasks: dict) -> str | None:
+    """The question this decision needs before it may be staged (design §7.5), or None: the item was never in front
+    in this pass (read it back first); a step closes a task `review_queue.risky_close` gives a reason for (done, drop,
+    an accepted done or drop proposal, inside `rec` too, or an exception of Keep all); any merge."""
+    why = merge = ex_why = None
+    for st in steps or []:
         if _merges(e, st):
-            return SAID["risky_merge"]
-        if _closes(e, st):
+            merge = merge or _merge_ask(w, cfg, e, st, today)
+        elif _closes(e, st) and why is None:
             why = review_queue.risky_close((e.get("item") or {}).get("task") or {}, today)
-            if why:
-                return SAID["risky_close"].format(why=why)
     for x in excepts or []:
-        if x["option"] in ("done", "drop"):
-            why = review_queue.risky_close((member_tasks or {}).get(x["key"]) or {}, today)
-            if why:
-                return SAID["risky_close"].format(why=why)
-    return None
+        if x["option"] in ("done", "drop") and ex_why is None:
+            r = review_queue.risky_close((member_tasks or {}).get(x["key"]) or {}, today)
+            if r:
+                nm = next((m.get("task") or {}).get("name") for m in (e.get("item") or {}).get("members") or [] if m.get("key") == x["key"])
+                ex_why = SAID["ex_why"].format(Name=spoken._cap(speakable(spoken.short(nm), 120) or SAID["this_one"]), why=r)
+    if not (unread or why or merge or ex_why):
+        return None
+    name = _name(e)
+    group = decision == "keep_all" or (decision == "rec" and e.get("kind") == "group")
+    if merge:
+        q = merge
+    elif decision == "rec":
+        q = speakable(((e.get("spoken") or {}).get("question")) or "", today=today) or SAID["is_that_right"]
+    elif group:
+        und = [m.get("key") for m in (e.get("item") or {}).get("members") or [] if m.get("state") in review_pass.UNDECIDED]
+        q = f"{_keep_all_said(e, excepts, und, today)} {SAID['is_that_right']}"
+    else:
+        named = None if unread else name
+        ps = [_q_extra(opt, a, today) for opt, a, _ in bes] + [_q_step(e, st, dargs, today, named) for st in steps or []]
+        q = spoken._cap(", and ".join(p for p in ps if p) or SAID["q_other"]) + "?"
+    parts = [SAID["not_read"].format(name=name) if unread else None, q,
+             spoken._cap(why) + "." if why and not merge else None, ex_why]
+    return " ".join(p for p in parts if p)
 
 
 def _phrases_join(ps: list[str]) -> str:
@@ -745,8 +871,7 @@ def decide(ctx, args: dict) -> dict:
             _seen(w, ctx, v2, v2.get("current"))
             return _with_data({"status": "settled", "say": _join(SAID["settled"], place["say"]), "next": place["item"], "elsewhere": None, "mode": _mode(ctx)})
         e = review_pass.entry(w, ctx.cfg, today, ref)
-        if not _arrived(w, v["id"], item_key):
-            raise _fail(SAID["not_read"].format(name=_name(e)))
+        unread = not _arrived(w, v["id"], item_key)            # never in front in this pass: read back and asked first
         offered = [o.get("id") for o in e.get("options") or [] if o.get("id") not in NOT_OFFERED]
         if decision is None and not extras:
             raise _fail(SAID["say_what"].format(choices=_choices(e)))
@@ -775,15 +900,18 @@ def decide(ctx, args: dict) -> dict:
                     one["note"] = xn
                 excepts.append(one)
             dargs["except"] = excepts
-        steps: list[str] = [decision] if decision and decision not in ("rec", "keep_all") else []
+        steps: list[str] | None = [decision] if decision and decision not in ("rec", "keep_all") else []
         if decision == "rec":
             said = review_pass.said_by(review_pass.live(w), ctx.source).get(item_key if member is None else ref)
-            if not said:
+            if said:
+                steps = list(said.get("steps") or [])
+                dargs["steps"] = steps
+                if said.get("members") is not None:
+                    dargs["members"] = list(said["members"])
+            elif unread:
+                steps = list(((e.get("recommendation") or {}).get("steps")) or [])     # for the question; the yes stages what the read-back said
+            else:
                 return _reread(w, ctx, today, ref, SAID["changed"], "changed")
-            steps = list(said.get("steps") or [])
-            dargs["steps"] = steps
-            if said.get("members") is not None:
-                dargs["members"] = list(said["members"])
         bes: list[tuple[str, dict, str]] = []
         for k, val in extras:
             if k in ("pin", "longterm"):
@@ -800,12 +928,18 @@ def decide(ctx, args: dict) -> dict:
                 except (ValueError, TypeError):
                     raise _fail(SAID["bad_remind"]) from None
                 bes.append(("remind", {"fire_at": f["fire_at"]}, SAID["s_remind"].format(day=_remind_words(f["fire_at"], today))))
-        if decision == "keep_all" or (decision == "rec" and e.get("kind") == "group"):
-            risk = _risk(e, [], today, member_tasks, excepts)
-        else:
-            risk = _risk(e, steps, today)
-        if risk:
-            raise _fail(risk)
+        group = decision == "keep_all" or (decision == "rec" and e.get("kind") == "group")
+        ask = _ask(w, ctx.cfg, e, decision, [] if group else steps, dargs, excepts, bes, unread, today, member_tasks)
+        if ask:
+            bound = {"pass": v["id"], "ref": ref, "decision": decision, "until": dargs.get("until"), "except": excepts,
+                     "extras": [[o, a] for o, a, _ in bes], "tray_rev": tray.rev(w)}
+            given = args.get("confirm")
+            if not _confirm_take(w, given, "decide", **bound):
+                token = _confirm_ask(w, "decide", **bound)
+                if unread:
+                    _seen(w, ctx, v, e)                         # read back: a yes to its question is the answer said here
+                return _with_data({"status": "confirm", "say": SAID["ask_again"] if given else None, "ask": ask, "confirm": token,
+                                   "item": item_out(e, v, today) if unread else None, "elsewhere": None, "mode": _mode(ctx)})
         old = (e.get("staged") or {}).get("decision") if e.get("state") == "decided" and e.get("kind") != "group" else None
         old_words = _decided_words(e, today) if old else None
         old_origin = next((m.get("origin") for k, _, m in tray.read(w)["entries"] if m.get("decides") == ref and k in (old or {}).get("keys", [])), None)
@@ -928,7 +1062,9 @@ DESC = {
                      "to the item's question; keep_all on a group, with `except` for the tasks decided otherwise). For later pass "
                      "`day` in the owner's own words. `note` is only the owner's own words. pin, longterm, due and remind_at stand "
                      "beside a decision and leave the item open when given alone. Nothing is applied: say the answer's `said`, then "
-                     "read `next`. When the answer's status is changed or settled, say its `say` and read the item it gives. " + DATA,
+                     "read `next`. When the answer's status is changed or settled, say its `say` and read the item it gives. When it is "
+                     "confirm, nothing is staged yet: ask its `ask` as written and wait; only on a clear yes call again with the "
+                     "same arguments and `confirm` set to its token (never on silence, never on your own). " + DATA,
     "review_undo": "Take back a staged decision: the item `ref` names, or without ref the newest decision in this review, whoever made "
                    "it. The item comes back in front, undecided. An applied decision is undone in Factotum's History, not here. " + DATA,
     "review_status": "How the review stands: how many are left and about how long, how many were passed over, what is staged. With "
@@ -958,7 +1094,8 @@ PROPS = {
                                                            "day": {"type": "string"}, "note": {"type": "string"}}}},
                        "pin": {"type": "boolean"}, "longterm": {"type": "boolean"},
                        "due": {"type": "string", "description": "also move its due date: a day as for `day`, or 'none'"},
-                       "remind_at": {"type": "string", "description": "also a reminder: YYYY-MM-DDTHH:MM in the owner's time"}}, ["ref"]),
+                       "remind_at": {"type": "string", "description": "also a reminder: YYYY-MM-DDTHH:MM in the owner's time"},
+                       "confirm": {"type": "string", "description": "only the token a 'confirm' answer gave, after the owner said yes to its `ask`"}}, ["ref"]),
     "review_undo": ({"ref": {"type": "string", "description": "the item whose decision to take back; leave it out for the newest"}}, []),
 }
 

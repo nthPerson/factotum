@@ -450,6 +450,7 @@ def _session(cfg, db):
     """A scripted walk through every tool; every answer."""
     ctx = ctx_for(db, cfg)
     out = [ok(ctx, "review_start")]
+    out.append(ok(ctx, "review_decide", {"ref": "t:1", "decision": "done"}))           # unspoken and risky: a question with the read-back
     out.append(ok(ctx, "review_decide", {"ref": "t:5", "decision": "rec"}))
     out.append(ok(ctx, "review_decide", {"ref": "t:1", "decision": "rec"}))
     out.append(ok(ctx, "review_undo", {}))
@@ -640,37 +641,151 @@ def test_a_ref_outside_the_pass_is_refused_without_a_number(cfg, db):
     assert entries(db) == []
 
 
-def test_a_risky_close_or_a_merge_is_refused_until_the_question_exists(cfg, db):
-    """Until the confirm round trip (commit 5) a close of a task risky_close names and any merge are never staged by
-    speech: they are refused with the reason, and nothing reaches the tray."""
+def _merge_world(db):
     c = connect(db)
     mk(c, 20, name="Book the lab bench")
     mk(c, 21, name="Reserve the lab bench")
     sm = relations.suggest(c, "same_as", 20, 21, "two names for one thing", "planner")
     c.commit()
+    c.close()
+    return sm
+
+
+def _confirm_row(db):
+    c = connect(db)
+    try:
+        r = c.execute("SELECT value_json FROM settings WHERE key = 'state.review.confirm'").fetchone()
+        return json.loads(r[0]) if r else None
+    finally:
+        c.close()
+
+
+def test_a_risky_close_asks_first_and_stages_only_with_its_token(cfg, db, monkeypatch):
+    """A close of a task review_queue.risky_close names a reason for is a question first (design §7.5): the first call
+    answers status confirm with the question and a single-use token and stages nothing; the yes is the same call with
+    the token. A wrong token, other arguments, a used token, a tray changed in between or ten minutes asks again and
+    stages nothing."""
+    from factotum import review_decide
     ctx = ctx_for(db, cfg)
     ok(ctx, "review_start")
     at(ctx, "t:1")
-    msg = refused(ctx, "review_decide", {"ref": "t:1", "decision": "done"})
-    assert msg.startswith("That one needs a question first") and "firm date is within two days" in msg
+    a = ok(ctx, "review_decide", {"ref": "t:1", "decision": "done", "note": "booked it"})
+    assert a["status"] == "confirm" and a["ask"] == "Mark Prepare and rehearse the funding pitch done? Its firm date is within two days."
+    tok = a["confirm"]
+    assert isinstance(tok, str) and len(tok) >= 8 and entries(db) == []
+    row = _confirm_row(db)
+    assert row["token"] == tok and row["what"] == "decide" and row["ref"] == "t:1" and row["decision"] == "done"
+    # a wrong token: asked again, a new token
+    b = ok(ctx, "review_decide", {"ref": "t:1", "decision": "done", "confirm": "not-the-token"})
+    assert b["status"] == "confirm" and b["confirm"] != tok and b["say"] == RM.SAID["ask_again"] and entries(db) == []
+    tok = b["confirm"]
+    # other arguments with the token: asked again
+    c_ = ok(ctx, "review_decide", {"ref": "t:1", "decision": "drop", "confirm": tok})
+    assert c_["status"] == "confirm" and c_["ask"].startswith("Drop Prepare and rehearse the funding pitch?") and entries(db) == []
+    tok = c_["confirm"]
+    # the tray changed in between (the screen staged something): asked again
+    c = connect(db)
+    review_decide.stage(c, cfg, "t:9", "keep", {}, D, origin="page")
+    c.commit()
+    d = ok(ctx, "review_decide", {"ref": "t:1", "decision": "drop", "confirm": tok})
+    assert d["status"] == "confirm" and {k for k, *_ in entries(db)} == {"9"}
+    tok = d["confirm"]
+    # ten minutes: asked again
+    row = _confirm_row(db)
+    row["at"] = "2026-01-01T00:00:00+00:00"
+    c.execute("UPDATE settings SET value_json = ? WHERE key = 'state.review.confirm'", (json.dumps(row),))
+    c.commit()
+    e = ok(ctx, "review_decide", {"ref": "t:1", "decision": "drop", "confirm": tok})
+    assert e["status"] == "confirm" and {k for k, *_ in entries(db)} == {"9"}
+    # the yes: staged, the note kept, the token used up
+    f = ok(ctx, "review_decide", {"ref": "t:1", "decision": "drop", "confirm": e["confirm"], "note": "not needed"})
+    assert f["status"] == "staged" and f["said"] == "Dropped." and dict((k, x["op"]) for k, x, _, _ in entries(db))["1"] == "drop"
+    assert _confirm_row(db) is None
+    c.close()
+
+
+def test_a_confirm_token_is_used_once(cfg, db):
+    ctx = ctx_for(db, cfg)
+    ok(ctx, "review_start")
+    w = connect(db)
+    tok = RM._confirm_ask(w, "decide", ref="t:1", decision="done", tray_rev=0)
+    w.commit()
+    assert RM._confirm_take(w, tok, "decide", ref="t:1", decision="done", tray_rev=0) is True
+    w.commit()
+    assert RM._confirm_take(w, tok, "decide", ref="t:1", decision="done", tray_rev=0) is False
+    tok = RM._confirm_ask(w, "decide", ref="t:1", decision="done", tray_rev=0)
+    tok2 = RM._confirm_ask(w, "decide", ref="t:5", decision="drop", tray_rev=0)          # a new question replaces the old
+    assert RM._confirm_take(w, tok, "decide", ref="t:1", decision="done", tray_rev=0) is False
+    assert RM._confirm_take(w, tok2, "apply", ref="t:5", decision="drop", tray_rev=0) is False     # another kind of question
+    w.close()
+
+
+def test_closing_a_goal_with_open_steps_and_a_merge_always_ask(cfg, db):
+    sm = _merge_world(db)
+    ctx = ctx_for(db, cfg)
+    ok(ctx, "review_start")
     at(ctx, "t:7")
-    assert "it has open steps" in refused(ctx, "review_decide", {"ref": "t:7", "decision": "drop"})
+    a = ok(ctx, "review_decide", {"ref": "t:7", "decision": "drop"})
+    assert a["status"] == "confirm" and a["ask"] == "Drop Write the conference paper? It has open steps."
     at(ctx, "t:20")
-    assert refused(ctx, "review_decide", {"ref": "t:20", "decision": f"merge:{sm}"}).startswith("Merging needs a question first")
+    m = ok(ctx, "review_decide", {"ref": "t:20", "decision": f"merge:{sm}"})
+    assert m["status"] == "confirm" and entries(db) == []
+    assert re.fullmatch(r"Merge (Book|Reserve) the lab bench into (Book|Reserve) the lab bench\? \2 the lab bench is the one that stays\.", m["ask"]), m["ask"]
     assert refused(ctx, "review_decide", {"ref": "t:20", "decision": f"link:{sm}"}).startswith("That isn't one of the choices here")
-    assert entries(db) == []
+    y = ok(ctx, "review_decide", {"ref": "t:20", "decision": f"merge:{sm}", "confirm": m["confirm"]})
+    assert y["status"] == "staged" and [e["op"] for _, e, _, _ in entries(db) if e["op"] == "merge"] == ["merge"]
+    ok(ctx, "review_undo", {"ref": "t:20"})
+    at(ctx, "t:20")
     assert ok(ctx, "review_decide", {"ref": "t:20", "decision": f"not_related:{sm}"})["status"] == "staged"
 
 
-def test_a_decision_on_an_item_not_yet_read_out_is_refused_for_now(cfg, db):
+def test_a_risky_close_inside_an_exception_asks_first(cfg, db):
+    c = connect(db)
+    mk(c, 22, name="Sketch the colour states")
+    link(c, 22, 3, "part_of")                                        # an open step: closing it deserves a question
+    _quiet(c, 22)
+    c.close()
     ctx = ctx_for(db, cfg)
     ok(ctx, "review_start")
-    msg = refused(ctx, "review_decide", {"ref": "s:5", "decision": "dismiss"})
-    assert msg == "That's Go to the dentist, not looked at yet. Go to it first."
-    assert refused(ctx, "review_decide", {"ref": "t:9", "pin": True}).startswith("That's Car sounds SOPs, not looked at yet")
-    assert entries(db) == []
+    at(ctx, "g:rec:of_aaa")
+    args = {"ref": "g:rec:of_aaa", "decision": "keep_all", "except": [{"ref": "t:3", "decision": "drop"}]}
+    a = ok(ctx, "review_decide", args)
+    assert a["status"] == "confirm" and entries(db) == []
+    assert a["ask"] == "Two kept; revise the billboard colour logic dropped. Is that right? Revise the billboard colour logic: it has open steps."
+    r = ok(ctx, "review_decide", dict(args, confirm=a["confirm"]))
+    assert r["status"] == "staged" and {k: e["op"] for k, e, _, _ in entries(db)} == {"2": "keep", "3": "drop", "4": "keep"}
+
+
+def test_a_decision_on_an_item_not_yet_spoken_reads_it_back_first(cfg, db):
+    """A decision on an item never in front in this pass is a question first, with the item read back (design §7.5):
+    nothing is staged, the item is not stamped offered, and the yes stages it where it is, the cursor left alone."""
+    ctx = ctx_for(db, cfg)
+    ok(ctx, "review_start")
+    a = ok(ctx, "review_decide", {"ref": "s:5", "decision": "dismiss"})
+    assert a["status"] == "confirm" and a["ask"] == "That's Go to the dentist, not looked at yet. Dismiss it?"
+    assert a["item"]["ref"] == "s:5" and a["item"]["say"] and entries(db) == []
+    p = ok(ctx, "review_decide", {"ref": "t:9", "pin": True})
+    assert p["status"] == "confirm" and p["ask"] == "That's Car sounds SOPs, not looked at yet. Pin it to Top?"
+    c = connect(db)
+    assert get_task(c, 9)["last_offered_at"] is None
+    r = ok(ctx, "review_decide", {"ref": "t:9", "pin": True, "confirm": p["confirm"]})
+    assert r["status"] == "staged" and r["back_to"]["ref"] == "t:5" and page_view(db, cfg)["cursor_key"] == "t:5"
+    assert get_task(c, 9)["last_offered_at"] is None
+    q = ok(ctx, "review_decide", {"ref": "t:9", "decision": "drop"})                 # unspoken and a close: one question
+    assert q["status"] == "confirm" and q["ask"] == "That's Car sounds SOPs, not looked at yet. Drop it?"
     at(ctx, "s:5")
     assert ok(ctx, "review_decide", {"ref": "s:5", "decision": "dismiss"})["said"] == "Dismissed."
+    c.close()
+
+
+def test_a_yes_to_an_unspoken_items_question_is_its_suggested_answer_as_read_back(cfg, db):
+    ctx = ctx_for(db, cfg)
+    ok(ctx, "review_start")
+    a = ok(ctx, "review_decide", {"ref": "t:1", "decision": "rec"})
+    assert a["status"] == "confirm" and a["ask"].startswith("That's Prepare and rehearse the funding pitch, not looked at yet. ")
+    assert a["ask"].endswith("?") and a["item"]["ref"] == "t:1"
+    r = ok(ctx, "review_decide", {"ref": "t:1", "decision": "rec", "confirm": a["confirm"]})
+    assert r["status"] == "staged" and r["said"] == "Due tomorrow at 2 PM, and kept."
 
 
 def test_keep_all_except_stages_each_member(cfg, db):
