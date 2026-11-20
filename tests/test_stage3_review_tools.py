@@ -5,7 +5,7 @@ day is resolved in Python (`dates.resolve_spoken`)."""
 import copy
 import json
 import re
-from datetime import date
+from datetime import date, datetime
 
 import pytest
 
@@ -22,6 +22,7 @@ MACHINE = date(2026, 11, 20)             # the machine's day, which Review never
 @pytest.fixture(autouse=True)
 def _reviews_day(monkeypatch):
     monkeypatch.setattr(review_queue, "today", lambda cfg: D)
+    monkeypatch.setattr(RM, "_local_now", lambda cfg: datetime(2026, 11, 19, 8, 30))      # the owner's clock on Review's day
 
 
 # --- commit 1: a spoken day, what may be spoken, a day for a confirmation ------------------------------------
@@ -40,8 +41,26 @@ def test_resolve_spoken_reads_the_days_a_person_says(said, want):
     assert dates.resolve_spoken(said, D) == date.fromisoformat(want)
 
 
+def test_next_and_this_weekday_mean_what_most_speakers_mean():
+    """Review of stage 3 (finding 3): "next <weekday>" is that weekday of next week, the same day as "<weekday> next week"
+    (resolve_when reads it as the one after the coming one: on a Friday "next tuesday" was December 1st while "tuesday"
+    was November 24th), and "this <weekday>" said on that weekday is today, which Later refuses. resolve_when is untouched."""
+    fri = date(2026, 11, 20)
+    for wd in ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"):
+        assert dates.resolve_spoken(f"next {wd}", fri) == dates.resolve_spoken(f"{wd} next week", fri), wd
+    assert dates.resolve_spoken("next tuesday", fri) == date(2026, 11, 24)
+    assert dates.resolve_spoken("next wednesday", fri) == date(2026, 11, 25)
+    assert dates.resolve_spoken("next friday", fri) == date(2026, 11, 27)
+    assert dates.resolve_spoken("this friday", fri) == fri
+    assert dates.resolve_spoken("this coming tuesday", fri) == date(2026, 11, 24)
+    assert dates.resolve_spoken("this tuesday", date(2026, 11, 24)) == date(2026, 11, 24)
+    assert dates.resolve_when("next tuesday", fri) == date(2026, 12, 1)               # the add line's reading, unchanged
+    with pytest.raises(M.ToolError, match="after today"):
+        RM.resolve_day("this friday", fri)
+
+
 @pytest.mark.parametrize("said", ["whenever", "someday", "sunshine", "novel 6", "in fifteen days", "2026-02-30", "nov 31", "the fortieth",
-                                  "", "   ", "later", "soon", "next", None, 7, "in a while"])
+                                  "", "   ", "later", "soon", "next", None, 7, "in a while", "next sunshine"])
 def test_resolve_spoken_gives_none_for_what_is_not_clear(said):
     assert dates.resolve_spoken(said, D) is None
 
@@ -820,6 +839,21 @@ def test_extras_are_staged_beside_and_leave_the_item_undecided(cfg, db):
     assert refused(ctx, "review_decide", {"ref": "t:5", "remind_at": "soon"}) == "I couldn't tell when to remind; say a day and a time."
     at(ctx, "s:5")
     assert refused(ctx, "review_decide", {"ref": "s:5", "pin": True}) == "That only works on a task."
+
+
+def test_a_reminder_is_a_day_and_a_time_ahead_in_the_owners_zone(cfg, db):
+    """Review of stage 3 (finding 4): remind_at took any ISO value, so a misheard year staged a reminder that fired at
+    once after the Apply, and a bare date a push at midnight. It is now YYYY-MM-DDTHH:MM with no offset, after the
+    owner's now and within a year; anything else is one sentence and nothing is staged."""
+    ctx = ctx_for(db, cfg)
+    ok(ctx, "review_start")
+    for bad in ("2020-01-01T09:00", "2026-11-19T08:00", "2026-11-21", "2026-11-21T09:00+02:00", "2026-11-21T09:00Z",
+                "2027-12-01T09:00", "2026-11-21 09:00:00.5", "tomorrow at 9", 7):
+        assert refused(ctx, "review_decide", {"ref": "t:5", "decision": "keep", "remind_at": bad}) == RM.SAID["bad_remind"], bad
+    assert entries(db) == []
+    r = ok(ctx, "review_decide", {"ref": "t:5", "remind_at": "2026-11-19T17:30"})
+    assert r["said"].startswith("A reminder Thursday, November nineteenth at 5:30 PM")
+    assert {k: e["fields"]["fire_at"] for k, e, _, _ in entries(db)} == {"5:r": "2026-11-19T17:30"}
 
 
 def test_undo_takes_back_the_last_decision_and_returns_to_it(cfg, db):

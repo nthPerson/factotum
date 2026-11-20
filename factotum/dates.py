@@ -196,9 +196,14 @@ def resolve_spoken(text, today: date) -> date | None:
         return None
     t = re.sub(r"\s+", " ", text.strip().lower()[:80]).strip(" .,!?;:'\"")
     t = _LEAD.sub("", t)
-    t = re.sub(r"^this (?=[a-z]+$)", "", t) if re.fullmatch(r"this [a-z]+", t) and t[5:] in _WEEKDAY_WORDS else t
     if not t:
         return None
+    m = re.fullmatch(r"(next|this|coming|this coming) ([a-z]+)", t)
+    if m and m.group(2) in _WEEKDAY_WORDS:                  # review 2026-11-20: "next tuesday" is Tuesday of next week, as
+        wd = WEEKDAYS.index(m.group(2)[:3])                 # "tuesday next week" is (resolve_when reads it as the one after
+        if m.group(1) == "next":                            # the coming one); "this tuesday" said on a Tuesday is today
+            return today + timedelta(days=7 - today.weekday() + wd)
+        return today + timedelta(days=(wd - today.weekday()) % 7)
     if _when_reads(t):
         try:
             d = resolve_when(t, today)

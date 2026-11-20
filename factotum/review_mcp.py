@@ -539,7 +539,7 @@ def start(ctx, args: dict) -> dict:
         else:
             say = place["say"]
         _seen(w, ctx, v, v.get("current"))
-    now = reminders.local_now(ctx.cfg)
+    now = _local_now(ctx.cfg)
     return _with_data({"say": say, "resumed": resumed, "today": {"date": today.isoformat(), "said": day_said(today, today), "time": now.strftime("%H:%M")},
                        "mode": "apply" if ctx.may_apply() else "stage", "waiting": waiting, "guide": GUIDE, "item": place["item"], "elsewhere": els,
                        "checkpoint": place["checkpoint"], "done": place["done"]})
@@ -687,6 +687,31 @@ def _due_day(text, today: date) -> date | None:
     if d > today + timedelta(days=366):
         raise _fail(SAID["too_far"])
     return d
+
+
+_REMIND_AT = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}")
+
+
+def _local_now(cfg) -> datetime:
+    """The owner's clock, naive (as a reminder's fire_at is stored)."""
+    return reminders.local_now(cfg)
+
+
+def _remind_at(val, cfg) -> str:
+    """A reminder's time as the owner said it, YYYY-MM-DDTHH:MM in the owner's zone with no offset, after now and within a
+    year (review 2026-11-20: a misheard year staged a reminder that fired as soon as it was applied, a bare date a push at
+    midnight); else a ToolError with one sentence."""
+    if not isinstance(val, str) or not _REMIND_AT.fullmatch(val.strip()):
+        raise _fail(SAID["bad_remind"])
+    try:
+        t = datetime.fromisoformat(val.strip())
+        batches._reminder_fields({"fields": {"fire_at": val.strip()}})
+    except (ValueError, TypeError):
+        raise _fail(SAID["bad_remind"]) from None
+    now = _local_now(cfg)
+    if not now < t <= now + timedelta(days=366):
+        raise _fail(SAID["bad_remind"])
+    return t.isoformat(timespec="minutes")
 
 
 def _locate(v: dict, ref) -> tuple[str, dict, dict | None] | None:
@@ -1027,10 +1052,7 @@ def decide(ctx, args: dict) -> dict:
                 d = _due_day(val, today)
                 bes.append(("due", {"due": d.isoformat() if d else None}, SAID["s_due"].format(day=day_said(d, today)) if d else SAID["s_no_due"]))
             else:
-                try:
-                    f = batches._reminder_fields({"fields": {"fire_at": val}})
-                except (ValueError, TypeError):
-                    raise _fail(SAID["bad_remind"]) from None
+                f = {"fire_at": _remind_at(val, ctx.cfg)}
                 bes.append(("remind", {"fire_at": f["fire_at"]}, SAID["s_remind"].format(day=_remind_words(f["fire_at"], today))))
         group = decision == "keep_all" or (decision == "rec" and e.get("kind") == "group")
         ask = _ask(w, ctx.cfg, e, decision, [] if group else steps, dargs, excepts, bes, unread, today, member_tasks)
@@ -1306,7 +1328,7 @@ PROPS = {
                                                            "day": {"type": "string"}, "note": {"type": "string"}}}},
                        "pin": {"type": "boolean"}, "longterm": {"type": "boolean"},
                        "due": {"type": "string", "description": "also move its due date: a day as for `day`, or 'none'"},
-                       "remind_at": {"type": "string", "description": "also a reminder: YYYY-MM-DDTHH:MM in the owner's time"},
+                       "remind_at": {"type": "string", "description": "also a reminder: YYYY-MM-DDTHH:MM in the owner's time, after now (review_start gives the date and time) and within a year"},
                        "confirm": {"type": "string", "description": "only the token a 'confirm' answer gave, after the owner said yes to its `ask`"}}, ["ref"]),
     "review_apply": ({"confirm": {"type": "string", "description": "only the token the first call gave, after the owner said yes to its `ask`"}}, []),
     "review_undo": ({"ref": {"type": "string", "description": "the item whose decision to take back; leave it out for the newest"}}, []),
