@@ -1339,9 +1339,11 @@ screen.
   replaces the old. A token cannot stop a model that calls twice without asking; it guarantees the
   question reached the model. Staging is undone with one word and nothing reaches a task before Apply.
 - **Apply** exists only in apply mode, always reads back first, is `destructiveHint` so claude.ai can ask
-  too, and is bound to the tray revision. It is not counted against `server.mcp_apply_hourly_cap`: what
-  it applies was built by Python or staged by the owner, and read back. Its batch is `review`, so
-  `known_recipients` is unaffected.
+  too, and is bound to the tray revision. *Changed 2026-11-20 after a security review of the build, with
+  the owner's agreement:* its rows count toward `server.mcp_apply_hourly_cap` with `apply_changes`', and an
+  address it put on a task is not in `known_recipients` when the tray held a row a skill or connector
+  staged; nobody taps Apply on a spoken Apply either. (This draft had it outside the cap and
+  `known_recipients` unaffected.)
 - **Injection.** Tool answers are data and say so. What strangers wrote is quoted and capped by
   `spoken`, flagged in `review_more`'s `from_others`, and whatever it says, the power is bounded by the
   three points above.
@@ -1517,7 +1519,10 @@ with confirm"; a planner card. `review_queue.today` pinned to Thursday 2026-11-1
 - `test_the_apply_read_back_says_what_is_not_a_decision_and_what_still_waits`
 - `test_the_apply_token_dies_when_the_tray_changes`
 - `test_a_spoken_apply_and_a_page_apply_at_once_apply_each_row_once` (two connections)
-- `test_a_review_apply_is_not_a_direct_write` (`known_recipients` and the hourly count unchanged)
+- `test_an_address_a_spoken_apply_put_on_a_task_is_not_a_known_recipient`,
+  `test_an_address_stays_known_when_the_owner_tapped_apply_or_staged_every_row_on_the_screen`,
+  `test_a_spoken_apply_counts_toward_the_hourly_cap_of_direct_changes` (they replace
+  `test_a_review_apply_is_not_a_direct_write`, 2026-11-20)
 - `test_a_review_apply_that_created_a_task_wakes_the_scheduler`
 - `test_a_decision_made_on_the_screen_is_said_on_the_next_turn`
 - `test_an_item_settled_meanwhile_is_passed_with_a_sentence`
@@ -1783,8 +1788,8 @@ Choices a reader should check.
 13. **An item answered by the tray** (its only reason was a link taken on another card) is not asked
     about, though it has no decision.
 14. **Seven tools**, extras as arguments of `review_decide`, `one_by_one` as a move.
-15. **`review_apply` is exempt from the hourly cap** and applies the whole tray, including what was
-    staged on other tabs, after saying so.
+15. **`review_apply` applies the whole tray**, including what was staged on other tabs, after saying so.
+    (It was also exempt from the hourly cap; reversed 2026-11-20, see 7.5.)
 16. **The applied batch stays source `review`**; "through Claude" comes from the cause.
 17. **`Context.wake`** also fixes today's `apply_changes`, which never woke the scheduler for a create.
 18. **The confirm token is one settings row** (`state.review.confirm`); everything else this build keeps

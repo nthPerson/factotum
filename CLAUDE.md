@@ -704,8 +704,16 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
   without asking; it guarantees the question reached it.
 - **`review_apply` is two calls bound to the tray's revision** (2026-11-20): the first writes nothing and reads back; the second runs
   `tray.apply(seen_rev=…)` with source `review` and cause `{kind: review, pass, applied_by}` (`staged_by` added by the tray). It never
-  applies `stage_changes` proposals (the owner's banner), is outside `server.mcp_apply_hourly_cap`, and exists only in apply mode, on both
+  applies `stage_changes` proposals (the owner's banner), and exists only in apply mode, on both
   servers. The page knows a spoken Apply from `/api/review/pass/now`'s `last_apply`.
+- **A spoken Apply is a direct write for the two bounds on direct writes** (security review 2026-11-20, the owner agreed; the design
+  had it outside both): nobody taps Apply on it either. Its rows count toward `server.mcp_apply_hourly_cap` with `apply_changes`'
+  (`mcp_server.direct_used`, one count for both; `review_mcp._under_cap` checks at the question and again at the yes, the unit a
+  staged row, and over the cap says "apply these on the screen" with the tray kept). And an address it put on a task is not in
+  `known_recipients` when the tray held a row a skill or connector staged (`mcp_server._spoken_applies`: a card from a stranger's
+  mail carries the stranger's address, and "create it" then "apply" are two tool calls). A tray the owner applied on the screen, or
+  staged wholly by hand and applied by speech, is the owner's. Both read `cause.applied_by` / `staged_by`: a new way to apply
+  without a tap must set them.
 - **A spoken undo takes back the whole answer** (review 2026-11-20, `review_mcp._beside_with`): without a ref, every item the newest tray
   write decided (one write is one answer: Keep all); with it, the rows staged beside in the same write (a yes's link, the planner's
   change, its judge `applied`) go too, and so on a changed mind. What the owner staged in a write of its own stays. The page's Take back

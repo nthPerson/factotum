@@ -1666,8 +1666,13 @@ answers a read-back (the decisions by kind, how many were made on the screen, th
 them, the batches from Claude that wait on the screen and are not part of it) with a token bound to the tray's
 revision; the second applies exactly that tray through `tray.apply` as one `review` batch with cause `{kind: review,
 pass, applied_by, staged_by}`, undoable in History, and reads back again when anything changed. It never applies
-`stage_changes` proposals, is outside the hourly cap of direct writes (what it applies was built by Python or staged by
-the owner, and read back), and wakes the scheduler when a card's Create made a task. Every connector session shares
+`stage_changes` proposals, and wakes the scheduler when a card's Create made a task. Nobody taps Apply on it, so the two
+bounds on a direct write hold for it too (security review 2026-11-20): its rows count toward
+`server.mcp_apply_hourly_cap` together with `apply_changes`' (checked at the read-back and at the yes; over the cap it
+answers "apply these on the screen" and the tray is kept), and an address it put on a task is not a contact
+`mail_draft_new` may write to when the tray held a row a skill or connector staged (a card made from a stranger's mail
+carries the stranger's address). A tray applied on the screen, or staged wholly by hand and applied by speech, is the
+owner's. Every connector session shares
 one driver, `connector`.
 
 ## 16. Open questions

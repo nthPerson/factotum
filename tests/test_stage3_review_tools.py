@@ -1208,9 +1208,16 @@ def test_two_spoken_applies_in_two_threads_apply_once(cfg, db):
     c.close()
 
 
-def test_a_review_apply_is_not_a_direct_write(cfg, db):
-    """Its batch is `review`: not counted against the hourly cap of direct writes, and an address it puts on a task is
-    the owner's (as after the page's Create), so known_recipients reads it as any reviewed task's."""
+def _known(db, cfg):
+    kctx = ctx_for(db, cfg)
+    kctx.accounts = lambda: {"by_email": {}}                                     # no Mailbird in a test
+    return M.known_recipients(kctx)
+
+
+def test_an_address_a_spoken_apply_put_on_a_task_is_not_a_known_recipient(cfg, db):
+    """Nobody tapped Apply (security review 2026-11-20): a card made from a stranger's mail carries the stranger's
+    address, and "create it" then "apply" said by a model the mail misled would make that address one a new draft may
+    go to. A review batch applied by a connector or skill, holding a row one of them staged, is read as a direct write."""
     ctx = ctx_for(db, cfg, apply=True)
     ok(ctx, "review_start")
     at(ctx, "s:4")
@@ -1218,13 +1225,61 @@ def test_a_review_apply_is_not_a_direct_write(cfg, db):
     r = ok(ctx, "review_apply", {"confirm": ok(ctx, "review_apply")["confirm"]})
     assert r["status"] == "applied"
     c = connect(db)
-    since = "2000-01-01"
-    assert c.execute("SELECT COUNT(*) FROM changes ch JOIN batches b ON b.id = ch.batch_id WHERE b.source IN ('skill', 'connector') AND b.applied_at > ?",
-                     (since,)).fetchone()[0] == 0
+    assert c.execute("SELECT counterpart FROM tasks WHERE id = ?", (c.execute("SELECT MAX(id) FROM tasks").fetchone()[0],)).fetchone()[0] == "mallory@example.com"
     c.close()
-    kctx = ctx_for(db, cfg)
-    kctx.accounts = lambda: {"by_email": {}}                                     # no Mailbird in a test
-    assert "mallory@example.com" in M.known_recipients(kctx)
+    assert "mallory@example.com" not in _known(db, cfg)
+
+
+def test_an_address_stays_known_when_the_owner_tapped_apply_or_staged_every_row_on_the_screen(cfg, db, tmp_path):
+    """The two ways a hand was on it: Claude staged the card's Create by speech and the owner tapped Apply on the page;
+    or the owner staged it on the page and only said "apply"."""
+    ctx = ctx_for(db, cfg, apply=True)
+    ok(ctx, "review_start")
+    at(ctx, "s:4")
+    ok(ctx, "review_decide", {"ref": "s:4", "decision": "create"})
+    c = connect(db)
+    assert tray.apply(c, cfg, D, source="review", finish=True, cause={"applied_by": "page"})["batch_id"]
+    assert M.direct_used(c, "2000-01-01") == 0                                   # and it is not Claude's write for the cap either
+    c.close()
+    assert "mallory@example.com" in _known(db, cfg)
+    from factotum import review_decide
+    db2 = str(tmp_path / "second.db")
+    c = connect(db2); init_db(c); world(c); c.commit()
+    ctx2 = ctx_for(db2, cfg, apply=True)
+    ok(ctx2, "review_start")
+    review_decide.stage(c, cfg, "s:4", "create", {}, D, origin="page")
+    c.commit(); c.close()
+    assert ok(ctx2, "review_apply", {"confirm": ok(ctx2, "review_apply")["confirm"]})["status"] == "applied"
+    assert "mallory@example.com" in _known(db2, cfg)
+
+
+def test_a_spoken_apply_counts_toward_the_hourly_cap_of_direct_changes(cfg, db):
+    """One bad conversation must not rewrite the list (security review 2026-11-20): what a spoken Apply writes counts
+    with apply_changes' rows, and over the cap it is refused before the question, with everything staged kept."""
+    ctx = ctx_for(db, cfg, apply=True)
+    ok(ctx, "review_start")
+    _decided_three(ctx, db, cfg)
+    staged = len(entries(db))
+    cfg["server"]["mcp_apply_hourly_cap"] = staged - 1
+    assert refused(ctx, "review_apply") == RM.SAID["apply_capped"] and len(entries(db)) == staged
+    cfg["server"]["mcp_apply_hourly_cap"] = staged
+    tok = ok(ctx, "review_apply")["confirm"]
+    cfg["server"]["mcp_apply_hourly_cap"] = staged - 1                           # the cap is checked again at the yes
+    assert refused(ctx, "review_apply", {"confirm": tok}) == RM.SAID["apply_capped"] and len(entries(db)) == staged
+    cfg["server"]["mcp_apply_hourly_cap"] = staged
+    assert ok(ctx, "review_apply", {"confirm": ok(ctx, "review_apply")["confirm"]})["status"] == "applied"
+    c = connect(db)
+    wrote = c.execute("SELECT COUNT(*) FROM changes ch JOIN batches b ON b.id = ch.batch_id WHERE b.source = 'review'").fetchone()[0]
+    c.close()
+    assert wrote >= 1
+    # the same budget as a direct write: apply_changes sees those rows as used
+    cfg["server"]["mcp_apply_hourly_cap"] = wrote
+    note = {"changes": [{"task_id": 9, "op": "set", "fields": {"context": "a note"}}]}
+    err, res = _call(ctx, "apply_changes", note)
+    assert err and "hour" in res
+    cfg["server"]["mcp_apply_hourly_cap"] = wrote + 5
+    err, res = _call(ctx, "apply_changes", note)
+    assert not err, res
 
 
 def test_a_review_apply_that_created_a_task_wakes_the_scheduler(cfg, db):

@@ -122,6 +122,7 @@ SAID = {
     "moved_screen": "You moved on to {name} on the screen.",
     # review_apply
     "stage_only": "Factotum is set to stage only; apply on the screen.",
+    "apply_capped": "That is more than Claude may apply in one hour. Apply these on the screen; everything staged is kept.",
     "tray_changed": "The tray changed since I asked, so here it is again.",
     "apply_decisions_one": "Apply one decision: {parts}?", "apply_decisions_n": "Apply {n} decisions: {parts}?",
     "apply_changes_one": "Apply one staged change?", "apply_changes_n": "Apply {n} staged changes?",
@@ -1276,6 +1277,21 @@ def _skipped(w, res: dict, today: date) -> list[str]:
     return [x for x in out if x]
 
 
+def _under_cap(w, ctx) -> None:
+    """A spoken Apply is Claude writing with nobody tapping Apply, so its rows count toward the hourly cap of direct
+    changes with apply_changes' (security review 2026-11-20; the design had left it out). The unit here is a staged
+    row, taken inside the write transaction; over the cap nothing is asked or applied and the tray stays as it is."""
+    from . import config as C
+    from .mcp_server import direct_used                          # lazy: mcp_server imports this module at its end
+    need = w.execute("SELECT COUNT(*) FROM tray").fetchone()[0]
+    if not need:
+        return
+    cap = int(C.get(ctx.cfg, "server.mcp_apply_hourly_cap", 100))
+    since = (datetime.now(timezone.utc) - timedelta(hours=1)).replace(microsecond=0).isoformat()
+    if direct_used(w, since) + need > cap:
+        raise _fail(SAID["apply_capped"])
+
+
 def apply(ctx, args: dict) -> dict:
     """review_apply: the whole tray as one undoable `review` batch, always in two calls (design §7.4): the first reads
     back what it covers and asks, with a token bound to the tray's revision; the second, with the token, applies
@@ -1290,6 +1306,7 @@ def apply(ctx, args: dict) -> dict:
     try:
         begin_write(w)
         rev = tray.rev(w)
+        _under_cap(w, ctx)                                         # at the question and again at the yes
         if token is not None and _confirm_take(w, token, "apply", rev=rev):
             row = review_pass.live(w)
             pid = row["id"] if row and row["day"] == today.isoformat() else None

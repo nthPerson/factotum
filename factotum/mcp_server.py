@@ -565,18 +565,54 @@ EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 EMAIL_FULL = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
 
 
+SPOKE = ("skill", "connector")                 # who applies with nobody tapping Apply
+BY_HAND = {"page", "carry"}                    # tray origins the owner's own hand staged
+
+
+def _spoken_applies(conn: sqlite3.Connection) -> set[int]:
+    """The `review` batches a skill or connector applied by speech (`review_apply`: cause.applied_by) whose tray held
+    a row that was not staged by hand on the screen. `known_recipients` reads them as direct writes."""
+    out = set()
+    for r in rows(conn, "SELECT id, cause_json FROM batches WHERE source = 'review' AND cause_json IS NOT NULL"):
+        try:
+            cause = json.loads(r["cause_json"])
+        except ValueError:
+            continue
+        if not isinstance(cause, dict) or cause.get("applied_by") not in SPOKE:
+            continue
+        staged_by = cause.get("staged_by")
+        if not isinstance(staged_by, dict) or not staged_by or not set(staged_by) <= BY_HAND:
+            out.add(int(r["id"]))
+    return out
+
+
+def direct_used(conn: sqlite3.Connection, since: str) -> int:
+    """The `changes` rows Claude wrote since `since` with nobody tapping Apply: the hourly cap's count
+    (`server.mcp_apply_hourly_cap`), shared by `apply_changes` and a spoken `review_apply` (security review 2026-11-20:
+    the spoken Apply was outside the cap). A batch the owner applied on the screen is not in it, whoever staged it."""
+    return conn.execute(
+        "SELECT COUNT(*) FROM changes c JOIN batches b ON b.id = c.batch_id WHERE b.applied_at > ? AND ("
+        "(b.source IN ('skill', 'connector') AND b.id NOT IN (SELECT batch_id FROM proposals WHERE batch_id IS NOT NULL)) OR "
+        "(b.source = 'review' AND CASE WHEN json_valid(b.cause_json) THEN json_extract(b.cause_json, '$.applied_by') END IN ('skill', 'connector')))",
+        (since,)).fetchone()[0]
+
+
 def known_recipients(ctx: Context) -> set[str]:
     """Addresses a NEW draft may be sent to: the user's own accounts and every address a task names
     (counterpart, waiting_on, account). Nothing read from mail counts — a message that CCs a stranger
     must not make that stranger a valid recipient — so to write to someone who only appears in a thread
     the model replies on that thread (security review 2026-11-02). Nor does an address that Claude
     itself put on a task with a direct write (`apply_changes`): nobody tapped Apply on it, so text
-    Claude read could otherwise name a stranger and then draft to them (review 2026-11-04). The same
-    address through the tray, the UI, a recording or an import counts."""
+    Claude read could otherwise name a stranger and then draft to them (review 2026-11-04). Nor one
+    from a spoken Apply (`review_apply`) of a tray that holds a row a skill or connector staged: a
+    card made from a stranger's mail carries the stranger's address, and "create it" then "apply"
+    are two tool calls (security review 2026-11-20). The same address through a tray the owner
+    applied on the screen, or staged there by hand, the UI, a recording or an import counts."""
     out: set[str] = set(ctx.accounts()["by_email"]) | {str(r["address"] or "").lower() for r in rows(ctx.conn, "SELECT address FROM accounts")}
     emails = lambda v: {m.lower() for m in EMAIL_RE.findall(v if isinstance(v, str) else json.dumps(v) if v else "")}
     untrusted: dict[int, set] = {}
     direct = {r["id"] for r in rows(ctx.conn, "SELECT id FROM batches WHERE source IN ('skill', 'connector') AND id NOT IN (SELECT batch_id FROM proposals WHERE batch_id IS NOT NULL)")}
+    direct |= _spoken_applies(ctx.conn)
     if direct:
         for ch in rows(ctx.conn, "SELECT batch_id, task_id, field, old, new FROM changes WHERE field IN ('counterpart', 'waiting_on', 'created') ORDER BY id"):
             try:
@@ -1137,8 +1173,8 @@ def apply_changes(ctx: Context, args: dict) -> dict:
     kept, rejected, ignored = _validate_changes(ctx, args.get("changes"), direct=True)
     if not kept:
         raise ToolError("nothing applicable: " + "; ".join(rejected)[:600])
-    # One bad conversation must not rewrite the list: direct changes are capped per hour (tray-applied
-    # batches do not count). Both sides of the comparison are rows in `changes`, and the count is taken
+    # One bad conversation must not rewrite the list: direct changes are capped per hour (a tray the owner
+    # applied on the screen does not count; a spoken Apply's rows do). Both sides of the comparison are rows in `changes`, and the count is taken
     # inside the write transaction (BEGIN IMMEDIATE holds the write lock), so two calls arriving together
     # cannot both pass on the same remainder.
     cap = int(C.get(ctx.cfg, "server.mcp_apply_hourly_cap", 100))
@@ -1147,8 +1183,7 @@ def apply_changes(ctx: Context, args: dict) -> dict:
     w = ctx.writer()
     try:
         w.execute("BEGIN IMMEDIATE")
-        used = w.execute("SELECT COUNT(*) FROM changes c JOIN batches b ON b.id = c.batch_id WHERE b.source IN ('skill', 'connector') AND b.applied_at > ? "
-                         "AND b.id NOT IN (SELECT batch_id FROM proposals WHERE batch_id IS NOT NULL)", (since,)).fetchone()[0]
+        used = direct_used(w, since)
         if used + need > cap:
             w.rollback()
             raise ToolError(f"direct writes are capped at {cap} changes an hour; {used} are used and this call needs up to {need}. "
