@@ -97,6 +97,18 @@ def card_count(conn) -> int:
                         SUGGESTION_KINDS).fetchone()[0]
 
 
+def undecided_count(conn, cfg: dict, today: date, exclude=frozenset()) -> int:
+    """The number beside Review once the tray is on the server: the queue's tasks and cards with no tray row that
+    `decides` them (and, for a page loaded before that, no task in its `exclude`). Reads only."""
+    decided = {r[0] for r in conn.execute("SELECT DISTINCT decides FROM tray WHERE decides IS NOT NULL")}   # tray.decided's column, read here
+    tasks = {int(d[2:]) for d in decided if d.startswith("t:") and d[2:].isdigit()}                          # (tray imports chat: no import here)
+    cards = [int(d[2:]) for d in decided if d.startswith("s:") and d[2:].isdigit()]
+    marks = ",".join("?" * len(SUGGESTION_KINDS))
+    staged_cards = conn.execute(f"SELECT COUNT(*) FROM evidence WHERE judged_at IS NULL AND task_id IS NULL AND kind IN ({marks})"
+                                f" AND id IN ({','.join('?' * len(cards))})", (*SUGGESTION_KINDS, *cards)).fetchone()[0] if cards else 0
+    return count(conn, cfg, today, exclude=set(exclude) | tasks) - staged_cards
+
+
 def count(conn, cfg: dict, today: date, exclude=frozenset()) -> int:
     """len(queue(...)) over the open rows not in `exclude` (the page's tray), plus card_count(conn)."""
     open_tasks = relations.annotate(conn, [t for t in rows(conn, "SELECT * FROM tasks WHERE status = 'open'") if t["id"] not in exclude])

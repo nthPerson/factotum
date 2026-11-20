@@ -78,7 +78,8 @@ _CONN_METHODS = {"commit", "rollback"}
 _WRITERS = {("batches", "apply"), ("batches", "undo"), (None, "set_setting"), (None, "add_link"), ("chat", "new_thread"), ("chat", "turn"),
             ("chat", "create_from_proposal"), ("chat", "mark_staged"), ("by_hand", "add"), ("reminders", "act"), ("reminders", "save_outcome"),
             ("app_push", "keys"), ("app_push", "subscribe"), ("app_push", "unsubscribe"), ("app_push", "send_test"),
-            ("summary", "request_refresh"), ("oauth", "arm"), ("oauth", "revoke_client"), ("suggestions", "session")}
+            ("summary", "request_refresh"), ("oauth", "arm"), ("oauth", "revoke_client"), ("suggestions", "session"),
+            ("tray", "write"), ("tray", "carry"), ("tray", "apply"), ("review_decide", "stage")}
 _DML = ("INSERT", "UPDATE", "DELETE", "REPLACE")
 
 

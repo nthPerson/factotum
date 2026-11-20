@@ -45,7 +45,7 @@ from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
 from .claude import runner as claude_runner
-from . import app_push, batches, by_hand, commands, config as C, filing, lifecycle, oauth, relations, reminders, review_cards, review_queue, ripple, search, suggestions, summary
+from . import app_push, batches, by_hand, commands, config as C, filing, lifecycle, oauth, relations, reminders, review_cards, review_decide, review_queue, ripple, search, suggestions, summary, tray
 from .db import connect, get_settings, get_task, init_db, now_iso, rows, seed_accounts, set_setting
 
 WEB = Path(__file__).resolve().parent / "web"
@@ -150,6 +150,34 @@ class SuggestionCreateBody(BaseModel):
 
 class DraftOpenBody(BaseModel):
     draft: dict[str, Any]
+
+
+class TrayOpsBody(BaseModel):
+    ops: list[dict[str, Any]]
+    device: str | None = None
+
+
+class TrayCarryBody(BaseModel):
+    carry_id: str
+    entries: list
+    device: str | None = None
+
+
+class TrayApplyBody(BaseModel):
+    keys: list[str] | None = None        # the rows to apply (the tray's dropdown); None: every one
+    seen_rev: int | None = None          # the tray revision the page showed: a row written after it refuses the Apply (409)
+    source: str = "review"               # review | ui
+    finish: bool = False                 # an Apply on Review: mark the day reviewed (unless only the editor's edits were applied)
+    whole_tray: bool = True
+
+
+class DecideBody(BaseModel):
+    key: str                             # the item: t:<task id> | s:<evidence id>
+    option: str | None = None            # an option id (design §4.2); none with from_chat
+    args: dict[str, Any] | None = None
+    note: str | None = None              # laid into args
+    from_chat: dict[str, Any] | None = None   # {message_id, index}: a decision proposed in the card's conversation
+    device: str | None = None
 
 
 SUGGESTION_KINDS = review_queue.SUGGESTION_KINDS
@@ -498,9 +526,10 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
 
     @app.get("/api/review")
     def review(exclude: str | None = None):
-        """One page of the review queue. `exclude` is a comma-separated list of task ids the client
-        has already decided on (staged in the tray, not yet applied), so the next page skips them.
-        `total` is the whole eligible set after exclusion; `items` is the first `cap` of it.
+        """One page of the review queue. The tasks the server's tray decides are left out, and so are
+        `exclude`'s, a comma-separated list of task ids a page loaded before the tray moved to the server
+        has decided on in its own tray, so the next page skips them. `total` is the whole eligible set
+        after exclusion; `items` is the first `cap` of it.
         Two at once take turns: each writes (the day's suggestions, the offered stamp) and commits on
         the shared connection, and two commits interleaved there answered 500."""
         with commit_lock:
@@ -508,16 +537,19 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
 
     @app.get("/api/review/count")
     def review_count(exclude: str | None = None):
-        """The number beside Review and on the app's icon (review_queue.count). Reads only; no lock needed."""
-        skip = exclude_ids(exclude)
+        """The number beside Review: the items no tray row decides (review_queue.undecided_count), less an old
+        page's `exclude`. Reads only; no lock needed."""
         ecfg = eff_cfg()
-        return {"count": review_queue.count(conn, ecfg, review_queue.today(ecfg), exclude=skip)}
+        return {"count": review_queue.undecided_count(conn, ecfg, review_queue.today(ecfg), exclude=exclude_ids(exclude))}
+
+    def _tray_decided_tasks() -> set[int]:
+        return {int(d[2:]) for d in tray.decided(conn) if d.startswith("t:") and d[2:].isdigit()}
 
     def _review(exclude: str | None):
         ecfg = eff_cfg()
         today = review_queue.today(ecfg)
         st = get_settings(conn)
-        skip = exclude_ids(exclude)
+        skip = exclude_ids(exclude) | _tray_decided_tasks()
         suggestions.session(conn, today, suggestions.per_review(ecfg))   # today's few link suggestions, written before the queue reads them
         conn.commit()
         q = review_queue.items(conn, ecfg, today)
@@ -606,6 +638,91 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
             set_setting(conn, "state.last_review_at", review_queue.today(eff_cfg()).isoformat())
             conn.commit()
         return {"ok": True}
+
+    # ---- The tray on the server (spoken Review stage 1, design §5.3-5.4) -------------------------------
+    # One tray for every device. Every write goes through tray.write / carry / apply or review_decide.stage,
+    # each of which takes SQLite's write lock (db.begin_write) before it reads; on this connection that is
+    # inside commit_lock. An error that can follow a staged change answers the tray beside `detail`, so the
+    # page lays it over its mirror (never 401 or 403).
+    def _device(d) -> str | None:
+        return d.strip()[:80] if isinstance(d, str) and d.strip() else None
+
+    def _tray_error(status: int, words: str, **more) -> JSONResponse:
+        conn.rollback()                              # nothing half-written stays in the shared transaction
+        return JSONResponse(dict({"detail": words}, **more, tray=tray.read(conn)), status_code=status)
+
+    @app.get("/api/tray")
+    def tray_read(since: int | None = None):
+        """The tray: {rev, entries: [[key, entry, meta], ...]}, or {rev, same: true} when `since` is the
+        revision. Under commit_lock for one consistent snapshot; writes nothing."""
+        with commit_lock:
+            return tray.read(conn, since)
+
+    @app.post("/api/tray/ops")
+    def tray_ops(body: TrayOpsBody):
+        """Puts and deletes the page staged, in one revision. What a row decides is the server's call
+        (tray.decides_of), never the page's. 400 {detail: "<key>: <why>"} and nothing written."""
+        ops = [{k: v for k, v in o.items() if k != "decides"} for o in body.ops]
+        with commit_lock:
+            try:
+                changed = tray.write(conn, ops, "page", _device(body.device))
+            except ValueError as e:
+                return _tray_error(400, str(e))
+            conn.commit()
+            return dict(tray.read(conn), changed=changed)
+
+    @app.post("/api/tray/carry")
+    def tray_carry(body: TrayCarryBody):
+        """A browser's old local tray, handed over once (tray.carry)."""
+        with commit_lock:
+            try:
+                out = tray.carry(conn, body.carry_id, body.entries, _device(body.device))
+            except ValueError as e:
+                return _tray_error(400, str(e))
+            conn.commit()
+            return dict(tray.read(conn), **out)
+
+    @app.post("/api/tray/apply")
+    def tray_apply(body: TrayApplyBody):
+        """Apply the tray, or `keys` of it, as one batch (tray.apply): 409 {detail, changed, tray} when a row
+        was written after `seen_rev`; 400 {detail} for a row that cannot be applied (nothing written)."""
+        if body.source not in ("review", "ui"):
+            return JSONResponse({"detail": "source is review or ui"}, status_code=400)
+        ecfg = eff_cfg()
+        with chat._CREATE_LOCK, commit_lock:         # a chat create in the tray and its Create button never make two
+            try:
+                res = tray.apply(conn, ecfg, review_queue.today(ecfg), keys=body.keys, seen_rev=body.seen_rev, source=body.source,
+                                 finish=body.finish, whole_tray=body.whole_tray, cause={"applied_by": "page"})
+            except tray.Stale as e:
+                return _tray_error(409, str(e), changed=e.changed)
+            except ValueError as e:
+                return _tray_error(400, str(e))
+        if res.get("created"):                       # a new task is one filing may place (stage 7)
+            sch = getattr(app.state, "scheduler", None)
+            if sch is not None:
+                sch.wake()
+        return res
+
+    @app.post("/api/review/decide")
+    def review_decide_route(body: DecideBody):
+        """One option on one Review item, staged by the rule (review_decide.stage): {tray, keys, removed, said}.
+        400 refused, 404 gone, 409 answered since, each with the tray beside `detail`."""
+        args = {k: v for k, v in (body.args or {}).items() if k not in review_decide.FROM_CHAT_ARGS}
+        if body.note is not None:
+            args["note"] = body.note
+        ecfg = eff_cfg()
+        with commit_lock:
+            try:
+                out = review_decide.stage(conn, ecfg, body.key, body.option, args, review_queue.today(ecfg), origin="page",
+                                          device=_device(body.device), from_chat=body.from_chat)
+            except review_decide.Gone as e:
+                return _tray_error(404, str(e))
+            except review_decide.Stale as e:
+                return _tray_error(409, str(e))
+            except ValueError as e:                  # review_decide.Refused, or a row the tray refuses
+                return _tray_error(400, str(e))
+            conn.commit()
+            return dict(out, tray=tray.read(conn))
 
     @app.get("/api/settings")
     def settings():
