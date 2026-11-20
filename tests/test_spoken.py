@@ -407,3 +407,20 @@ def test_a_task_from_a_recording_carries_where_it_came_from(conn, cfg):
     cur = begin(conn, cfg)["current"]
     assert cur["provenance"] == {"kind": "recording", "title": "Project Meeting", "day": "2026-11-18"}
     assert cur["spoken"]["say"] == "New from yesterday's project meeting: Send the pilot dates, due tomorrow, firm."
+
+
+def test_a_fade_date_already_past_is_not_said_as_a_date_to_come():
+    """Review of stage 3 (a note): expire touches only rows Review has offered, so a fading task the owner never reached
+    still waits with its fade date behind it; "It fades on September twenty-second unless you keep it" spoke of the past
+    as if it were to come."""
+    past = task_entry(task(38, "Generate Bell Sounds SOPs and reference materials", project="Bell", last_mention_at="2026-08-25T17:49:00.000Z",
+                           last_reviewed_at="2026-08-01", fade_at="2026-09-22"), ["fading"])
+    s = say(past)["say"]
+    assert "September" not in s and "Its fade date has passed; it fades unless you keep it." in s
+
+
+def test_a_count_in_a_spoken_question_is_said_in_words():
+    from factotum import recommend
+    assert recommend.keep_all_words(2, 3) == ("Keep the other 2", "Keep the other two?")
+    assert recommend.keep_all_words(4, 4) == ("Keep all 4", "Keep them all?")
+    assert not re.search(r"[0-9]", recommend.TEXTS["link_n_said"].format(n=spoken.count_words(3)))

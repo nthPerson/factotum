@@ -147,6 +147,7 @@ GUIDE = ("Spoken review. Read `say` aloud as written; never read ids, refs, task
 
 # --- what may be spoken -----------------------------------------------------------------------------------------
 
+_TASK_REF = re.compile(r"\btask(?:-|\s?#\s?)[0-9]{1,9}\b", re.I)   # Task-N in any case, Task #N; a deliverable's "Task 4" stays
 _MD_CHARS = re.compile(r"[*_`#~|<>\[\]{}\\^=]")
 _SPACE = re.compile(r"\s+")
 
@@ -170,7 +171,7 @@ def speakable(s, cap: int = SPEAK_CAP, today: date | None = None) -> str:
             elif b > at:
                 at = b
         s = "".join(out) + s[at:]
-    s = spoken.TASK_REF.sub(SAID["another_task"], s)
+    s = _TASK_REF.sub(SAID["another_task"], s)
     s = spoken._ISO.sub(lambda m: (dates.say_day(m.group(0), today) if today else spoken._absolute_day(m.group(1), m.group(2))) or "", s)
     s = spoken._UUID.sub("", s)
     s = spoken._HEXISH.sub(lambda m: "" if any(c.isdigit() for c in m.group(0)) else m.group(0), s)
@@ -407,11 +408,13 @@ def _join(*says) -> str | None:
     return s or None
 
 
-def _with_data(out: dict) -> dict:
-    """The answer says it is data when it carries words others wrote."""
+def _with_data(out: dict, force: bool = False) -> dict:
+    """The answer says it is data when it carries words others wrote: an item's `from_others`, what happened on the
+    screen (it names items, a card among them), or `force` (a card's name in a question or a sentence; review 2026-11-20:
+    a card's name is written by mail triage from a stranger's mail)."""
     def has(x):
         return isinstance(x, dict) and (bool(x.get("from_others")) or any(has(v) for v in x.values() if isinstance(v, dict)))
-    if has(out):
+    if force or out.get("elsewhere") or has(out):
         out["data"] = SAID["data"]
     return out
 
@@ -652,7 +655,7 @@ def status(ctx, args: dict) -> dict:
                                                    "staged": staged}, "elsewhere": els}
     if args.get("list") is True:
         out["list"] = [_list_row(r) for r in v["list"] if r.get("state") != "gone"][:LIST_ROWS]
-    return out
+    return _with_data(out, force="list" in out)
 
 
 # --- review_decide, review_undo ---------------------------------------------------------------------------------
@@ -889,6 +892,8 @@ def _ask(w, cfg, e: dict, decision, steps: list[str] | None, dargs: dict, except
     if not (unread or why or merge or ex_why):
         return None
     name = _name(e)
+    if e.get("kind") == "card":                             # a stranger's words: said inside quotes, as spoken says a subject
+        name = "“" + re.sub(r"[\"“”]", "", name).strip() + "”"
     group = decision == "keep_all" or (decision == "rec" and e.get("kind") == "group")
     if merge:
         q = merge
@@ -1065,7 +1070,8 @@ def decide(ctx, args: dict) -> dict:
                 if unread:
                     _seen(w, ctx, v, e)                         # read back: a yes to its question is the answer said here
                 return _with_data({"status": "confirm", "say": SAID["ask_again"] if given else None, "ask": ask, "confirm": token,
-                                   "item": item_out(e, v, today) if unread else None, "elsewhere": els, "mode": _mode(ctx)})
+                                   "item": item_out(e, v, today) if unread else None, "elsewhere": els, "mode": _mode(ctx)},
+                                  force=e.get("kind") == "card")
         old = (e.get("staged") or {}).get("decision") if e.get("state") == "decided" and e.get("kind") != "group" else None
         old_words = _decided_words(e, today) if old else None
         old_origin = next((m.get("origin") for k, _, m in tray.read(w)["entries"] if m.get("decides") == ref and k in (old or {}).get("keys", [])), None)
@@ -1215,7 +1221,7 @@ def undo(ctx, args: dict) -> dict:
         say = SAID["undo_screen"].format(what=SAID[NOUNS.get(d0.get("op"), "n_other")], name=name)
     else:
         say = SAID["undo_many" if len(targets) > 1 else "undo"].format(name=name)
-    return _with_data({"status": "undone", "say": say, "item": place["item"], "elsewhere": els})
+    return _with_data({"status": "undone", "say": say, "item": place["item"], "elsewhere": els}, force=any(t.startswith("s:") for t in targets))
 
 
 # --- review_apply ---------------------------------------------------------------------------------------------

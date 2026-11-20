@@ -71,7 +71,9 @@ If the tools are missing, say the Factotum connector is not available and stop; 
 | keep them all; keep all except the second, that one is done | `review_decide` `keep_all`, with `except` naming each member's `ref` and its decision |
 | one at a time (a group) | `review_next` `one_by_one` |
 | pin it, long-term | `review_decide` with `pin` or `longterm`: the item still needs a decision |
-| undo, scratch that | `review_undo` |
+| long-term (the answer to "Keep, drop, or long-term?") | `review_decide` `keep` with `longterm: true` |
+| remind me at nine tomorrow | beside a decision, `remind_at` as YYYY-MM-DDTHH:MM in the owner's time, after now (`review_start` gave the date and time) |
+| undo, scratch that | `review_undo` without `ref`: it takes back the whole last answer (all of a Keep all, and what a yes staged with it) |
 | how many left, where are we | `review_status` |
 | which task is that | `review_more` with `what: number` |
 | go back to the slides one | `review_status` `list: true`, find it by its `said`, then `review_next` `to` with its `ref` |

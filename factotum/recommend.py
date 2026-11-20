@@ -153,7 +153,8 @@ def keep_all_words(n: int, total: int) -> tuple[str, str]:
         return (TEXTS["keep_both"], TEXTS["keep_both_said"]) if n == 2 else (TEXTS["keep_all_n"].format(n=n), TEXTS["keep_all_said"])
     if n == 1:
         return TEXTS["keep_other_1"], TEXTS["keep_other_1_said"]
-    return TEXTS["keep_other_n"].format(n=n), TEXTS["keep_other_n_said"].format(n=n)
+    from .spoken import count_words                         # the question is said: a count in words (review 2026-11-20)
+    return TEXTS["keep_other_n"].format(n=n), TEXTS["keep_other_n_said"].format(n=count_words(n))
 
 
 def _held_close(answer: str, why: str) -> str:
@@ -219,7 +220,8 @@ def _rule(entry: dict, today: date, names: dict) -> tuple[dict | None, str | Non
             return None, None
         n = len(sugg)
         head = TEXTS["link_1"] if n == 1 else TEXTS["link_2"] if n == 2 else TEXTS["link_n"].format(n=n)
-        ask = TEXTS["link_1_said"] if n == 1 else TEXTS["link_2_said"] if n == 2 else TEXTS["link_n_said"].format(n=n)
+        from .spoken import count_words
+        ask = TEXTS["link_1_said"] if n == 1 else TEXTS["link_2_said"] if n == 2 else TEXTS["link_n_said"].format(n=count_words(n))
         whys = []
         for s in sugg:
             w = _named(s.get("why"), own, names)

@@ -43,7 +43,7 @@ TEMPLATES = {
     "changed_head": "A linked task changed", "snooze_head": "Back from Later", "slipped_head": "Soft date slipped", "fading_head": "Fading",
     "last_call_head": "Last call", "back_head": "Back, mentioned again", "slack_head": "Mentioned in Slack",
     "due": "due {day}", "firm": "firm", "no_date": "no date", "quiet_since": "untouched since {day}",
-    "fades": "It fades {on} unless you keep it.", "lapses": "Its firm date has passed; it lapses unless you keep it.",
+    "fades": "It fades {on} unless you keep it.", "faded_due": "Its fade date has passed; it fades unless you keep it.", "lapses": "Its firm date has passed; it lapses unless you keep it.",
     "mail_on": "New mail on {name}.", "wrote_about": "{who} wrote about “{subject}”",
     "wrote": "{who} wrote", "replied_about": "{who} replied about “{subject}”", "maybe_from": "a mail that may be from {who}, about “{subject}”",
     "more_mail_1": "One more mail came in.", "more_mail_n": "{n} more mails came in.",
@@ -627,9 +627,7 @@ def _task_sentences(ve: dict, today: date, names: dict) -> list[str]:
         head = f"{T['fading_head']}: {name}{due or ', ' + T['no_date']}" + (", " + T["quiet_since"].format(day=quiet) if quiet else "") + "."
         out.append(head)
         done_fade = True
-        fa = dates.say_day(t.get("fade_at"), today, time=False)
-        if fa:
-            out.append(T["fades"].format(on=fa if fa in ("today", "tomorrow") else "on " + fa))
+        out += _fades(t, today)
     elif primary == "last_call":
         out.append(f"{T['last_call_head']}: {nd}.")
         out.append(T["lapses"])
@@ -647,10 +645,18 @@ def _task_sentences(ve: dict, today: date, names: dict) -> list[str]:
         elif follows:
             out.append(T["mail_also"])
     if "fading" in reasons and not done_fade:
-        fa = dates.say_day(t.get("fade_at"), today, time=False)
-        if fa:
-            out.append(T["fades"].format(on=fa if fa in ("today", "tomorrow") else "on " + fa))
+        out += _fades(t, today)
     return out
+
+
+def _fades(t: dict, today: date) -> list[str]:
+    """When a fading task fades: its day, or that the day is behind it (review 2026-11-20: expire touches only rows Review
+    has offered, so one the owner never reached waits with its fade date past, and was said as a date to come)."""
+    d = dates.parse_date(str(t.get("fade_at") or "")[:10])
+    if d is not None and d < today:
+        return [T["faded_due"]]
+    fa = dates.say_day(t.get("fade_at"), today, time=False)
+    return [T["fades"].format(on=fa if fa in ("today", "tomorrow") else "on " + fa)] if fa else []
 
 
 def _card_sentences(ve: dict, today: date, names: dict) -> list[str]:
