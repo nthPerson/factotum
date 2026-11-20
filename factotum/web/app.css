@@ -1100,6 +1100,12 @@ mark { background: var(--warn-soft); color: inherit; border-radius: 2px; padding
 .card .rvrec .basis { font-size: 13px; line-height: 1.4; color: var(--fg); overflow-wrap: anywhere; }
 .card .rvrec.held { border-color: var(--line); background: var(--surface-2); }
 .card .rvrec.held .lead { color: var(--muted); }
+/* "Show how it would be read" (spoken Review 2e): the server's sentences for the ear, in grey at the foot of the card. */
+.card .rvsay { margin: 12px 0 2px; font-size: 13px; }
+.card .rvsay .linkish { font-size: 13px; color: var(--muted); }
+.card .rvsay-text { margin-top: 6px; padding: 4px 0 4px 10px; border-left: 3px solid var(--line); color: var(--muted); line-height: 1.45; overflow-wrap: anywhere; }
+.card .rvsay-text p { margin: 4px 0; }
+.card .rvsay-text .q { font-style: italic; }
 .card .big button.recd { box-shadow: 0 0 0 2px var(--accent); }
 .card .big.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .card .big.one { grid-template-columns: minmax(0, 1fr); }

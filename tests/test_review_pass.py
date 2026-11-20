@@ -794,4 +794,4 @@ def test_tasks_from_nowhere_in_common_make_no_group_and_regroup_refuses_them(con
     with pytest.raises(review_decide.Refused):                      # groups came in 2d (tests/test_review_groups.py)
         P.regroup(conn, cfg, D, v["id"], "t:1", "one_by_one", by=BY)
     cur = v["current"]
-    assert "spoken" not in cur and not any(r["key"].startswith("g:") for r in v["list"])      # recommendations came in 2c (tests/test_recommend.py)
+    assert cur["spoken"]["say"] and not any(r["key"].startswith("g:") for r in v["list"])      # the spoken card came in 2e (tests/test_spoken.py)

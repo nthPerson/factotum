@@ -72,6 +72,7 @@
   try { ui.tab = parseAddress().tab; } catch (_) {}
   try { const r = localStorage.getItem('factotum.rail'); if (r === '0' || r === '1') ui.railOpen = r === '1'; } catch (_) {}
   try { ui.rvEdit = localStorage.getItem('factotum.rvedit') === '1'; } catch (_) {}
+  try { ui.rvSay = localStorage.getItem('factotum.rvsay') === '1'; } catch (_) {}      // "Show how it would be read", per browser (2e)
   // The tray is drawn from its cache in load() (trayBoot); a tray this browser kept before it moved to the server is handed over there (carryOldTray).
 
   const TODAY = () => new Date(data.today + 'T12:00:00');
@@ -2176,7 +2177,7 @@
   // The entry's options (the server's ids, words and keys), then the page's own: the Later menu and its date, the list, and
   // the moves. An item that left the queue offers the moves only.
   function reviewOptions(cur) {
-    const own = [{ id: 'list', kind: 'page' }, { id: 'back', kind: 'move', key: '←' }, { id: 'next', kind: 'move', key: '→' }, { id: 'end', kind: 'move' }];
+    const own = [{ id: 'list', kind: 'page' }, { id: 'say', kind: 'page' }, { id: 'back', kind: 'move', key: '←' }, { id: 'next', kind: 'move', key: '→' }, { id: 'end', kind: 'move' }];
     if (!cur || !cur.entry || cur.entry.settled) return own;
     const e = cur.entry;
     if (e.kind === 'group') return (e.options || []).concat([{ id: 'one_by_one', kind: 'regroup' }], own);      // a regroup, not an option of the rule
@@ -2330,6 +2331,7 @@
     if (['next', 'back', 'first', 'continue', 'end'].includes(id)) return passMove(id);
     if (id.startsWith('goto:')) { ui.rvList = false; return passMove('goto', id.slice(5)); }
     if (id === 'list') { ui.rvList = !ui.rvList; render(); return; }
+    if (id === 'say') { ui.rvSay = !ui.rvSay; try { localStorage.setItem('factotum.rvsay', ui.rvSay ? '1' : '0'); } catch (_) {} render(); return; }
     if (id === 'apply') return applyAll();
     if (id === 'apply-stop') { const b = lastBatch; return applyAll().then(() => { if (lastBatch !== b && rp.view && rp.view.id) return passMove('end'); }); }
     if (id === 'restart') { rp.finished = null; render(); return loadPass(true).catch(() => {}); }
@@ -2550,6 +2552,14 @@
       return `<div><span class="evk" aria-label="Slack">#</span> ${esc(l.where)} · <b>${esc(l.who)}</b>: ${esc(l.text)}${when(l)}</div>`;
     }).join('')}</div>`;
   }
+  // "Show how it would be read" (spoken Review 2e): at the foot of the card, the server's sentences for the ear (spoken.py)
+  // in grey, so the wording can be checked on real items without the Claude app. The page writes no words of its own here.
+  function sayHtml(entry) {
+    const s = entry && entry.spoken;
+    if (!s) return '';
+    const body = ui.rvSay ? `<div class="rvsay-text"><p>${esc(s.say || '')}</p>${s.basis ? `<p>${esc(s.basis)}</p>` : ''}${s.question ? `<p class="q">${esc(s.question)}</p>` : ''}</div>` : '';
+    return `<div class="rvsay"><button class="linkish" data-opt="say" aria-expanded="${!!ui.rvSay}">${ui.rvSay ? 'Hide how it would be read' : 'Show how it would be read'}</button>${body}</div>`;
+  }
   // Review is one of: loading, failed, an item (a task or a suggestion card; one that left the queue says so), the
   // checkpoint after "Items per sitting", the end (everything looked at), or finished (the pass ended here).
   function renderReview() {
@@ -2626,6 +2636,7 @@
         ${linkSuggestionsHtml(it)}
         <div class="extra"><button class="btn small" data-opt="pin" aria-pressed="${!!x.top_rank}">${x.top_rank ? '★ On Top · unpin' : '★ Pin to Top'}</button><button class="btn small" data-opt="longterm" aria-pressed="${!!x.longterm}">${x.longterm ? 'Long-term · clear' : 'Mark long-term (never fades)'}</button>${dueForm(x.id, x.due)}${reminderForm(x.id)}</div>
         ${reviewPlaceHtml(x.id)}
+        ${sayHtml(entry)}
       </div>
       <div class="note">Next leaves an item undecided: it comes round again after the last, and is in Review next time. Keep = no change; the item will not be asked about again until something changes. Later = hidden until the date you pick, then back in Review and Today. Decisions stage into the tray; Apply writes them all at once.</div></div>`;
   }
@@ -2646,6 +2657,7 @@
         <div class="gmembers">${ms.map(m => groupRowHtml(m, entry)).join('')}</div>
         ${recHtml(entry)}
         <div class="rvbar">${rvnavHtml(v)}<div class="big ${ka ? 'two' : 'one'}">${big}</div></div>
+        ${sayHtml(entry)}
       </div>
       <div class="note">Keep all keeps every task here not yet decided, each as its own staged change (Undo takes back one). Done, Drop and Later decide one task; Open takes it out of the group to look at it alone; One by one puts every task in the group's place.</div></div>`;
   }
@@ -2664,7 +2676,7 @@
   // An item that left the queue while it was in front (applied, closed or answered elsewhere): why, and Next.
   function settledHtml(entry, v) {
     const it = entry.item || {}, name = (it.task && it.task.name) || it.name || it.label || '';
-    return `<div class="review">${navHtml(v)}<div class="card settled" data-key="${esc(entry.key)}"><div class="why ok">This one is settled</div><h2>${esc(name)}</h2><p>${esc(entry.settled)}</p>`
+    return `<div class="review">${navHtml(v)}<div class="card settled" data-key="${esc(entry.key)}"><div class="why ok">This one is settled</div><h2>${esc(name)}</h2><p>${esc(entry.settled)}</p>${sayHtml(entry)}`
       + `<div class="rvbar">${rvnavHtml(v)}<div class="big one"><button data-opt="next">Next ›</button></div></div></div></div>`;
   }
   // The pause after "Items per sitting": keep going, apply what is staged and stop, or finish for now.
@@ -2730,6 +2742,7 @@
         <div class="rvbar">${rvnavHtml(v)}<div class="big two"><button class="done${recRing(entry, 'create') ? ' recd' : ''}" data-opt="create">Create task</button><button class="drop${recRing(entry, 'dismiss') ? ' recd' : ''}" data-opt="dismiss">Dismiss</button></div></div>
         ${mail ? `<div class="extra"><button class="btn small" data-sugg-open="${sg.id}">✉ Show the message in Mailbird</button></div>` : ''}
         ${sgPlaceHtml(sg.id)}
+        ${sayHtml(entry)}
       </div>
       <div class="note">${mail ? 'Create makes an open task (source Mail) linked to this thread, so a reply or a message you send is noticed from then on. ' : `Create makes an open task (source ${slack ? 'Slack, the message linked' : rip ? 'Ripple: suggested after a linked task changed' : 'Planner'}) that shows as New in Review; `}Create and Dismiss stage into the tray; Apply writes them, and the Log tab undoes them.</div></div>`;
   }

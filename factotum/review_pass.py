@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from . import config as C, lifecycle, recommend, review_cards, review_decide, review_queue, suggestions, tray
+from . import config as C, lifecycle, recommend, review_cards, review_decide, review_queue, spoken as spoken_words, suggestions, tray
 from .dates import parse_date
 from .db import begin_write, get_task, now_iso, rows
 from .prompts import one_line
@@ -931,11 +931,11 @@ def now(conn: sqlite3.Connection) -> dict:
 
 def view(conn: sqlite3.Connection, cfg: dict, today: date, *, spoken: bool = True) -> dict | None:
     """The View of the live pass of Review's day (§6.6), or None (no live pass, or one from another day). Reads only.
-    `spoken` is for 2e's sentences; this pass has none yet."""
+    `spoken` False leaves out the sentences for the ear (`current.spoken`, `ahead.spoken`, a member's `spoken`)."""
     row = live(conn)
     if row is None or row["day"] != today.isoformat():
         return None
-    return _view(conn, cfg, today, row)
+    return _view(conn, cfg, today, row, spoken=spoken)
 
 
 def _now_on(task: dict, trows) -> tuple[bool, bool]:
@@ -1058,7 +1058,10 @@ def _entry(conn: sqlite3.Connection, cfg: dict, today: date, key: str | None, P:
     if item is None:
         item, settled = _settled(conn, cfg, today, key, st)
     kind = P.kinds.get(key) or _kind(key)
-    out = {"key": key, "kind": kind, "state": st, "item": item, "provenance": None,
+    prov = None
+    if kind == "task" and isinstance(item.get("task"), dict) and isinstance(item["task"].get("id"), int):      # where a task came from (2e)
+        prov = (P.alike.get(key) or {}).get("prov") or (_alike_of(conn, cfg, [item["task"]]).get(item["task"]["id"]) or {}).get("prov")
+    out = {"key": key, "kind": kind, "state": st, "item": item, "provenance": dict(prov) if prov else None,
            "evidence_lines": (item.get("evidence_lines") or []) if kind == "task" else [],
            "recommendation": None if settled else item.get("recommendation"), "rec_held": None if settled else item.get("rec_held"),
            "options": options(item, None if settled else item.get("recommendation"), trows, today),
@@ -1153,7 +1156,42 @@ def _line(conn: sqlite3.Connection, cfg: dict, key: str, P: Plan, trows) -> dict
             "due": review_decide.day_words(due) if isinstance(due, str) and due else None}
 
 
-def _view(conn: sqlite3.Connection, cfg: dict, today: date, row: dict, queue: dict | None = None) -> dict:
+def _tz(cfg: dict):
+    try:
+        return ZoneInfo(str(C.get(cfg, "owner.timezone", "UTC")))
+    except (KeyError, ValueError):
+        return None
+
+
+def _speak(conn: sqlite3.Connection, cfg: dict, today: date, entries: list[dict | None]) -> None:
+    """`spoken` (spoken.entry) on each entry and on each member of a group, in place: the names its words may say read
+    once (the queue's own, `recommend.names_for`, and every other task `spoken.wants`). Reads only."""
+    es = [e for e in entries if e]
+    if not es:
+        return
+    items = [e["item"] for e in es if isinstance(e.get("item"), dict)]
+    for e in es:
+        items += [m for m in (e.get("item") or {}).get("members") or [] if isinstance(m, dict)]
+    names = recommend.names_for(conn, items)
+    want = set()
+    for e in es:
+        want |= spoken_words.wants(e)
+        for m in (e.get("item") or {}).get("members") or []:
+            want |= spoken_words.wants({"item": m})
+    from .relations import briefs
+    for i, b in briefs(conn, want - set(names)).items():
+        if b.get("name"):
+            names[i] = b["name"]
+    tz = _tz(cfg)
+    for e in es:
+        e["spoken"] = spoken_words.entry(e, today, names, tz=tz)
+        for m in (e.get("item") or {}).get("members") or []:
+            m["spoken"] = spoken_words.entry({"key": m.get("key"), "kind": "task", "state": m.get("state"), "item": m, "provenance": e.get("provenance"),
+                                              "recommendation": m.get("recommendation"), "options": [], "staged": {"decision": None, "beside": []}},
+                                             today, names, tz=tz)
+
+
+def _view(conn: sqlite3.Connection, cfg: dict, today: date, row: dict, queue: dict | None = None, *, spoken: bool = True) -> dict:
     queue = review_queue.items(conn, cfg, today) if queue is None else queue
     tr = tray.read(conn)
     trows = _trows(tr["entries"])
@@ -1165,8 +1203,10 @@ def _view(conn: sqlite3.Connection, cfg: dict, today: date, row: dict, queue: di
               "left": review_queue.undecided_count(conn, cfg, today), "staged": len(trows),
               "minutes_left": math.ceil(len(und) * SECONDS_PER_ITEM / 60)}
     ahead = _after(P, cur, skip_cur=True)[0] if P.state == "item" and cur else None
+    current, ahead_entry = _entry(conn, cfg, today, cur, P, trows), _entry(conn, cfg, today, ahead, P, trows)
+    if spoken:
+        _speak(conn, cfg, today, [current, ahead_entry])
     return {"id": row["id"], "rev": row["rev"], "day": row["day"], "today": today.isoformat(), "state": P.state, "cursor_key": cur,
             "lap": row["lap"], "started_by": row["started_by"], "moved_by": row["moved_by"], "moved_at": row["moved_at"],
             "tray_rev": tr["rev"], "speaking": _speaking(row), "counts": counts, "checkpoint": {"looked": row["looked"], "cap": _cap(cfg)},
-            "labels": lifecycle.REVIEW_LABELS, "current": _entry(conn, cfg, today, cur, P, trows),
-            "ahead": _entry(conn, cfg, today, ahead, P, trows), "list": [_line(conn, cfg, k, P, trows) for k in P.order]}
+            "labels": lifecycle.REVIEW_LABELS, "current": current, "ahead": ahead_entry, "list": [_line(conn, cfg, k, P, trows) for k in P.order]}

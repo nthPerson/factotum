@@ -483,6 +483,20 @@ def test_nothing_the_user_or_the_agent_reads_says_blocked_or_dependency(conn, cf
     for e in review_queue.items(conn, cfg, date(2026, 11, 19))["tasks"] + review_queue.items(conn, cfg, date(2026, 11, 19))["cards"]:
         r = e.get("recommendation") or {}
         texts += [r.get("label") or "", r.get("basis") or "", r.get("said") or "", r.get("basis_said") or "", e.get("rec_held") or ""]
+    # The spoken card (spoken Review stage 2e): every fixed sentence, and everything it says over the table's items as the pass shows them.
+    from factotum import spoken
+    texts += list(spoken.TEMPLATES.values())
+    v = review_pass.begin_or_resume(conn, cfg, date(2026, 11, 19), by="page · test")
+    said = 0
+    for k in [r["key"] for r in v["list"] if r["state"] != "gone"]:
+        review_pass.move(conn, cfg, date(2026, 11, 19), v["id"], "goto", key=k, by="page · test")
+        cur = review_pass.view(conn, cfg, date(2026, 11, 19))["current"] or {}
+        for s in [cur.get("spoken")] + [m.get("spoken") for m in (cur.get("item") or {}).get("members") or []]:
+            if s:
+                said += 1
+                texts += [s["say"], s["basis"], s["question"], *s["more"].values(), *(o["words"] for o in s["options"]), *(m["words"] for m in s["members"])]
+    conn.rollback()
+    assert said >= 4
     for t in texts:
         assert not re.search(r"\bblocked\b|\bdependenc", t, re.I), t[:120]
 

@@ -284,3 +284,39 @@ console.log(JSON.stringify({{ calls, ahead, opened, later: ui.rvMemberLater }}))
         ["regroup", "g:rec:x", "take_out", 3], ["move", "goto", "t:3"],
         ["regroup", "g:rec:x", "one_by_one", None]]
     assert out["ahead"] == 2 and out["opened"] == "t:1" and out["later"] is None      # Keep all, and the last task decided
+
+
+def test_show_how_it_would_be_read_draws_the_servers_words_under_every_card():
+    """2e: a link at the foot of a task, a card, a group and a settled item; on, the server's say, basis and question in grey
+    (escaped, nothing of the page's own); per browser in localStorage['factotum.rvsay'], read and written inside try."""
+    import json
+    import shutil
+    import subprocess
+    sh = _body("sayHtml")
+    assert "entry.spoken" in sh and "data-opt=\"say\"" in sh and "esc(s.say" in sh
+    for f in ("taskItemHtml", "cardItemHtml", "groupItemHtml", "settledHtml"):
+        assert "sayHtml(entry)" in _body(f), f
+    assert "try { ui.rvSay = localStorage.getItem('factotum.rvsay') === '1'; } catch (_) {}" in JS
+    run = _body("reviewRun")
+    assert "if (id === 'say') { ui.rvSay = !ui.rvSay; try { localStorage.setItem('factotum.rvsay'" in run
+    assert run.index("id === 'say'") < run.index("cur.entry.settled")          # also on a settled item
+    assert "{ id: 'say', kind: 'page' }" in _body("reviewOptions")
+    assert ".card .rvsay-text" in CSS
+    node = shutil.which("node")
+    if node is None:
+        return
+    script = f"""
+const ui = {{ rvSay: false }};
+const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+{sh}
+const e = {{ spoken: {{ say: 'New: <b>Send</b> it.', basis: 'It is new.', question: 'Keep it?' }} }};
+const off = sayHtml(e); ui.rvSay = true; const on = sayHtml(e);
+const none = sayHtml({{ key: 't:1' }}); const nobasis = sayHtml({{ spoken: {{ say: 'Fading.', basis: '', question: '' }} }});
+console.log(JSON.stringify({{ off, on, none, nobasis }}));"""
+    r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert "Show how it would be read" in out["off"] and "rvsay-text" not in out["off"]
+    assert "Hide how it would be read" in out["on"] and "New: &lt;b&gt;Send&lt;/b&gt; it." in out["on"] and "It is new." in out["on"] and "Keep it?" in out["on"]
+    assert out["none"] == ""
+    assert out["nobasis"].count("<p") == 1
