@@ -101,6 +101,7 @@
   // A task as it will be after Apply: its staged decision and date, and its links with the staged link
   // changes and suggestion verdicts drawn in (overlayRel), and the editor's staged edits (stage 6), and Pin and Long-term,
   // which stand beside the decision under "<id>:top" and "<id>:lt" (spoken Review stage 1). Never mutates `data`.
+  const BESIDE = [':top', ':lt'];      // the keys that stand beside a task's decision: "<id>:top", "<id>:lt"
   function view(t) {
     const st = staged.get(t.id), due = staged.get(t.id + ':due'), rel = overlayRel(t);
     const top = staged.get(t.id + ':top'), lt = staged.get(t.id + ':lt');
@@ -1957,6 +1958,7 @@
       d ? `<span class="chip due ${dueCls} ${x.hard ? 'hard' : ''}" data-due="${x.id}" title="${x.hard ? 'Hard deadline' : 'Soft date'} · click to cycle">${d.label}</span>` : `<span class="chip due" data-due="${x.id}" title="No date · click to set">no date</span>`,
       `<span class="chip eff">${esc(x.effort || '?')}</span>`,
       st ? `<span class="chip staged">${esc(st.label)}</span>` : '',
+      ...BESIDE.map(sfx => staged.get(x.id + sfx)).filter(Boolean).map(e => `<span class="chip staged">${esc(e.label)}</span>`),      // Pin and Long-term staged beside the decision say so by name
       stagedCountHtml(x.id),
     ].join('');
   }
@@ -3906,9 +3908,11 @@
     return out;
   }
   // The row's "N changes staged", when something besides its decision is staged (N counts them all).
+  // How many changes are staged for a task, when a chip does not already name every one of them (the decision, and Pin and
+  // Long-term beside it, each have their own chip: chipsHtml).
   function stagedCountHtml(id) {
     const ks = keysFor(id);
-    if (!ks.size || (ks.size === 1 && ks.has(String(id)))) return '';
+    if ([String(id), ...BESIDE.map(sfx => id + sfx)].filter(k => ks.has(k)).length === ks.size) return '';
     return `<span class="chip staged">${ks.size} change${ks.size === 1 ? '' : 's'} staged</span>`;
   }
   // Who: one field and a choice; "is for" writes `counterpart`, "waiting on" writes `waiting_on`.
