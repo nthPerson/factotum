@@ -39,11 +39,36 @@ def items(conn, cfg: dict, today: date) -> dict:
     (only for "linked_changed"), flags, evidence}, in Review's order; and `cards`, each with `key: "s:<id>"`
     (review_cards). No cap, no exclusion, nothing left out for being decided. Reads only: the day's link
     suggestions (suggestions.session) are the caller's to write first."""
-    from . import review_cards, ripple       # lazy: ripple imports the planner, and the scheduler imports this module
+    from . import review_cards               # lazy: review_cards imports ripple, which imports the planner
     from .mail_sweep import review_flags
     open_tasks = relations.decorate(conn, rows(conn, "SELECT * FROM tasks WHERE status = 'open'"), today, cfg)
     flags = review_flags(conn)
     full = queue(conn, cfg, today, open_tasks, flags)
+    return {"tasks": _finish(conn, full, open_tasks, flags, review_cards.evidence_by_task(conn)), "cards": review_cards.cards(conn, cfg)}
+
+
+def task_item(conn, cfg: dict, today: date, task_id: int) -> dict | None:
+    """One open task as `items` ships it, built the same way, or None when the task is not open. A task with no
+    reason to be on Review today is still an item, with `reasons: []` and `primary: None` (a decision from its
+    card's conversation must still work after the reason went). Reads only."""
+    from . import review_cards
+    from .mail_sweep import review_flags
+    ts = rows(conn, "SELECT * FROM tasks WHERE id = ? AND status = 'open'", (task_id,))
+    if not ts:
+        return None
+    t = relations.decorate(conn, ts, today, cfg)[0]
+    flags = review_flags(conn)
+    last = parse_date(get_settings(conn).get("state.last_review_at"))
+    rs = lifecycle.review_reasons(t, today, cfg, last, flags.get(task_id))
+    item = {"task": t, "reasons": rs, "primary": rs[0] if rs else None}
+    return _finish(conn, [item], ts, flags, review_cards.evidence_by_task(conn, {task_id}))[0]
+
+
+def _finish(conn, full: list[dict], open_tasks: list[dict], flags: dict, by_task: dict) -> list[dict]:
+    """The queue's items (`{task, reasons, primary}`, tasks decorated) as Review ships them: the link texts and
+    suggestions read from the full `rel`, then `rel` compacted on every row in `open_tasks`, the flags, the
+    evidence and the key."""
+    from . import ripple                     # lazy: ripple imports the planner, and the scheduler imports this module
     names = {k: v["name"] for k, v in relations.briefs(conn, {s["other"] for i in full for s in i["task"]["rel"]["suggestions"]}).items()}
     for i in full:                                           # from the full rel (a text may name a closed task it waited on)
         i["texts"] = lifecycle.reason_texts(i["task"], i["reasons"])
@@ -53,13 +78,12 @@ def items(conn, cfg: dict, today: date) -> dict:
             i["since"] = ripple.since(conn, i["task"]["id"], i["task"]["rel"].get("changed"))
     for t in open_tasks:
         relations.ship(t)
-    by_task = review_cards.evidence_by_task(conn)
     out = []
     for i in full:
         i["flags"] = flags.get(i["task"]["id"], {})
         i["evidence"] = by_task.get(i["task"]["id"], [])      # judged in the same batch as the decision; a proposal's change can be accepted
         out.append({"key": f"t:{i['task']['id']}", **i})
-    return {"tasks": out, "cards": review_cards.cards(conn, cfg)}
+    return out
 
 
 def is_card(e: dict) -> bool:

@@ -459,9 +459,17 @@ def test_the_planner_skill_names_the_new_tools_and_phrases():
     assert "skill-version: 2026-11-11" in s and all(n in s for n in ("task_neighbours", "waiting_tasks", "twin_candidates", "goal_tree", "can't start until", "break this into steps"))
 
 
-def test_nothing_the_user_or_the_agent_reads_says_blocked_or_dependency():
+def test_nothing_the_user_or_the_agent_reads_says_blocked_or_dependency(conn, cfg):
+    from factotum import review_decide
+    from test_review_decide import _cases, _plan, _world
     texts = [p.read_text() for p in (C.ROOT / "prompts").glob("*.md")] + [p.read_text() for p in (C.ROOT / "skills").rglob("SKILL.md")]
     texts += [t["description"] for t in M.TOOLS] + [M.OPS_HELP] + list(lifecycle.REVIEW_LABELS.values()) + [lifecycle.REASON_TEXTS[k] for k in lifecycle.REASON_TEXTS]
+    # Review's decision rule (spoken Review, 2026-11-19): its fixed words, and every label and toast it stages over the table's world.
+    texts += list(review_decide.SAID.values()) + list(review_decide.LABELS.values())
+    F = _world(conn)
+    for _, key, option, args, _, _ in _cases():
+        p = _plan(conn, cfg, key.format(**F), option.format(**F), args)
+        texts += [e.get("label") or "" for _, e, _ in p.puts] + [p.said]
     for t in texts:
         assert not re.search(r"\bblocked\b|\bdependenc", t, re.I), t[:120]
 
