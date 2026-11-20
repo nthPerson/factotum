@@ -1,0 +1,86 @@
+"""The page's Review on the pass (spoken Review 2a-2b, design 6.11): one controller over the server's View, every
+press through reviewRun, decisions through decideOn, moves through passMove; what must be in the page script and its
+stylesheet for that to hold (the behaviour is checked rendered, and the pass itself in tests/test_review_pass.py)."""
+import re
+from pathlib import Path
+
+from factotum import api
+
+WEB = Path(api.__file__).parent / "web"
+JS = (WEB / "app.js").read_text(encoding="utf-8")
+CSS = (WEB / "app.css").read_text(encoding="utf-8")
+
+
+def _body(name):
+    m = re.search(rf"\n  (async )?function {name}\(", JS)
+    assert m, name
+    i = m.start() + 1
+    ends = [x for x in (JS.find("\n  function ", i + 1), JS.find("\n  async function ", i + 1)) if x > 0]
+    return JS[i:min(ends) if ends else len(JS)]
+
+
+def test_review_is_one_controller_over_the_pass():
+    for f in ("reviewCurrent", "reviewOptions", "reviewRun", "loadPass", "passMove", "passReread", "navHtml", "listHtml",
+              "stagedBannerHtml", "taskItemHtml", "cardItemHtml", "checkpointHtml", "endHtml", "finishedHtml"):
+        _body(f)
+    assert re.search(r"\n  let rp = \{ view: null, loading: null, seq: 0, failed: '', finished: null", JS)
+    st = _body("renderReview")
+    assert "reviewCurrent()" in st and "loadReview" not in JS
+
+
+def test_the_old_review_and_its_closures_are_gone():
+    for gone in ("data-rv-accept", "data-rv-dismiss", "data-sugg-create", "data-sugg-dismiss", "data-rv=", "data-rv-act", "data-lsug",
+                 "data-follow=", "data-notabout", "function reviewAct", "function linkSuggestionAct", "mailCard", "reviewIdx",
+                 "reviewPaused", "Batch applied", "review-more", "let review = ", "reviewLoading", "reviewFailed", "reviewSeq"):
+        assert gone not in JS, gone
+    assert "panel.querySelectorAll('[data-opt]')" in JS and "reviewRun(b.dataset.opt" in JS
+
+
+def test_every_decision_and_answer_goes_through_decideOn_and_every_move_through_passMove():
+    run = _body("reviewRun")
+    assert "decideOn(key, " in run and "passMove(" in run and "stage(" not in run.replace("decideOn(", "")
+    assert "stageJudge(" not in run and "stageChange(" not in run
+    assert run.index("ui.laterOpen = false; ui.datePick = false;") < run.index("decideOn(key, opt")      # the Later menu shuts before the card moves on
+    assert JS.count("'/api/review/decide'") == 1 and "'/api/review/decide'" in _body("decideOn")
+    assert "passAnswer(" in _body("decideOn")                                                        # a decision's answer carries the pass
+    mv = _body("passMove")
+    assert "from: " in mv or "body.from = " in mv
+    assert "'/api/review/pass/' + " in mv and "/move'" in mv
+    assert "'/api/review/pass'" in _body("loadPass") and "'/api/review/pass'" in _body("passReread")
+    for f in re.findall(r"\n  (?:async )?function (\w+)\(", JS):
+        if "'/api/review/pass" in _body(f):
+            assert f in ("loadPass", "passMove", "passReread"), f
+
+
+def test_the_keys_move_and_decide():
+    keys = JS[JS.index("if (ui.tab === 'review') {", JS.index("document.addEventListener('keydown'")):]
+    keys = keys[:keys.index("return; }") + 9]
+    for k in ("ArrowRight", "ArrowLeft", "']'", "'['", "reviewRun("):
+        assert k in keys, k
+    assert "reviewAct" not in keys
+
+
+def test_after_an_apply_review_reads_the_pass_and_never_pauses():
+    aa = _body("applyAll")
+    assert "await passReread(res.finished)" in aa and "reviewPaused" not in aa
+    assert "rp.view ? rp.view.counts.left" in _body("reviewShown")
+
+
+def test_the_card_stays_the_cards():
+    assert ".review .card[data-id=\"${id}\"] > h2" in JS                                  # editRefresh redraws it in place (Trap 7)
+    t = _body("taskItemHtml")
+    assert re.search(r'<div class="card" data-id="\$\{x\.id\}"[^>]*>', t)
+    head = t[t.index('<div class="card"'):t.index("<h2>")]
+    assert head.count("<div") == head.count("</div>") + 1      # the h2 is a direct child of the card, never wrapped
+    assert '<div class="rvbar">${rvnavHtml(v)}<div class="big">' in t      # the moves above the decisions, one element
+    assert 'class="rvnav"' in _body("rvnavHtml")
+
+
+def test_the_phones_bar_is_one_thing_at_the_bottom():
+    phone = CSS[CSS.index("/* Review's decisions are pinned at the bottom"):]
+    phone = phone[:phone.index("\n}\n")]
+    assert ".review .card .rvbar { position: fixed;" in phone
+    assert "body.kb-open .review .card .rvbar" in phone and "body.kb-open.kb-note .review .card .rvbar" in phone
+    assert "body.kb-open.kb-note .review .card .rvbar .rvnav { display: none; }" in phone
+    assert "#panel .review .card .rvbar" in _body("placeReviewBar")
+    assert ".rvnav" in CSS and ".rvtop" in CSS and ".rvlist" in CSS and ".rvstaged" in CSS

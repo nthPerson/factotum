@@ -6,7 +6,6 @@
   const TABS = ['today', 'timeline', 'projects', 'review', 'search', 'chat', 'log', 'settings'];
 
   let data = { tasks: [], projects: [], today: new Date().toISOString().slice(0, 10), top_cap: 7 };
-  let review = null;        // /api/review payload
   let settings = null;      // /api/settings payload
   // Settings changed but not saved yet: key → the value captured when its control changed; '#accounts' → true
   // when the accounts table changed. A save sends only these, so a value nobody touched stays the file's.
@@ -19,6 +18,12 @@
   // `busy` the chain every tray request waits on, so they reach the server one at a time and in order; `failed` why the
   // last send did not arrive ('' when it did); `carryFailed` why this browser's old tray could not be handed over.
   const tray = { rev: 0, base: new Map(), meta: new Map(), inflight: null, busy: Promise.resolve(), failed: '', queued: false, booted: false, carryFailed: '', unsentAt: 0, retry: null };
+  // Review as a pass held on the server (spoken Review 2a, design 6.11): `view` the pass's View as last answered (or as drawn
+  // ahead at a press), `loading` the begin in flight and `seq` the newest, `failed` why the last begin failed, `finished` what
+  // to say once the pass ended here ({why, left}), `follow` (following another device, 2a-3), `said` a line the next draw
+  // shows once (coming round), `inflight` the presses whose answers are awaited, `held` the newest answer kept until then,
+  // `back` the View before a press drew ahead (a lost answer draws it again), `drawn` the item last drawn (a new one scrolls up).
+  let rp = { view: null, loading: null, seq: 0, failed: '', finished: null, follow: null, said: '', inflight: 0, held: undefined, back: null, drawn: null, drawing: null };
   let lastBatch = null;
   let chat = { threads: null, current: null, messages: [], live: null, busy: false, place: null };   // place: the key of the conversation in place whose turn runs (stage 6)
   let lastTap = { id: null, at: 0 };   // for the hand-rolled double-click on rows
@@ -48,7 +53,7 @@
   if (!folds || typeof folds !== 'object' || Array.isArray(folds)) folds = {};
   const folded = (key, dflt) => Object.prototype.hasOwnProperty.call(folds, key) ? !!folds[key] : !!dflt;
   function setFold(key, shut) { folds[key] = !!shut; try { localStorage.setItem('factotum.folds', JSON.stringify(folds)); } catch (_) {} }
-  let ui = { tab: 'today', focus: null, focusAt: null, sel: new Set(), open: new Set(), reviewIdx: 0, laterOpen: false, datePick: false, trayOpen: false, trayOff: new Set(), reviewPaused: false, rvNote: { id: null, text: '' }, remOpen: null, dueOpen: null, sinceOpen: null,
+  let ui = { tab: 'today', focus: null, focusAt: null, sel: new Set(), open: new Set(), laterOpen: false, datePick: false, trayOpen: false, trayOff: new Set(), rvNote: { key: null, text: '' }, rvList: false, remOpen: null, dueOpen: null, sinceOpen: null,
              railOpen: !window.matchMedia('(max-width: 860px)').matches, chatDrawer: false,
              page: null, pageScroll: 0, pageMore: false, pageLater: false,      // the task page: its id, the list's scroll, a phone's More and Later open
              bulkMore: false,      // the phone's short bar shows its second line (back to false when nothing is selected)
@@ -369,15 +374,13 @@
 
   // ---------- app extras (stage 8) ----------
   // The number beside Review and on the installed app's icon. Before Review is loaded it is the server's
-  // count (GET /api/review/count, read in load()); while Review is loaded, that page's own number (it leaves
-  // out what the tray already decided). The icon always gets what the tab shows.
+  // count (GET /api/review/count, read in load()); while a pass is drawn, its View's counts.left (the same
+  // number: review_queue.undecided_count, which leaves out what the tray already decides). The icon always gets what the tab shows.
   let reviewCount = null;
   let badgeShown;            // what the icon was last given (undefined: nothing yet), so a redraw calls nothing
   // null: not known yet (no Review page and no count has arrived), and the icon is then left as it is.
   function reviewShown() {
-    if (!review) return reviewCount === null ? null : (reviewCount || 0);
-    const cards = review.suggestions || [];      // a card whose Create or Dismiss is staged waits on nothing
-    return review.total || cards.length ? review.total + cards.filter(x => !x.created && !staged.has('e:' + x.id)).length : 0;
+    return rp.view ? rp.view.counts.left : reviewCount === null ? null : (reviewCount || 0);
   }
   // Off (notify.app.badge), signed out, or 0: cleared. Before Settings has loaded, or while the count is not known: nothing.
   function syncBadge() {
@@ -393,7 +396,7 @@
   }
 
   async function loadCount() {
-    const excl = [...staged.keys()].filter(k => typeof k === 'number').join(',');      // as loadReview sends it
+    const excl = [...staged.keys()].filter(k => typeof k === 'number').join(',');      // what the tray decides (the count leaves it out; older pages sent it the same way)
     try { reviewCount = (await api('/api/review/count' + (excl ? '?exclude=' + excl : ''))).count; } catch (_) {}      // a failure keeps the last count; a sign-out shows its own screen
   }
   // The number beside Review and on the icon, without a redraw (render() and a return while something is typed).
@@ -418,7 +421,7 @@
   }
   function refreshEnded() {
     const last = ((summary || {}).refresh || {}).last || {};
-    logData = null; if (ui.tab !== 'review') review = null;      // a Review session in progress keeps its page
+    logData = null; if (ui.tab !== 'review') reviewStale();      // a review in progress keeps what it draws
     toast(last.ok ? 'Refreshed · ' + (last.line || '') : 'Refresh failed · ' + (last.line || ''));
   }
   // Something is being typed: a draft or a Review note, an open reminder or due-date form (their values
@@ -457,7 +460,7 @@
     // server's fresh count again (as at Refresh's end); a Review session in progress keeps its page. The icon is
     // set again even when the number did not change: a push may have put another number there in the meantime.
     // Before the typing check: with something typed only the count is asked for and shown, nothing is redrawn.
-    if (ui.tab !== 'review') review = null;
+    if (ui.tab !== 'review') reviewStale();
     badgeShown = undefined;
     if (typingNow()) { if (ui.tab === 'today') { clearTimeout(sumTimer); pollSummary(); } loadCount().then(showCount); return; }
     if (ui.tab === 'log') logData = null;
@@ -765,7 +768,8 @@
   // never overtakes a change staged before it. The answer's tray replaces the mirror; a refusal takes the provisional
   // rows back and says why.
   function decideOn(key, option, args, opts) {
-    const o = opts || {}, prov = new Map();
+    const o = opts || {}, prov = new Map(), viewBefore = rp.back || undefined;      // the View before a press drew ahead (passAhead)
+    rp.back = null; rp.inflight++;
     for (const [k0, e] of o.prov || cardProv(key, option)) {
       const k = trayKey(k0);
       prov.set(k, e ? Object.assign({}, e, { local: true, deciding: true }) : null);
@@ -779,12 +783,17 @@
         if (b == null) staged.delete(k); else staged.set(k, JSON.parse(b));
       }
     };
-    const run = async () => {
+    // The answer (a refusal's too) carries the pass (spoken Review 2a): drawn by passAnswer; a lost one draws again what was
+    // in front before the press.
+    let pass;
+    const run = async () => { try { await run1(); } finally { passAnswer(pass, true); } };
+    const run1 = async () => {
       const body = { key, option: option || null, args: args || {}, device: deviceLabel() };
       if (o.from_chat) body.from_chat = o.from_chat;
       let r;
       try { r = await api('/api/review/decide', { method: 'POST', body: JSON.stringify(body) }); }
       catch (e) {
+        pass = e && e.body && 'pass' in e.body ? e.body.pass : viewBefore;
         const was = traySig(), wasMeta = trayMetaSig();
         undo();
         if (e && e.body && e.body.tray) trayAnswer(e.body.tray, null, { quiet: true, drop: mine });
@@ -793,6 +802,7 @@
         trayRedraw(was, wasMeta);
         return;
       }
+      if ('pass' in r) pass = r.pass;
       // Discarded while on its way (Discard all, the tray's ✕): what the rule staged for it is taken out again (review 2026-11-19).
       const back = [...mine].some(e => e.takenBack);
       const was = traySig(), wasMeta = trayMetaSig();
@@ -935,17 +945,12 @@
       if (cards.length && res.batch_id != null) cardMade.set(res.batch_id, cards[0].task_id);
       ui.trayOpen = false; ui.trayOff = new Set();      // the answer's tray is the mirror now (trayApply)
       ui.sel.clear(); logData = null;
-      if (ui.tab !== 'review') review = null;   // a stale Review page would still show the old due date; re-fetch on the next visit
+      if (ui.tab !== 'review') reviewStale();   // a stale Review would still show the old due date; read again on the next visit
       await load();
-      // Only edits from a Review card's editor (its own Apply: no decision and no verdict among them) are not a review
-      // (the server's call, tray.finishes): the queue is read again and the card stays to be decided.
-      if (ui.tab === 'review' && !res.finished) await loadReview();
-      else if (ui.tab === 'review') {
-        // The decisions are in; the server marked today reviewed (phase 2 skips the push), and the next
-        // page waits for a click instead of appearing under the user's hands.
-        await loadReview();
-        ui.reviewPaused = true; render();
-      }
+      // On Review the pass is read again, never begun: the item in front stays where it was (an Apply does not move the
+      // cursor, so there is no pause), and an Apply that left nothing undecided ended the pass, which the page then says
+      // (res.finished: the server's call, tray.finishes; a card editor's own Apply is no review).
+      if (ui.tab === 'review') { await passReread(res.finished); render(); }
       if (chatMids.length) reloadPlacesWith(chatMids);      // a staged new task now reads "created Task-N" where it was proposed
       // A tray ref (m<message>-<index>) is the page's own name for a new task: never shown.
       const why = String(res.skipped.length ? res.skipped[0].why : '').replace(/no task made in this batch has ref 'm\d+-\d+'/, 'the new task it links to was not in this Apply');
@@ -1234,7 +1239,8 @@
     if (res && res.undone === false) return res;
     const made = addedBy.get(id);      // an add undone: nothing about the dropped task stays attached, selected or open
     if (made != null) { addedBy.delete(id); ui.sel.delete(made); ui.open.delete(made); if (ui.focus === made) ui.focus = null; }
-    if (cardMade.has(id)) { const t = cardMade.get(id); cardMade.delete(id); ui.sel.delete(t); ui.open.delete(t); if (ui.focus === t) ui.focus = null; review = null; }      // a card's Create undone: Review is read again, so the card is back
+    if (cardMade.has(id)) { const t = cardMade.get(id); cardMade.delete(id); ui.sel.delete(t); ui.open.delete(t); if (ui.focus === t) ui.focus = null; reviewStale(); }      // a card's Create undone: Review is read again, so the card is back
+    if (ui.tab === 'review') await passReread(false);      // an undo moves no pass (its items come back undecided): this page reads it again itself
     const before = appliedProps.size;
     for (const [k, b] of [...appliedProps]) if (b === id) appliedProps.delete(k);
     if (appliedProps.size !== before) persistApplied();
@@ -2143,25 +2149,174 @@
       return `<div class="proj-group ${open ? 'open' : ''}"><button data-proj="${esc(p)}" aria-expanded="${open}">${esc(p)} <span class="n">${rows.length} open · ${due} due this week</span>${fading ? `<span class="warnn">${fading} fading</span>` : ''}</button>${open ? `<div class="rows">${rows.sort((a, b) => (a.due || '9').localeCompare(b.due || '9')).map(x => row(x)).join('')}</div>` : ''}</div>`;
     }).join('');
   }
-  // One page of the queue. Ids already staged in the tray are excluded server-side, so a page is
-  // always `cap` fresh items and the counter counts this page only.
-  // Each load stamps the page's rows as offered, so a render waiting for one never asks again
-  // (`reviewLoading`); only the newest load's answer is kept, and a failed one waits for Try again.
-  let reviewLoading = null, reviewSeq = 0, reviewFailed = '';
-  async function loadReview() {
-    const n = ++reviewSeq;
-    reviewFailed = '';
-    const exclude = [...staged.keys()].filter(k => typeof k === 'number').join(',');
-    const p = api('/api/review' + (exclude ? '?exclude=' + exclude : ''));
-    reviewLoading = p;
+  // ---------- Review as a pass held on the server (spoken Review 2a, design 6.11) ----------
+  // The server holds the order and one cursor (review_pass); the page draws the View it answers and sends every press
+  // through reviewRun: a move to passMove, a decision or an answer to decideOn (the rule), whose answer carries the pass.
+  // Next leaves an item undecided and it comes round after the last; Back returns to anything, decided or not; the list
+  // jumps to any item. A press that moves on from the item in front draws the next one at once (the View's `ahead`) and
+  // the answer replaces it; while several answers are awaited, only the newest is drawn.
+  function reviewStale() { rp.view = null; rp.held = undefined; rp.finished = null; }
+  function reviewCurrent() {
+    const v = rp.view;
+    if (!v) return { state: rp.failed ? 'failed' : rp.finished ? 'finished' : 'loading' };
+    if ((v.state === 'item' || v.state === 'checkpoint') && v.current) return { state: v.state, key: v.current.key, kind: v.current.kind, entry: v.current, pass: v };
+    return { state: v.state === 'empty' ? 'empty' : 'end', pass: v };
+  }
+  // The entry's options (the server's ids, words and keys), then the page's own: the Later menu and its date, the list, and
+  // the moves. An item that left the queue offers the moves only.
+  function reviewOptions(cur) {
+    const own = [{ id: 'list', kind: 'page' }, { id: 'back', kind: 'move', key: '←' }, { id: 'next', kind: 'move', key: '→' }, { id: 'end', kind: 'move' }];
+    if (!cur || !cur.entry || cur.entry.settled) return own;
+    const e = cur.entry;
+    return (e.options || []).concat(e.kind === 'task' ? (e.later_choices || []).map(c => ({ id: 'until:' + c.id, label: c.label, kind: 'later' })).concat([{ id: 'pickdate', kind: 'page' }]) : [], own);
+  }
+  // A pass the server answered (a begin, a move, a decision): kept when it is the newest of its pass, and drawn once no
+  // other press waits on an answer, after the press in progress (afterPress). undefined: nothing new; null: no live pass.
+  function passAnswer(p, counted) {
+    if (counted) rp.inflight = Math.max(0, rp.inflight - 1);
+    if (p !== undefined) {
+      const v = rp.held !== undefined ? rp.held : rp.view;
+      if (p === null || !v || p.id !== v.id || (p.rev || 0) >= (v.rev || 0)) rp.held = p;
+    }
+    if (rp.inflight > 0 || rp.held === undefined) return;
+    const next = rp.held; rp.held = undefined;
+    rp.view = next; if (next) rp.finished = null;
+    afterPress('review', () => {
+      if (ui.tab !== 'review' || ui.page !== null || (typingNow() && next && rp.drawn === next.cursor_key)) { showCount(); return; }
+      render();
+    });
+  }
+  // At a press that moves on from the item in front, what comes next is drawn at once: the View's `ahead`, or the
+  // checkpoint when the sitting is full. Not when nothing is known to be ahead (the answer draws what comes).
+  function passAhead() {
+    const v = rp.view; if (!v || v.state !== 'item' || !v.ahead) return;
+    const shown = (v.list || []).filter(r => r.state !== 'gone').map(r => r.key);
+    rp.back = v;
+    rp.view = Object.assign({}, v, { cursor_key: v.ahead.key, current: v.ahead, ahead: undefined, state: v.checkpoint && v.checkpoint.looked >= v.checkpoint.cap ? 'checkpoint' : 'item',
+      counts: Object.assign({}, v.counts, { position: shown.indexOf(v.ahead.key) + 1 || null }) });
+  }
+  // Begin a pass, or resume the live one (POST /api/review/pass): one in flight, the newest answer wins, a failure waits for Try again.
+  async function loadPass(fresh) {
+    const n = ++rp.seq;
+    rp.failed = '';
+    const p = api('/api/review/pass', { method: 'POST', body: JSON.stringify({ fresh: !!fresh, device: deviceLabel() }) });
+    rp.loading = p;
     let r;
     try { r = await p; }
-    catch (e) { if (n === reviewSeq) { reviewFailed = e.detail || e.message || String(e); render(); } throw e; }
-    finally { if (reviewLoading === p) reviewLoading = null; }
-    if (n !== reviewSeq) return;      // a newer load was asked for (an Apply, Review another): its answer wins
-    review = r;
-    if (review.total === undefined) review.total = review.items.length;   // older server
-    ui.reviewIdx = 0; ui.reviewPaused = false; ui.laterOpen = false; render();
+    catch (e) { if (n === rp.seq) { rp.failed = e.detail || e.message || String(e); render(); } throw e; }
+    finally { if (rp.loading === p) rp.loading = null; }
+    if (n !== rp.seq) return;
+    rp.view = r.pass; rp.held = undefined; rp.finished = null; rp.said = ''; ui.laterOpen = false; ui.datePick = false; ui.rvList = false;
+    render();
+  }
+  // The pass as it stands, read without beginning one (after an Apply: an Apply that left nothing undecided ended it, and
+  // the page then says so instead of beginning another). No live pass and no such Apply: the next draw begins one.
+  async function passReread(applied) {
+    let r; try { r = await api('/api/review/pass'); } catch (_) { return; }
+    rp.held = undefined; rp.said = '';
+    if (r.pass) { rp.view = r.pass; rp.finished = null; }
+    else { rp.view = null; if (applied) rp.finished = { why: 'applied', left: 0 }; }
+  }
+  // One move of the shared cursor. Next and Back name the item drawn in front (`from`): when another device moved it
+  // meanwhile, nothing moves and the answer's pass is drawn. Next draws what comes at once.
+  async function passMove(to, key) {
+    const v = rp.view; if (!v || !v.id) return;
+    const body = { to, device: deviceLabel() };
+    if (to === 'next' || to === 'back') body.from = v.cursor_key || null;
+    if (key) body.key = key;
+    rp.said = ''; ui.laterOpen = false; ui.datePick = false;
+    if ((to === 'next' || to === 'continue') && v.state === 'checkpoint') rp.view = Object.assign({}, v, { state: 'item' });
+    else if (to === 'next') passAhead();
+    const was = rp.view !== v ? v : undefined; rp.back = null;
+    rp.inflight++;
+    if (was) render();
+    let r;
+    try { r = await api('/api/review/pass/' + v.id + '/move', { method: 'POST', body: JSON.stringify(body) }); }
+    catch (e) {
+      if (e && e.status === 409) toast('This review has ended · ' + (e.body && e.body.pass ? 'here is today’s' : 'a new one begins'));
+      else if (e && e.message !== 'signed out') toast('Not moved: ' + (e.detail || (e.network ? 'no connection' : e.message)));
+      passAnswer(e && e.body && 'pass' in e.body ? e.body.pass : was, true);
+      return;
+    }
+    if (r.moved === false) toast(r.why === 'first' ? 'This is the first item' : `Moved on ${r.by || 'another device'} meanwhile · this is where the review is now`);
+    if (r.came_round) rp.said = `Back to the start · ${r.left} left undecided`;
+    if (r.ended) rp.finished = { why: 'finished', left: (v.counts || {}).left || 0 };
+    passAnswer('pass' in r ? r.pass : undefined, true);
+  }
+  // Take back what decides an item: the rows that decide it go at the click and the rule takes them out on the server
+  // (with a pass, the item comes in front).
+  function takeBack(key) {
+    const m = /^([ts]):(\d+)$/.exec(String(key)); if (!m) return;
+    const id = +m[2];
+    if (m[1] === 's') return decideOn('s:' + id, 'undecide');
+    const keys = [...staged.keys()].filter(k => k === id || (tray.meta.get(k) || {}).decides === key);
+    return decideOn(key, 'undecide', {}, { prov: keys.map(k => [k, null]) });
+  }
+  // The one dispatcher of Review: every button ([data-opt]), every key and the date box call it.
+  function reviewRun(id, extra) {
+    id = String(id || '');
+    if (id !== 'list') rp.said = '';
+    if (['next', 'back', 'first', 'continue', 'end'].includes(id)) return passMove(id);
+    if (id.startsWith('goto:')) { ui.rvList = false; return passMove('goto', id.slice(5)); }
+    if (id === 'list') { ui.rvList = !ui.rvList; render(); return; }
+    if (id === 'apply') return applyAll();
+    if (id === 'apply-stop') { const b = lastBatch; return applyAll().then(() => { if (lastBatch !== b && rp.view && rp.view.id) return passMove('end'); }); }
+    if (id === 'restart') { rp.finished = null; render(); return loadPass(true).catch(() => {}); }
+    if (id === 'resume') { rp.failed = ''; render(); return loadPass(false).catch(() => {}); }
+    if (id.startsWith('takeback:')) return takeBack(id.slice(9));
+    const cur = reviewCurrent();
+    if (cur.state !== 'item' || !cur.entry || cur.entry.settled) return;
+    const key = cur.entry.key, item = cur.entry.item || {};
+    if (cur.kind === 'card') return cardRun(id, +key.slice(2));
+    const x = item.task || {}, tid = x.id;
+    if (id === 'later') { ui.laterOpen = !ui.laterOpen; ui.datePick = false; render(); revealLaterMenu(); return; }
+    if (id === 'pickdate') { ui.datePick = !ui.datePick; render(); revealLaterMenu(); return; }
+    if (id === 'undecide') return takeBack(key);
+    // Pin and Long-term stand beside the decision (the rule's <id>:top / <id>:lt): pressed back to what the task is, the
+    // staged one goes. What is drawn at the click is the rule's row.
+    if (id === 'pin' || id === 'longterm') return decideOn(key, id, {}, { prov: [besideProv(x, id === 'pin' ? 'top' : 'longterm')] });
+    const ans = /^(accept|dismiss|follow|not_about|link|step|waits|same|merge|not_related):(\d+)$/.exec(id);
+    if (ans) {      // an answer on the card: a proposal, a mail about it, a suggested link (its line goes at the click)
+      const eid = +ans[2], ev = (item.evidence || []).find(e => e.id === eid), c = (ev && ev.change) || {};
+      if (ans[1] === 'accept' && (c.op === 'done' || c.op === 'drop')) {      // this IS the decision: the card moves on
+        ui.laterOpen = false; ui.datePick = false; ui.rvNote = { key: null, text: '' };
+        passAhead();
+        return decideOn(key, id, {}, { prov: [[tid, { task_id: tid, op: c.op, fields: c.fields || {}, label: c.op === 'done' ? 'done' : 'dropped' }]] });
+      }
+      const no = ['dismiss', 'not_about', 'not_related'].includes(ans[1]);
+      return decideOn(key, id, {}, { prov: [['e:' + eid, { task_id: tid, op: 'judge_evidence', fields: { evidence_id: eid, verdict: no ? 'dismissed' : 'applied' }, label: no ? 'answered' : 'accepted' }]] });
+    }
+    // A decision (the rule's: it stamps the review, judges the card's evidence, makes a note with Done or Drop the outcome
+    // (a longer one goes to the text, and the answer says so) and stages one with Keep or Later beside it, all deciding this
+    // item, so Take back takes them all). Later's day: one of the server's choices, or a date after today.
+    if (id === 'until-date') { const rd = document.getElementById('rv-date'); if (!rd || !rd.value) { toast('Pick a date first'); return; } id = 'until:' + rd.value; }
+    let opt = id, kind = id;
+    const args = Object.assign({}, args0(extra));
+    if (id.startsWith('until:')) {
+      const u = id.slice(6), named = (cur.entry.later_choices || []).some(c => c.id === u);
+      if (!named && !/^\d{4}-\d{2}-\d{2}$/.test(u)) return;
+      if (!named && u <= ((rp.view || {}).today || data.today)) { toast('Pick a day after today'); return; }      // the rule refuses today too
+      opt = 'later'; args.until = u; kind = named ? u : 'date';
+    } else if (!['done', 'drop', 'keep'].includes(id)) return;
+    const text = ui.rvNote.key === key ? ui.rvNote.text.trim() : '';
+    if (text) args.note = text;
+    // Shut before the decision is staged: what is drawn next must not open with this one's Later menu.
+    ui.laterOpen = false; ui.datePick = false; ui.rvNote = { key: null, text: '' };
+    passAhead();
+    return decideOn(key, opt, args, { prov: [[tid, decisionProv(tid, kind, args.until)]] });
+  }
+  const args0 = a => (a && typeof a === 'object' ? a : {});
+  // A suggestion card's Create and Dismiss are decisions staged by the rule (review_decide, item s:<id>): the next item is
+  // drawn at the click and the tray lists it; Apply makes the task (one batch with its links and the card's verdict), and
+  // the batch's Undo brings the card back (Create again then reopens the same task). Take back unstages it.
+  function cardRun(opt, id) {
+    if (opt === 'undecide') return takeBack('s:' + id);
+    if (opt === 'dismiss') { passAhead(); return decideOn('s:' + id, 'dismiss'); }
+    if (opt !== 'create') return;
+    const card = sgCard(id), edited = !!card && sgDirty(card);      // an untouched card is created exactly as suggested
+    if (card && !sgDraft(card).name.trim()) { toast('Not staged: a task needs a name'); return; }
+    passAhead();
+    return decideOn('s:' + id, 'create', edited ? { draft: sgBody(sgDraft(card)).create } : {});
   }
   // ---------- Review (stage 4b): link reasons in words, link suggestions ----------
   // A link reason's colour; any other reason keeps the rule it had (last call red, new / back teal, else amber).
@@ -2174,7 +2329,7 @@
     const { reasons, primary, flags } = item, said = (item.texts || {})[primary];
     const props = (item.evidence || []).filter(e => e.change && e.by !== 'ripple');
     const mailOnly = props.length > 0 && props.every(e => e.change.op === 'follow_thread');
-    const label = r => r === 'planner' && mailOnly ? 'From your mail' : review.labels[r];
+    const label = r => r === 'planner' && mailOnly ? 'From your mail' : ((rp.view || {}).labels || {})[r] || r;
     const head = said ? esc(said).replace(/Task-(\d+)/g, '<a href="/t/$1" data-open-task="$1">Task-$1</a>') : esc(label(primary));
     const flag = k => flags && flags[k] && !(k === 'planner' && mailOnly) ? ` · <b>${esc(flags[k])}</b>` : '';
     return head + (reasons.length > 1 ? ' · also ' + esc(reasons.slice(1).map(label).join(', ')) : '') + flag('planner') + flag('ripple');
@@ -2186,7 +2341,7 @@
     const from = [m.sender ? esc(m.sender) : '', subject ? `“${esc(subject)}”` : ''].filter(Boolean).join(' · ');
     const hint = from || e.reason ? ` <span class="hint">— ${from}${from && e.reason ? ', ' : ''}${e.reason ? esc(e.reason) : ''}</span>` : '';
     return `<div class="extra mailabout"><span class="chip">From your mail</span><span>This mail is about Task-${tid}. Follow its thread?${hint}</span>`
-      + `<button class="btn small primary" data-follow="${e.id}">Follow its thread</button><button class="btn small" data-notabout="${e.id}">Not about this</button></div>`;
+      + `<button class="btn small primary" data-opt="follow:${e.id}">Follow its thread</button><button class="btn small" data-opt="not_about:${e.id}">Not about this</button></div>`;
   }
   // Which of two tasks a merge keeps when the suggestion does not say: the Canvas row, else the older, else
   // the lower id (relations.default_survivor's rule, on what the page holds).
@@ -2202,7 +2357,7 @@
     const card = item.task.id;
     return (item.link_suggestions || []).filter(s => !suggestionStaged(s.evidence_id)).map(s => {
       const N = s.other, out = s.dir === 'out', T = `<span class="code">Task-${N}</span>${s.other_name ? ' ' + esc(s.other_name) : ''}`;
-      const btn = (act, words, primary) => `<button class="btn small${primary ? ' primary' : ''}" data-lsug="${s.evidence_id}" data-lsug-act="${act}">${esc(words)}</button>`;
+      const btn = (act, words, primary) => `<button class="btn small${primary ? ' primary' : ''}" data-opt="${act === 'not' ? 'not_related' : act}:${s.evidence_id}">${esc(words)}</button>`;      // the rule's answers
       let q, bs;
       if (s.kind === 'same_as') { q = `Same task as ${T}?`; bs = btn('merge', `Merge into ${suggestionKeep(s, card)}`, true) + btn('not', 'Not the same'); }
       else if (s.kind === 'part_of' || s.kind === 'waits_on') {
@@ -2214,12 +2369,6 @@
   }
   // What a suggestion's button stages: the link or merge, carrying the suggestion (the server judges it with the
   // change), or the suggestion dismissed.
-  // The rule's answer (review_decide.plan: link, step, waits, same, merge, not_related on the suggestion's evidence id);
-  // the page's "not" is not_related. The line goes at the click.
-  function linkSuggestionAct(card, eid, act) {
-    if (!['link', 'step', 'waits', 'same', 'merge', 'not'].includes(act)) return;
-    decideOn('t:' + card, (act === 'not' ? 'not_related' : act) + ':' + eid, {}, { prov: [['e:' + eid, { task_id: card, op: 'judge_evidence', fields: { evidence_id: eid, verdict: act === 'not' ? 'dismissed' : 'applied' }, label: 'link answered' }]] });
-  }
   // The chips under a Review card's name; drawn again in place when the card's editor stages a change (editRefresh).
   function reviewSubHtml(x) {
     const d = fmtDue(x.due);
@@ -2250,56 +2399,114 @@
       return `<div><span class="evk" aria-label="Slack">#</span> ${esc(l.where)} · <b>${esc(l.who)}</b>: ${esc(l.text)}${when(l)}</div>`;
     }).join('')}</div>`;
   }
+  // Review is one of: loading, failed, an item (a task or a suggestion card; one that left the queue says so), the
+  // checkpoint after "Items per sitting", the end (everything looked at), or finished (the pass ended here).
   function renderReview() {
-    if (!review) {
-      if (reviewFailed) return `<div class="empty">Could not load Review: ${esc(reviewFailed)} <button class="btn small" id="review-retry">Try again</button></div>`;
-      if (!reviewLoading) loadReview().catch(() => {});      // a failure is drawn above, from reviewFailed
-      return '<div class="empty">Loading review queue…</div>';
-    }
-    const items = review.items.filter(i => !staged.has(i.task.id));
-    const total = review.items.length;
-    const remaining = ui.reviewPaused ? review.total : review.total - total;
-    const sugg = (review.suggestions || []).filter(x => !staged.has('e:' + x.id) && !x.created);
-    // Cards whose Create or Dismiss is staged: drawn after the undecided ones, each with Take back.
-    const done = (review.suggestions || []).filter(x => staged.has('e:' + x.id) && !x.created);
-    const decidedCards = done.length ? `<div class="sgstaged-list"><div class="hint">Staged on suggestion cards · Apply in the tray</div>${done.map(x => sgStagedHtml(x, staged.get('e:' + x.id))).join('')}</div>` : '';
-    if (!items.length && sugg.length && !(ui.reviewPaused && remaining > 0)) return suggestionCard(sugg[0], sugg.length, decidedCards);
-    if (ui.reviewPaused || !items.length) {
-      const more = remaining > 0 ? `<p><button class="btn" id="review-more">Review another ${Math.min(review.cap, remaining)} of the remaining ${remaining}</button></p>` : '';
-      const head = ui.reviewPaused ? (remaining ? 'Batch applied.' : 'Batch applied. Nothing left to review.') : total || done.length ? `${staged.size} decision${staged.size === 1 ? '' : 's'} staged.` : 'Nothing to review.';
-      const body = ui.reviewPaused ? '' : total || done.length ? '<p>Apply them in the tray, or keep going.</p>' : '';
-      const what = !ui.reviewPaused && !total && !done.length ? '<p class="hint">Review gathers what needs a decision: soft dates that slipped, new tasks, backlog about to fade, and suggestions from the inputs you switch on.</p>' : '';
-      return `<div class="review"><div class="finish"><h2>${head}</h2>${what}${body}${more}${review.last_review_at ? `<p class="hint">Last review: ${review.last_review_at}</p>` : ''}</div>${decidedCards}</div>`;
-    }
-    const { task: raw, primary } = items[0];
-    const x = view(raw);   // staged edits (a due date set on this card) show at once, not only after Apply
-    const d = fmtDue(x.due);
+    const c = reviewCurrent();
+    rp.drawing = c.key || c.state;
+    if (c.state === 'failed') return `<div class="empty">Could not load Review: ${esc(rp.failed)} <button class="btn small" data-opt="resume">Try again</button></div>`;
+    if (c.state === 'loading') { if (!rp.loading) loadPass().catch(() => {}); return '<div class="empty">Loading review queue…</div>'; }      // a failure is drawn above, from rp.failed
+    if (c.state === 'finished') return finishedHtml();
+    if (c.state === 'empty' || c.state === 'end') return endHtml(c.pass);
+    if (c.state === 'checkpoint') return checkpointHtml(c.pass);
+    if (c.entry.settled) return settledHtml(c.entry, c.pass);
+    return c.kind === 'card' ? cardItemHtml(c.entry, c.pass) : taskItemHtml(c.entry, c.pass);
+  }
+  // Above the card: Back, where the review stands, the list, Next. On a phone Back and Next are in the bar at the bottom.
+  function navHtml(v) {
+    const c = v.counts || {};
+    const where = rp.said ? `<b>${esc(rp.said)}</b>` : `${c.position ? `${c.position} of ${c.items}` : `${c.items} item${c.items === 1 ? '' : 's'}`} · ${c.left} left undecided${staged.size ? ` · ${staged.size} staged` : ''}${c.left ? ` · ~${Math.max(1, c.minutes_left || 1)} min` : ''}`;
+    return `<div class="rvtop"><button class="btn small rvb" data-opt="back" title="Back: the item before this one (← or [)">‹ Back</button><span class="rvpos">${where}</span>`
+      + `<button class="btn small" data-opt="list" aria-expanded="${!!ui.rvList}">List ${ui.rvList ? '▴' : '▾'}</button><button class="btn small rvn" data-opt="next" title="Next: leave this one undecided; it comes round again (→ or ])">Next ›</button></div>${ui.rvList ? listHtml(v) : ''}`;
+  }
+  // The phone's row of moves, above the decisions in the bar at the bottom.
+  function rvnavHtml(v) {
+    const c = v.counts || {};
+    return `<div class="rvnav"><button data-opt="back" aria-label="Back: the item before this one">‹</button><span>${rp.said ? esc(rp.said) : `${c.position ? `${c.position} of ${c.items} · ` : ''}${c.left} left`}</span><button data-opt="next" aria-label="Next: leave this one undecided">›</button></div>`;
+  }
+  // Every item of the pass with its state; a tap goes to it. Skipped ones come round again; settled ones are struck through.
+  const RV_STATE = { waiting: '', passed: 'skipped', decided: 'staged', answered: 'answered', gone: 'settled' };
+  function listHtml(v) {
+    const rows = (v.list || []).map(r => {
+      const front = r.key === v.cursor_key && v.state === 'item', gone = r.state === 'gone';
+      const st = front ? 'in front' : r.state === 'decided' && r.staged ? r.staged : RV_STATE[r.state] || '';
+      return `<button class="rvrow st-${esc(r.state)}${front ? ' front' : ''}" data-opt="goto:${esc(r.key)}" ${gone || front ? 'disabled' : ''}><span class="rvst">${esc(st)}</span><span class="nm">${esc(r.name || '')}</span><span class="rvwhy">${esc(r.why || '')}${r.due ? ' · ' + esc(r.due) : ''}</span></button>`;
+    }).join('');
+    return `<div class="rvlist">${rows}<div class="rvlfoot"><span class="hint">Skipped items come round again, and stay in Review next time. Nothing is written until Apply.</span><button class="btn small" data-opt="end">Finish for now</button></div></div>`;
+  }
+  // What the tray decides on this task (the mirror: drawn at the click), and what is staged beside it; Take back.
+  function stagedBannerHtml(entry) {
+    const m = /^t:(\d+)$/.exec(entry.key); if (!m) return '';
+    const id = +m[1], d = staged.get(id); if (!d) return '';
+    const beside = [...staged].filter(([k, e]) => k !== id && e && e.task_id === id && e.op !== 'judge_evidence' && !e.deciding && !(tray.meta.get(k) || {}).decides).map(([, e]) => e.label).filter(Boolean);
+    return `<div class="rvstaged"><span class="what"><b>Staged: ${esc(d.label || d.op)}</b>${beside.length ? ` · and ${esc(beside.join(', '))}` : ''}</span>${d.local ? '<span class="hint">staging…</span>' : ''}<button class="btn small" data-opt="undecide" ${d.local ? 'disabled' : ''}>Take back</button></div>`;
+  }
+  function taskItemHtml(entry, v) {
+    const it = entry.item, primary = it.primary;
+    const x = view(it.task);   // staged edits (a due date set on this card) show at once, not only after Apply
     const cls = REASON_CLS[primary] || (primary === 'last_call' ? 'crit' : primary === 'new' || primary === 'back' ? 'new' : 'warn');
-    const idx = total - items.length;
-    const note = ui.rvNote.id === x.id ? ui.rvNote.text : '';
+    const note = ui.rvNote.key === entry.key ? ui.rvNote.text : '';
     const edit = ui.rvEdit && isOpenRow(x.id);      // the card's editor (2026-11-18): the same one an opened task has
+    const opts = reviewOptions(reviewCurrent());
+    const DEC = { done: 'done', later: 'later', drop: 'drop' };
+    const big = opts.filter(o => o.kind === 'decision').map(o => `<button class="${DEC[o.id] || ''}" data-opt="${esc(o.id)}">${esc(o.label)}${o.key ? ` <kbd>${esc(o.key)}</kbd>` : ''}</button>`).join('');
+    const later = opts.filter(o => o.kind === 'later').map(o => `<button class="btn small" data-opt="${esc(o.id)}">${esc(o.label)}</button>`).join('');
     return `<div class="review">
-      <div class="progress"><span>${idx + 1} of ${total}</span><div class="track"><div class="fill" style="width:${Math.round(100 * idx / total)}%"></div></div><span>~${Math.max(1, Math.ceil(items.length * 12 / 60))} min left</span></div>
-      <div class="card" data-id="${x.id}">
-        <div class="why ${cls}">${reasonText(items[0])}</div>
-        ${evidenceLinesHtml(items[0])}
+      ${navHtml(v)}
+      <div class="card" data-id="${x.id}" data-key="${esc(entry.key)}">
+        ${stagedBannerHtml(entry)}
+        <div class="why ${cls}">${reasonText(it)}</div>
+        ${evidenceLinesHtml(it)}
         <h2>${esc(x.name)}</h2>
         <div class="sub" data-rvsub="${x.id}">${reviewSubHtml(x)}</div>
-        ${sinceHtml(items[0])}
+        ${sinceHtml(it)}
         <p data-rvwhy="${x.id}">${esc(x.why_now || (x.score_reasons || []).join(' · '))}</p>${x.context && !edit ? `<p class="ctx ${ui.ctxOpen === x.id ? 'open' : ''}">${esc(x.context)}</p><button class="btn small more" data-ctx-more="${x.id}">${ui.ctxOpen === x.id ? 'Less' : 'More'}</button>` : ''}
         <div class="rvedit-bar"><button class="btn small" data-rv-edit aria-expanded="${edit}">${edit ? 'Close the editor' : '✎ Edit this task'}</button>${edit ? '' : '<span class="hint">name, text, date, project, effort, who, links</span>'}</div>
         ${edit ? rvEditHtml(x) : ''}
         <textarea id="rv-note" rows="2" placeholder="${PHONE() ? 'Note · Done or Drop: the outcome · Keep or Later: added to the text' : `Optional note · Done or Drop: the outcome (up to ${OUTCOME_MAX} characters) · Keep or Later: added to the text`}">${esc(note)}</textarea>
         <div class="links">${x.source_link ? `<a href="${esc(x.source_link)}" target="_blank" rel="noopener">${x.source === 'Plaud' ? 'Plaud note' : 'Source'}</a>` : ''}</div>
-        <div class="big"><button class="done" data-rv="done">Done <kbd>d</kbd></button><button data-rv="keep">Keep <kbd>k</kbd></button><button class="later" data-rv="later">Later <kbd>s</kbd></button><button class="drop" data-rv="drop">Drop <kbd>x</kbd></button></div>
-        <div class="later-menu ${ui.laterOpen ? 'on' : ''}"><span class="hint">Comes back on:</span><button class="btn small" data-rv="tomorrow">Tomorrow</button><button class="btn small" data-rv="fri">Friday</button><button class="btn small" data-rv="nextweek">Next week</button><button class="btn small" data-rv="pickdate">📅 ${ui.datePick ? 'Hide date' : 'Pick a date…'}</button></div>
-        ${ui.laterOpen && ui.datePick ? `<div class="remform datepick"><label for="rv-date" class="hint">Comes back on</label><input type="date" id="rv-date" min="${isoPlus(1)}" value="${isoPlus(1)}" aria-label="Pick a date"><button class="btn small primary" id="rv-date-go">Use this date</button></div>` : ''}
-        ${(items[0].evidence || []).filter(e => e.change && !staged.has('e:' + e.id)).map(e => e.by === 'ripple' ? rippleLineHtml(e, x.id) : e.change.op === 'follow_thread' ? (suggestionStaged(e.id) ? '' : mailAboutHtml(e, x.id)) : `<div class="extra"><span class="chip">Planner suggests</span><span>${esc(e.label)}${e.reason ? ` <span class="hint" style="margin:0">— ${esc(e.reason)}</span>` : ''}</span><button class="btn small primary" data-rv-accept="${e.id}">Accept</button></div>`).join('')}
-        ${linkSuggestionsHtml(items[0])}
-        <div class="extra"><button class="btn small" data-rv="top" aria-pressed="${!!x.top_rank}">${x.top_rank ? '★ On Top · unpin' : '★ Pin to Top'}</button><button class="btn small" data-rv="longterm" aria-pressed="${!!x.longterm}">${x.longterm ? 'Long-term · clear' : 'Mark long-term (never fades)'}</button>${dueForm(x.id, x.due)}${reminderForm(x.id)}</div>
+        <div class="rvbar">${rvnavHtml(v)}<div class="big">${big}</div></div>
+        <div class="later-menu ${ui.laterOpen ? 'on' : ''}"><span class="hint">Comes back on:</span>${later}<button class="btn small" data-opt="pickdate">📅 ${ui.datePick ? 'Hide date' : 'Pick a date…'}</button></div>
+        ${ui.laterOpen && ui.datePick ? `<div class="remform datepick"><label for="rv-date" class="hint">Comes back on</label><input type="date" id="rv-date" min="${isoPlus(1)}" value="${isoPlus(1)}" aria-label="Pick a date"><button class="btn small primary" data-opt="until-date">Use this date</button></div>` : ''}
+        ${(it.evidence || []).filter(e => e.change && !staged.has('e:' + e.id)).map(e => e.by === 'ripple' ? rippleLineHtml(e, x.id) : e.change.op === 'follow_thread' ? (suggestionStaged(e.id) ? '' : mailAboutHtml(e, x.id)) : `<div class="extra"><span class="chip">Planner suggests</span><span>${esc(e.label)}${e.reason ? ` <span class="hint" style="margin:0">— ${esc(e.reason)}</span>` : ''}</span><button class="btn small primary" data-opt="accept:${e.id}">Accept</button><button class="btn small" data-opt="dismiss:${e.id}">Dismiss</button></div>`).join('')}
+        ${linkSuggestionsHtml(it)}
+        <div class="extra"><button class="btn small" data-opt="pin" aria-pressed="${!!x.top_rank}">${x.top_rank ? '★ On Top · unpin' : '★ Pin to Top'}</button><button class="btn small" data-opt="longterm" aria-pressed="${!!x.longterm}">${x.longterm ? 'Long-term · clear' : 'Mark long-term (never fades)'}</button>${dueForm(x.id, x.due)}${reminderForm(x.id)}</div>
         ${reviewPlaceHtml(x.id)}
       </div>
-      <div class="note">Keep = no change; the item will not be asked about again until something changes. Later = hidden until the date you pick, then back in Review and Today. Decisions stage into the tray; Apply writes them all at once.</div></div>`;
+      <div class="note">Next leaves an item undecided: it comes round again after the last, and is in Review next time. Keep = no change; the item will not be asked about again until something changes. Later = hidden until the date you pick, then back in Review and Today. Decisions stage into the tray; Apply writes them all at once.</div></div>`;
+  }
+  // An item that left the queue while it was in front (applied, closed or answered elsewhere): why, and Next.
+  function settledHtml(entry, v) {
+    const it = entry.item || {}, name = (it.task && it.task.name) || it.name || it.label || '';
+    return `<div class="review">${navHtml(v)}<div class="card settled" data-key="${esc(entry.key)}"><div class="why ok">This one is settled</div><h2>${esc(name)}</h2><p>${esc(entry.settled)}</p>`
+      + `<div class="rvbar">${rvnavHtml(v)}<div class="big one"><button data-opt="next">Next ›</button></div></div></div></div>`;
+  }
+  // The pause after "Items per sitting": keep going, apply what is staged and stop, or finish for now.
+  function checkpointHtml(v) {
+    const c = v.counts || {}, n = staged.size;
+    return `<div class="review"><div class="finish rvcheck"><h2>${(v.checkpoint || {}).looked} looked at · ${c.left} left undecided</h2>`
+      + `<p>Keep going, or stop here: what is left stays in Review for next time${n ? `, and Apply writes the ${n} staged change${n === 1 ? '' : 's'}` : ''}.</p>`
+      + `<p class="rvacts"><button class="btn primary" data-opt="continue">Keep going</button>${n ? `<button class="btn" data-opt="apply-stop">Apply ${n} and stop</button>` : ''}<button class="btn" data-opt="end">Finish for now</button></p></div></div>`;
+  }
+  // Everything looked at: Apply, what was decided (Go to, Take back), look again from the start.
+  function endHtml(v) {
+    const list = v.list || [], shown = list.filter(r => r.state !== 'gone');
+    if (v.state === 'empty' || !shown.length) return `<div class="review"><div class="finish"><h2>Nothing to review.</h2><p class="hint">Review gathers what needs a decision: soft dates that slipped, new tasks, backlog about to fade, and suggestions from the inputs you switch on.</p></div></div>`;
+    const done = shown.filter(r => r.state === 'decided' || r.state === 'answered'), n = staged.size;
+    return `<div class="review"><div class="finish"><h2>All ${shown.length} looked at.</h2><p>${n ? `${n} change${n === 1 ? '' : 's'} staged. Apply writes them as one batch, and History can undo it.` : 'Nothing is staged.'}</p>`
+      + `<p class="rvacts">${n ? `<button class="btn primary" data-opt="apply">Apply ${n}</button>` : ''}<button class="btn" data-opt="goto:${esc(shown[0].key)}">Look again from the start</button><button class="btn" data-opt="end">Finish for now</button></p></div>`
+      + `${done.length ? `<div class="sgstaged-list"><div class="hint">Decided in this review</div>${done.map(stagedRowHtml).join('')}</div>` : ''}</div>`;
+  }
+  function stagedRowHtml(r) {
+    return `<div class="sgstaged"><span class="chip ${r.state === 'decided' ? 'new' : ''}">${esc(r.staged || (r.state === 'answered' ? 'answered' : 'staged'))}</span><span class="nm">${esc(r.name || '')}</span>`
+      + `<button class="btn small" data-opt="goto:${esc(r.key)}">Go to</button>${r.state === 'decided' ? `<button class="btn small" data-opt="takeback:${esc(r.key)}">Take back</button>` : ''}</div>`;
+  }
+  // The pass ended here: applied with nothing left, or Finish for now. What is left stays in Review; the tray keeps what is staged.
+  function finishedHtml() {
+    const f = rp.finished || {}, n = staged.size;
+    const head = f.why === 'applied' ? 'Applied. Nothing is left to decide.' : 'Review finished for now.';
+    const left = f.why !== 'applied' && f.left ? `${f.left} left undecided: they stay in Review for next time. ` : '';
+    return `<div class="review"><div class="finish"><h2>${head}</h2><p>${left}${n ? `${n} staged change${n === 1 ? '' : 's'} wait in the tray.` : ''}</p><p class="rvacts"><button class="btn" data-opt="restart">Start again</button></p></div></div>`;
   }
   // A planner create with no task behind it: one card, Create or Dismiss (the dismissal is a batch
   // change like any other, so the Log tab undoes it).
@@ -2309,16 +2516,18 @@
     const name = over || (draft.sg[card.id] || sgBase(card)).name, what = create ? 'Create staged' : 'Dismissal staged';
     return `<div class="sgstaged" data-sgstaged="${card.id}"><span class="chip ${create ? 'new' : ''}">${what}</span><span class="nm">${esc(name)}</span>`
       + `${e.local ? '<span class="hint">staging…</span>' : trayFromWords('e:' + card.id) ? `<span class="hint">${esc(trayFromWords('e:' + card.id).replace(/^ · /, ''))}</span>` : ''}`
-      + `<button class="btn small" data-sg-takeback="${card.id}" ${e.local ? 'disabled' : ''}>Take back</button></div>`;
+      + `<button class="btn small" data-opt="takeback:s:${card.id}" ${e.local ? 'disabled' : ''}>Take back</button></div>`;
   }
-  function suggestionCard(sg, n, after) {
+  function cardItemHtml(entry, v) {
+    const sg = entry.item, st = staged.get('e:' + sg.id);
     const slack = sg.kind === 'slack_mention', mail = sg.mail, f = sg.fields || {}, rip = !slack && !mail && sg.by === 'ripple';
     const link = slack && f.source_link;
     const d = sgDraft(sg), edit = ui.rvEdit;
     const day = iso => new Date(iso.length > 10 && !/[zZ+]/.test(iso.slice(10)) ? iso + 'Z' : iso).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
     return `<div class="review">
-      <div class="progress"><span>${n} suggestion${n === 1 ? '' : 's'} waiting</span><div class="track"></div></div>
-      <div class="card" data-sugg="${sg.id}">
+      ${navHtml(v)}
+      <div class="card" data-sugg="${sg.id}" data-key="${esc(entry.key)}">
+        ${st ? sgStagedHtml(sg, st) : ''}
         <div class="why ${rip ? 'chg' : 'new'}">${slack ? 'Mentioned in Slack' : mail ? 'From your mail' : rip ? 'Ripple suggests' : 'Planner suggests'}</div>
         <h2>${esc(d.name)}</h2>
         <div class="sub" data-sgsub="${sg.id}">${sgSubHtml(sg, d)}</div>
@@ -2331,11 +2540,10 @@
         <div class="rvedit-bar"><button class="btn small" data-rv-edit aria-expanded="${edit}">${edit ? 'Close the editor' : '✎ Edit before creating'}</button>${edit ? '' : '<span class="hint">name, text, date, project, effort, who, links</span>'}</div>
         ${edit ? sgFormHtml(sg, d) : ''}
         <div data-sgstate="${sg.id}">${sgStateHtml(sg)}</div>
-        <div class="big"><button class="done" data-sugg-create="${sg.id}">Create task</button><button class="drop" data-sugg-dismiss="${sg.id}">Dismiss</button></div>
+        <div class="rvbar">${rvnavHtml(v)}<div class="big two"><button class="done" data-opt="create">Create task</button><button class="drop" data-opt="dismiss">Dismiss</button></div></div>
         ${mail ? `<div class="extra"><button class="btn small" data-sugg-open="${sg.id}">✉ Show the message in Mailbird</button></div>` : ''}
         ${sgPlaceHtml(sg.id)}
       </div>
-      ${after || ''}
       <div class="note">${mail ? 'Create makes an open task (source Mail) linked to this thread, so a reply or a message you send is noticed from then on. ' : `Create makes an open task (source ${slack ? 'Slack, the message linked' : rip ? 'Ripple: suggested after a linked task changed' : 'Planner'}) that shows as New in Review; `}Create and Dismiss stage into the tray; Apply writes them, and the Log tab undoes them.</div></div>`;
   }
   // ---------- Review: a suggestion card is a draft (2026-11-18) ----------
@@ -2343,7 +2551,7 @@
   // as what Create would make and is changed by hand in the card's editor, or by its conversation (origin
   // `suggestion`: a reply's `create` is the revised draft, taken over with "Use on this card"). Create sends the
   // draft only when it differs from the suggestion; the server lays it over the card's own fields in the one batch.
-  const sgCard = id => (review && (review.suggestions || []).find(c => c.id === id)) || null;
+  const sgCard = id => { const v = rp.view; for (const e of v ? [v.current, v.ahead] : []) if (e && e.kind === 'card' && e.item && e.item.id === id && e.item.fields !== undefined) return e.item; return null; };      // the card drawn (or about to be)
   function sgBase(sg) {
     const f = sg.fields || {};
     return { name: String(f.name || sg.label || '').replace(/^create:\s*/i, ''), context: String(f.context || sg.reason || ''), project: f.project || '', effort: f.effort || '',
@@ -2526,7 +2734,7 @@
     const diff = text ? beforeAfter(before, f.context) : '';
     const note = stale ? '<span class="hint stale">This task\'s text has changed since the ripple read it, so this rewrite would write over the newer text. Dismiss it, or edit the text yourself.</span>' : '';
     return `<div class="extra rsug"><span class="chip rip">Ripple suggests</span><span class="what">${linkTasks(e.label)}${e.reason ? ` <span class="hint" style="margin:0">— ${linkTasks(e.reason)}</span>` : ''}</span>${diff}${note}`
-      + `${stale ? '' : `<button class="btn small primary" data-rv-accept="${e.id}">Accept</button>`}<button class="btn small" data-rv-dismiss="${e.id}">Dismiss</button></div>`;
+      + `${stale ? '' : `<button class="btn small primary" data-opt="accept:${e.id}">Accept</button>`}<button class="btn small" data-opt="dismiss:${e.id}">Dismiss</button></div>`;
   }
   // The one undo-and-tell step (the Review card's Undo; the landing toast's too): the toast says what was
   // left as it is, the Log and the list are read again.
@@ -3047,7 +3255,7 @@
     document.documentElement.style.setProperty('--kb', Math.max(0, Math.round(innerHeight - vv.height - vv.offsetTop)) + 'px');
     const a = document.activeElement;
     if (document.body.classList.contains('kb-open') && a && a.matches('input, textarea')) {      // a smaller window: the box stays in view
-      const r = a.getBoundingClientRect(), big = document.body.classList.contains('kb-note') && document.querySelector('#panel .review .card .big');
+      const r = a.getBoundingClientRect(), big = document.body.classList.contains('kb-note') && document.querySelector('#panel .review .card .rvbar');
       if (r.top < 0 || r.bottom > vv.height - (big ? big.offsetHeight : 0)) showBox(a, false);      // above Review's decisions too
     }
   }
@@ -4276,7 +4484,7 @@
     if (!PHONE()) return;
     const menu = document.querySelector('#panel .review .card .later-menu.on'); if (!menu) return;
     const last = document.querySelector('#panel .review .card .datepick') || menu;
-    const big = document.querySelector('#panel .review .card .big');
+    const big = document.querySelector('#panel .review .card .rvbar');
     const b = big && big.getClientRects().length ? big.getBoundingClientRect() : null;
     const limit = (b && b.height ? b.top : innerHeight) - 8;
     const head = document.querySelector('header.bar'), top = head && getComputedStyle(head).position !== 'static' ? head.getBoundingClientRect().bottom + 8 : 8;
@@ -4285,9 +4493,13 @@
     if (!again && document.body.classList.contains('kb-open')) setTimeout(() => revealLaterMenu(true), 350);
   }
   function placeReviewBar() {
-    const big = document.querySelector('#panel .review .card .big'); if (!big) return;
+    const big = document.querySelector('#panel .review .card .rvbar');      // the moves and the decisions, one fixed element
+    document.body.classList.toggle('rvbar-on', !!big && PHONE());
+    if (!big) return;
     const trayEl = document.getElementById('tray');
     big.style.bottom = PHONE() && trayEl.classList.contains('on') ? trayEl.offsetHeight + 'px' : '';
+    // A toast stands above the bar, never over a decision it would take the tap of.
+    if (PHONE() && big.getClientRects().length) document.documentElement.style.setProperty('--rvbar', Math.max(0, Math.round(innerHeight - big.getBoundingClientRect().top)) + 'px');
   }
   // A due chip's click cycles the date: tomorrow, Friday, in a week, none (the panel's, and a row's chips redrawn in place).
   function wireDueChips(root) {
@@ -4355,55 +4567,29 @@
     panel.querySelectorAll('[data-proj]').forEach(b => b.addEventListener('click', () => { const k = 'projects:' + b.dataset.proj; setFold(k, !folded(k, true)); render(); }));
     panel.querySelectorAll('[data-fold]').forEach(b => b.addEventListener('click', () => { setFold(b.dataset.fold, !folded(b.dataset.fold)); render(); }));
     wireSummary();
-    panel.querySelectorAll('[data-rv]').forEach(b => b.addEventListener('click', () => reviewAct(b.dataset.rv)));
+    // Review (spoken Review 2a, design 6.11): every decision, answer and move is one option id, [data-opt], and reviewRun is
+    // the one dispatcher; nothing on Review is a closure here any more.
+    panel.querySelectorAll('[data-opt]').forEach(b => b.onclick = () => reviewRun(b.dataset.opt));
     panel.querySelectorAll('[data-ctx-more]').forEach(b => b.onclick = () => { ui.ctxOpen = ui.ctxOpen === +b.dataset.ctxMore ? null : +b.dataset.ctxMore; render(); });
-    // Accept or Dismiss a proposal on the card, Follow its mail's thread or say the mail is not about it: the rule's
-    // accept:E, dismiss:E, follow:E, not_about:E. An accepted Done or Drop IS the decision: the card moves on at the click.
-    panel.querySelectorAll('[data-rv-accept]').forEach(b => b.onclick = () => {
-      const eid = +b.dataset.rvAccept, tid = +b.closest('.card').dataset.id;
-      const item = review && review.items.find(i => i.task.id === tid), e = item && (item.evidence || []).find(x => x.id === eid);
-      const c = (e && e.change) || {};
-      if (c.op === 'done' || c.op === 'drop') { ui.rvNote = { id: null, text: '' }; decideOn('t:' + tid, 'accept:' + eid, {}, { prov: [[tid, { task_id: tid, op: c.op, fields: c.fields || {}, label: c.op === 'done' ? 'done' : 'dropped' }]] }); }
-      else answerOn(tid, 'accept:' + eid, eid, 'suggestion accepted');
-    });
-    panel.querySelectorAll('[data-rv-dismiss]').forEach(b => b.onclick = () => { decideOn('t:' + +b.closest('.card').dataset.id, 'dismiss:' + b.dataset.rvDismiss, {}, { prov: [['e:' + b.dataset.rvDismiss, { task_id: +b.closest('.card').dataset.id, op: 'judge_evidence', fields: { evidence_id: +b.dataset.rvDismiss, verdict: 'dismissed' }, label: 'suggestion dismissed' }]] }); });
-    panel.querySelectorAll('[data-follow]').forEach(b => b.onclick = () => { answerOn(+b.closest('.card').dataset.id, 'follow:' + b.dataset.follow, +b.dataset.follow, 'mail card accepted'); });
-    panel.querySelectorAll('[data-notabout]').forEach(b => b.onclick = () => { decideOn('t:' + +b.closest('.card').dataset.id, 'not_about:' + b.dataset.notabout, {}, { prov: [['e:' + b.dataset.notabout, { task_id: +b.closest('.card').dataset.id, op: 'judge_evidence', fields: { evidence_id: +b.dataset.notabout, verdict: 'dismissed' }, label: 'not about this mail' }]] }); });
     panel.querySelectorAll('[data-since-see]').forEach(b => b.onclick = () => { const id = +b.dataset.sinceSee; ui.sinceOpen = ui.sinceOpen === id ? null : id; render(); });
     panel.querySelectorAll('[data-since-undo]').forEach(b => b.onclick = async () => {
       b.disabled = true;
       if (!await undoAndSay(+b.dataset.sinceUndo)) { b.disabled = false; return; }
-      review = null; await loadReview().catch(() => {}); render();      // a failed load says so in the panel
+      reviewStale(); await loadPass().catch(() => {}); render();      // the pass resumed with what came back; a failed load says so in the panel
     });
-    const rr = document.getElementById('review-retry'); if (rr) rr.onclick = () => { loadReview().catch(() => {}); render(); };
-    panel.querySelectorAll('[data-lsug]').forEach(b => b.onclick = () => linkSuggestionAct(+b.closest('.card').dataset.id, +b.dataset.lsug, b.dataset.lsugAct));
     panel.querySelectorAll('[data-pending-apply]').forEach(b => b.onclick = async () => {
-      try { const r = await api(`/api/proposals/${b.dataset.pendingApply}/apply`, { method: 'POST' }); lastBatch = r.batch_id; review = null; logData = null; await load(); toast(`${r.applied} change${r.applied === 1 ? '' : 's'} applied` + (r.skipped.length ? ` · ${r.skipped.length} skipped` : ''), true); if ((r.ripple_queued || []).length) watchRipple(r.batch_id); }
+      try { const r = await api(`/api/proposals/${b.dataset.pendingApply}/apply`, { method: 'POST' }); lastBatch = r.batch_id; reviewStale(); logData = null; await load(); toast(`${r.applied} change${r.applied === 1 ? '' : 's'} applied` + (r.skipped.length ? ` · ${r.skipped.length} skipped` : ''), true); if ((r.ripple_queued || []).length) watchRipple(r.batch_id); }
       catch (e) { toast('Apply failed: ' + e.message); }
     });
     panel.querySelectorAll('[data-pending-dismiss]').forEach(b => b.onclick = async () => {
       try { await api(`/api/proposals/${b.dataset.pendingDismiss}/dismiss`, { method: 'POST' }); await load(); toast('Dismissed'); } catch (e) { toast('Dismiss failed: ' + e.message); }
     });
-    // A suggestion card's Create and Dismiss are decisions staged by the rule (review_decide, item s:<id>): the card leaves
-    // at the click and the tray lists it; Apply makes the task (one batch with its links and the card's verdict), and the
-    // batch's Undo brings the card back (Create again then reopens the same task). Take back unstages it.
-    panel.querySelectorAll('[data-sugg-dismiss]').forEach(b => b.onclick = () => {
-      const id = +b.dataset.suggDismiss;
-      decideOn('s:' + id, 'dismiss');
-    });
-    panel.querySelectorAll('[data-sugg-create]').forEach(b => b.onclick = () => {
-      const id = +b.dataset.suggCreate;
-      const card = sgCard(id), edited = !!card && sgDirty(card);      // an untouched card is created exactly as suggested
-      if (card && !sgDraft(card).name.trim()) { toast('Not staged: a task needs a name'); return; }
-      decideOn('s:' + id, 'create', edited ? { draft: sgBody(sgDraft(card)).create } : {});
-    });
-    panel.querySelectorAll('[data-sg-takeback]').forEach(b => b.onclick = () => { const id = +b.dataset.sgTakeback; decideOn('s:' + id, 'undecide'); });
-    // The date is used only on the button: a date input's own change event fires while the phone's
+    // The date is used only on its button (or Enter): a date input's own change event fires while the phone's
     // wheel is still moving, which once staged a date nobody chose.
-    const rg = document.getElementById('rv-date-go'); if (rg) rg.onclick = () => { const rd = document.getElementById('rv-date'); if (!rd || !rd.value) { toast('Pick a date first'); return; } reviewAct('date', rd.value); };
-    const rd = document.getElementById('rv-date'); if (rd) rd.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); if (rd.value) reviewAct('date', rd.value); } e.stopPropagation(); });
-    const rn = document.getElementById('rv-note'); if (rn) rn.oninput = () => { ui.rvNote = { id: +rn.closest('.card').dataset.id, text: rn.value }; };
-    const rm = document.getElementById('review-more'); if (rm) rm.onclick = () => loadReview();
+    const rd = document.getElementById('rv-date'); if (rd) rd.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); if (rd.value) reviewRun('until-date'); } e.stopPropagation(); });
+    const rn = document.getElementById('rv-note'); if (rn) rn.oninput = () => { ui.rvNote = { key: rn.closest('.card').dataset.key, text: rn.value }; };
+    // A new item in front is shown from its top (a press near the bottom would otherwise leave the next card scrolled down).
+    if (ui.tab === 'review' && ui.page === null && rp.drawing !== rp.drawn) { const first = rp.drawn === null; rp.drawn = rp.drawing; if (!first) window.scrollTo(0, 0); }
     wireReminders(panel); wireDue(panel);
     panel.querySelectorAll('[data-undo]').forEach(b => b.onclick = async () => {
       b.disabled = true;
@@ -4562,26 +4748,6 @@
     const [m] = top.splice(from, 1); top.splice(top.indexOf(toId), 0, m);
     top.forEach((id, i) => stageExtra(id + ':top', id, 'set', { top_rank: i + 1 }, 'Top ' + (i + 1)));
   }
-  function reviewAct(kind, dateStr) {
-    const items = review.items.filter(i => !staged.has(i.task.id)); if (!items.length) return;
-    const x = items[0].task, id = x.id;
-    if (kind === 'later') { ui.laterOpen = !ui.laterOpen; ui.datePick = false; render(); revealLaterMenu(); return; }
-    if (kind === 'pickdate') { ui.datePick = !ui.datePick; render(); revealLaterMenu(); return; }
-    // Pin and Long-term stand beside the decision (the rule's <id>:top / <id>:lt): pressed back to what the task is, the
-    // staged one goes. What is drawn at the click is the rule's row.
-    if (kind === 'top' || kind === 'longterm') { decideOn('t:' + id, kind === 'top' ? 'pin' : 'longterm', {}, { prov: [besideProv(x, kind)] }); return; }
-    // Every decision is the rule's (review_decide.plan, spoken Review 2a-2a): it stamps the review, judges the card's
-    // evidence, makes a note with Done or Drop the outcome (a longer one goes to the text, and the answer says so) and
-    // stages one with Keep or Later beside the decision as add_note, all deciding this item, so Take back takes them all.
-    if (!['done', 'drop', 'keep', 'tomorrow', 'fri', 'nextweek', 'date'].includes(kind) || (kind === 'date' && !dateStr)) return;
-    if (kind === 'date' && dateStr <= data.today) { toast('Pick a day after today'); return; }      // Later is a day to come (the rule refuses today too)
-    const text = ui.rvNote.id === id ? ui.rvNote.text.trim() : '';
-    // Shut before the decision is staged: its render draws the next card, which must not open with this one's Later menu.
-    ui.laterOpen = false; ui.datePick = false; ui.rvNote = { id: null, text: '' };
-    const later = kind === 'tomorrow' || kind === 'fri' || kind === 'nextweek' || kind === 'date';
-    const args = Object.assign(text ? { note: text } : {}, later ? { until: kind === 'date' ? dateStr : kind } : {});
-    decideOn('t:' + id, later ? 'later' : kind, args, { prov: [[id, decisionProv(id, kind, dateStr)]] });
-  }
   // What a decision draws at the click, under the task's own key, until the rule's rows arrive (the card moves on at once).
   function decisionProv(id, kind, dateStr) {
     if (kind === 'done' || kind === 'drop' || kind === 'keep') return { task_id: id, op: kind, fields: {}, label: { done: 'done', drop: 'dropped', keep: 'kept' }[kind] };
@@ -4593,10 +4759,6 @@
     const s = byId(x.id) || {}, t = view(x);
     if (kind === 'top') { const want = !t.top_rank; return [x.id + ':top', want === !!s.top_rank ? null : { task_id: x.id, op: want ? 'pin_top' : 'unpin', fields: {}, label: want ? 'pinned' : 'unpinned' }]; }
     const want = !t.longterm; return [x.id + ':lt', want === !!s.longterm ? null : { task_id: x.id, op: 'set', fields: { longterm: want ? 1 : 0 }, label: want ? 'long-term' : 'not long-term' }];
-  }
-  // An answer on the card in front (a proposal, a mail, a suggested link): the rule stages it; `e:<id>` drawn at once hides its line.
-  function answerOn(tid, option, eid, label) {
-    decideOn('t:' + tid, option, {}, { prov: [['e:' + eid, { task_id: tid, op: 'judge_evidence', fields: { evidence_id: eid, verdict: 'applied' }, label }]] });
   }
   async function sendPrompt(text) {
     if (!text) return;
@@ -4701,7 +4863,14 @@
     if (ui.page !== null) return;      // the task page covers the tab: no key acts on what is under it
     // Before the returns below: Review has its own keys, and an empty list has no rows (and says "Press n").
     if (e.key === 'n' && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); openNew(); return; }      // a phone's hardware keyboard opens the sheet
-    if (ui.tab === 'review') { const map = { d: 'done', k: 'keep', s: 'later', x: 'drop', t: 'top', l: 'longterm' }; if (map[e.key]) { e.preventDefault(); reviewAct(map[e.key]); } return; }
+    // Review: → or ] Next, ← or [ Back, and on a task in front d k s x the decisions, t l Pin and Long-term (j stays free).
+    if (ui.tab === 'review') {
+      const c = reviewCurrent(), map = { d: 'done', k: 'keep', s: 'later', x: 'drop', t: 'pin', l: 'longterm' };
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (e.key === 'ArrowRight' || e.key === ']') { e.preventDefault(); reviewRun('next'); }
+      else if (e.key === 'ArrowLeft' || e.key === '[') { e.preventDefault(); reviewRun('back'); }
+      else if (map[e.key] && c.state === 'item' && c.kind === 'task' && !c.entry.settled) { e.preventDefault(); reviewRun(map[e.key]); }
+      return; }
     const visible = [...document.querySelectorAll('#panel .row')].map(r => +r.dataset.id); if (!visible.length) return;
     const i = visible.indexOf(ui.focus);
     // j / k walk the rows as drawn: a task drawn twice (the Linked view, Timeline's sections) has two places, and

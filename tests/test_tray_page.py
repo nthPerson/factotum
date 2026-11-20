@@ -39,6 +39,7 @@ const localStorage = {{ getItem: k => (k in store ? store[k] : null), setItem: (
 const presses = [], toasts = [], renders = [], ui = {{ trayOpen: false, trayOff: new Set() }}; let inPress = false;
 const afterPress = (k, f) => {{ presses.push(k); const w = inPress; inPress = true; try {{ f(); }} finally {{ inPress = w; }} }}, render = () => {{ renders.push(inPress); }}, renderTray = () => {{}}, bottomRule = () => {{}}, placePageBar = () => {{}};
 const placeReviewBar = () => {{}}, typingNow = () => false, trayBar = () => {{}}, deviceLabel = () => 'test', toast = m => {{ toasts.push(m); }};
+let rp = {{ back: null, inflight: 0 }}; const passAnswer = () => {{}};      // the pass (spoken Review 2a) is not this test's
 const persistStaged = () => syncTray(), sgCard = () => null, sgDraft = () => ({{ name: '' }}), cut60 = s => String(s).slice(0, 60);
 // The fake server: a tray it changes by the ops it is sent, answering once `held` lets the first held call through.
 // /api/tray/ops: the ops; /api/review/decide: `decideRows` (key, entry, decides), or `decideFail` thrown;

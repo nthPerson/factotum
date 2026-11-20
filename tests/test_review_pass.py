@@ -451,6 +451,23 @@ def test_the_checkpoint_comes_after_review_cap_items_and_continue_or_next_goes_o
     assert v["state"] == "checkpoint" and v["cursor_key"] == "t:6" and v["counts"]["undecided"] == 2
 
 
+def test_a_checkpoint_with_nothing_left_undecided_reads_as_the_end(conn, cfg):
+    """Found rendering 2a-2b: decisions made after the checkpoint (another device, a conversation) leave nothing
+    undecided; the pass then reads as the end, not as a checkpoint asking to keep going over decided items."""
+    cfg = copy.deepcopy(cfg)
+    cfg["lifecycle"]["review_cap"] = 5
+    tasks(conn, 7)
+    begin(conn, cfg)
+    for i in range(1, 6):
+        _, v = dec(conn, cfg, f"t:{i}", "keep")
+    assert v["state"] == "checkpoint"
+    for k in ("t:6", "t:7"):
+        _, v = dec(conn, cfg, k, "keep")
+    assert v["state"] == "end" and v["cursor_key"] is None and v["counts"]["undecided"] == 0
+    v = view(conn, cfg)
+    assert v["state"] == "end" and v["current"] is None
+
+
 def test_the_view_carries_the_item_a_move_on_would_bring(conn, cfg):
     tasks(conn, 3)
     v = begin(conn, cfg)

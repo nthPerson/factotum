@@ -127,7 +127,8 @@ def _state(key: str, stored: dict | None, entry: dict | None, deciding: dict, ke
 def plan(pass_row: dict, stored_items: list[dict], queue: dict, tray_entries, today: date) -> Plan:
     """Every stored item's state (§6.2) and the arrivals: queue items the pass does not hold, each placed at the end
     (in Review's order among themselves) or, when urgent (order_key's tier 0) while an item is in front, right after
-    it. A pass in the state `end` or `empty` with something undecided reads as back on its first undecided item. Pure."""
+    it. A pass in the state `end` or `empty` with something undecided reads as back on its first undecided item, and a
+    checkpoint with nothing undecided as the end. Pure."""
     entries = {e["key"]: e for e in list(queue.get("tasks") or []) + list(queue.get("cards") or [])}
     trows = _trows(tray_entries)
     deciding: dict[str, list[str]] = {}
@@ -157,6 +158,8 @@ def plan(pass_row: dict, stored_items: list[dict], queue: dict, tray_entries, to
     undecided = [k for k in order if states[k] in UNDECIDED]
     if st in ("end", "empty") and undecided:
         st, cursor = "item", undecided[0]
+    elif st == "checkpoint" and not undecided:              # decided meanwhile elsewhere: nothing to keep going over
+        st, cursor = "end", None
     return Plan(order, pos, kinds, states, arrivals, entries, st, cursor)
 
 

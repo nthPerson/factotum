@@ -767,18 +767,27 @@ label.pprop { cursor: pointer; }
   .pprop input[type=checkbox] { width: 20px; height: 20px; margin: 0; }
   .place .preply textarea, .place .btn { font-size: 16px; min-height: 44px; }
   .pfoot .btn { flex: 1 1 100%; min-height: 48px; }
-  /* Review's decisions are pinned at the bottom (frame 10); wire() lifts them above the tray when it shows */
-  .review .card .big { position: fixed; left: 0; right: 0; bottom: 0; z-index: 6; margin: 0; background: var(--surface); border-top: 1px solid var(--line);
-    padding-top: 10px; padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px)); padding-left: max(12px, env(safe-area-inset-left, 0px)); padding-right: max(12px, env(safe-area-inset-right, 0px));
-    grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  /* Review's decisions are pinned at the bottom (frame 10), with the moves above them: .rvbar, one fixed element of two
+     rows (spoken Review 2a): .rvnav (Back, where the review stands, Next) over .big; placeReviewBar lifts it above the tray */
+  .review .card .rvbar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 6; margin: 0; background: var(--surface); border-top: 1px solid var(--line);
+    padding-top: 4px; padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px)); padding-left: max(12px, env(safe-area-inset-left, 0px)); padding-right: max(12px, env(safe-area-inset-right, 0px)); }
+  .review .card .rvbar .rvnav { display: flex; align-items: center; gap: 8px; height: 36px; }
+  .review .card .rvbar .rvnav span { flex: 1; min-width: 0; text-align: center; font-family: var(--mono); font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .review .card .rvbar .rvnav button { font: inherit; font-size: 22px; line-height: 1; width: 64px; height: 34px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); color: var(--fg); cursor: pointer; }
+  .review .card .big { margin: 6px 0 0; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .review .card .big.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .review .card .big.one { grid-template-columns: minmax(0, 1fr); }
   .review .card .big button { min-height: 48px; padding: 8px 4px; }
-  .review .card { padding-bottom: calc(88px + var(--kb, 0px)); }
+  .review .card { padding-bottom: calc(18px + var(--kb, 0px)); }
+  body.rvbar-on main { padding-bottom: calc(var(--rvbar, 140px) + 16px); }      /* the page ends above the bar (and the tray under it) */
   /* a box being typed in on a phone: nothing pinned covers it or the keyboard */
-  body.kb-open .tray, body.kb-open .review .card .big, body.kb-open .pagebar, body.kb-open .fab { display: none; }
+  body.kb-open .tray, body.kb-open .review .card .rvbar, body.kb-open .pagebar, body.kb-open .fab { display: none; }
   body.kb-open .bulk:not(:focus-within) { display: none; }      /* the short bar too, unless its own date box is the one typed in */
   /* …and Review's decisions stay while its note box is typed in (the note is Done's outcome): one short row of four
      just above the keyboard (--kb; the tray's lift does not apply, the tray is hidden) */
-  body.kb-open.kb-note .review .card .big { display: grid; bottom: var(--kb, 0px) !important; padding-top: 6px; padding-bottom: 6px; }
+  body.kb-open.kb-note .review .card .rvbar { display: block; bottom: var(--kb, 0px) !important; padding-top: 6px; padding-bottom: 6px; }
+  body.kb-open.kb-note .review .card .rvbar .rvnav { display: none; }
+  body.kb-open.kb-note .review .card .big { margin: 0; }
   body.kb-open.kb-note .review .card .big button { min-height: 44px; padding: 4px; }
 }
 
@@ -1057,4 +1066,40 @@ mark { background: var(--warn-soft); color: inherit; border-radius: 2px; padding
   .sgstaged { display: grid; grid-template-columns: 1fr auto; column-gap: 10px; row-gap: 4px; }
   .sgstaged > :not(.btn) { grid-column: 1; justify-self: start; min-width: 0; }
   .sgstaged .btn { grid-column: 2; grid-row: 1 / span 3; align-self: center; min-height: 44px; }
+}
+
+/* ---------- Review as a pass (spoken Review 2a, 2026-11-20): where it stands, the list, what is staged, the stops ---------- */
+.review .rvtop { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.review .rvtop .rvpos { flex: 1; min-width: 0; font-family: var(--mono); font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.review .rvtop .rvpos b { color: var(--accent); font-weight: 600; }
+.card .rvbar .rvnav { display: none; }      /* the desktop's moves are above the card */
+.review .rvlist { border: 1px solid var(--line); border-radius: 10px; background: var(--surface); margin: 0 0 12px; max-height: 60vh; overflow-y: auto; overscroll-behavior: contain; }
+.review .rvrow { display: grid; grid-template-columns: 7.5em minmax(0, 1fr); column-gap: 10px; width: 100%; text-align: left; font: inherit; font-size: 14px; color: var(--fg);
+  background: none; border: 0; border-bottom: 1px solid var(--line); padding: 8px 12px; cursor: pointer; }
+.review .rvrow:hover:not(:disabled) { background: var(--surface-2); }
+.review .rvrow:disabled { cursor: default; color: var(--fg); }
+.review .rvrow .rvst { grid-row: 1 / span 2; align-self: start; padding-top: 2px; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.review .rvrow .nm { overflow-wrap: anywhere; }
+.review .rvrow .rvwhy { grid-column: 2; font-size: 12px; color: var(--muted); }
+.review .rvrow.front { background: var(--accent-soft); }
+.review .rvrow.front .rvst { color: var(--accent); font-weight: 600; }
+.review .rvrow.st-decided .rvst, .review .rvrow.st-answered .rvst { color: var(--ok); }
+.review .rvrow.st-passed .rvst { color: var(--warn); }
+.review .rvrow.st-gone .nm { text-decoration: line-through; color: var(--muted); }
+.review .rvlfoot { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 12px; }
+.review .rvlfoot .hint { flex: 1 1 14em; margin: 0; font-size: 12px; }
+.card .rvstaged { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: -4px 0 12px; padding: 8px 10px; border-radius: 8px; background: var(--ok-soft); }
+.card .rvstaged .what { flex: 1 1 12em; min-width: 0; font-size: 14px; overflow-wrap: anywhere; }
+.card .rvstaged .what b { color: var(--ok); font-weight: 600; }
+.card .rvstaged .hint { margin: 0; }
+.card .big.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.card .big.one { grid-template-columns: minmax(0, 1fr); }
+.review .rvacts { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+@media (max-width: 700px) {
+  .review .rvtop .rvb, .review .rvtop .rvn { display: none; }      /* Back and Next are in the bar at the bottom */
+  .review .rvtop .btn { min-height: 40px; }
+  .review .rvrow { grid-template-columns: 6.5em minmax(0, 1fr); min-height: 44px; }
+  .review .rvacts .btn { flex: 1 1 100%; min-height: 48px; }
+  .card .rvstaged .btn { min-height: 44px; }
+  body.rvbar-on:not(.kb-open) .toast:not(.ask) { bottom: calc(var(--rvbar, 0px) + 8px); }      /* above Review's bar, never over a decision */
 }
