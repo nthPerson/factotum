@@ -185,6 +185,9 @@ review_passes(id, day, started_at, started_by,    -- spoken Review stage 2 (2026
      cursor_key, state, lap, looked, rev,         -- the item in front (NULL at the end); item|checkpoint|end|empty; laps; items arrived at since the
      moved_at, moved_by, drivers_json,            --   start or the checkpoint; +1 on every move; who moved last ("page · iPhone", "connector", "skill")
      ended_at, end_why)                           -- applied|finished|replaced|another_day
+                                                  -- drivers_json (stage 3, 2026-11-20): per driver ("page", "connector", "skill") what it last
+                                                  --   saw: {tray_rev, decided, cursor, at, said: {item key: {steps, members} or {}}}, the
+                                                  --   items it read out (newest 40) and the suggested answer each carried
 review_pass_items(pass_id, key, pos, kind,        -- the pass's order: an item key (t:412, s:186, g:rec:<id>), its position (an arrival between two takes a fraction)
      members_json, added_at, arrived_at,          -- a group's task ids in order (else NULL); arrived_at: first time in front (the offered stamp was written then)
      passed_at, passes, done_batch_id)            -- left undecided with Next; the Apply that wrote its decision
@@ -1297,6 +1300,19 @@ it would be read" at the foot of every card shows the server's `say`, basis and 
 `localStorage['factotum.rvsay']`). Settings: "Suggest an answer" (`review.recommend`) and "Group alike new tasks"
 (`review.group_alike`), both on when absent, free and sending nothing.
 
+**The page during a spoken review (spoken Review stage 3, 2026-11-20; §15 "Review through a connector").** Nothing is
+locked and nothing new sits at the bottom. While a connector or a skill drives the pass (the View's `speaking`, its
+last look `speaking_at` under ten minutes old) a quiet line at the top of the Review card, the checkpoint and the end
+says "Through Claude · 9 of 17 · just now" (`spokenLineHtml`), and goes without a reload when the look is older; the
+follow reads the pass again when who speaks changes and does not toast "Moved by Claude" on every spoken move. A tray
+row a connector or a skill staged carries a small "through Claude" chip. `GET /api/review/pass/now` also answers
+`speaking_at` and `last_apply` (the newest `review` batch not undone and its cause's `applied_by`), so a page following
+a spoken Apply reads the tray, the lists and the Log again (through `afterPress`, leaving an open tray panel and its
+unticked rows as they were) and says "Applied through Claude · Undo in History". History says "you, through Claude"
+for a review batch Claude applied; the Log's chip says so ("through Claude" in the Timeline's narrow column) and its
+line adds "· said to Claude" when the connector or a skill staged part of it. A tap on the screen mid-conversation
+goes through the same tray and cursor; the next spoken turn says it.
+
 ## 10. Reminders and push
 
 - The public ntfy.sh server caps delay at 3 days and 250 messages/day, so **the service owns the
@@ -1542,7 +1558,7 @@ pushes that are sent anyway.
 `plaud-sync-planner` and `plaud-sync-ops` (installed in Claude Code and claude.ai) kept working
 until import day; from then the Notion Tasks DB is a mirror and writes there are lost. Phase 6
 replaces them with `factotum-planner` and `factotum-ops` under `skills/` (symlinked into
-`~/.claude/skills`): the planner skill uses the same `factotum mcp` server Chat uses, plus one
+`~/.claude/skills`; a third, `factotum-review`, runs Review by voice since 2026-11-20, below): the planner skill uses the same `factotum mcp` server Chat uses, plus one
 write tool, `stage_changes`, which records a pending batch in `proposals` (validated like a chat
 proposal, through a separate connection; the tool connection stays `query_only`). The tray shows
 it with Apply / Dismiss, so the tray rule holds from a skill too; `stage_changes` is left out of a
@@ -1612,6 +1628,47 @@ carries `expect`; a `set` of `outcome` alone is taken on a done or dropped task 
 outcome there would ripple at once with the task still open). `apply_changes` accepts `link` and `unlink` but never `merge`: a merge drops a task and
 always waits for a tap. A link counts as two rows against the hourly cap. The validator checks a link with
 the same rules as `batches.apply` before the open-task rule.
+
+**Review through a connector or a skill (spoken Review stage 3, 2026-11-20; design §7).** The Claude app's voice
+mode walks the owner through Review with seven tools on the same MCP server (the claude.ai connector over `/mcp`
+and the stdio skill server; never a chat turn: each is `skill_only`), and a third skill, `skills/factotum-review`,
+is the text it follows. Factotum has no audio. The tools (`factotum/review_mcp.py`) are thin wrappers over the pass,
+the rule and the tray, sharing the one cursor and the one tray with the page: `review_start` (begin or resume the
+pass of Review's day; the opening line, today's date and time in the owner's words, the mode, what already waits,
+a short guide, the first item), `review_next` (next, back, repeat, to, first_undecided, continue, one_by_one; always
+`from`, the item last read out, and nothing moves when it is no longer in front), `review_more` (why, text, links,
+evidence, the task number only when asked), `review_status` (counts; with `list`, up to 30 refs and short names),
+`review_decide`, `review_undo` and `review_apply`. An item on the wire is the View's spoken card (`say` cut at 45
+words, then its basis and question), its option ids with their words, a group's members, what the tray holds; every
+string passes `speakable` (no address, link, `Task-N` in any case, id, digit run, ISO date or markdown); every answer
+is fitted to 4000 characters and marked as data (`data`) wherever it carries words others wrote (an item's
+`from_others`, a card's name, what happened on the screen, a list). Each writing call is one transaction on a writer
+connection of its own (`db.begin_write` first, rolled back and closed on any error), never the API's shared one and
+never under `commit_lock`; the stdio server reads Settings again before every call.
+
+What speech may do is bounded in Python: `ref` must be in the pass, `decision` one of that item's option ids, the
+changes `review_decide.plan`'s, the only free text the owner's `note`; a Later day is the owner's words resolved by
+`dates.resolve_spoken` (after Review's day, within a year; "next tuesday" is Tuesday of next week, "this friday" on a
+Friday is today and refused), a reminder `YYYY-MM-DDTHH:MM` after the owner's now and within a year. `rec` (a yes to
+the item's question) stages the suggested answer this client read out (`drivers_json` `said`), and is read again when
+the answer has changed since. **A question first** (`status: confirm`, an `ask` built in Python, a single-use token in
+`state.review.confirm` bound to the pass, the item, the decision, the resolved day, the exceptions, the extras and
+the tray's revision, ten minutes, a new question replacing the old): a close of a task `review_queue.risky_close`
+names (also inside `rec`, an accepted proposal or a Keep-all exception), any merge (naming which task stays), and
+any decision on an item this client never read out (read back with the question). `review_undo` without a ref takes
+back the whole last answer (every item the newest write decided, so all of a Keep all) with the rows that write
+staged beside it (a yes's link, the planner's change and its judge), and a second decision on a task drops what the
+first staged beside it the same way; what the owner staged in a write of its own stays. Every answer says in
+`elsewhere` what happened on the screen since this client's last turn (decisions made, changed or taken back there,
+an Apply there, the cursor moved there), from what `review_pass.seen` kept. **`review_apply`** exists only when
+`server.mcp_writes` is `apply` (hidden and refused otherwise, on both servers): the first call writes nothing and
+answers a read-back (the decisions by kind, how many were made on the screen, the other staged changes that go with
+them, the batches from Claude that wait on the screen and are not part of it) with a token bound to the tray's
+revision; the second applies exactly that tray through `tray.apply` as one `review` batch with cause `{kind: review,
+pass, applied_by, staged_by}`, undoable in History, and reads back again when anything changed. It never applies
+`stage_changes` proposals, is outside the hourly cap of direct writes (what it applies was built by Python or staged by
+the owner, and read back), and wakes the scheduler when a card's Create made a task. Every connector session shares
+one driver, `connector`.
 
 ## 16. Open questions
 

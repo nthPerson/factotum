@@ -88,7 +88,12 @@ supports one (`factotum/recommend.py`, `review_queue.risky_close`, the option `r
 alike new tasks of one recording, course or thread as one group (`review_pass` groups, Keep all, One by one, `POST /api/review/pass/{id}/group`,
 `review.group_alike`); the spoken card (`factotum/spoken.py`, `dates.say_day` / `say_whose`, `spoken` on the View, "Show how it would be read");
 then the review's fixes: no close suggested on a proposal, a link alone beside a reason only the owner answers, the settle guard over the whole
-card, strangers' quote marks out.
+card, strangers' quote marks out. Stage 3 (2026-11-20): Review by voice through the Claude app (`factotum/review_mcp.py`: seven tools,
+`review_start`, `review_next`, `review_more`, `review_status`, `review_decide`, `review_undo`, `review_apply` in apply mode, on the connector's
+`/mcp` and the stdio skill server; the skill `skills/factotum-review`; `dates.resolve_spoken`; the question first with a single-use token; a
+spoken Apply bound to the tray's revision; `elsewhere`; the page's "Through Claude" line, chip, toast and Log words); then the review's fixes:
+undo takes back the whole answer and what a yes staged beside it, "next tuesday" is next week's, a reminder must be ahead, an item is read
+out by this client before it is decided, card names marked as data, the stdio server reads Settings per call.
 Retiring the old Notion
 pages and plaud-sync is the user's checklist (SETUP §15). Update this paragraph when something lands.
 
@@ -164,6 +169,9 @@ pages and plaud-sync is the user's checklist (SETUP §15). Update this paragraph
 | Review's suggested answer: the rules, risky closes, `rec`, the button and `a` | spoken Review design §6.8; SPEC §5 "A suggested answer" | `factotum/recommend.py` (`recommend`, `held`, `_rule`, `keep_all_words`, `names_for`, `TEXTS`), `review_queue.py` (`risky_close`, `RISKY`, `recommend_all`), `review_pass.py` (`decide` `rec`, `_shown`, `_stage_steps`, `_stage_many`), `web/app.js` (`recHtml`, `recRun`, `recRing`) |
 | alike new tasks as one group: what groups, the plan's members, Keep all, take out, one by one | spoken Review design §6.9; SPEC §4 "The pass", §5 | `factotum/review_pass.py` (`groupable`, `alike`, `_alike_of`, `_title`, `regroup`, `_keep_all_steps`, `_group_rec`, `_group_entry`, `_members`, `_provenance`, `_from_words`), `review_queue.order_key` (a group as New), `api.py` (`review_pass_group`, `GroupBody`), `web/app.js` (`groupItemHtml`, `groupRowHtml`, `groupRun`, `passRegroup`), `tests/test_review_groups.py` |
 | the spoken card: what is said, the cleaning, days in words, the reading line | spoken Review design §6.10; SPEC §5 "The spoken card" | `factotum/spoken.py` (`entry`, `short`, `flat`, `person`, `sender`, `subject`, `change`, `wants`, `TEMPLATES`, `_fit`, `_quoted`, `_says_others`), `dates.py` (`say_day`, `say_whose`, `say_time`, `ordinal_words`), `review_pass.py` (`_speak`), `web/app.js` (`sayHtml`), `tests/test_spoken.py` |
+| Review by voice: the seven review tools, the wire item, a spoken day, the question first, undo, the spoken Apply, `elsewhere` | spoken Review design §7; SPEC §15 "Review through a connector or a skill", SETUP §22 | `factotum/review_mcp.py` (`TOOL_FNS`, `DESC`, `PROPS`, `SAID`, `GUIDE`, `DATA`, `speakable`, `item_out`, `_tx`, `_said_recs`, `_arrived`, `_ask`, `_confirm_ask`, `_confirm_take`, `_beside_with`, `_remind_at`, `elsewhere`, `_read_back`, `apply`), `dates.resolve_spoken`, `review_pass.py` (`entry`, `seen`, `said_by`, `SAID_KEPT`), `mcp_server.py` (`Context.refresh`, `Context.wake`, `woke`, `serve_stdio`), `tests/test_stage3_review_tools.py` |
+| the skill voice mode follows | design §7.7, SETUP §22 | `skills/factotum-review/SKILL.md` (its `skill-version`), `skills/factotum-planner/SKILL.md` (the "Review" line), `tests/test_stage3_review_tools.py` (the skill's checks), `tests/test_stage4_agent.py` (the planner's version pin) |
+| the page during a spoken review: the line, the chip, a spoken Apply, the Log's words | design §7.6, SPEC §9 "The page during a spoken review" | `web/app.js` (`spokenLineHtml`, `trayClaude`, `followCheck`, `spokenApply`, `afterSpokenApply`, `whoText`, `throughClaude`, `batchWho`, `saidToClaude`, `batchLine`), `review_pass.py` (`now_more`, `last_apply`, `_speaking`), `api.py` (`/api/review/pass/now`) |
 | the Review count, the number on the app's icon, the shortcuts, `/new` | design §16, SPEC §9, §10 | `factotum/review_queue.py` (`queue`, `card_count`, `count`), `api.py` (`/api/review/count`, `SHORTCUT_PATHS`), `app_push.py` (`payload`, `with_badge`), `web/sw.js` (`badgeOf`, `setBadge`), `web/app.js` (`reviewShown`, `syncBadge`, `parseAddress`, `applyAddress`, `openNew`), `manifest.webmanifest` `shortcuts`, `tools/make_icons.py` (`shortcut`) |
 
 ## Commands
@@ -677,6 +685,39 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
   its option joins `RV_FREE` (a double click on Keep landed on a group member's Drop drawn at the first click).
 - **"Show how it would be read" is per browser** (`localStorage['factotum.rvsay']`, read and written inside `try`), and the page writes no
   words of its own there: it draws the server's `say`, basis and question.
+
+- **A review tool is a thin wrapper, and every word it returns for speaking is the server's** (2026-11-20, stage 3): a new fixed
+  sentence goes in `review_mcp.SAID` (or `GUIDE`, `DATA`, `DESC`; the forbidden-words test reads them all), every string passes
+  `review_mcp.speakable`, an answer stays under `REVIEW_BUDGET` (4000) through `_fit`, and an answer that carries a stranger's words
+  (an item's `from_others`, a card's name, `elsewhere`, a list) carries `data`. The review tools are `skill_only`: no chat turn has them.
+- **A review tool writes in one transaction on a writer of its own** (2026-11-20): `_tx` (`db.begin_write` first, rollback and close on
+  any error, an open BEGIN IMMEDIATE would lock the scheduler out); never the API's shared connection, never under `commit_lock`; the
+  tools' `ctx.conn` stays `query_only`. `review_apply` manages its writer by hand because `tray.apply` commits inside.
+- **A spoken decision names its item and the server decides what was read** (2026-11-20): `ref` is required, `from` on a relative move;
+  `review_pass.seen` keeps per driver (`drivers_json`) the tray revision, the decided items, the cursor and `said`, every item read out
+  with the suggested answer it carried (newest `SAID_KEPT`, 40). `rec` stages those steps, never the ones worked out at the press (read
+  again when they differ), and a decision on an item this driver never read out is read back and asked first, even when the screen
+  brought it in front (review 2026-11-20). Every connector session shares the driver `connector`.
+- **A risky spoken step asks first through one single-use token** (2026-11-20, `review_mcp._ask`, `_confirm_ask`, `_confirm_take`):
+  `state.review.confirm`, bound to the pass, the ref, the decision, the resolved Later day, the exceptions, the extras and the tray's
+  revision; ten minutes; a new question replaces the old; anything else asks again. A token cannot stop a model that calls twice
+  without asking; it guarantees the question reached it.
+- **`review_apply` is two calls bound to the tray's revision** (2026-11-20): the first writes nothing and reads back; the second runs
+  `tray.apply(seen_rev=…)` with source `review` and cause `{kind: review, pass, applied_by}` (`staged_by` added by the tray). It never
+  applies `stage_changes` proposals (the owner's banner), is outside `server.mcp_apply_hourly_cap`, and exists only in apply mode, on both
+  servers. The page knows a spoken Apply from `/api/review/pass/now`'s `last_apply`.
+- **A spoken undo takes back the whole answer** (review 2026-11-20, `review_mcp._beside_with`): without a ref, every item the newest tray
+  write decided (one write is one answer: Keep all); with it, the rows staged beside in the same write (a yes's link, the planner's
+  change, its judge `applied`) go too, and so on a changed mind. What the owner staged in a write of its own stays. The page's Take back
+  is unchanged: its tray shows those rows.
+- **A spoken day is `dates.resolve_spoken`, never `resolve_when`** (2026-11-20): it reads what the add line reads and more; "next
+  <weekday>" is that weekday of next week (review 2026-11-20; `resolve_when` keeps its own reading for the add line), "this <weekday>" on
+  that day is today. A reminder by speech is `YYYY-MM-DDTHH:MM`, no offset, after the owner's now, within a year (`_remind_at`).
+- **`elsewhere` says only what the screen did** (2026-11-20): rows of origin `page` or `carry` newer than the driver's stored revision
+  (one this client decided and the screen changed too), decisions taken back, an Apply, the cursor moved there; another connector or
+  skill session's work is not said. `review_status` reads only, so its `elsewhere` repeats until a turn that writes calls `seen`.
+- **The stdio skill server reads Settings again before every call** (2026-11-20, `Context.refresh`): a Claude Code session outlives a
+  change in Settings; a chat turn's server (no writer) does not refresh.
 
 - **The service runs from the main working copy and serves `factotum/web/` from disk** (2026-11-19): a commit to `main`
   changes the page the owner has open at its next reload, under the old Python still running. Feature work that touches the

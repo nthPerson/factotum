@@ -830,7 +830,13 @@ nothing is applied until you say apply and then yes (apply mode) or tap Apply on
 again at the end), back, repeat, more or why, keep, done (with a reason if you like), drop, later with a day
 ("later, Friday"), yes to the suggested answer, undo, how many left, apply, that's all. A close of something
 risky (a firm date within two days, a Top task, a goal with open steps, a task another one waits on) and every
-merge are asked about first; so is a decision on an item not read out yet.
+merge are asked about first; so is a decision on an item not read out yet. "Undo" takes back the whole last answer
+(all of a Keep all, and whatever a yes staged with it). A day is said as you would say it ("next Tuesday" is Tuesday
+of next week); a reminder needs a day and a time.
+
+**To stop**, say "that's all" (Claude says what is staged and, in apply mode, asks whether to apply now) or just
+leave the conversation: nothing staged is lost, the tray and the pass wait on the screen, and "let's do my review"
+later carries on where you were.
 
 **Stage or apply.** Settings → Connections → "What Claude may do with tasks" (`server.mcp_writes`): *Stage for my
 Apply* leaves every spoken decision in the tray and hides `review_apply`, so you tap Apply on the screen; *Apply
