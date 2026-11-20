@@ -4,24 +4,65 @@ the same functions. Reads only. GET /api/review also writes (the day's link-sugg
 offered stamp `expire` acts on), so it is never called just for the number."""
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
-from . import lifecycle, relations
+from . import config as C, lifecycle, relations
 from .dates import parse_date
 from .db import get_settings, rows
 
 SUGGESTION_KINDS = ("proposal", "slack_mention")      # evidence with no task that Review offers as a Create / Dismiss card
+OWNER_SOURCES = ("ui", "review", "command", "chat", "skill", "connector")   # batch sources that are the owner's own hand: a reopen there is not Back
+
+
+def back_flags(conn, cfg: dict | None = None) -> dict[int, str]:
+    """{task id: the day it came back}: the latest change of `status` from faded or lapsed to open in a batch that
+    was not undone and is not the owner's own (OWNER_SOURCES): a recording (`plaud`), mail, a ripple. The day is the
+    batch's, where the owner is when `cfg` is given (else UTC). `changes` holds JSON text, so the values are quoted."""
+    marks = ",".join("?" * len(OWNER_SOURCES))
+    got = conn.execute("SELECT c.task_id, MAX(b.applied_at) FROM changes c JOIN batches b ON b.id = c.batch_id"
+                       " WHERE c.field = 'status' AND c.old IN ('\"faded\"', '\"lapsed\"') AND c.new = '\"open\"'"
+                       f" AND b.undone_at IS NULL AND b.applied_at IS NOT NULL AND b.source NOT IN ({marks}) GROUP BY c.task_id",
+                       OWNER_SOURCES).fetchall()
+    tz = None
+    if cfg is not None:
+        try:
+            tz = ZoneInfo(str(C.get(cfg, "owner.timezone", "UTC")))
+        except (KeyError, ValueError):
+            tz = None
+    out: dict[int, str] = {}
+    for tid, at in got:
+        try:
+            d = datetime.fromisoformat(str(at).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if tz is not None and d.tzinfo is not None:
+            d = d.astimezone(tz)
+        out[int(tid)] = d.date().isoformat()
+    return out
+
+
+def flags(conn, cfg: dict | None = None) -> dict[int, dict]:
+    """What Review says beside the lifecycle's own reasons, by task id: mail_sweep.review_flags (the sweeps' and the
+    planner's evidence) with `back` (back_flags) merged in. Reads only."""
+    from .mail_sweep import review_flags
+    out = review_flags(conn)
+    for tid, day in back_flags(conn, cfg).items():
+        out.setdefault(tid, {})["back"] = day
+    return out
+
+
+_flags = flags                                        # `queue`'s argument of the same name hides it there
 
 
 def queue(conn, cfg: dict, today: date, open_tasks: list[dict] | None = None, flags: dict | None = None) -> list[dict]:
     """Review's whole eligible queue, in Review's order. `open_tasks`: the open rows, already annotated
-    (relations.annotate, or the API's scored rows); None reads and annotates them. `flags`: review_flags(conn)
+    (relations.annotate, or the API's scored rows); None reads and annotates them. `flags`: flags(conn, cfg)
     when the caller has it; None reads it."""
     if open_tasks is None:
         open_tasks = relations.annotate(conn, rows(conn, "SELECT * FROM tasks WHERE status = 'open'"))
     if flags is None:
-        from .mail_sweep import review_flags
-        flags = review_flags(conn)
+        flags = _flags(conn, cfg)
     last = parse_date(get_settings(conn).get("state.last_review_at"))
     return lifecycle.build_review_queue(open_tasks, today, cfg, last, flags_by_id=flags, cap=10**9)
 
@@ -40,11 +81,10 @@ def items(conn, cfg: dict, today: date) -> dict:
     (review_cards). No cap, no exclusion, nothing left out for being decided. Reads only: the day's link
     suggestions (suggestions.session) are the caller's to write first."""
     from . import review_cards               # lazy: review_cards imports ripple, which imports the planner
-    from .mail_sweep import review_flags
     open_tasks = relations.decorate(conn, rows(conn, "SELECT * FROM tasks WHERE status = 'open'"), today, cfg)
-    flags = review_flags(conn)
-    full = queue(conn, cfg, today, open_tasks, flags)
-    return {"tasks": _finish(conn, full, open_tasks, flags, review_cards.evidence_by_task(conn)), "cards": review_cards.cards(conn, cfg)}
+    fl = flags(conn, cfg)
+    full = queue(conn, cfg, today, open_tasks, fl)
+    return {"tasks": _finish(conn, full, open_tasks, fl, review_cards.evidence_by_task(conn)), "cards": review_cards.cards(conn, cfg)}
 
 
 def task_item(conn, cfg: dict, today: date, task_id: int) -> dict | None:
@@ -52,16 +92,15 @@ def task_item(conn, cfg: dict, today: date, task_id: int) -> dict | None:
     reason to be on Review today is still an item, with `reasons: []` and `primary: None` (a decision from its
     card's conversation must still work after the reason went). Reads only."""
     from . import review_cards
-    from .mail_sweep import review_flags
     ts = rows(conn, "SELECT * FROM tasks WHERE id = ? AND status = 'open'", (task_id,))
     if not ts:
         return None
     t = relations.decorate(conn, ts, today, cfg)[0]
-    flags = review_flags(conn)
+    fl = flags(conn, cfg)
     last = parse_date(get_settings(conn).get("state.last_review_at"))
-    rs = lifecycle.review_reasons(t, today, cfg, last, flags.get(task_id))
+    rs = lifecycle.review_reasons(t, today, cfg, last, fl.get(task_id))
     item = {"task": t, "reasons": rs, "primary": rs[0] if rs else None}
-    return _finish(conn, [item], ts, flags, review_cards.evidence_by_task(conn, {task_id}))[0]
+    return _finish(conn, [item], ts, fl, review_cards.evidence_by_task(conn, {task_id}))[0]
 
 
 def _finish(conn, full: list[dict], open_tasks: list[dict], flags: dict, by_task: dict) -> list[dict]:

@@ -11,7 +11,7 @@ from .dates import days_until, parse_date
 OPEN = "open"
 CLOSED = ("done", "dropped", "faded", "lapsed")
 
-REVIEW_ORDER = ["last_call", "thread_updated", "mentioned", "planner", "ripple", "freed", "blocker_gone", "steps_done", "linked_changed", "link_suggested", "snooze_over", "new", "slipped", "fading", "back", "reminder_missed"]
+REVIEW_ORDER = ["last_call", "thread_updated", "mentioned", "planner", "ripple", "freed", "blocker_gone", "steps_done", "linked_changed", "link_suggested", "snooze_over", "new", "slipped", "fading", "back"]
 REVIEW_LABELS = {
     "last_call": "Last call · hard deadline passed",
     "thread_updated": "Thread updated",
@@ -28,7 +28,6 @@ REVIEW_LABELS = {
     "slipped": "Soft date slipped",
     "fading": "Fading soon",
     "back": "Back · mentioned again",
-    "reminder_missed": "Reminder missed",
 }
 
 
@@ -72,7 +71,8 @@ def last_call_at(task: dict, cfg: dict) -> date | None:
 
 def review_reasons(task: dict, today: date, cfg: dict, last_review_at: date | None, flags: dict | None = None) -> list[str]:
     """Which review buckets this task belongs to, in REVIEW_ORDER. `flags` carries signals the
-    sweeps compute (thread_updated, back, reminder_missed)."""
+    sweeps and the queue compute (thread_updated, mentioned, planner, ripple; `back`: the day a recording or
+    another automation reopened the task from faded or lapsed, review_queue.back_flags)."""
     if task.get("status") != OPEN:
         return []
     snoozed = parse_date(task.get("snoozed_until"))
@@ -126,10 +126,9 @@ def review_reasons(task: dict, today: date, cfg: dict, last_review_at: date | No
     warn = int(C.get(cfg, "lifecycle.fade_warn_days", 3))
     if fa and (fa - today).days <= warn and not (reviewed and (fa - reviewed).days <= warn):
         out.append("fading")
-    if flags.get("back"):
+    back = parse_date(flags.get("back")) if isinstance(flags.get("back"), str) else None
+    if back and not (reviewed and reviewed >= back):      # answered by any decision on or after the day it came back
         out.append("back")
-    if flags.get("reminder_missed"):
-        out.append("reminder_missed")
     return [r for r in REVIEW_ORDER if r in out]
 
 

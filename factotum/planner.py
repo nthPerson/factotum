@@ -44,8 +44,7 @@ NON_PROVING = {"slack_mention"}       # anyone in a workspace can write "Task-42
 
 
 def bundle(conn: sqlite3.Connection, cfg: dict, today: date, events: list[dict] | None = None, now: datetime | None = None) -> dict:
-    from . import reminders, summary
-    from .mail_sweep import review_flags
+    from . import reminders, review_queue, summary          # review_queue lazily: it reads the flags, Back among them
     open_tasks = relations.scored(conn, rows(conn, "SELECT * FROM tasks WHERE status = 'open'"), today, cfg)
     ordered = sorted(open_tasks, key=lambda t: (0 if t.get("top_rank") else 1, t.get("top_rank") or 0, -(t["score"] or 0), t["id"]))
     cands = rows(conn, "SELECT e.*, t.name AS task_name FROM evidence e LEFT JOIN tasks t ON t.id = e.task_id WHERE e.judged_at IS NULL AND e.kind NOT IN ('proposal', 'mail_new', 'link_suggestion', 'filing') ORDER BY e.id DESC LIMIT ?", (CAND_CAP,))[::-1]
@@ -61,7 +60,7 @@ def bundle(conn: sqlite3.Connection, cfg: dict, today: date, events: list[dict] 
     waiting = [t for t in open_tasks if t.get("waiting_on")]
     st = {r["key"]: r["value_json"] for r in rows(conn, "SELECT key, value_json FROM settings")}
     last = lifecycle.parse_date(st.get("state.last_review_at", "null").strip('"'))
-    review_n = len(lifecycle.build_review_queue(open_tasks, today, cfg, last, flags_by_id=review_flags(conn), cap=10**9))
+    review_n = len(lifecycle.build_review_queue(open_tasks, today, cfg, last, flags_by_id=review_queue.flags(conn, cfg), cap=10**9))
     pending = rows(conn, "SELECT label FROM evidence WHERE kind = 'proposal' AND judged_at IS NULL ORDER BY id DESC LIMIT 20")
     closed = rows(conn, "SELECT id, name, status FROM tasks WHERE status IN ('done', 'dropped') AND completed_at = ? ORDER BY id LIMIT 30", (today.isoformat(),))
     # `snap`: the open rows as this run reads them, so the summary it writes is remembered by what
