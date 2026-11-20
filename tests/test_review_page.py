@@ -84,3 +84,11 @@ def test_the_phones_bar_is_one_thing_at_the_bottom():
     assert "body.kb-open.kb-note .review .card .rvbar .rvnav { display: none; }" in phone
     assert "#panel .review .card .rvbar" in _body("placeReviewBar")
     assert ".rvnav" in CSS and ".rvtop" in CSS and ".rvlist" in CSS and ".rvstaged" in CSS
+
+
+def test_a_quick_second_tap_never_lands_on_a_decision_that_moved_under_it():
+    """The bar stays put but its buttons change between a task (four) and a card (two): a decision tapped within
+    RV_SETTLE_MS of a new item coming in front is dropped; moves and keys are not."""
+    assert "const RV_SETTLE_MS = 400;" in JS
+    assert "if (b.closest('.big') && Date.now() - rp.drawnAt < RV_SETTLE_MS) return; reviewRun(b.dataset.opt);" in JS
+    assert "rp.drawnAt = Date.now();" in JS
