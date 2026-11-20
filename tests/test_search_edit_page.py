@@ -93,7 +93,7 @@ def test_the_tray_is_the_servers():
         assert "syncTray()" in _body(f), f
     assert "e.body = j" in JS                                         # a 409 hands its tray to the page
     rv = _body("reviewAct")
-    assert rv.index("ui.laterOpen = false; ui.datePick = false;") < rv.index("stage(id, 'keep'")      # the Later menu is shut before the card moves on
+    assert rv.index("ui.laterOpen = false; ui.datePick = false;") < rv.index("decideOn('t:' + id, later ?")      # the Later menu is shut before the card moves on
 
 
 def test_review_decisions_go_through_the_rule():
@@ -107,6 +107,25 @@ def test_review_decisions_go_through_the_rule():
     assert "`/api/review/suggestions/${id}/create`" not in JS          # the old route stays for pages loaded before the deploy
     assert "!staged.has('e:' + x.id)" in _body("reviewShown")
     assert "res.cards" in _body("applyAll") and "cardMade.set(res.batch_id" in _body("applyAll")
+
+
+def test_every_review_press_goes_through_the_rule():
+    """Spoken Review 2a-2a (design 6.11): the four decisions, Pin and Long-term, Accept and Dismiss on a proposal, Follow
+    and Not about on a mail, and every answer to a suggested link stage through decideOn (the rule, review_decide.plan),
+    never an op staged by the page; a conversation's Pin or Long-term on a task already so is not staged again."""
+    rv = _body("reviewAct")
+    assert "decideOn('t:' + id" in rv and "stage(" not in rv.replace("decideOn(", "") and "stageJudge(" not in rv and "stageChange(" not in rv
+    assert "act(id" not in rv
+    ls = _body("linkSuggestionAct")
+    assert "decideOn('t:' + card" in ls and "stageChange(" not in ls and "stageJudge(" not in ls
+    for sel in ("'[data-rv-accept]'", "'[data-rv-dismiss]'", "'[data-follow]'", "'[data-notabout]'"):
+        i = JS.index(sel)
+        h = JS[i:JS.index("panel.querySelectorAll(", i + 1)]
+        assert ("decideOn('t:' + " in h or "answerOn(" in h) and "stageJudge(" not in h and "stageExtra(" not in h and "stageChange(" not in h, sel
+    assert "decideOn('t:' + tid, option" in _body("answerOn")
+    assert "propNoop(p)" in _body("stagePlace") and "!propNoop(p)" in JS[JS.index("const placeOpen = "):JS.index("const cardDraft = ")]
+    assert "afterPress('tray', () => { o.fallback(); render(); })" in _body("decideOn")      # a refused one is staged after the press
+    assert "takenBack" in _body("decideOn") and "takenBack" in _body("discardStaged")
 
 
 def test_peek_reads_a_task_without_marking_its_neighbours_seen(cfg, tmp_path):

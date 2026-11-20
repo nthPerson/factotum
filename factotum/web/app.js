@@ -726,20 +726,26 @@
     tray.busy = tray.busy.then(run, run);
     return tray.busy;
   }
-  // Apply through the server's tray: every change staged here reaches it first, then one batch (tray.apply) of `keys` (all
-  // when none), refused with 409 when a row changed after the revision this page shows. The answer's tray replaces the
-  // mirror without a redraw (the caller reloads the lists). Never cached or retried.
-  async function trayApply(keys, opts) {
-    for (let b = null; b !== tray.busy;) { b = tray.busy; await b; }
-    if (tray.carryFailed) throw new Error('the changes this browser kept before are not in the shared tray yet');
-    if (trayUnsent()) throw new Error('some changes are not saved yet; Apply again when the connection is back');
+  // Apply through the server's tray: one batch (tray.apply) of `keys` (all when none), refused with 409 when a row changed
+  // after the revision this page shows. It runs in the tray's queue (review 2026-11-19): every change staged here before
+  // the press reaches the server first, and one staged while its request is in flight is sent after it and stays staged,
+  // so a 409 is always another writer. The answer's tray replaces the mirror without a redraw (the caller reloads the
+  // lists). Never cached or retried.
+  function trayApply(keys, opts) {
     const o = opts || {};
-    let res;
-    try {
-      res = await api('/api/tray/apply', { method: 'POST', body: JSON.stringify({ keys: keys ? [...keys].map(String) : null, seen_rev: tray.rev, source: o.source || 'ui', finish: !!o.finish, whole_tray: !keys }) });
-    } catch (e) { if (e.body && e.body.tray) trayAnswer(e.body.tray, null); throw e; }
-    trayAnswer(res.tray, null, { quiet: true });
-    return res;
+    const run = async () => {
+      if (tray.carryFailed) throw new Error('the changes this browser kept before are not in the shared tray yet');
+      if (tray.failed || tray.inflight) throw new Error('some changes are not saved yet; Apply again when the connection is back');
+      let res;
+      try {
+        res = await api('/api/tray/apply', { method: 'POST', body: JSON.stringify({ keys: keys ? [...keys].map(String) : null, seen_rev: tray.rev, source: o.source || 'ui', finish: !!o.finish, whole_tray: !keys }) });
+      } catch (e) { if (e.body && e.body.tray) trayAnswer(e.body.tray, null); throw e; }
+      trayAnswer(res.tray, null, { quiet: true });
+      return res;
+    };
+    const p = tray.busy.then(run, run);
+    tray.busy = p.catch(() => {});
+    return p;
   }
   // What a suggestion card's decision draws at the click (the rule's row, review_decide.plan): Create and Dismiss share
   // the card's key "e:<id>", so the later replaces the earlier; Take back (undecide) takes it out.
@@ -782,12 +788,16 @@
         const was = traySig(), wasMeta = trayMetaSig();
         undo();
         if (e && e.body && e.body.tray) trayAnswer(e.body.tray, null, { quiet: true, drop: mine });
-        if (e && e.status === 400 && o.fallback) { o.fallback(); return; }
+        if (e && e.status === 400 && o.fallback) { afterPress('tray', () => { o.fallback(); render(); }); return; }      // staged the page's way, after the press (review 2026-11-19)
         if (e && e.message !== 'signed out') toast('Not staged: ' + (e.detail || (e.network ? 'no connection; press it again when it is back' : e.message)));
         trayRedraw(was, wasMeta);
         return;
       }
-      trayAnswer(r.tray, null, { drop: mine });
+      // Discarded while on its way (Discard all, the tray's ✕): what the rule staged for it is taken out again (review 2026-11-19).
+      const back = [...mine].some(e => e.takenBack);
+      const was = traySig(), wasMeta = trayMetaSig();
+      trayAnswer(r.tray, null, { drop: mine, quiet: back });
+      if (back) { for (const k of r.keys || []) staged.delete(trayKey(k)); syncTray(); trayRedraw(was, wasMeta); return; }
       if ([...staged.values()].some(e => mine.has(e))) { undo(); trayPoll({ force: true }); }      // an answer older than the tray shown: read it again
       if (r.said) toast(r.said);
     };
@@ -870,8 +880,8 @@
     if (replaced) staged.set('e:' + eid, Object.assign({}, j, { fields: Object.assign({}, j.fields, { verdict: 'dismissed' }), label: 'filing suggestion not taken' }));
     else staged.delete('e:' + eid);
   }
-  function discardStaged(keys) {   // keys as strings; undefined = every one
-    [...staged.keys()].filter(k => !keys || keys.has(String(k))).forEach(k => { const e = staged.get(k); staged.delete(k); chipLeft(e, false); });
+  function discardStaged(keys) {   // keys as strings; undefined = every one. A decision still on its way is marked, so its answer is taken out too.
+    [...staged.keys()].filter(k => !keys || keys.has(String(k))).forEach(k => { const e = staged.get(k); staged.delete(k); if (e && e.deciding) e.takenBack = true; chipLeft(e, false); });
     if (!staged.size) { ui.trayOpen = false; ui.trayOff = new Set(); }
     persistStaged(); render();
   }
@@ -961,7 +971,7 @@
       else toast(said, true);
       if ((res.ripple_queued || []).length) watchRipple(res.batch_id);
     } catch (e) {
-      if (e.status === 409) toast('Not applied: the tray changed on another device since it was shown. Look at it and Apply again.');
+      if (e.status === 409) toast('Not applied: the tray changed on another device or by Claude since it was shown. Look at it and Apply again.');
       else toast('Apply failed: ' + (e.detail || e.message));
     }
   }
@@ -2204,19 +2214,11 @@
   }
   // What a suggestion's button stages: the link or merge, carrying the suggestion (the server judges it with the
   // change), or the suggestion dismissed.
+  // The rule's answer (review_decide.plan: link, step, waits, same, merge, not_related on the suggestion's evidence id);
+  // the page's "not" is not_related. The line goes at the click.
   function linkSuggestionAct(card, eid, act) {
-    const item = review && review.items.find(i => i.task.id === card);
-    const s = item && (item.link_suggestions || []).find(x => x.evidence_id === eid); if (!s) return;
-    const N = s.other;
-    if (act === 'not') { stageJudge(eid, card, 'dismissed', `${s.kind === 'same_as' ? 'not the same as' : 'not related to'} Task-${N}`); return; }
-    let c;
-    if (act === 'link') c = { task_id: s.dir === 'out' ? card : N, op: 'link', fields: { kind: s.kind, other: s.dir === 'out' ? N : card } };
-    else if (act === 'step') c = { task_id: card, op: 'link', fields: { kind: 'part_of', other: N } };
-    else if (act === 'waits') c = { task_id: card, op: 'link', fields: { kind: 'waits_on', other: N } };
-    else if (act === 'merge' || act === 'same') { const K = act === 'merge' ? suggestionKeep(s, card) : defaultKeep(card, N); c = { task_id: K === card ? N : card, op: 'merge', fields: { into: K } }; }
-    else return;
-    stageChange(c, '', { ev: eid });
-    toast('Link staged · decide on the card, then Apply');
+    if (!['link', 'step', 'waits', 'same', 'merge', 'not'].includes(act)) return;
+    decideOn('t:' + card, (act === 'not' ? 'not_related' : act) + ':' + eid, {}, { prov: [['e:' + eid, { task_id: card, op: 'judge_evidence', fields: { evidence_id: eid, verdict: act === 'not' ? 'dismissed' : 'applied' }, label: 'link answered' }]] });
   }
   // The chips under a Review card's name; drawn again in place when the card's editor stages a change (editRefresh).
   function reviewSubHtml(x) {
@@ -2885,8 +2887,10 @@
     if (p.op === 'set') return { task_id: id, op: 'set', fields: { snoozed_until: String(f.snoozed_until).slice(0, 10) }, label: 'later · back ' + String(f.snoozed_until).slice(0, 10), prop };
     return { task_id: id, op: p.op, fields: f.outcome ? { outcome: f.outcome } : {}, label: changeWords(p) || (p.op === 'done' ? 'done' : 'dropped'), prop };
   }
+  // A Pin or Long-term proposed for a task that is already so (with what is staged): nothing to stage (review 2026-11-19).
+  const propNoop = p => { const t = p.task_id != null && byId(p.task_id); if (!t) return false; const v = view(t); return (p.op === 'pin_top' && !!v.top_rank) || (p.op === 'longterm' && !!v.longterm); };
   // Not staged, not made or applied yet: what the stage button stages (when ticked).
-  const placeOpen = (p, mid, i) => PLACE_OPS.has(p.op) && !p.applied && !propApplied(mid, i) && !propStaged(p, mid, i);
+  const placeOpen = (p, mid, i) => PLACE_OPS.has(p.op) && !p.applied && !propApplied(mid, i) && !propStaged(p, mid, i) && !propNoop(p);
   // On a suggestion card a proposed `create` is the card's revised draft: "Use on this card" takes it over.
   const cardDraft = (pl, p) => pl.origin === 'suggestion' && p.op === 'create';
   const andList = a => a.length < 2 ? a.join('') : a.slice(0, -1).join(', ') + ' and ' + a[a.length - 1];
@@ -2905,6 +2909,7 @@
         if (p.applied) return `<div class="pprop"><span></span>${words}<span class="chip staged">${p.op === 'create' && p.task_id ? 'created ' + tref(p.task_id) : 'linked'}</span></div>`;
         if (propApplied(m.id, i)) return `<div class="pprop"><span></span>${words}<span class="chip staged">applied</span></div>`;
         if (propStaged(p, m.id, i)) return `<div class="pprop"><span></span>${words}<span class="chip staged">staged</span></div>`;
+        if (propNoop(p)) return `<div class="pprop"><span></span>${words}<span class="chip">${p.op === 'pin_top' ? 'already on Top' : 'already long-term'}</span></div>`;
         if (!PLACE_OPS.has(p.op)) return `<div class="pprop"><span></span>${words}<span></span></div>`;
         if (cardDraft(pl, p)) return `<div class="pprop"><span></span>${words}<span class="pbtns"><button class="btn small primary" data-sg-use="${esc(k)}">Use on this card</button></span></div>`;
         return `<label class="pprop"><input type="checkbox" data-pprop="${esc(k)}" ${pl.off.has(k) ? '' : 'checked'} aria-label="Stage this">${words}${p.op === 'create' ? `<span class="pbtns"><button class="btn small" data-place-create="${esc(k)}">Create</button><button class="btn small" data-edit-first="${esc(k)}">Edit first</button></span>` : '<span></span>'}</label>`;
@@ -2954,7 +2959,7 @@
     const props = proposalsOf(mid);
     let n = 0, decided = false; const left = [];
     props.forEach((p, i) => {
-      if (!placeTicked(pl, p, mid, i)) return;
+      if (propNoop(p) || !placeTicked(pl, p, mid, i)) return;      // already so: not staged and not counted
       const out = placeLeftOut(pl, props, p, mid);
       if (out !== null) { left.push(out); return; }
       // A decision about the card's own task goes through the rule (the verdicts on its evidence and the review stamp
@@ -4352,32 +4357,18 @@
     wireSummary();
     panel.querySelectorAll('[data-rv]').forEach(b => b.addEventListener('click', () => reviewAct(b.dataset.rv)));
     panel.querySelectorAll('[data-ctx-more]').forEach(b => b.onclick = () => { ui.ctxOpen = ui.ctxOpen === +b.dataset.ctxMore ? null : +b.dataset.ctxMore; render(); });
+    // Accept or Dismiss a proposal on the card, Follow its mail's thread or say the mail is not about it: the rule's
+    // accept:E, dismiss:E, follow:E, not_about:E. An accepted Done or Drop IS the decision: the card moves on at the click.
     panel.querySelectorAll('[data-rv-accept]').forEach(b => b.onclick = () => {
-      const eid = +b.dataset.rvAccept; const item = review.items.find(i => (i.evidence || []).some(e => e.id === eid)); const e = item && item.evidence.find(e => e.id === eid); if (!e || !e.change) return;
-      const tid = item.task.id, c = Object.assign({ task_id: tid }, e.change);
-      if (['done', 'drop'].includes(c.op)) {   // this IS the decision: the card's other flags are judged with it
-        stage(tid, c.op, c.fields || {}, changeWords(c) || e.label);
-        (item.evidence || []).forEach(o => { if (o.id !== eid && !staged.has('e:' + o.id)) stageJudge(o.id, tid, 'reviewed', o.kind === 'proposal' ? 'suggestion seen' : 'thread seen'); });
-        ui.rvNote = { id: null, text: '' };
-      }
-      else if (['pin_top', 'longterm'].includes(c.op)) stageExtra(`${tid}:a${eid}`, tid, c.op, {}, e.label);   // an extra beside the decision, like the ★ button
-      else if (c.op === 'add_reminder') stageExtra(tid + ':r', tid, 'add_reminder', c.fields, e.label);
-      else if (['link', 'unlink', 'merge', 'add_note'].includes(c.op)) stageChange(c, e.label, {}, 'a' + eid);
-      else if (c.op === 'set') stageExtra(`${tid}:c${eid}`, tid, 'set', c.fields || {}, e.label, { expect: c.expect || textExpect(tid, c.fields) });     // a ripple's text carries the text it read
-      else { toast('This suggestion cannot be staged here'); return; }
-      stageJudge(eid, tid, 'applied', 'suggestion accepted'); toast(['done', 'drop'].includes(c.op) ? 'Decision staged · Apply in the tray' : 'Suggestion staged · decide on the card, then Apply');
+      const eid = +b.dataset.rvAccept, tid = +b.closest('.card').dataset.id;
+      const item = review && review.items.find(i => i.task.id === tid), e = item && (item.evidence || []).find(x => x.id === eid);
+      const c = (e && e.change) || {};
+      if (c.op === 'done' || c.op === 'drop') { ui.rvNote = { id: null, text: '' }; decideOn('t:' + tid, 'accept:' + eid, {}, { prov: [[tid, { task_id: tid, op: c.op, fields: c.fields || {}, label: c.op === 'done' ? 'done' : 'dropped' }]] }); }
+      else answerOn(tid, 'accept:' + eid, eid, 'suggestion accepted');
     });
-    panel.querySelectorAll('[data-rv-dismiss]').forEach(b => b.onclick = () => { stageJudge(+b.dataset.rvDismiss, +b.closest('.card').dataset.id, 'dismissed', 'suggestion dismissed'); });
-    // A mail card on a task: follow its thread (the link, with its verdict) or say the mail is not about it.
-    const mailCard = eid => { const item = review && review.items.find(i => (i.evidence || []).some(e => e.id === eid)); const e = item && item.evidence.find(e => e.id === eid); return e && e.change && e.change.op === 'follow_thread' ? { e, tid: item.task.id } : null; };
-    panel.querySelectorAll('[data-follow]').forEach(b => b.onclick = () => {
-      const m = mailCard(+b.dataset.follow); if (!m) return;
-      const { e, tid } = m, subject = (e.change.mail || {}).subject || (e.change.fields || {}).subject || '';
-      stageChange({ task_id: tid, op: 'follow_thread', fields: e.change.fields }, subject ? `follows “${subject}”` : 'follows the mail thread', { ev: e.id }, 'f' + e.id);
-      stageJudge(e.id, tid, 'applied', 'mail card accepted');
-      toast('Staged · it follows the thread once you Apply');
-    });
-    panel.querySelectorAll('[data-notabout]').forEach(b => b.onclick = () => { const m = mailCard(+b.dataset.notabout); if (m) stageJudge(m.e.id, m.tid, 'dismissed', 'not about this mail'); });
+    panel.querySelectorAll('[data-rv-dismiss]').forEach(b => b.onclick = () => { decideOn('t:' + +b.closest('.card').dataset.id, 'dismiss:' + b.dataset.rvDismiss, {}, { prov: [['e:' + b.dataset.rvDismiss, { task_id: +b.closest('.card').dataset.id, op: 'judge_evidence', fields: { evidence_id: +b.dataset.rvDismiss, verdict: 'dismissed' }, label: 'suggestion dismissed' }]] }); });
+    panel.querySelectorAll('[data-follow]').forEach(b => b.onclick = () => { answerOn(+b.closest('.card').dataset.id, 'follow:' + b.dataset.follow, +b.dataset.follow, 'mail card accepted'); });
+    panel.querySelectorAll('[data-notabout]').forEach(b => b.onclick = () => { decideOn('t:' + +b.closest('.card').dataset.id, 'not_about:' + b.dataset.notabout, {}, { prov: [['e:' + b.dataset.notabout, { task_id: +b.closest('.card').dataset.id, op: 'judge_evidence', fields: { evidence_id: +b.dataset.notabout, verdict: 'dismissed' }, label: 'not about this mail' }]] }); });
     panel.querySelectorAll('[data-since-see]').forEach(b => b.onclick = () => { const id = +b.dataset.sinceSee; ui.sinceOpen = ui.sinceOpen === id ? null : id; render(); });
     panel.querySelectorAll('[data-since-undo]').forEach(b => b.onclick = async () => {
       b.disabled = true;
@@ -4576,34 +4567,36 @@
     const x = items[0].task, id = x.id;
     if (kind === 'later') { ui.laterOpen = !ui.laterOpen; ui.datePick = false; render(); revealLaterMenu(); return; }
     if (kind === 'pickdate') { ui.datePick = !ui.datePick; render(); revealLaterMenu(); return; }
-    if (kind === 'top' || kind === 'longterm') { act(id, kind); return; }   // extras, not decisions
-    // A decision is a review: it sets last_reviewed_at (Keep does so server-side). An optional note saved
-    // with Done or Drop is the task's outcome (design §8.5: appended to the text as well, it would ripple
-    // twice). With Keep or Later it is staged beside the decision as add_note under "<id>:note": the server
-    // appends it, dated, to the context as it is at Apply, so nothing typed here writes over a newer text.
+    // Pin and Long-term stand beside the decision (the rule's <id>:top / <id>:lt): pressed back to what the task is, the
+    // staged one goes. What is drawn at the click is the rule's row.
+    if (kind === 'top' || kind === 'longterm') { decideOn('t:' + id, kind === 'top' ? 'pin' : 'longterm', {}, { prov: [besideProv(x, kind)] }); return; }
+    // Every decision is the rule's (review_decide.plan, spoken Review 2a-2a): it stamps the review, judges the card's
+    // evidence, makes a note with Done or Drop the outcome (a longer one goes to the text, and the answer says so) and
+    // stages one with Keep or Later beside the decision as add_note, all deciding this item, so Take back takes them all.
     if (!['done', 'drop', 'keep', 'tomorrow', 'fri', 'nextweek', 'date'].includes(kind) || (kind === 'date' && !dateStr)) return;
     if (kind === 'date' && dateStr <= data.today) { toast('Pick a day after today'); return; }      // Later is a day to come (the rule refuses today too)
     const text = ui.rvNote.id === id ? ui.rvNote.text.trim() : '';
     // Shut before the decision is staged: its render draws the next card, which must not open with this one's Later menu.
     ui.laterOpen = false; ui.datePick = false; ui.rvNote = { id: null, text: '' };
-    const later = (day, label) => stage(id, 'set', { snoozed_until: day, last_reviewed_at: data.today }, 'later · back ' + label);
-    const closes = kind === 'done' || kind === 'drop';
-    // An outcome is at most OUTCOME_MAX characters (the server cuts there): a longer note is never cut, it is
-    // added to the text in full beside the decision, as before outcomes, and the toast says so.
-    const long = closes && [...text].length > OUTCOME_MAX;
-    if (closes && text && !long) stageChange({ task_id: id, op: kind, fields: { outcome: text } }, kind === 'done' ? 'done' : 'dropped');
-    else if (kind === 'done') stage(id, 'done', {}, 'done');
-    else if (kind === 'drop') stage(id, 'drop', {}, 'dropped');
-    else if (kind === 'keep') stage(id, 'keep', {}, 'kept');
-    else if (kind === 'tomorrow') later(isoPlus(1), 'tomorrow');
-    else if (kind === 'fri') later(nextFri(), 'Friday');
-    else if (kind === 'nextweek') later(isoPlus(7 - ((TODAY().getDay() + 6) % 7)), 'next week');
-    else later(dateStr, dateStr);
-    if (text && (!closes || long)) stageChange({ task_id: id, op: 'add_note', fields: { text } }, '');
-    if (long) toast(`The note is longer than an outcome (${OUTCOME_MAX} characters), so it goes to the task's text instead`);
-    // The flags that brought the card here (a thread update, a planner proposal) are judged in the
-    // same batch, so the card does not come back tomorrow for the same reason.
-    (items[0].evidence || []).forEach(e => { if (!staged.has('e:' + e.id)) stageJudge(e.id, id, 'reviewed', (e.kind === 'proposal' ? 'suggestion seen' : 'thread seen')); });
+    const later = kind === 'tomorrow' || kind === 'fri' || kind === 'nextweek' || kind === 'date';
+    const args = Object.assign(text ? { note: text } : {}, later ? { until: kind === 'date' ? dateStr : kind } : {});
+    decideOn('t:' + id, later ? 'later' : kind, args, { prov: [[id, decisionProv(id, kind, dateStr)]] });
+  }
+  // What a decision draws at the click, under the task's own key, until the rule's rows arrive (the card moves on at once).
+  function decisionProv(id, kind, dateStr) {
+    if (kind === 'done' || kind === 'drop' || kind === 'keep') return { task_id: id, op: kind, fields: {}, label: { done: 'done', drop: 'dropped', keep: 'kept' }[kind] };
+    const day = kind === 'tomorrow' ? isoPlus(1) : kind === 'fri' ? nextFri() : kind === 'nextweek' ? isoPlus(7 - ((TODAY().getDay() + 6) % 7)) : dateStr;
+    return { task_id: id, op: 'set', fields: { snoozed_until: day, last_reviewed_at: data.today }, label: 'later · back ' + ({ tomorrow: 'tomorrow', fri: 'Friday', nextweek: 'next week' }[kind] || dateStr) };
+  }
+  // Pin or Long-term as the rule will stage it: the opposite of what the card shows, or nothing when that is what the task is.
+  function besideProv(x, kind) {
+    const s = byId(x.id) || {}, t = view(x);
+    if (kind === 'top') { const want = !t.top_rank; return [x.id + ':top', want === !!s.top_rank ? null : { task_id: x.id, op: want ? 'pin_top' : 'unpin', fields: {}, label: want ? 'pinned' : 'unpinned' }]; }
+    const want = !t.longterm; return [x.id + ':lt', want === !!s.longterm ? null : { task_id: x.id, op: 'set', fields: { longterm: want ? 1 : 0 }, label: want ? 'long-term' : 'not long-term' }];
+  }
+  // An answer on the card in front (a proposal, a mail, a suggested link): the rule stages it; `e:<id>` drawn at once hides its line.
+  function answerOn(tid, option, eid, label) {
+    decideOn('t:' + tid, option, {}, { prov: [['e:' + eid, { task_id: tid, op: 'judge_evidence', fields: { evidence_id: eid, verdict: 'applied' }, label }]] });
   }
   async function sendPrompt(text) {
     if (!text) return;

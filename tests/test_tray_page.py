@@ -29,22 +29,38 @@ def _fn(name):
 def _tray_script(scenario):
     state = re.search(r"\n  const tray = \{.*?\};\n", JS).group(0)
     block = JS[JS.index("  const TRAY_FIELDS"):JS.index("  function syncTray()")]
-    fns = "\n".join(_fn(n) for n in ("syncTray", "sendTray", "trayAnswer", "trayRedraw", "trayFail"))
+    fns = "\n".join(_fn(n) for n in ("syncTray", "sendTray", "trayAnswer", "trayRedraw", "trayFail", "trayPoll", "trayApply",
+                                       "cardProv", "decideOn", "chipLeft", "discardStaged"))
     return f"""
 let staged = new Map();
 {state}
 const store = {{}};
 const localStorage = {{ getItem: k => (k in store ? store[k] : null), setItem: (k, v) => {{ store[k] = String(v); }}, removeItem: k => {{ delete store[k]; }} }};
-const afterPress = (_, f) => f(), render = () => {{}}, renderTray = () => {{}}, bottomRule = () => {{}}, placePageBar = () => {{}};
-const placeReviewBar = () => {{}}, typingNow = () => false, trayBar = () => {{}}, deviceLabel = () => 'test', toast = () => {{}};
-// The fake server: a tray it changes by the ops it is sent, answering once `gate` lets the first call through.
-const server = new Map(); let rev = 0, held = null, calls = [];
-const answer = () => ({{ rev, entries: [...server].map(([k, e]) => [k, e, {{}}]) }});
+const presses = [], toasts = [], renders = [], ui = {{ trayOpen: false, trayOff: new Set() }}; let inPress = false;
+const afterPress = (k, f) => {{ presses.push(k); const w = inPress; inPress = true; try {{ f(); }} finally {{ inPress = w; }} }}, render = () => {{ renders.push(inPress); }}, renderTray = () => {{}}, bottomRule = () => {{}}, placePageBar = () => {{}};
+const placeReviewBar = () => {{}}, typingNow = () => false, trayBar = () => {{}}, deviceLabel = () => 'test', toast = m => {{ toasts.push(m); }};
+const persistStaged = () => syncTray(), sgCard = () => null, sgDraft = () => ({{ name: '' }}), cut60 = s => String(s).slice(0, 60);
+// The fake server: a tray it changes by the ops it is sent, answering once `held` lets the first held call through.
+// /api/tray/ops: the ops; /api/review/decide: `decideRows` (key, entry, decides), or `decideFail` thrown;
+// /api/tray/apply: everything, or 409 when seen_rev is not the tray's revision. `hold` holds the first ops call,
+// `holdPath` the first call to that path.
+const server = new Map(), metas = new Map(); let rev = 0, held = null, calls = [], paths = [], holdPath = null, decideRows = [], decideFail = null;
+const answer = () => ({{ rev, entries: [...server].map(([k, e]) => [k, e, metas.get(k) || {{}}]) }});
+const fail = (status, detail, body) => Object.assign(new Error(String(status)), {{ status, detail, body }});
 function api(path, opts) {{
-  const body = JSON.parse(opts.body); calls.push(body.ops);
-  const run = () => {{ for (const o of body.ops) {{ if (o.del != null) server.delete(o.del); else server.set(o.put, o.entry); }} rev += 1; return answer(); }};
-  if (calls.length === 1 && hold) return new Promise(r => {{ held = () => r(run()); }});
-  return Promise.resolve(run());
+  const body = opts && opts.body ? JSON.parse(opts.body) : {{}}; paths.push(path);
+  let run;
+  if (path === '/api/tray/ops') {{
+    calls.push(body.ops);
+    run = () => {{ for (const o of body.ops) {{ if (o.del != null) {{ server.delete(o.del); metas.delete(o.del); }} else server.set(o.put, o.entry); }} rev += 1; return answer(); }};
+  }} else if (path === '/api/review/decide') {{
+    run = () => {{ if (decideFail) throw fail(decideFail, 'refused', {{ tray: answer() }}); for (const [k, e, d] of decideRows) {{ server.set(k, e); metas.set(k, {{ decides: d }}); }} rev += 1; return {{ tray: answer(), keys: decideRows.map(r => r[0]), removed: [], said: '' }}; }};
+  }} else if (path === '/api/tray/apply') {{
+    run = () => {{ if (body.seen_rev !== rev) throw fail(409, 'the tray changed', {{ tray: answer() }}); const n = server.size; server.clear(); metas.clear(); rev += 1; return {{ tray: answer(), applied: n, batch_id: 1, skipped: [] }}; }};
+  }} else run = () => answer();
+  const go = () => new Promise((ok, no) => {{ try {{ ok(run()); }} catch (e) {{ no(e); }} }});
+  if ((path === '/api/tray/ops' && calls.length === 1 && hold) || (holdPath === path && !held)) {{ holdPath = null; return new Promise((ok, no) => {{ held = () => go().then(ok, no); }}); }}
+  return go();
 }}
 let hold = false;
 const tick = () => new Promise(r => setTimeout(r, 0));
@@ -116,3 +132,50 @@ console.log(JSON.stringify({ same: store['factotum.tray'] === kept, calls: calls
 def test_a_return_before_the_tray_has_started_leaves_it_to_load():
     body = _fn("onReturn")
     assert "if (tray.booted) { syncTray(); trayPoll(); }" in body
+
+
+DECISION = "{ task_id: 412, op: 'done', fields: {}, label: 'done' }"
+
+
+def test_a_change_staged_during_apply_waits_for_it_and_is_kept():
+    """Reviewer note 1: Apply runs in the tray's queue, so a change staged while its request is in flight is sent after
+    it: the Apply is not refused as if another device had changed the tray, and the change stays staged."""
+    r = _run(f"""
+tray.booted = true;
+server.set('412', {DONE}); rev = 1; trayAnswer(answer(), null, {{ quiet: true }});
+holdPath = '/api/tray/apply';
+let res = null, err = null;
+const p = trayApply(null, {{}}).then(x => {{ res = x; }}, e => {{ err = e.status || e.message; }});
+await tick();
+staged.set('413:top', {PIN}); syncTray(); await tick();
+held(); await p; await settle();
+console.log(JSON.stringify({{ applied: res && res.applied, err, server: [...server.keys()], staged: [...staged.keys()].map(String) }}));""")
+    assert r == {"applied": 1, "err": None, "server": ["413:top"], "staged": ["413:top"]}
+
+
+def test_a_decision_discarded_while_its_request_is_in_flight_stays_discarded():
+    """Reviewer note 2: Discard all while a decision is on its way: the server's answer must not draw it again, and the
+    rows it staged are taken out of the server's tray too."""
+    r = _run(f"""
+tray.booted = true;
+holdPath = '/api/review/decide';
+decideRows = [['412', {DECISION}, 't:412'], ['e:7', {{ task_id: 412, op: 'judge_evidence', fields: {{ evidence_id: 7, verdict: 'reviewed' }}, label: 'thread seen' }}, 't:412']];
+decideOn('t:412', 'done', {{}}, {{ prov: [[412, {DECISION}]] }}); await tick();
+const drawn = staged.has(412);
+discardStaged(undefined);
+held(); await settle();
+{REPORT.replace("calls }", "calls, drawn }")}""")
+    assert r["drawn"] is True and r["server"] == [] and r["staged"] == []
+
+
+def test_a_refused_conversation_decision_falls_back_after_the_press():
+    """Reviewer note 7: a conversation's decision the rule refuses is staged the page's way, and the redraw that shows
+    it waits for the press in progress (afterPress), like every other redraw caused from outside a press."""
+    r = _run(f"""
+tray.booted = true;
+decideFail = 400;
+decideOn('t:412', null, null, {{ from_chat: {{ message_id: 3, index: 0 }}, prov: [[412, {DECISION}]], quiet: true,
+  fallback: () => {{ staged.set('412:c3-0', {{ task_id: 412, op: 'set', fields: {{ due: '2026-11-30' }}, label: 'due Mon Nov 30' }}); syncTray(); render(); }} }});
+await settle();
+console.log(JSON.stringify({{ presses, renders, server: [...server.keys()], staged: [...staged.keys()].map(String), toasts }}));""")
+    assert r["renders"] and all(r["renders"]) and r["server"] == ["412:c3-0"] and r["staged"] == ["412:c3-0"] and r["toasts"] == []
