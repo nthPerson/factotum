@@ -876,6 +876,76 @@ def test_undo_takes_back_the_last_decision_and_returns_to_it(cfg, db):
     assert refused(ctx, "review_undo", {"ref": "t:412"}) == "That one isn't in this review."
 
 
+def _yes(ctx, args):
+    """A decision, through its question when it asks one (the owner says yes)."""
+    r = ok(ctx, "review_decide", args)
+    if r.get("status") == "confirm":
+        r = ok(ctx, "review_decide", dict(args, confirm=r["confirm"]))
+    return r
+
+
+def test_undo_of_a_yes_takes_back_everything_the_yes_staged(cfg, db):
+    """Review of stage 3 (finding 1): a spoken undo took back only the row that decides the item, and the rows the same
+    yes staged beside it (the suggested link, the planner's change of time and its judge 'applied') stayed in the tray
+    while the answer said the item was undecided again; the next spoken Apply applied them. They go with it now."""
+    ctx = ctx_for(db, cfg)
+    ok(ctx, "review_start")
+    r = ok(ctx, "review_decide", {"ref": "t:5", "decision": "rec"})
+    assert r["status"] == "staged" and {k for k, _, _, _ in entries(db)} == {"5", f"rel:5:part_of:6"}
+    u = ok(ctx, "review_undo")
+    assert u["say"] == "Taken back: Send the simulator screenshots is undecided again." and entries(db) == []
+    at(ctx, "t:1")
+    r = ok(ctx, "review_decide", {"ref": "t:1", "decision": "rec"})
+    assert r["said"] == "Due tomorrow at 2 PM, and kept." and any(k.startswith("1:c") for k, _, _, _ in entries(db))
+    u = ok(ctx, "review_undo", {"ref": "t:1"})
+    assert u["status"] == "undone" and entries(db) == []
+
+
+def test_a_changed_mind_after_a_yes_drops_what_the_yes_staged_beside(cfg, db):
+    """Finding 1, its second half: "yes", then "actually drop it": the drop replaces the keep, and the link and the
+    planner's change that came with the yes go too; the proposal is judged reviewed with the drop, never applied."""
+    ctx = ctx_for(db, cfg)
+    ok(ctx, "review_start")
+    at(ctx, "t:1")
+    ok(ctx, "review_decide", {"ref": "t:1", "decision": "rec"})
+    at(ctx, "t:1")
+    r = _yes(ctx, {"ref": "t:1", "decision": "drop"})
+    assert r["status"] == "staged" and r["replaced"] == "Changed from kept to dropped."
+    rows = {k: (e["op"], (e.get("fields") or {}).get("verdict"), d) for k, e, d, _ in entries(db)}
+    assert not any(k.startswith("1:c") for k in rows) and rows["1"] == ("drop", None, "t:1")
+    assert {v for k, v in rows.items() if k.startswith("e:")} == {("judge_evidence", "reviewed", "t:1")}
+
+
+def test_a_link_answered_on_its_own_stays_when_the_decision_is_taken_back(cfg, db):
+    """What the owner staged in a turn of its own stands: only what was staged with the decision, in the same write,
+    goes with it (a link answered on the screen first, then a spoken keep and its undo)."""
+    from factotum import review_decide
+    ctx = ctx_for(db, cfg)
+    ok(ctx, "review_start")
+    c = connect(db)
+    review_decide.stage(c, cfg, "t:5", f"link:{eid(db)}", {}, D, origin="page")
+    c.commit()
+    ok(ctx, "review_decide", {"ref": "t:5", "decision": "keep"})
+    ok(ctx, "review_undo")
+    assert [k for k, _, _, _ in entries(db)] == ["rel:5:part_of:6"]
+
+
+def test_undo_after_keep_all_takes_back_the_whole_answer(cfg, db):
+    """Review of stage 3 (finding 2): Keep all is one write, so every member row carries one revision, and an undo
+    with no ref took back one member and left the rest staged. Without a ref, undo takes back every item the newest
+    write decided: the whole answer the owner said "scratch that" about."""
+    ctx = ctx_for(db, cfg)
+    ok(ctx, "review_start")
+    at(ctx, "t:9")
+    ok(ctx, "review_decide", {"ref": "t:9", "decision": "keep"})
+    at(ctx, "g:rec:of_aaa")
+    r = _yes(ctx, {"ref": "g:rec:of_aaa", "decision": "keep_all", "except": [{"ref": "t:3", "decision": "drop"}]})
+    assert r["status"] == "staged" and {k for k, _, _, _ in entries(db)} == {"9", "2", "3", "4"}
+    u = ok(ctx, "review_undo")
+    assert u["say"] == "Taken back: the three new tasks are undecided again." and u["item"]["ref"] == "g:rec:of_aaa"
+    assert [k for k, _, _, _ in entries(db)] == ["9"]
+
+
 def test_undo_of_an_applied_decision_points_to_history(cfg, db):
     ctx = ctx_for(db, cfg)
     ok(ctx, "review_start")

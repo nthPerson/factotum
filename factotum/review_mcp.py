@@ -1072,6 +1072,11 @@ def decide(ctx, args: dict) -> dict:
         front = v["state"] == "item" and v["cursor_key"] == item_key
         res = {}
         try:
+            if old and decision and member is None and e.get("kind") == "task" and \
+                    review_pass._decision(e, ref, e.get("recommendation") if decision == "rec" else decision):
+                beside = _beside_with(w, ctx.cfg, today, tray.read(w)["entries"], [ref])      # a changed mind: what came with the old yes goes
+                if beside:
+                    tray.write(w, [{"del": k} for k in beside], ctx.source)
             for opt, a, _ in bes:
                 review_pass.decide(w, ctx.cfg, today, v["id"], ref, opt, args=a, origin=ctx.source, by=ctx.source)
             if decision:
@@ -1124,6 +1129,36 @@ def _mode(ctx) -> str:
 NOUNS = {"keep": "n_keep", "done": "n_done", "drop": "n_drop", "set": "n_later", "create_suggestion": "n_create", "judge_evidence": "n_dismiss"}
 
 
+def _beside_with(w, cfg, today: date, rows: list, items: list[str]) -> list[str]:
+    """The tray keys staged beside the decisions of `items` in the same write as them (review 2026-11-20): the rows that
+    decide nothing, carry the revision of one of those items' deciding rows, and belong to one of those tasks (its own
+    rows, a link to it, its evidence's or link suggestions' rows). What a yes staged with its Keep (the suggested link,
+    the planner's change and its judge `applied`) goes with the Keep when it is taken back or replaced; what the owner
+    staged in a write of its own (a link answered first, Pin, a due date said beside) stays. Reads only."""
+    revs = {int(m.get("rev") or 0) for _, _, m in rows if m.get("decides") in items}
+    tids, eids = set(), set()
+    for key in items:
+        if not key.startswith("t:"):
+            continue
+        tids.add(int(key[2:]))
+        try:
+            it = review_decide.load_item(w, cfg, today, key)
+        except (review_decide.Gone, review_decide.Refused):
+            continue
+        eids |= {x.get("id") for x in it.get("evidence") or []} | {x.get("evidence_id") for x in it.get("link_suggestions") or []}
+    out = []
+    for k, e, m in rows:
+        if m.get("decides") or int(m.get("rev") or 0) not in revs:
+            continue
+        f = e.get("fields") or {}
+        mine = e.get("task_id") in tids or f.get("other") in tids or f.get("into") in tids or e.get("ev") in eids \
+            or e.get("prop") is not None and str(e.get("prop")) in {str(x) for x in eids} \
+            or (k.startswith("e:") and k[2:].isdigit() and int(k[2:]) in eids)
+        if mine:
+            out.append(k)
+    return out
+
+
 def undo(ctx, args: dict) -> dict:
     """review_undo: take back the named item's decision, or the newest one in this pass by anyone."""
     ref = args.get("ref")
@@ -1151,12 +1186,26 @@ def undo(ctx, args: dict) -> dict:
         else:
             if not deciding:
                 return {"status": "nothing", "say": SAID["undo_nothing"], "elsewhere": els}
-            targets = [max(deciding, key=lambda d: max(int(m.get("rev") or 0) for _, _, m in deciding[d]))]
+            newest = max(int(m.get("rev") or 0) for rs in deciding.values() for _, _, m in rs)
+            order = [k for r in v["list"] for k in [r["key"]] + [m.get("key") for m in r.get("members") or []]]
+            targets = sorted((d for d, rs in deciding.items() if any(int(m.get("rev") or 0) == newest for _, _, m in rs)),
+                             key=lambda d: order.index(d) if d in order else len(order))     # one write is one answer (Keep all)
         first = targets[0]
         e0 = review_pass.entry(w, ctx.cfg, today, first, spoken=False)
         d0 = (e0.get("staged") or {}).get("decision") or {}
         origin = next((m.get("origin") for k, _, m in deciding[first] if k in d0.get("keys", [])), deciding[first][0][2].get("origin"))
-        name = _name(review_pass.entry(w, ctx.cfg, today, ref, spoken=False)) if ref and ref.startswith("g:") else _name(e0)
+        groups = {(_locate(v, t) or (None,))[0] for t in targets}
+        if ref and ref.startswith("g:"):
+            name = _name(review_pass.entry(w, ctx.cfg, today, ref, spoken=False))
+        elif len(targets) > 1 and len(groups) == 1 and next(iter(groups), "").startswith("g:"):
+            name = SAID["the_n_new"].format(n=_n(len(targets)))
+        elif len(targets) > 1:
+            name = _phrases_join([_row_name(v, t) for t in targets]).rstrip(".")
+        else:
+            name = _name(e0)
+        beside = _beside_with(w, ctx.cfg, today, tray.read(w)["entries"], targets)
+        if beside:
+            tray.write(w, [{"del": k} for k in beside], ctx.source)
         for t in targets:
             review_pass.decide(w, ctx.cfg, today, v["id"], t, "undecide", origin=ctx.source, by=ctx.source)
         v2 = review_pass.view(w, ctx.cfg, today)
