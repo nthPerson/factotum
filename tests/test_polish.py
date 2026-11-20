@@ -200,7 +200,9 @@ def test_filing_on_a_machine_where_claude_cannot_run_fails_once_a_day_and_drops_
     monkeypatch.setattr(R, "run", run)
     on = _starter_like(cfg)
     s = Scheduler(on, conn, push=lambda *a, **k: None, mailer=None)
-    now = datetime.now().replace(second=0, microsecond=0)
+    # the three ticks stay on the real day (the queue's day is date.today()): run at 23:59 they crossed midnight,
+    # the third tick was another day and its failure was logged again
+    now = min(datetime.now(), datetime.now().replace(hour=23, minute=50)).replace(second=0, microsecond=0)
     for n in range(5):
         batches.apply(conn, [{"op": "create", "fields": {"name": f"Water plant {n}"}}], "ui", TODAY)
     s.tick(now); s.tick(now + timedelta(minutes=1))
