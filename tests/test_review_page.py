@@ -229,6 +229,7 @@ recRun(task(['link:9'], 'link', 'waiting'));
 recRun(task(['follow:31', 'accept:40', 'keep'], 'accept_keep', 'decided'));
 recRun(task(['link:9'], 'link', 'decided'));
 recRun(task(['accept:41'], 'done', 'waiting'));
+recRun({{ kind: 'task', entry: {{ key: 't:8', state: 'waiting', item: {{ task: {{ id: 8 }}, reasons: ['link_suggested', 'fading'], evidence: [] }}, recommendation: {{ steps: ['link:9'], answer: 'link' }} }} }});
 recRun({{ kind: 'card', entry: {{ key: 's:50', state: 'waiting', item: {{ id: 50 }}, recommendation: {{ steps: ['dismiss'], answer: 'dismiss' }} }} }});
 console.log(JSON.stringify({{ calls, ahead, notes: ui.rvNotes }}));"""
     r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
@@ -238,8 +239,9 @@ console.log(JSON.stringify({{ calls, ahead, notes: ui.rvNotes }}));"""
     # every press names the steps it was shown (review 2026-11-20: the server stages only that answer)
     assert c[0] == ["t:7", "rec", {"steps": ["link:9"]}, [["e:9", "judge_evidence"]]]               # a link alone takes no note: it stays in the box
     assert c[1] == ["t:7", "rec", {"steps": ["follow:31", "accept:40", "keep"], "note": "ask Sam"}, [["e:31", "judge_evidence"], ["e:40", "judge_evidence"], [7, "keep"]]]
-    assert c[2][2] == {"steps": ["link:9"]} and c[3][3] == [[7, "done"]] and c[4] == ["s:50", "rec", {"steps": ["dismiss"]}, [["e:50", "judge_evidence"]]]
-    assert out["ahead"] == 4                                                                          # not for a link alone on an item already settled
+    assert c[2][2] == {"steps": ["link:9"]} and c[3][3] == [[7, "done"]] and c[5] == ["s:50", "rec", {"steps": ["dismiss"]}, [["e:50", "judge_evidence"]]]
+    assert c[4][:3] == ["t:8", "rec", {"steps": ["link:9"]}]
+    assert out["ahead"] == 4      # not for a link alone on an item already settled, nor beside a reason that still needs a decision
     assert out["notes"] == {}
 
 

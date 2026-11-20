@@ -85,6 +85,18 @@ def test_a_suggested_link_alone_is_link_and_with_another_reason_link_and_keep():
     assert r["label"] == "Link both and keep it" and r["said"] == "Link both and keep it?"
 
 
+@pytest.mark.parametrize("other", ["fading", "slipped", "snooze_over", "back", "thread_updated", "mentioned", "last_call", "blocker_gone"])
+def test_a_suggested_link_beside_a_reason_with_no_answer_is_the_link_alone(other):
+    """Review of the second half (2026-11-20): rule 6 gives no answer for these, so the link is suggested and the decision
+    is left to the owner; "Link it and keep it" saved a fading task with a link detector's sentence as the only basis."""
+    r = R.recommend(E(["link_suggested", other], sugg=[sg(7, "part_of")]), D, {})
+    assert r["answer"] == "link" and r["steps"] == ["link:7"] and r["label"] == "Link it" and r["said"] == "Link it?"
+    for keepable in (["link_suggested", "new"], ["link_suggested", "freed"]):
+        assert R.recommend(E(keepable, sugg=[sg(7, "part_of")]), D, {})["steps"] == ["link:7", "keep"]
+    # the rest is answered as the rule answers it without the link: New first is Keep (as test_new_is_keep), so Keep too
+    assert R.recommend(E(["link_suggested", "new", "fading"], sugg=[sg(7, "part_of")]), D, {})["steps"] == ["link:7", "keep"]
+
+
 def test_a_suggested_link_of_no_kind_gets_none():
     assert R.recommend(E(["link_suggested", "new"], sugg=[sg(7, "waits_on"), sg(9, "any", other=5)]), D, {}) is None
 
@@ -117,10 +129,16 @@ def test_a_follow_and_one_other_proposal_are_both_taken():
     assert r["steps"] == ["follow:31", "accept:40", "keep"] and r["label"].startswith("Follow the thread, ") and r["basis"] == "The mail gives the day."
 
 
-@pytest.mark.parametrize("op, answer, label", [("done", "done", "Mark it done"), ("drop", "drop", "Drop it")])
-def test_a_done_or_drop_proposal_on_a_task_that_is_not_risky_is_accept(op, answer, label):
-    r = R.recommend(E(["planner"], evidence=[prop(41, op, {"outcome": "Sent"}, reason="Max says it arrived.")]), D, {})
-    assert r["answer"] == answer and r["steps"] == ["accept:41"] and r["label"] == label and r["basis"] == "Max says it arrived."
+@pytest.mark.parametrize("op, what", [("done", "Done"), ("drop", "Drop")])
+@pytest.mark.parametrize("by", [None, "ripple"])
+def test_a_done_or_drop_proposal_is_never_recommended_and_the_card_says_why(op, what, by):
+    """Review of the second half (2026-11-20; the owner's call, design §6.8 rule 4 changed): a close proposal reaches Review
+    only when nothing proved it (planner.apply applies the proven ones; a Slack mention never proves, and anyone in a
+    workspace can write "Task-42 is done"), so a one-word yes must not close the task on it."""
+    e = E(["planner"], evidence=[prop(41, op, {"outcome": "Sent"}, reason="Max says it arrived.", by=by)])
+    assert R.recommend(e, D, {}) is None and R.held(e, D) == f"Not suggesting {what}: nothing Factotum read proves it."
+    e = E(["planner"], evidence=[prop(31, "follow_thread"), prop(41, op, reason="The mail says so.")])
+    assert R.recommend(e, D, {}) is None and R.held(e, D).startswith(f"Not suggesting {what}:")
 
 
 def test_a_proposal_with_no_reason_says_who_suggested_it():

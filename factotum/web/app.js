@@ -2447,7 +2447,7 @@
   // The suggested answer (spoken Review 2c, design 6.8): the option `rec` with the steps it shows, which the server
   // expands through the rule, exactly as the same presses one by one. What those presses would draw at
   // the click is drawn now; the note rides on the step that takes one (Done, Drop, Keep, Later), else it stays in the box.
-  // It moves on as a decision does: when the item was undecided, or when the answer holds a decision.
+  // It moves on as a decision does: when the answer holds a decision, or settles an undecided item.
   function recRun(cur) {
     const e = cur.entry, r = e.recommendation; if (!r) return;
     const key = e.key, item = e.item || {}, tid = (item.task || {}).id, steps = r.steps || [];
@@ -2468,7 +2468,9 @@
     }
     ui.laterOpen = false; ui.datePick = false;
     if (args.note) delete ui.rvNotes[key];      // only this item's note, and only when it went with the answer
-    if (r.answer !== 'link' || e.state === 'waiting' || e.state === 'passed') passAhead();
+    // A link alone settles the item only when the link was all it was here for (beside fading, slipped or mail to read the
+    // decision is still the owner's, and the item stays in front).
+    if (r.answer !== 'link' || ((e.state === 'waiting' || e.state === 'passed') && (item.reasons || []).every(x => x === 'link_suggested'))) passAhead();
     return decideOn(key, 'rec', args, { prov });
   }
   const REC_NOTE_TAKERS = ['done', 'drop', 'keep', 'later'];

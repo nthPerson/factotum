@@ -823,9 +823,13 @@ Rules, in the order tried:
    asks before staging a close on the same four.
 4. Proposals on the task, already paid for; the basis is the proposal's own reason: a `follow_thread`
    proposal → `follow:E`, `keep`; a `set`, `add_reminder`, `pin_top`, `longterm`, `link` or `add_note`
-   proposal → `accept:E`, `keep`; a `done` / `drop` proposal on a task that is not risky → `accept:E`.
+   proposal → `accept:E`, `keep`. ~~a `done` / `drop` proposal on a task that is not risky → `accept:E`~~: **none** for a
+   `done` / `drop` proposal (review 2026-11-20, for the owner to confirm): such a proposal reaches Review only when nothing
+   proved it (`planner.apply` applies the proven ones; a Slack mention never proves), so the card says "Not suggesting
+   Done: nothing Factotum read proves it." (`rec_held`) instead of putting a close behind one yes.
 5. By the primary reason: `link_suggested` (kinds `part_of`, `waits_on`) → `link:E` for each shown
-   suggestion, plus `keep` when another reason needs a decision; `new` → `keep`; `steps_done` → `done`;
+   suggestion, plus `keep` when every other reason is one the rule answers Keep (`new`, `freed`, a linked change written
+   into the text; review 2026-11-20), else the links alone, leaving the decision to the owner; `new` → `keep`; `steps_done` → `done`;
    `freed` → `keep`; `linked_changed` whose text was brought up to date → `keep`; a group → `keep_all`;
    a card whose draft's due has passed → `dismiss`.
 6. None for `thread_updated` or `mentioned` without a proposal (the mail has to be read),

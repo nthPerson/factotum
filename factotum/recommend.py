@@ -44,6 +44,7 @@ TEXTS = {
     "mail_basis": "A new mail looks to be about this task.",
     "this_task": "this task", "another_task": "another task",
     "held": "Not suggesting {what}: {why}.", "held_done": "Done", "held_drop": "Drop",
+    "unproven": "nothing Factotum read proves it",
     "follow_first": "Follow the thread, ", "follow_first_many": "Follow the threads, ",
     "follow_label": "Follow the thread and keep it", "follow_said": "Follow the thread and keep it?",
     "follows_label": "Follow the threads and keep it", "follows_said": "Follow the threads and keep it?",
@@ -203,13 +204,8 @@ def _rule(entry: dict, today: date, names: dict) -> tuple[dict | None, str | Non
         e = others[0]
         op = e["change"].get("op")
         basis = _proposal_basis(e, own, names)
-        if op in CLOSES:
-            if risky:
-                return None, _held_close(op, risky)
-            label, said = TEXTS[f"accept_{op}_label"], TEXTS[f"accept_{op}_said"]
-            if lead:
-                label, said = lead + _lcfirst(label), lead + _lcfirst(said)
-            return _rec(op, steps + [f"accept:{e['id']}"], label, said, basis, f"proposal:{op}"), None
+        if op in CLOSES:                                           # never a close on a proposal (review 2026-11-20, the owner's call):
+            return None, _held_close(op, risky or TEXTS["unproven"])   # one reaches Review only when nothing proved it
         if op not in ACCEPTABLE:                                   # a merge, a reopen, anything the rule would not stage beside
             return None, None
         label, said = _accept_label(e["change"]), TEXTS[f"accept_{op}_said"]
@@ -231,7 +227,11 @@ def _rule(entry: dict, today: date, names: dict) -> tuple[dict | None, str | Non
                 whys.append(_sentence(w))
         basis = " ".join(whys)[:BASIS_MAX] or TEXTS["link_basis"]
         steps = [f"link:{s['evidence_id']}" for s in sugg]
-        if any(r != "link_suggested" for r in reasons):
+        rest = [r for r in reasons if r != "link_suggested"]
+        if rest:                                                   # Keep beside the links only where the rest is answered Keep
+            other = _rule(dict(entry, reasons=rest, primary=rest[0], link_suggestions=[]), today, names)[0]
+            if not other or other["steps"] != ["keep"]:            # fading, slipped, back, mail to read: the owner decides
+                return _rec("link", steps, head, ask, basis, "rule:link"), None
             return _rec("link_keep", steps + ["keep"], head + TEXTS["and_keep"], ask[:-1] + TEXTS["and_keep_said"], basis, "rule:link"), None
         return _rec("link", steps, head, ask, basis, "rule:link"), None
     if primary == "new":
