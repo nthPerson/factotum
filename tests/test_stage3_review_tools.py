@@ -1095,3 +1095,77 @@ def test_a_writer_that_raises_leaves_no_transaction_open(cfg, db, monkeypatch):
     other.execute("BEGIN IMMEDIATE")
     other.rollback()
     other.close()
+
+
+# --- commit 7: what happened on the screen meanwhile, who is speaking ----------------------------------------
+
+def test_a_decision_made_on_the_screen_is_said_on_the_next_turn(cfg, db):
+    from factotum import review_decide
+    ctx = ctx_for(db, cfg)
+    ok(ctx, "review_start")
+    c = connect(db)
+    review_decide.stage(c, cfg, "t:9", "keep", {}, D, origin="page")             # a tap on the phone's screen
+    c.commit()
+    a = ok(ctx, "review_next", {"move": "next", "from": "t:5"})
+    assert a["elsewhere"] == "On the screen: Car sounds SOPs was kept." and a["moved"] is True
+    assert ok(ctx, "review_next", {"move": "repeat"})["elsewhere"] is None              # said once
+    review_decide.stage(c, cfg, "t:7", "drop", {}, D, origin="page")
+    review_decide.stage(c, cfg, "s:5", "dismiss", {}, D, origin="page")
+    review_decide.stage(c, cfg, "t:6", "later", {"until": "2026-11-20"}, D, origin="page")
+    review_decide.stage(c, cfg, "t:2", "keep", {}, D, origin="page")
+    c.commit()
+    s = ok(ctx, "review_status")
+    assert s["elsewhere"] == ("On the screen: Write the conference paper was dropped, Go to the dentist was dismissed, "
+                              "Complete the IRB submission was put off until tomorrow, and one more was decided."), s["elsewhere"]
+    assert ok(ctx, "review_status")["elsewhere"] == s["elsewhere"]                      # a read: nothing marked as heard
+    d = ok(ctx, "review_decide", {"ref": "t:1", "decision": "keep"})
+    assert d["elsewhere"] == s["elsewhere"]
+    assert ok(ctx, "review_next", {"move": "repeat"})["elsewhere"] is None
+    c.close()
+
+
+def test_decisions_taken_back_or_applied_on_the_screen_are_said(cfg, db):
+    from factotum import review_decide
+    ctx = ctx_for(db, cfg)
+    ok(ctx, "review_start")
+    ok(ctx, "review_decide", {"ref": "t:5", "decision": "keep"})
+    ok(ctx, "review_decide", {"ref": "t:1", "decision": "keep"})
+    c = connect(db)
+    review_decide.stage(c, cfg, "t:5", "undecide", {}, D, origin="page")
+    c.commit()
+    u = ok(ctx, "review_undo", {"ref": "t:1"})
+    assert u["elsewhere"] == "One decision was taken back on the screen."
+    ok(ctx, "review_decide", {"ref": "t:1", "decision": "keep"})
+    tray.apply(c, cfg, D, source="review", finish=True, cause={"applied_by": "page"})
+    n = ok(ctx, "review_next", {"move": "repeat"})
+    assert n["elsewhere"] == "Everything staged was applied on the screen."
+    c.close()
+
+
+def test_a_move_on_the_screen_is_said_and_next_from_the_old_item_moves_nothing(cfg, db):
+    ctx = ctx_for(db, cfg)
+    ok(ctx, "review_start")
+    c = connect(db)
+    P.move(c, cfg, D, page_view(db, cfg)["id"], "goto", key="t:7", by="page")
+    c.commit()
+    a = ok(ctx, "review_next", {"move": "next", "from": "t:5"})
+    assert a["moved"] is False and a["item"]["ref"] == "t:7" and a["elsewhere"] == "You moved on to Write the conference paper on the screen."
+    c.close()
+
+
+def test_the_follow_shows_who_is_speaking_only_while_fresh(cfg, db, monkeypatch):
+    from fastapi.testclient import TestClient
+    from factotum.api import create_app
+    client = TestClient(create_app(cfg, db_path=str(db)))
+    assert client.get("/api/review/pass/now").json()["speaking"] is None
+    ctx = ctx_for(db, cfg)
+    ok(ctx, "review_start")
+    now = client.get("/api/review/pass/now").json()
+    assert now["speaking"] == "connector" and client.get("/api/review/pass").json()["pass"]["speaking"] == "connector"
+    c = connect(db)
+    d = json.loads(c.execute("SELECT drivers_json FROM review_passes").fetchone()[0])
+    d["connector"]["at"] = "2026-01-01T00:00:00+00:00"                              # ten minutes and more ago
+    c.execute("UPDATE review_passes SET drivers_json = ?", (json.dumps(d),))
+    c.commit()
+    c.close()
+    assert client.get("/api/review/pass/now").json()["speaking"] is None

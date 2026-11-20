@@ -112,6 +112,14 @@ SAID = {
     "undo": "Taken back: {name} is undecided again.", "undo_many": "Taken back: {name} are undecided again.",
     "undo_screen": "Taken back the {what} you made on the screen, for {name}.",
     "undo_nothing": "Nothing to take back.", "undo_applied": "That's already applied; undo it in Factotum's History.",
+    # elsewhere: what happened on the screen since this client's last turn
+    "screen": "On the screen: {parts}.",
+    "e_keep": "{name} was kept", "e_done": "{name} was marked done", "e_drop": "{name} was dropped", "e_later": "{name} was put off until {day}",
+    "e_later_plain": "{name} was put off", "e_create": "{name} is to be created", "e_dismiss": "{name} was dismissed", "e_other": "{name} was decided",
+    "e_more_one": "one more was decided", "e_more_n": "{n} more were decided",
+    "taken_back_one": "One decision was taken back on the screen.", "taken_back_n": "{N} decisions were taken back on the screen.",
+    "applied_screen": "Everything staged was applied on the screen.",
+    "moved_screen": "You moved on to {name} on the screen.",
     # review_apply
     "stage_only": "Factotum is set to stage only; apply on the screen.",
     "tray_changed": "The tray changed since I asked, so here it is again.",
@@ -408,6 +416,85 @@ def _with_data(out: dict) -> dict:
     return out
 
 
+# --- what happened elsewhere (design §7.2) ----------------------------------------------------------------------
+
+ELSEWHERE_NAMES = 3                      # names said before "and two more"
+
+
+def _row_name(v: dict, key: str) -> str:
+    """An item's or a member's short name from the View's list, for a sentence about it."""
+    loc = _locate(v, key)
+    if loc is None:
+        return SAID["this_one"]
+    _, row, m = loc
+    if m is None and row.get("kind") == "group":
+        return SAID["the_n_new"].format(n=_n(len([x for x in row.get("members") or [] if x.get("state") != "gone"])))
+    return speakable(spoken.short((m or row).get("name")), 120) or SAID["this_one"]
+
+
+def _what_happened(e: dict, today: date) -> str:
+    op, f = e.get("op"), e.get("fields") or {}
+    if op in ("keep", "done", "drop"):
+        return f"e_{op}"
+    if op == "set" and f.get("snoozed_until"):
+        return "e_later"
+    return {"create_suggestion": "e_create", "judge_evidence": "e_dismiss"}.get(op, "e_other")
+
+
+def elsewhere(w, v: dict | None, driver: str, today: date) -> str | None:
+    """One sentence about what changed since this driver's last turn (`review_pass.seen` keeps the tray revision, the
+    decided items and the cursor it saw), or None: decisions made on the screen ("On the screen: the mixer was
+    kept."), decisions taken back there, everything applied there, or the cursor moved there. Reads only."""
+    if not v:
+        return None
+    row = review_pass.live(w)
+    if row is None or row["id"] != v["id"]:
+        return None
+    mine = review_pass._drivers(row).get(driver)
+    if not isinstance(mine, dict) or "tray_rev" not in mine:
+        return None
+    old_rev, old_dec = int(mine.get("tray_rev") or 0), set(mine.get("decided") or [])
+    entries = tray.read(w)["entries"]
+    now_dec = set(tray.decided(w))
+    says = []
+    made = []
+    for k, e, m in entries:
+        d = m.get("decides")
+        if not d or int(m.get("rev") or 0) <= old_rev or m.get("origin") not in ("page", "carry") or d in old_dec:
+            continue
+        if not ((d.startswith("t:") and k == d[2:]) or (d.startswith("s:") and k == f"e:{d[2:]}")):
+            continue                                       # the deciding row only, once per item
+        made.append((d, e))
+    if made:
+        parts = []
+        for d, e in made[:ELSEWHERE_NAMES]:
+            w_ = _what_happened(e, today)
+            until = (e.get("fields") or {}).get("snoozed_until")
+            day = speakable(dates.say_day(until, today), 60, today) if w_ == "e_later" and until else ""
+            parts.append(SAID[w_ if day or w_ != "e_later" else "e_later_plain"].format(name=spoken._cap(_row_name(v, d)), day=day))
+        rest = len(made) - ELSEWHERE_NAMES
+        if rest > 0:
+            parts.append(SAID["e_more_one"] if rest == 1 else SAID["e_more_n"].format(n=_n(rest)))
+        said = parts[0] if len(parts) == 1 else ", ".join(parts[:-1]) + ", and " + parts[-1]
+        says.append(SAID["screen"].format(parts=said))
+    lost = old_dec - now_dec
+    if lost:
+        settled = 0
+        for k in lost:
+            loc = _locate(v, k)
+            if loc is None or _state_of(loc) in review_pass.SETTLED or _state_of(loc) == "gone":
+                settled += 1
+        back = len(lost) - settled
+        if settled:
+            says.append(SAID["applied_screen"])
+        if back:
+            says.append(SAID["taken_back_one"] if back == 1 else SAID["taken_back_n"].format(N=_N(back)))
+    if not says and mine.get("cursor") and v.get("cursor_key") and mine.get("cursor") != v.get("cursor_key") \
+            and v.get("state") == "item" and v.get("moved_by") == "page":
+        says.append(SAID["moved_screen"].format(name=_row_name(v, v["cursor_key"])))
+    return " ".join(says) or None
+
+
 # --- the tools (design §7.4) ------------------------------------------------------------------------------------
 
 def _urgent(w, cfg, today: date, v: dict) -> int:
@@ -439,6 +526,7 @@ def start(ctx, args: dict) -> dict:
         before = review_pass.live(w)
         resumed = before is not None and before["day"] == today.isoformat() and not restart
         v = review_pass.begin_or_resume(w, ctx.cfg, today, by=ctx.source, fresh=restart)
+        els = elsewhere(w, v, ctx.source, today) if resumed else None
         waiting = _waiting(w, v)
         place = _place(w, ctx, v, today)
         c = v["counts"]
@@ -453,7 +541,7 @@ def start(ctx, args: dict) -> dict:
         _seen(w, ctx, v, v.get("current"))
     now = reminders.local_now(ctx.cfg)
     return _with_data({"say": say, "resumed": resumed, "today": {"date": today.isoformat(), "said": day_said(today, today), "time": now.strftime("%H:%M")},
-                       "mode": "apply" if ctx.may_apply() else "stage", "waiting": waiting, "guide": GUIDE, "item": place["item"],
+                       "mode": "apply" if ctx.may_apply() else "stage", "waiting": waiting, "guide": GUIDE, "item": place["item"], "elsewhere": els,
                        "checkpoint": place["checkpoint"], "done": place["done"]})
 
 
@@ -471,6 +559,7 @@ def next_(ctx, args: dict) -> dict:
         v = review_pass.view(w, ctx.cfg, today, spoken=False)
         if v is None:
             raise _fail(SAID["no_pass"])
+        els = elsewhere(w, v, ctx.source, today)
         moved, came, at_start, said = False, False, False, None
         if mv == "repeat" or (mv == "next" and v["state"] in ("end", "empty")):
             pass
@@ -505,7 +594,7 @@ def next_(ctx, args: dict) -> dict:
         place = _place(w, ctx, v, today)
         _seen(w, ctx, v, v.get("current"))
     c = v["counts"]
-    return _with_data({"moved": moved, "say": _join(said, place["say"]), "item": place["item"], "elsewhere": None, "came_round": came,
+    return _with_data({"moved": moved, "say": _join(said, place["say"]), "item": place["item"], "elsewhere": els, "came_round": came,
                        "at_start": at_start, "checkpoint": place["checkpoint"], "done": place["done"], "left": c["undecided"], "passed_over": c["passed"]})
 
 
@@ -554,12 +643,13 @@ def status(ctx, args: dict) -> dict:
     if v is None:
         return {"say": _join(SAID["no_review"], _decisions(summ, staged=True)), "running": False,
                 "counts": {"left": 0, "passed_over": 0, "decided": 0, "items": 0, "staged": staged}, "elsewhere": None}
+    els = elsewhere(ctx.conn, v, ctx.source, today)
     c = v["counts"]
     say = _join(SAID["left_n"].format(N=_N(c["undecided"]), minutes=_minutes(c["minutes_left"])) if c["undecided"] else SAID["left_none"],
                 (SAID["passed_one"] if c["passed"] == 1 else SAID["passed_n"].format(N=_N(c["passed"]))) if c["passed"] else None,
                 _decisions(summ, staged=True) or SAID["nothing_staged_yet"])
     out = {"say": say, "running": True, "counts": {"left": c["undecided"], "passed_over": c["passed"], "decided": c["decided"], "items": c["items"],
-                                                   "staged": staged}, "elsewhere": None}
+                                                   "staged": staged}, "elsewhere": els}
     if args.get("list") is True:
         out["list"] = [_list_row(r) for r in v["list"] if r.get("state") != "gone"][:LIST_ROWS]
     return out
@@ -846,13 +936,13 @@ def _refused_why(e: Exception) -> str:
     return SAID["cant"].format(why=speakable(str(e), 200).rstrip(".")) if str(e) else SAID["cant_plain"]
 
 
-def _reread(w, ctx, today: date, ref: str, say: str, status: str) -> dict:
+def _reread(w, ctx, today: date, ref: str, say: str, status: str, els: str | None = None) -> dict:
     """The item read out again (and its suggested answer kept as said)."""
     v = review_pass.view(w, ctx.cfg, today)
     loc = _locate(v, ref) if v else None
     e = review_pass.entry(w, ctx.cfg, today, loc[0]) if loc else None         # a member's item is its group
     _seen(w, ctx, v, e)
-    return _with_data({"status": status, "say": say, "item": item_out(e, v, today) if v else None, "elsewhere": None})
+    return _with_data({"status": status, "say": say, "item": item_out(e, v, today) if v else None, "elsewhere": els})
 
 
 def decide(ctx, args: dict) -> dict:
@@ -875,6 +965,7 @@ def decide(ctx, args: dict) -> dict:
         loc = _locate(v, ref)
         if loc is None:
             raise _fail(SAID["not_in"])
+        els = elsewhere(w, v, ctx.source, today)
         item_key, row, member = loc
         if _state_of(loc) == "gone":
             if v["state"] == "item" and v["cursor_key"] == item_key:
@@ -882,7 +973,7 @@ def decide(ctx, args: dict) -> dict:
             v2 = review_pass.view(w, ctx.cfg, today)
             place = _place(w, ctx, v2, today)
             _seen(w, ctx, v2, v2.get("current"))
-            return _with_data({"status": "settled", "say": _join(SAID["settled"], place["say"]), "next": place["item"], "elsewhere": None, "mode": _mode(ctx)})
+            return _with_data({"status": "settled", "say": _join(SAID["settled"], place["say"]), "next": place["item"], "elsewhere": els, "mode": _mode(ctx)})
         e = review_pass.entry(w, ctx.cfg, today, ref)
         unread = not _arrived(w, v["id"], item_key)            # never in front in this pass: read back and asked first
         offered = [o.get("id") for o in e.get("options") or [] if o.get("id") not in NOT_OFFERED]
@@ -924,7 +1015,7 @@ def decide(ctx, args: dict) -> dict:
             elif unread:
                 steps = list(((e.get("recommendation") or {}).get("steps")) or [])     # for the question; the yes stages what the read-back said
             else:
-                return _reread(w, ctx, today, ref, SAID["changed"], "changed")
+                return _reread(w, ctx, today, ref, SAID["changed"], "changed", els)
         bes: list[tuple[str, dict, str]] = []
         for k, val in extras:
             if k in ("pin", "longterm"):
@@ -952,7 +1043,7 @@ def decide(ctx, args: dict) -> dict:
                 if unread:
                     _seen(w, ctx, v, e)                         # read back: a yes to its question is the answer said here
                 return _with_data({"status": "confirm", "say": SAID["ask_again"] if given else None, "ask": ask, "confirm": token,
-                                   "item": item_out(e, v, today) if unread else None, "elsewhere": None, "mode": _mode(ctx)})
+                                   "item": item_out(e, v, today) if unread else None, "elsewhere": els, "mode": _mode(ctx)})
         old = (e.get("staged") or {}).get("decision") if e.get("state") == "decided" and e.get("kind") != "group" else None
         old_words = _decided_words(e, today) if old else None
         old_origin = next((m.get("origin") for k, _, m in tray.read(w)["entries"] if m.get("decides") == ref and k in (old or {}).get("keys", [])), None)
@@ -966,11 +1057,11 @@ def decide(ctx, args: dict) -> dict:
         except review_decide.Stale:
             w.rollback()
             begin_write(w)
-            return _reread(w, ctx, today, ref, SAID["changed"], "changed")
+            return _reread(w, ctx, today, ref, SAID["changed"], "changed", els)
         except review_decide.Gone:
             w.rollback()
             begin_write(w)
-            return _reread(w, ctx, today, ref, SAID["settled"], "settled")
+            return _reread(w, ctx, today, ref, SAID["settled"], "settled", els)
         except review_decide.Refused as x:
             raise _fail(_refused_why(x)) from None
         except ValueError:
@@ -999,7 +1090,7 @@ def decide(ctx, args: dict) -> dict:
         if new_words and new_words != old_words:
             replaced = SAID["replaced_screen" if old_origin in ("page", "carry") else "replaced"].format(old=old_words, new=new_words)
     out = {"status": "staged", "said": said, "replaced": replaced, "item_done": done, "next": place["item"] if front else None,
-           "back_to": None if front else place["item"], "say": place["say"] if front else None, "elsewhere": None,
+           "back_to": None if front else place["item"], "say": place["say"] if front else None, "elsewhere": els,
            "tray": {"staged": sum((summ.get("decisions") or {}).values())}, "mode": _mode(ctx)}
     return _with_data(out)
 
@@ -1019,6 +1110,7 @@ def undo(ctx, args: dict) -> dict:
         v = review_pass.view(w, ctx.cfg, today, spoken=False)
         if v is None:
             raise _fail(SAID["no_pass"])
+        els = elsewhere(w, v, ctx.source, today)
         in_pass = {r["key"] for r in v["list"]} | {m.get("key") for r in v["list"] for m in r.get("members") or []}
         deciding: dict[str, list] = {}
         for k, e, m in tray.read(w)["entries"]:
@@ -1033,10 +1125,10 @@ def undo(ctx, args: dict) -> dict:
             if not targets:
                 st = _state_of(loc)
                 return {"status": "applied" if st == "decided" else "nothing",
-                        "say": SAID["undo_applied"] if st == "decided" else SAID["undo_nothing"], "elsewhere": None}
+                        "say": SAID["undo_applied"] if st == "decided" else SAID["undo_nothing"], "elsewhere": els}
         else:
             if not deciding:
-                return {"status": "nothing", "say": SAID["undo_nothing"], "elsewhere": None}
+                return {"status": "nothing", "say": SAID["undo_nothing"], "elsewhere": els}
             targets = [max(deciding, key=lambda d: max(int(m.get("rev") or 0) for _, _, m in deciding[d]))]
         first = targets[0]
         e0 = review_pass.entry(w, ctx.cfg, today, first, spoken=False)
@@ -1052,7 +1144,7 @@ def undo(ctx, args: dict) -> dict:
         say = SAID["undo_screen"].format(what=SAID[NOUNS.get(d0.get("op"), "n_other")], name=name)
     else:
         say = SAID["undo_many" if len(targets) > 1 else "undo"].format(name=name)
-    return _with_data({"status": "undone", "say": say, "item": place["item"], "elsewhere": None})
+    return _with_data({"status": "undone", "say": say, "item": place["item"], "elsewhere": els})
 
 
 # --- review_apply ---------------------------------------------------------------------------------------------
