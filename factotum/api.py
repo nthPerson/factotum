@@ -1392,8 +1392,10 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         ecfg = eff_cfg()
         allowed = _mcp_allowed(ecfg)
         try:
+            sch = getattr(app.state, "scheduler", None)
             ctx = mcp_server.Context(reader, ecfg, run_dir=None, writer=lambda: connect(db), allowed=allowed,
-                                     apply_writes=str(C.get(ecfg, "server.mcp_writes", "stage")) == "apply", source="connector")
+                                     apply_writes=str(C.get(ecfg, "server.mcp_writes", "stage")) == "apply", source="connector",
+                                     wake=sch.wake if sch is not None else None)
             if isinstance(msg, list):
                 out = [r for r in (mcp_server.dispatch(ctx, m) for m in msg) if r is not None]
                 return JSONResponse(out) if out else JSONResponse(None, status_code=202)

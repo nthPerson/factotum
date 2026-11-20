@@ -55,12 +55,22 @@ class Context:
     apply_writes: object = False             # server.mcp_writes == "apply": apply_changes is offered and writes a batch at once; a bool, or a
                                              # callable read on every list / call (the stdio server outlives a change of the setting)
     source: str = "skill"                    # the batch / proposal source: "skill" (stdio from Claude Code) or "connector" (the HTTP route)
+    wake: object = None                      # the scheduler's wake (the HTTP route sets it; None on stdio, where the next tick picks new tasks up):
+                                             # called after a batch that created a task, so filing runs as after the page's Apply
     tool_log: list = field(default_factory=list)
     _mail: object = field(default=None, repr=False)
     _accounts: dict | None = field(default=None, repr=False)
     _folders: dict | None = field(default=None, repr=False)
     _slack: dict = field(default_factory=dict, repr=False)      # token → client; (token, user id) → name; token → {channel name: id}
     _discord: object = field(default=None, repr=False)
+
+    def woke(self) -> None:
+        """Wake the scheduler when there is one (a new task is one filing may place). Never fails a tool."""
+        if callable(self.wake):
+            try:
+                self.wake()
+            except Exception:   # noqa: BLE001 — the batch is written; a scheduler that cannot be woken runs at its next tick
+                pass
 
     def may_apply(self) -> bool:
         return bool(self.apply_writes() if callable(self.apply_writes) else self.apply_writes) and self.writer is not None
@@ -1147,6 +1157,8 @@ def apply_changes(ctx: Context, args: dict) -> dict:
             w.close()
         except Exception:   # noqa: BLE001
             pass
+    if res["created"]:
+        ctx.woke()
     created = [{"task_id": i, "name": (one(ctx.conn, "SELECT name FROM tasks WHERE id = ?", (i,)) or {}).get("name")} for i in res["created"]]
     ctx.record("applied", {"batch_id": res["batch_id"], "applied": res["applied"], "label": _cut(args.get("label"), 200)})
     return {"batch_id": res["batch_id"], "applied": res["applied"], "created": created, "skipped": res["skipped"], "rejected": rejected, "ignored": ignored,

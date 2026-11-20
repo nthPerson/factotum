@@ -62,3 +62,60 @@ def test_speakable_removes_what_must_not_be_said():
     long = RM.speakable("word " * 400, cap=50)
     assert len(long) <= 50 and not long.endswith(" ") and long.split()[-1] == "word"
     assert RM.speakable(None) == "" and RM.speakable("Keep it, or drop?") == "Keep it, or drop?"
+
+
+# --- commit 2: Context.wake --------------------------------------------------------------------------------
+
+def _rpc(ctx, id_, method, params=None):
+    from factotum import mcp_server as M
+    msg = {"jsonrpc": "2.0", "id": id_, "method": method}
+    if params is not None:
+        msg["params"] = params
+    return M.dispatch(ctx, msg)
+
+
+def _text(resp) -> str:
+    return "".join(c["text"] for c in resp["result"]["content"] if c["type"] == "text")
+
+
+def _call(ctx, name, args=None, id_=1):
+    r = _rpc(ctx, id_, "tools/call", {"name": name, "arguments": args or {}})["result"]
+    return (r["isError"], _text({"result": r}) if r["isError"] else __import__("json").loads(_text({"result": r})))
+
+
+def test_apply_changes_wakes_the_scheduler_after_a_create_and_only_then(cfg, tmp_path):
+    """A connector's direct create is a task filing may place, as after the page's Apply (design §7.2, call 17): the
+    context's `wake` runs after a batch that created a task; a batch that created none does not wake it."""
+    from factotum import mcp_server as M
+    from factotum.db import connect, init_db
+    db = tmp_path / "w.db"
+    init_db(connect(db))
+    woke = []
+    ctx = M.Context(connect(db), cfg, writer=lambda: connect(db), apply_writes=True, source="connector", wake=lambda: woke.append(1))
+    err, res = _call(ctx, "apply_changes", {"changes": [{"op": "create", "fields": {"name": "Book the dentist", "project": "Personal"}}]})
+    assert not err and len(res["created"]) == 1 and woke == [1]
+    tid = res["created"][0]["task_id"]
+    err, res = _call(ctx, "apply_changes", {"changes": [{"task_id": tid, "op": "set", "fields": {"due": "2026-11-27"}}]}, 2)
+    assert not err and res["applied"] == 1 and woke == [1]
+    ctx2 = M.Context(connect(db), cfg, writer=lambda: connect(db), apply_writes=True, source="skill")          # no scheduler here: nothing to wake
+    err, res = _call(ctx2, "apply_changes", {"changes": [{"op": "create", "fields": {"name": "Call the bank", "project": "Personal"}}]}, 3)
+    assert not err and len(res["created"]) == 1
+
+
+def test_the_http_route_gives_the_context_the_schedulers_wake(cfg, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from fastapi.testclient import TestClient
+    from factotum.api import create_app
+    monkeypatch.setenv("FACTOTUM_MCP_TOKEN", "s3cret")
+    app = create_app(cfg, db_path=str(tmp_path / "api.db"))
+    client = TestClient(app)
+    h = {"Authorization": "Bearer s3cret"}
+    client.put("/api/settings", json={"values": {"server.mcp_writes": "apply"}})
+    call = lambda i, name: client.post("/mcp", json={"jsonrpc": "2.0", "id": i, "method": "tools/call", "params": {"name": "apply_changes", "arguments": {
+        "changes": [{"op": "create", "fields": {"name": name, "project": "Personal"}}]}}}, headers=h).json()
+    r = call(1, "No scheduler here")                                          # serve --no-scheduler: nothing to wake, and no error
+    assert not r["result"]["isError"], r
+    woke = []
+    app.state.scheduler = SimpleNamespace(wake=lambda: woke.append(1))
+    r = call(2, "Book the dentist")
+    assert not r["result"]["isError"] and woke == [1], r
