@@ -2306,11 +2306,16 @@
     return was !== undefined && la.batch_id > was && (la.by === 'connector' || la.by === 'skill') && la.batch_id !== lastBatch;
   }
   // What the page's own Apply does after its answer, for one made through Claude: the tray read, the lists and the Log
-  // read again (the tasks it changed), Today told its Review is stale.
+  // read again (the tasks it changed), Today told its Review is stale. The owner's open tray panel and the rows unticked
+  // there stay (only keys the Apply took are forgotten; an emptied tray closes), and the reload is drawn through
+  // afterPress, as the follow draws, so it never lands inside a press (review 2026-11-20).
   async function afterSpokenApply() {
-    logData = null; ui.trayOpen = false; ui.trayOff = new Set();
+    logData = null;
     await trayPoll({ force: true });
-    try { await load(); } catch (_) {}
+    const have = new Set([...staged.keys()].map(String));
+    ui.trayOff = new Set([...ui.trayOff].filter(k => have.has(k)));
+    if (!staged.size) ui.trayOpen = false;
+    await new Promise(done => afterPress('spoken-apply', () => { load().catch(() => {}).then(done); }));
   }
   // One move of the shared cursor. Next and Back name the item drawn in front (`from`): when another device moved it
   // meanwhile, nothing moves and the answer's pass is drawn. Next draws what comes at once. The request waits its turn in

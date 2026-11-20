@@ -1411,7 +1411,12 @@ def test_the_page_shows_a_spoken_review_without_locking_anything():
     assert fc.index("afterSpokenApply()") < fc.index("if (rp.view !== v || rp.inflight || rp.loading) return;")      # said even when a load redrew meanwhile
     sa = _body("spokenApply")
     assert "rp.lastApply" in sa and "'connector'" in sa and "'skill'" in sa and "was !== undefined" in sa      # the first look only notes it
-    assert "load()" in _body("afterSpokenApply") and "trayPoll(" in _body("afterSpokenApply")
+    asa = _body("afterSpokenApply")
+    assert "load()" in asa and "trayPoll(" in asa
+    # review of stage 3 (a note): the owner's open tray panel and its unticked rows are left alone (only keys the Apply took
+    # are forgotten), and the reload is drawn through afterPress, as the follow draws, never inside a press
+    assert "ui.trayOff = new Set()" not in asa and "ui.trayOpen = false;" not in asa.split("if (!staged.size)")[0]
+    assert "afterPress(" in asa and asa.index("afterPress(") < asa.index("load()")
     assert "chip claude\">through Claude" in _body("renderTray") and "trayClaude(k)" in _body("renderTray")
     assert "'you, through Claude'" in _body("whoText") and "throughClaude(e.cause)" in _body("whoText")
     assert "' · said to Claude'" in _body("batchLine") and "saidToClaude(cause)" in _body("batchLine")
