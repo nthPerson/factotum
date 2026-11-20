@@ -675,7 +675,7 @@ def _step_phrase(e: dict, step: str, args: dict, today: date) -> str:
         if ch.get("op") in ("done", "drop"):
             return SAID[f"s_{ch['op']}"]
         due = (ch.get("fields") or {}).get("due") if ch.get("op") == "set" else None
-        if due and set(ch.get("fields") or {}) <= {"due", "hard"}:
+        if due and set(ch.get("fields") or {}) <= {"due", "hard", "due_is_datetime"}:
             return SAID["s_due_change"].format(day=dates.say_day(due, today))
         return SAID["s_accept"]
     return SAID.get({"follow": "s_follow", "not_about": "s_not_about", "link": "s_linked", "step": "s_linked", "waits": "s_linked",

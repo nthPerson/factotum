@@ -151,7 +151,7 @@ def world(c):
     card whose subject tries to steer the model; a planner card. No name holds a number."""
     mk(c, 1, name="Prepare and rehearse the funding pitch", hard=1, due="2026-11-20", last_reviewed_at="2026-11-10", last_mention_at="2026-11-18")
     c.execute("INSERT INTO evidence (task_id, kind, ref, label, excerpt, at) VALUES (1, 'proposal', ?, 'due tomorrow 2 PM', 'The booking mail gives the time.', ?)",
-              (json.dumps({"op": "set", "task_id": 1, "fields": {"due": "2026-11-20T14:00"}}), now_iso()))
+              (json.dumps({"op": "set", "task_id": 1, "fields": {"due": "2026-11-20T14:00", "due_is_datetime": 1}}), now_iso()))      # as the planner writes it
     c.execute("INSERT INTO evidence (task_id, kind, ref, label, excerpt, at) VALUES (1, 'thread_updated', 'conv-9', 'Appointment booked', 'Lavin Center', ?)", (now_iso(),))
     for i, n in ((2, "Send the pilot date ranges"), (3, "Revise the billboard colour logic"), (4, "Deliver the Caltrans slides")):
         new(c, i, rec="of_aaa", name=n)
