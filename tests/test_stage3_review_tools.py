@@ -1169,3 +1169,64 @@ def test_the_follow_shows_who_is_speaking_only_while_fresh(cfg, db, monkeypatch)
     c.commit()
     c.close()
     assert client.get("/api/review/pass/now").json()["speaking"] is None
+
+
+# --- commit 8: what the page shows while Claude drives the review ----------------------------------------------
+
+def test_the_follow_says_when_claude_last_spoke_and_which_apply_was_the_last(cfg, db):
+    """The View carries `speaking_at` beside `speaking` (the line "Through Claude · 3 of 8 · just now"), and
+    /api/review/pass/now names the newest review batch and who applied it, so a page following a spoken review can
+    say "Applied through Claude" and read its lists again; a page Apply is named `page`, an undone batch is not one."""
+    from fastapi.testclient import TestClient
+    from factotum import batches
+    from factotum.api import create_app
+    client = TestClient(create_app(cfg, db_path=str(db)))
+    n = client.get("/api/review/pass/now").json()
+    assert n["last_apply"] is None
+    ctx = ctx_for(db, cfg, apply=True)
+    _decided_three(ctx, db, cfg)
+    v = client.get("/api/review/pass").json()["pass"]
+    assert v["speaking"] == "connector" and v["speaking_at"]
+    assert client.get("/api/review/pass/now").json()["speaking_at"] == v["speaking_at"]
+    a = ok(ctx, "review_apply")
+    r = ok(ctx, "review_apply", {"confirm": a["confirm"]})
+    n = client.get("/api/review/pass/now").json()
+    assert n["last_apply"] == {"batch_id": r["batch_id"], "by": "connector"}
+    c = connect(db)
+    batches.undo(c, r["batch_id"])
+    c.commit()
+    c.close()
+    assert client.get("/api/review/pass/now").json()["last_apply"] is None       # an undone Apply is not the last one
+    c = connect(db)
+    from factotum import review_decide
+    review_decide.stage(c, cfg, "t:7", "keep", {}, D, origin="page")
+    c.commit()
+    c.close()
+    res = client.post("/api/tray/apply", json={"keys": None, "seen_rev": None, "source": "review", "finish": True, "whole_tray": True}).json()
+    assert client.get("/api/review/pass/now").json()["last_apply"] == {"batch_id": res["batch_id"], "by": "page"}
+
+
+def test_the_page_shows_a_spoken_review_without_locking_anything():
+    """The page during a spoken review (design 7.6): the line "Through Claude · 9 of 17 · just now" at the top of the
+    Review card (the item, the checkpoint, the end) while `speaking` is set, never at the bottom and never a control;
+    the follow reads again when who speaks changes; a tray row Claude staged carries a "through Claude" chip; a newer
+    review batch applied through Claude is said with "Applied through Claude · Undo in History" and the lists are read
+    again; History says "you, through Claude" and the Log's line "· said to Claude"."""
+    from test_review_page import JS, CSS, _body
+    line = _body("spokenLineHtml")
+    assert "v.speaking" in line and "Through Claude" in line and "just now" in line and "speaking_at" in line
+    assert "<button" not in line and "data-opt" not in line and "rvbar" not in line
+    assert "spokenLineHtml(v)" in _body("navHtml") and "spokenLineHtml(v)" in _body("checkpointHtml") and "spokenLineHtml(v)" in _body("endHtml")
+    assert ".review .rvspoken" in CSS and "position: fixed" not in CSS[CSS.index(".review .rvspoken"):CSS.index(".review .rvspoken") + 300]
+    fc = _body("followCheck")
+    assert "n.speaking !== v.speaking" in fc and "spokenApply(n.last_apply)" in fc and "'Applied through Claude · Undo in History'" in fc
+    assert fc.index("afterSpokenApply()") < fc.index("if (rp.view !== v || rp.inflight || rp.loading) return;")      # said even when a load redrew meanwhile
+    sa = _body("spokenApply")
+    assert "rp.lastApply" in sa and "'connector'" in sa and "'skill'" in sa and "was !== undefined" in sa      # the first look only notes it
+    assert "load()" in _body("afterSpokenApply") and "trayPoll(" in _body("afterSpokenApply")
+    assert "chip claude\">through Claude" in _body("renderTray") and "trayClaude(k)" in _body("renderTray")
+    assert "'you, through Claude'" in _body("whoText") and "throughClaude(e.cause)" in _body("whoText")
+    assert "' · said to Claude'" in _body("batchLine") and "saidToClaude(cause)" in _body("batchLine")
+    assert "(narrow ? 'through Claude' : 'you, through Claude')" in JS and "batchWho(b) ||" in JS and "batchWho(b, true) ||" in JS      # the Changes view, the Timeline
+    assert "!(p.speaking && /^(connector|skill)/.test(who))" in fc                                                  # the line, not a toast per spoken move
+    assert "applied_by === 'connector' || cause.applied_by === 'skill'" in JS

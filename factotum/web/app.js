@@ -1686,12 +1686,19 @@
     lines[lines.length - 1] += ' Shown for context, not a link.';
     return `<section class="dsec"><h4>Came from the same place</h4>${lines.map(l => `<p class="near">${l}</p>`).join('')}</section>`;
   }
+  // A review batch applied through the connector or a skill (spoken Review, design 7.6): its cause's `applied_by`
+  // (the page's Apply writes "page"); `staged_by` counts the rows each origin staged.
+  const throughClaude = cause => !!cause && (cause.applied_by === 'connector' || cause.applied_by === 'skill');
+  const saidToClaude = cause => !!cause && !!cause.staged_by && !!(cause.staged_by.connector || cause.staged_by.skill);
+  // The Log's chip of a review batch applied through Claude: the Timeline's narrow column says "through Claude".
+  const batchWho = (b, narrow) => b.source === 'review' && throughClaude(b.cause) ? (narrow ? 'through Claude' : 'you, through Claude') : '';
   // Who made a change, from its batch's source.
   const WHO = { ui: 'you', review: 'you', command: 'you', automation: 'automatic', planner: 'planner', plaud: 'a recording', mail: 'mail', canvas: 'Canvas',
     connector: 'a connector', skill: 'Claude Code', chat: 'chat', ntfy: 'a reminder', import: 'import' };
   // Plain text: History draws it through linkTasks (escaped, then each Task-N a link), as every other Task-N there.
   function whoText(e) {
     if (e.source === 'ripple') { const f = e.cause && Array.isArray(e.cause.from) ? e.cause.from[0] : null; return { text: Number.isInteger(f) ? `ripple from Task-${f}` : 'ripple', cls: 'chg' }; }
+    if (e.source === 'review' && throughClaude(e.cause)) return { text: 'you, through Claude', cls: 'you' };
     const text = WHO[e.source] || String(e.source || '');
     return { text, cls: text === 'you' ? 'you' : '' };
   }
@@ -2269,13 +2276,16 @@
       // A new Review's day under a pass begun yesterday (midnight while following; review 2026-11-20): read it, and the GET
       // finds no pass of today, so this one is let go and the next draw begins today's.
       const newDay = !!n.today && !!v.today && n.today !== v.today;
-      if (!(n.pass_id !== v.id || n.rev !== v.rev || n.tray_rev !== v.tray_rev || newDay)) return;
+      const spoken = spokenApply(n.last_apply);
+      if (!(n.pass_id !== v.id || n.rev !== v.rev || n.tray_rev !== v.tray_rev || n.speaking !== v.speaking || n.speaking_at !== v.speaking_at || newDay || spoken)) return;
       let r; try { r = await api('/api/review/pass'); } catch (_) { return; }
+      // An Apply made through Claude: the tray, the lists and the Log are read again, then said (whatever is drawn now).
+      if (spoken) afterSpokenApply().then(() => toast('Applied through Claude · Undo in History'));
       if (rp.view !== v || rp.inflight || rp.loading) return;      // a press or a load meanwhile: its answer is the newer
       if (typeof n.tray_rev === 'number' && n.tray_rev > tray.rev) trayPoll();
       const p = r.pass;
       if (!p && n.pass_id === v.id) reviewStale();                  // still live, but from another day
-      else if (!p) { rp.view = null; rp.held = undefined; rp.finished = { why: 'elsewhere', left: (v.counts || {}).left || 0 }; }
+      else if (!p) { rp.view = null; rp.held = undefined; rp.finished = { why: spoken ? 'applied' : 'elsewhere', left: (v.counts || {}).left || 0 }; }
       else {
         rp.view = p; rp.held = undefined; rp.finished = null;
         if (p.cursor_key !== v.cursor_key) { rp.said = ''; ui.laterOpen = false; ui.datePick = false; }
@@ -2284,9 +2294,23 @@
       afterPress('review', () => {
         if (ui.tab !== 'review' || ui.page !== null || typingNow()) { showCount(); return; }
         render();
-        if (who) toast('Moved ' + movedWhere(who));
+        if (who && !spoken && !(p.speaking && /^(connector|skill)/.test(who))) toast('Moved ' + movedWhere(who));      // the line says Claude moves it
       });
     } finally { rp.checking = false; }
+  }
+  // The newest review batch the follow has seen (`last_apply` of /api/review/pass/now): the first look only notes it;
+  // a newer one applied by a connector or a skill is a spoken Apply (design 7.6), which the page says and reads in.
+  function spokenApply(la) {
+    if (!la || la.batch_id == null) return false;
+    const was = rp.lastApply; rp.lastApply = la.batch_id;
+    return was !== undefined && la.batch_id > was && (la.by === 'connector' || la.by === 'skill') && la.batch_id !== lastBatch;
+  }
+  // What the page's own Apply does after its answer, for one made through Claude: the tray read, the lists and the Log
+  // read again (the tasks it changed), Today told its Review is stale.
+  async function afterSpokenApply() {
+    logData = null; ui.trayOpen = false; ui.trayOff = new Set();
+    await trayPoll({ force: true });
+    try { await load(); } catch (_) {}
   }
   // One move of the shared cursor. Next and Back name the item drawn in front (`from`): when another device moved it
   // meanwhile, nothing moves and the answer's pass is drawn. Next draws what comes at once. The request waits its turn in
@@ -2586,11 +2610,20 @@
     if (c.entry.settled) return settledHtml(c.entry, c.pass);
     return c.kind === 'card' ? cardItemHtml(c.entry, c.pass) : c.kind === 'group' ? groupItemHtml(c.entry, c.pass) : taskItemHtml(c.entry, c.pass);
   }
+  // While Claude drives the review (spoken Review stage 3, design 7.6): one line at the top, "Through Claude · 9 of 17 ·
+  // just now", from the View's `speaking` (a connector's or skill's last look under ten minutes old) and `speaking_at`.
+  // Not a bar and not a control: nothing is locked, a tap here goes through the same tray and cursor.
+  function spokenLineHtml(v) {
+    if (!v || !v.speaking) return '';
+    const c = v.counts || {}, s = Math.max(0, (Date.now() - (Date.parse(v.speaking_at) || Date.now())) / 1000);
+    const when = s < 60 ? 'just now' : s < 3600 ? `${Math.round(s / 60)} min ago` : '';
+    return `<div class="rvspoken" role="status"><span class="dot" aria-hidden="true"></span>Through Claude${c.position ? ` · ${c.position} of ${c.items}` : ''}${when ? ' · ' + when : ''}</div>`;
+  }
   // Above the card: Back, where the review stands, the list, Next. On a phone Back and Next are in the bar at the bottom.
   function navHtml(v) {
     const c = v.counts || {};
     const where = rp.said ? `<b>${esc(rp.said)}</b>` : `${c.position ? `${c.position} of ${c.items}` : `${c.items} item${c.items === 1 ? '' : 's'}`} · ${c.left} left undecided${staged.size ? ` · ${staged.size} staged` : ''}${c.left ? ` · ~${Math.max(1, c.minutes_left || 1)} min` : ''}`;
-    return `<div class="rvtop"><button class="btn small rvb" data-opt="back" title="Back: the item before this one (← or [)">‹ Back</button><span class="rvpos">${where}</span>`
+    return `${spokenLineHtml(v)}<div class="rvtop"><button class="btn small rvb" data-opt="back" title="Back: the item before this one (← or [)">‹ Back</button><span class="rvpos">${where}</span>`
       + `<button class="btn small" data-opt="list" aria-expanded="${!!ui.rvList}">List ${ui.rvList ? '▴' : '▾'}</button><button class="btn small rvn" data-opt="next" title="Next: leave this one undecided; it comes round again (→ or ])">Next ›</button></div>${ui.rvList ? listHtml(v) : ''}`;
   }
   // The phone's row of moves, above the decisions in the bar at the bottom.
@@ -2693,7 +2726,7 @@
   // The pause after "Items per sitting": keep going, apply what is staged and stop, or finish for now.
   function checkpointHtml(v) {
     const c = v.counts || {}, n = staged.size;
-    return `<div class="review"><div class="finish rvcheck"><h2>${(v.checkpoint || {}).looked} looked at · ${c.left} left undecided</h2>`
+    return `<div class="review">${spokenLineHtml(v)}<div class="finish rvcheck"><h2>${(v.checkpoint || {}).looked} looked at · ${c.left} left undecided</h2>`
       + `<p>Keep going, or stop here: what is left stays in Review for next time${n ? `, and Apply writes the ${n} staged change${n === 1 ? '' : 's'}` : ''}.</p>`
       + `<p class="rvacts"><button class="btn primary" data-opt="continue">Keep going</button>${n ? `<button class="btn" data-opt="apply-stop">Apply ${n} and stop</button>` : ''}<button class="btn" data-opt="end">Finish for now</button></p></div></div>`;
   }
@@ -2702,7 +2735,7 @@
     const list = v.list || [], shown = list.filter(r => r.state !== 'gone');
     if (v.state === 'empty' || !shown.length) return `<div class="review"><div class="finish"><h2>Nothing to review.</h2><p class="hint">Review gathers what needs a decision: soft dates that slipped, new tasks, backlog about to fade, and suggestions from the inputs you switch on.</p></div></div>`;
     const done = shown.filter(r => r.state === 'decided' || r.state === 'answered'), n = staged.size;
-    return `<div class="review"><div class="finish"><h2>All ${shown.length} looked at.</h2><p>${n ? `${n} change${n === 1 ? '' : 's'} staged. Apply writes them as one batch, and History can undo it.` : 'Nothing is staged.'}</p>`
+    return `<div class="review">${spokenLineHtml(v)}<div class="finish"><h2>All ${shown.length} looked at.</h2><p>${n ? `${n} change${n === 1 ? '' : 's'} staged. Apply writes them as one batch, and History can undo it.` : 'Nothing is staged.'}</p>`
       + `<p class="rvacts">${n ? `<button class="btn primary" data-opt="apply">Apply ${n}</button>` : ''}<button class="btn" data-opt="goto:${esc(shown[0].key)}">Look again from the start</button><button class="btn" data-opt="end">Finish for now</button></p></div>`
       + `${done.length ? `<div class="sgstaged-list"><div class="hint">Decided in this review</div>${done.map(stagedRowHtml).join('')}</div>` : ''}</div>`;
   }
@@ -3535,6 +3568,7 @@
       const k = new Set(b.changes.filter(c => c.task_id && !NOISE.has(c.field)).map(c => c.task_id)).size;
       return `Ripple from Task-${from}: ${k} task${k === 1 ? '' : 's'} updated` + (cause.cause_undone_at && !b.undone_at ? ' · cause undone, kept' : '');
     }
+    const said = b.source === 'review' && saidToClaude(cause) ? ' · said to Claude' : '';      // a review staged by speech (design 7.6)
     const per = new Map();
     for (const c of b.changes) {
       if (NOISE.has(c.field)) continue;
@@ -3551,8 +3585,8 @@
     const items = [...per.values()];
     if (!items.length) return 'no changes';
     const after = from != null ? `after Task-${from} · ` : '';
-    if (items.length > 2 && items.every(i => i.label === items[0].label)) return `${after}${items.length} tasks · ${items[0].label}`;
-    return after + items.slice(0, 3).map(i => (i.id ? `Task-${i.id} ` : 'suggestion ') + i.label).join(' · ') + (items.length > 3 ? ` · +${items.length - 3} more` : '');
+    if (items.length > 2 && items.every(i => i.label === items[0].label)) return `${after}${items.length} tasks · ${items[0].label}${said}`;
+    return after + items.slice(0, 3).map(i => (i.id ? `Task-${i.id} ` : 'suggestion ') + i.label).join(' · ') + (items.length > 3 ? ` · +${items.length - 3} more` : '') + said;
   }
   // One changed field in words, lower case ("due Nov 3 → Nov 5", "note added: “…”"): the Log's digest and History.
   function fieldSaid(c) {
@@ -3593,7 +3627,7 @@
   }
   function changesHtml() {
     return logData.batches.map(b => `<div class="logb ${b.undone_at ? 'undone' : ''}">
-        <div class="loghead"><b>#${b.id}</b> <span class="chip">${esc(b.source)}</span> <span>${logWhen(b.applied_at || b.created_at)}</span> <span>${b.changes.length} change${b.changes.length === 1 ? '' : 's'}</span>
+        <div class="loghead"><b>#${b.id}</b> <span class="chip">${esc(batchWho(b) || b.source)}</span>${b.source === 'review' && saidToClaude(b.cause) ? ' <span>said to Claude</span>' : ''} <span>${logWhen(b.applied_at || b.created_at)}</span> <span>${b.changes.length} change${b.changes.length === 1 ? '' : 's'}</span>
           ${b.undone_at ? `<span class="chip">undone ${logWhen(b.undone_at)}</span>` : b.changes.length ? `<span class="spacer"></span><button class="btn small" data-undo="${b.id}">Undo</button>` : ''}</div>
         ${changeLines(b)}</div>`).join('') || '<div class="empty">No batches yet.</div>';
   }
@@ -3619,7 +3653,7 @@
         out += `${out ? '</div>' : ''}<h4 class="tlday">${dayLabel(i.t)}<span class="n">${same.filter(x => x.b).length} change batch${same.filter(x => x.b).length === 1 ? '' : 'es'} · ${same.filter(x => x.r).length} run${same.filter(x => x.r).length === 1 ? '' : 's'}${cost ? ' · $' + cost.toFixed(2) : ''}</span></h4><div class="tlist">`; }
       if (i.b) {
         const b = i.b, key = 'b' + b.id, open = logOpen.has(key);
-        out += `<div class="tl change ${b.undone_at ? 'undone' : ''} ${open ? 'open' : ''}" data-tl="${key}"><span class="t">${time(i.t)}</span><span class="chip k">${esc(SOURCE_NAMES[b.source] || b.source)}</span>
+        out += `<div class="tl change ${b.undone_at ? 'undone' : ''} ${open ? 'open' : ''}" data-tl="${key}"><span class="t">${time(i.t)}</span><span class="chip k">${esc(batchWho(b, true) || SOURCE_NAMES[b.source] || b.source)}</span>
           <span class="m"><span class="code">#${b.id}</span> ${esc(batchLine(b))}</span><span class="x">${b.undone_at ? 'undone' : `${b.changes.length} change${b.changes.length === 1 ? '' : 's'}`}</span>
           ${b.undone_at || !b.changes.length ? '<span class="nobtn"></span>' : `<button class="btn small" data-undo="${b.id}">Undo</button>`}<span class="car" aria-hidden="true"></span>
           ${open ? `<div class="more">${batchDigest(b)}<div class="hint">Every field, old → new, is in the Changes view (#${b.id}).</div></div>` : ''}</div>`;
@@ -3725,9 +3759,11 @@
   function trayFromWords(k) {
     const s = staged.get(k), m = tray.meta.get(k) || {};
     if (s && s.local) return s.deciding ? ' · staging…' : ' · kept in this browser, not handed over yet';      // a decision on its way, or an old tray not carried
-    if (m.origin === 'connector' || m.origin === 'skill') return ' · from Claude';
+    if (m.origin === 'connector' || m.origin === 'skill') return ' · through Claude';
     return m.device && m.device !== deviceLabel() ? ' · from ' + m.device : '';
   }
+  // A row a connector or a skill staged (spoken Review stage 3): the tray panel draws it a small "through Claude" chip.
+  const trayClaude = k => { const m = tray.meta.get(k) || {}, s = staged.get(k); return !(s && s.local) && (m.origin === 'connector' || m.origin === 'skill'); };
   function renderTray() {
     const n = staged.size;
     document.getElementById('tray').classList.toggle('on', n > 0);
@@ -3740,7 +3776,7 @@
     document.body.classList.toggle('tray-open', open);
     if (!open) { panel.innerHTML = ''; return; }
     const picked = [...staged].filter(([k]) => !ui.trayOff.has(String(k))).length;
-    panel.innerHTML = `<div class="rows">${[...staged].map(([k, s]) => `<label><input type="checkbox" data-tray-key="${esc(String(k))}" ${ui.trayOff.has(String(k)) ? '' : 'checked'}><span>${s.task_id ? `<span class="code">Task-${s.task_id}</span> ${esc((byId(s.task_id) || {}).name || '')}` : ''}</span><span class="what">${esc(s.label)}<span class="from">${esc(trayFromWords(k))}</span></span></label>`).join('')}</div>
+    panel.innerHTML = `<div class="rows">${[...staged].map(([k, s]) => `<label><input type="checkbox" data-tray-key="${esc(String(k))}" ${ui.trayOff.has(String(k)) ? '' : 'checked'}><span>${s.task_id ? `<span class="code">Task-${s.task_id}</span> ${esc((byId(s.task_id) || {}).name || '')}` : ''}</span><span class="what">${esc(s.label)}${trayClaude(k) ? '<span class="chip claude">through Claude</span>' : `<span class="from">${esc(trayFromWords(k))}</span>`}</span></label>`).join('')}</div>
       ${tray.carryFailed ? `<p class="hint bad">The changes this browser kept before the tray moved to the server could not be handed over (${esc(tray.carryFailed)}). Apply waits; they are tried again on the next return.</p>` : ''}
       <div class="acts"><span class="hint">${picked} of ${n} selected</span><button class="btn small" id="tray-discard-sel" ${picked ? '' : 'disabled'}>Discard selected</button><button class="btn small primary" id="tray-apply-sel" ${picked && !tray.carryFailed ? '' : 'disabled'}>Apply selected</button></div>`;
     panel.querySelectorAll('[data-tray-key]').forEach(ck => ck.onchange = () => { if (ck.checked) ui.trayOff.delete(ck.dataset.trayKey); else ui.trayOff.add(ck.dataset.trayKey); renderTray(); });

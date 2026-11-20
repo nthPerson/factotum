@@ -449,8 +449,9 @@ def _drivers(row: dict) -> dict:
     return d if isinstance(d, dict) else {}
 
 
-def _speaking(row: dict) -> str | None:
-    """The connector or skill when it last looked under SPEAKING_S ago (stage 3 writes it through `seen`)."""
+def _speaking_look(row: dict) -> tuple[str, str] | tuple[None, None]:
+    """(driver, at): the connector or skill whose last look (stage 3 writes it through `seen`) is under SPEAKING_S
+    old, and when that was; (None, None) when neither is."""
     now = datetime.now(timezone.utc)
     for drv in ("connector", "skill"):
         at = (_drivers(row).get(drv) or {}).get("at")
@@ -461,8 +462,27 @@ def _speaking(row: dict) -> str | None:
         if t.tzinfo is None:
             t = t.replace(tzinfo=timezone.utc)
         if (now - t).total_seconds() < SPEAKING_S:
-            return drv
-    return None
+            return drv, t.isoformat()
+    return None, None
+
+
+def _speaking(row: dict) -> str | None:
+    """The connector or skill when it last looked under SPEAKING_S ago."""
+    return _speaking_look(row)[0]
+
+
+def last_apply(conn: sqlite3.Connection) -> dict | None:
+    """The newest review batch not undone, {batch_id, by}: `by` is its cause's `applied_by` (page, connector, skill), so
+    a page following a spoken review can say an Apply was made through Claude. Reads only (one indexed row)."""
+    r = conn.execute("SELECT id, cause_json FROM batches WHERE source = 'review' AND undone_at IS NULL ORDER BY id DESC LIMIT 1").fetchone()
+    if r is None:
+        return None
+    try:
+        cause = json.loads(r[1] or "{}")
+    except ValueError:
+        cause = {}
+    by = cause.get("applied_by") if isinstance(cause, dict) else None
+    return {"batch_id": r[0], "by": by if by in ("page", "connector", "skill") else "page"}
 
 
 # --- one write to a pass -----------------------------------------------------------------------------------
@@ -967,6 +987,13 @@ def now(conn: sqlite3.Connection) -> dict:
             "tray_rev": tray.rev(conn), "speaking": _speaking(row), "day": row["day"]}
 
 
+def now_more(conn: sqlite3.Connection) -> dict:
+    """What the page's follow reads beyond `now` (stage 3, design 7.6): `speaking_at`, when Claude last looked, and
+    `last_apply` (`last_apply`). Reads only; takes no lock."""
+    row = live(conn)
+    return {"speaking_at": _speaking_look(row)[1] if row else None, "last_apply": last_apply(conn)}
+
+
 def view(conn: sqlite3.Connection, cfg: dict, today: date, *, spoken: bool = True) -> dict | None:
     """The View of the live pass of Review's day (§6.6), or None (no live pass, or one from another day). Reads only.
     `spoken` False leaves out the sentences for the ear (`current.spoken`, `ahead.spoken`, a member's `spoken`)."""
@@ -1276,5 +1303,5 @@ def _view(conn: sqlite3.Connection, cfg: dict, today: date, row: dict, queue: di
         _speak(conn, cfg, today, [current, ahead_entry])
     return {"id": row["id"], "rev": row["rev"], "day": row["day"], "today": today.isoformat(), "state": P.state, "cursor_key": cur,
             "lap": row["lap"], "started_by": row["started_by"], "moved_by": row["moved_by"], "moved_at": row["moved_at"],
-            "tray_rev": tr["rev"], "speaking": _speaking(row), "counts": counts, "checkpoint": {"looked": row["looked"], "cap": _cap(cfg)},
+            "tray_rev": tr["rev"], "speaking": _speaking(row), "speaking_at": _speaking_look(row)[1], "counts": counts, "checkpoint": {"looked": row["looked"], "cap": _cap(cfg)},
             "labels": lifecycle.REVIEW_LABELS, "current": current, "ahead": ahead_entry, "list": [_line(conn, cfg, k, P, trows, today) for k in P.order]}

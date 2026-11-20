@@ -183,7 +183,7 @@ def test_get_review_and_the_pass_reads_write_nothing(cfg, tmp_path):
     assert c.total_changes == before and not c.in_transaction
     assert got["id"] == v["id"] and got["rev"] == v["rev"]
     assert now == {"pass_id": v["id"], "rev": v["rev"], "state": "item", "cursor_key": "t:1", "tray_rev": 0, "speaking": None, "day": v["day"],
-                   "today": review_queue.today(cfg).isoformat()}
+                   "speaking_at": None, "last_apply": None, "today": review_queue.today(cfg).isoformat()}      # stage 3: the page's line and toast
 
 
 def test_get_review_is_whole_and_in_the_new_order(cfg, tmp_path):

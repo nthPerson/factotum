@@ -185,6 +185,7 @@ section.group h3.crit { color: var(--crit); } section.group h3.warn { color: var
 .chip.eff { font-family: var(--mono); }
 .chip.top { background: var(--top-soft); color: var(--top); }
 .chip.lt { background: var(--ok-soft); color: var(--ok); }
+.chip.claude { background: var(--accent-soft); color: var(--accent); margin-left: 6px; font-style: normal; }   /* a tray row a connector or a skill staged */
 .chip.fade { background: var(--warn-soft); color: var(--warn); }
 .chip.rem { background: var(--accent-soft); color: var(--accent); font-family: var(--mono); }
 .chip.staged { background: var(--accent); color: var(--on-accent); }
@@ -1070,6 +1071,9 @@ mark { background: var(--warn-soft); color: inherit; border-radius: 2px; padding
 
 /* ---------- Review as a pass (spoken Review 2a, 2026-11-20): where it stands, the list, what is staged, the stops ---------- */
 .review .rvtop { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+/* While Claude drives the review (spoken Review stage 3): one quiet line above the nav, not a bar and not a control. */
+.review .rvspoken { display: flex; align-items: center; gap: 7px; margin: 0 0 8px; font-size: 12px; color: var(--accent); overflow-wrap: anywhere; }
+.review .rvspoken .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex: none; }
 .review .rvtop .rvpos { flex: 1; min-width: 0; font-family: var(--mono); font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
 .review .rvtop .rvpos b { color: var(--accent); font-weight: 600; }
 .card .rvbar .rvnav { display: none; }      /* the desktop's moves are above the card */
