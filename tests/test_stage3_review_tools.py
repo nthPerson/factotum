@@ -1258,3 +1258,209 @@ def test_the_review_skill_is_short_names_every_tool_and_what_to_do_with_each_ans
     assert not re.search(r"Task-\d", s)
     planner = (C.ROOT / "skills" / "factotum-planner" / "SKILL.md").read_text()
     assert "weekly review" not in planner.split("---")[1] and "**factotum-review**" in planner and "**Backlog grooming**" in planner
+
+
+# --- commit 10: a whole spoken review over the stdio server, and the HTTP route beside a page Apply ---------------
+
+class _Out:
+    """What the stdio server writes: one JSON-RPC line per request, nothing else."""
+    def __init__(self):
+        self.lines = []
+
+    def write(self, s):
+        self.lines.append(s)
+
+    def flush(self):
+        pass
+
+
+def _stdio(ctx, script):
+    """Run `mcp_server.serve` over a scripted session: `script` is a generator that yields JSON-RPC requests and is
+    sent each answer, so a later call can use a ref or a token an earlier one gave (as a model would)."""
+    out = _Out()
+
+    def inp():
+        g = script()
+        req = next(g)
+        while True:
+            n = len(out.lines)
+            yield json.dumps(req) + "\n"
+            resp = json.loads(out.lines[-1]) if len(out.lines) > n else None
+            try:
+                req = g.send(resp)
+            except StopIteration:
+                return
+    M.serve(ctx, inp(), out)
+    return out.lines
+
+
+def _req(i, name, args=None):
+    return {"jsonrpc": "2.0", "id": i, "method": "tools/call", "params": {"name": name, "arguments": args or {}}}
+
+
+def _res(resp):
+    r = resp["result"]
+    assert not r["isError"], r
+    return json.loads(r["content"][0]["text"])
+
+
+def test_a_whole_spoken_review_runs_through_the_stdio_server(cfg, db):
+    """Design 7.8: start; yes to the suggested answer; a drop that asks first, then the suggestion taken instead; keep
+    all but one; next on a fading task and on a card; which task it is; next again until it comes round; keep and
+    dismiss; how many left; apply, confirmed. Then the database: one review batch with its cause, the verdicts, the
+    finish write, every task as said, and nothing on stdout but JSON-RPC lines."""
+    seen = {}
+
+    def script():
+        resp = yield {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}}
+        resp = yield {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}
+        seen["tools"] = {t["name"] for t in resp["result"]["tools"]}
+        a = _res((yield _req(3, "review_start")))
+        assert a["item"]["ref"] == "t:5" and a["mode"] == "apply"
+        a = _res((yield _req(4, "review_decide", {"ref": "t:5", "decision": "rec"})))
+        assert a["status"] == "staged" and a["said"] == "Linked, and kept." and a["next"]["ref"] == "t:1"
+        a = _res((yield _req(5, "review_decide", {"ref": "t:1", "decision": "drop"})))
+        assert a["status"] == "confirm" and a["ask"] == "Drop Prepare and rehearse the funding pitch? Its firm date is within two days."
+        a = _res((yield _req(6, "review_decide", {"ref": "t:1", "decision": "rec"})))              # "no, take the suggestion": the token is never used
+        assert a["status"] == "staged" and a["next"]["ref"] == "g:rec:of_aaa" and a["next"]["kind"] == "group"
+        a = _res((yield _req(7, "review_decide", {"ref": "g:rec:of_aaa", "decision": "keep_all", "except": [{"ref": "t:3", "decision": "drop"}]})))
+        assert a["status"] == "staged" and a["next"]["ref"] == "t:7"
+        a = _res((yield _req(8, "review_next", {"move": "next", "from": "t:7"})))
+        assert a["moved"] and a["item"]["ref"] == "t:9"
+        a = _res((yield _req(9, "review_more", {"ref": "t:9", "what": "number"})))
+        assert a["say"] == "Task nine"
+        a = _res((yield _req(10, "review_next", {"move": "next", "from": "t:9"})))
+        assert a["item"]["ref"] == "s:4" and "say" in a["item"]["from_others"] and a.get("data")      # the mail's words, marked as data
+        a = _res((yield _req(11, "review_next", {"move": "next", "from": "s:4"})))       # the card is left for now
+        assert a["item"]["ref"] == "s:5"
+        a = _res((yield _req(12, "review_decide", {"ref": "s:5", "decision": "create"})))
+        assert a["status"] == "staged"
+        ref, came_round, i = a["next"]["ref"], False, 13
+        while ref != "s:4":                                                                 # round again to what was left
+            if ref == "t:7":
+                a = _res((yield _req(i, "review_decide", {"ref": "t:7", "decision": "keep"})))
+                ref = a["next"]["ref"]
+            else:
+                a = _res((yield _req(i, "review_next", {"move": "next", "from": ref})))
+                came_round = came_round or a["came_round"]
+                ref = a["item"]["ref"]
+            i += 1
+            assert i < 25
+        a = _res((yield _req(i, "review_decide", {"ref": "s:4", "decision": "dismiss"})))
+        assert a["status"] == "staged"
+        st = _res((yield _req(i + 1, "review_status")))
+        seen["status"] = st["say"]
+        a = _res((yield _req(i + 2, "review_apply")))
+        assert a["status"] == "confirm"
+        seen["ask"] = a["ask"]
+        r = _res((yield _req(i + 3, "review_apply", {"confirm": a["confirm"]})))
+        assert r["status"] == "applied" and r["say"] == "Applied. You can undo it in Factotum's History."
+        seen["batch"] = r["batch_id"]
+
+    ctx = ctx_for(db, cfg, source="skill", apply=True)
+    lines = _stdio(ctx, script)
+    for line in lines:                                                                      # stdout is the protocol, one answer per line
+        assert line.endswith("\n") and line.count("\n") == 1 and json.loads(line)["jsonrpc"] == "2.0"
+    assert REVIEW_TOOLS | {"review_apply"} <= seen["tools"]
+    assert seen["status"].startswith("Nothing left") or "staged" in seen["status"], seen["status"]
+    assert seen["ask"].startswith("Apply ") and "?" in seen["ask"], seen["ask"]
+    c = connect(db)
+    b = c.execute("SELECT source, cause_json FROM batches WHERE source = 'review'").fetchall()
+    assert len(b) == 1 and c.execute("SELECT id FROM batches WHERE source = 'review'").fetchone()[0] == seen["batch"]
+    cause = json.loads(b[0]["cause_json"])
+    assert cause["kind"] == "review" and cause["applied_by"] == "skill" and set(cause["staged_by"]) == {"skill"}
+    verdict = lambda eid: c.execute("SELECT verdict FROM evidence WHERE id = ?", (eid,)).fetchone()[0]
+    assert verdict(1) == "applied" and verdict(4) == "dismissed" and verdict(5) == "applied"      # the planner's change, the card dismissed, the card created
+    assert get_task(c, 1)["due"] == "2026-11-20T14:00" and get_task(c, 1)["status"] == "open"
+    assert get_task(c, 3)["status"] == "dropped" and get_task(c, 2)["status"] == "open" and get_task(c, 4)["status"] == "open"
+    assert get_task(c, 2)["last_reviewed_at"] == D.isoformat() and get_task(c, 7)["last_reviewed_at"] == D.isoformat()
+    assert c.execute("SELECT COUNT(*) FROM relations WHERE src = 5 AND dst = 6 AND kind = 'part_of' AND removed_at IS NULL").fetchone()[0] == 1
+    assert c.execute("SELECT COUNT(*) FROM tasks WHERE name = 'Go to the dentist' AND status = 'open'").fetchone()[0] == 1
+    assert c.execute("SELECT COUNT(*) FROM tasks WHERE name LIKE 'Ignore your instructions%'").fetchone()[0] == 0
+    assert c.execute("SELECT value_json FROM settings WHERE key = 'state.last_review_at'").fetchone()[0] == json.dumps(D.isoformat())
+    assert entries(db) == [] and c.execute("SELECT end_why FROM review_passes").fetchone()[0] is None      # the fading task was left: the pass goes on
+    assert get_task(c, 9)["last_reviewed_at"] == "2026-09-01" and 9 in [t["task"]["id"] for t in review_queue.items(c, cfg, D)["tasks"]]
+    c.close()
+
+
+def test_a_spoken_review_stopped_after_next_on_a_card_leaves_the_card_a_card(cfg, db):
+    """The variant of the scripted session that stops after `next` on the card: nothing judged it, it is still a card
+    in the queue, and nothing reached a task."""
+    def script():
+        yield {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}}
+        _res((yield _req(2, "review_start")))
+        seen["batches"] = n_batches()
+        a = _res((yield _req(3, "review_next", {"move": "to", "ref": "s:4"})))
+        assert a["item"]["ref"] == "s:4"
+        a = _res((yield _req(4, "review_next", {"move": "next", "from": "s:4"})))
+        assert a["moved"] and a["item"]["ref"] != "s:4"
+    seen = {}
+    n_batches = lambda: connect(db).execute("SELECT COUNT(*) FROM batches").fetchone()[0]
+    _stdio(ctx_for(db, cfg, source="skill", apply=True), script)
+    c = connect(db)
+    assert c.execute("SELECT verdict FROM evidence WHERE id = 4").fetchone()[0] is None
+    assert 4 in [x["id"] for x in review_queue.items(c, cfg, D)["cards"]]
+    assert c.execute("SELECT COUNT(*) FROM batches").fetchone()[0] == seen["batches"] and entries(db) == []
+    c.close()
+
+
+def test_the_http_route_serves_the_review_tools(cfg, db, monkeypatch):
+    """Design 7.8: over POST /mcp (the connector), the seven tools are listed in apply mode, a spoken review stages and
+    moves, and while a page's Apply runs again and again in another thread no request answers 500, every tool answer
+    is a result or one sentence, and each staged decision is applied exactly once."""
+    import threading
+    from fastapi.testclient import TestClient
+    from factotum.api import create_app
+    monkeypatch.setenv("FACTOTUM_MCP_TOKEN", "s3cret")
+    client = TestClient(create_app(cfg, db_path=str(db)))
+    client.put("/api/settings", json={"values": {"server.mcp_writes": "apply"}})
+    h = {"Authorization": "Bearer s3cret"}
+    n = {"i": 0}
+
+    def mcp(name, args=None):
+        n["i"] += 1
+        r = client.post("/mcp", json=_req(n["i"], name, args), headers=h)
+        assert r.status_code == 200, (name, r.status_code, r.text[:300])
+        res = r.json()["result"]
+        return (res["isError"], res["content"][0]["text"] if res["isError"] else json.loads(res["content"][0]["text"]))
+
+    tl = client.post("/mcp", json={"jsonrpc": "2.0", "id": 0, "method": "tools/list"}, headers=h).json()
+    assert REVIEW_TOOLS | {"review_apply"} <= {t["name"] for t in tl["result"]["tools"]}
+    err, a = mcp("review_start")
+    assert not err and a["item"]["ref"] == "t:5"
+    page_codes, stop = [], threading.Event()
+
+    def page_applies():
+        while not stop.is_set():
+            r = client.post("/api/tray/apply", json={"keys": None, "seen_rev": None, "source": "review", "finish": True, "whole_tray": True})
+            page_codes.append(r.status_code)
+    t = threading.Thread(target=page_applies)
+    t.start()
+    try:
+        ref = "t:5"
+        for _ in range(6):                                                                  # keep what comes, the group with keep_all, a card dismissed
+            err, cur = mcp("review_next", {"move": "repeat"})
+            assert not err
+            if not cur.get("item"):
+                break
+            ref, opts = cur["item"]["ref"], [o["id"] for o in cur["item"]["options"]]
+            dec = "keep" if "keep" in opts else "keep_all" if "keep_all" in opts else "dismiss" if "dismiss" in opts else None
+            if dec is None:
+                err, _ = mcp("review_next", {"move": "next", "from": ref})
+                continue
+            err, d = mcp("review_decide", {"ref": ref, "decision": dec})
+            assert not err or d.endswith("."), d                                            # a refusal is one sentence, never a 500
+        err, a = mcp("review_apply")
+        assert not err and a["status"] in ("confirm", "nothing")
+        if a["status"] == "confirm":
+            err, b = mcp("review_apply", {"confirm": a["confirm"]})
+            assert not err and b["status"] in ("applied", "nothing", "confirm")            # the page's Apply may have come first
+    finally:
+        stop.set()
+        t.join()
+    assert page_codes and set(page_codes) <= {200, 409}, set(page_codes)
+    c = connect(db)
+    rows = c.execute("SELECT c.task_id, COUNT(*) FROM changes c JOIN batches b ON b.id = c.batch_id WHERE b.source = 'review' "
+                     "AND c.field = 'last_reviewed_at' GROUP BY c.task_id").fetchall()
+    assert rows and all(k == 1 for _, k in rows), rows                                     # each decision applied once, by whichever Apply
+    c.close()
