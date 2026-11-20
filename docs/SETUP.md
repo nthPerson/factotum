@@ -402,11 +402,13 @@ are threads); archived threads are listed per channel on request.
 
 ## 14. The skills and `factotum mcp` from elsewhere (phase 6)
 
-On this machine both skills and the server are already registered:
+On this machine the skills and the server are already registered (the third skill, `factotum-review`, came with
+the spoken Review: §22):
 
 ```bash
 ln -sfn /home/robert/factotum/skills/factotum-planner ~/.claude/skills/factotum-planner
 ln -sfn /home/robert/factotum/skills/factotum-ops     ~/.claude/skills/factotum-ops
+ln -sfn /home/robert/factotum/skills/factotum-review  ~/.claude/skills/factotum-review
 claude mcp add -s user factotum -e PYTHONPATH=/home/robert/factotum -- /home/robert/factotum/.venv/bin/python -m factotum mcp
 claude mcp get factotum        # Status: ✔ Connected
 ```
@@ -445,13 +447,13 @@ set `server.mcp_http_tools` in the config to a list of tool names (or `all`).
 
 **Another machine (the thinkpad).** Claude Code reads `~/.claude/skills` on *that* machine and its
 own `claude mcp` list, so the two registrations above are per machine: clone the repo there (or
-copy `skills/factotum-planner` and `skills/factotum-ops`), symlink them into `~/.claude/skills`,
+copy `skills/factotum-planner`, `skills/factotum-ops` and `skills/factotum-review`), symlink them into `~/.claude/skills`,
 and add the server over HTTP with the bearer token as shown. **Claude Desktop and claude.ai** do
 not read `~/.claude/skills` at all: their skills are the ones uploaded under Settings →
 Capabilities → Skills (zip each `skills/factotum-*` folder and upload it; it then shows on
 every device signed into the account), and their tools come from a connector — see §16.
 
-**After a deploy that changes `skills/`** the copies elsewhere are stale: zip and upload both skills again in
+**After a deploy that changes `skills/`** the copies elsewhere are stale: zip and upload the skills again in
 claude.ai / Claude Desktop (an old planner skill writes a note by overwriting the task's text, which loses a
 ripple's rewrite; the current one sends `add_note`), and pull on every other machine that has the repository
 (its `~/.claude/skills` links point into it). Ask "which skill-version is loaded" to check.
@@ -530,7 +532,7 @@ Factotum is its own OAuth server for `/mcp` (SPEC §15). Four steps, each once, 
    Claude Code. After changing it, reconnect the connector in claude.ai (or start a new chat) so
    it reloads the tool list. Upload the skills (§14) so those chats know the recipes.
 5. **After a deploy that adds or changes tools** (the linked-tasks release added `task_neighbours`,
-   `waiting_tasks`, `twin_candidates` and `goal_tree`), reconnect the connector in claude.ai (or start a new
+   `waiting_tasks`, `twin_candidates` and `goal_tree`; the spoken Review added the seven `review_*` tools, §22), reconnect the connector in claude.ai (or start a new
    chat) so it reloads the tool list; until then it offers the old one. If the reconnect asks for consent
    again, arm first (step 3). Upload the skills again too (§14).
 
@@ -798,3 +800,46 @@ which is in the recording's batch and can be undone.
   three commands (a backup-API copy, `init-db` on the copy, `links-check` on the copy) to run instead. After the
   restart `.venv/bin/python -m factotum links-check` reads the live database (what is still to come), and
   `.venv/bin/python -m factotum sweep links` runs one pass now.
+
+## 22. A spoken Review through the Claude app
+
+Review can be run by talking to the Claude app (voice mode on the phone, or typed in any chat), through the
+connector of §16 and the skill `factotum-review`. Factotum has no audio of its own: seven tools on its MCP server
+(`review_start`, `review_next`, `review_more`, `review_status`, `review_decide`, `review_undo`, and `review_apply`
+in apply mode) walk the same Review the tab shows, with one cursor and one tray, so the screen follows what is said
+and a tap on the screen is mentioned on the next spoken turn. Every sentence about a task is built by Factotum;
+nothing is applied until you say apply and then yes (apply mode) or tap Apply on the screen (stage mode).
+
+**Before the first one** (once, after the deploy that brought it):
+
+1. **Reconnect the connector** in claude.ai (Settings → Connectors → Factotum → reconnect, or remove and add it
+   again as in §16 step 3, arming first if it asks for consent) so the new tools are listed. A chat started
+   before the reconnect still has the old list.
+2. **Add the skill.** claude.ai, Claude Desktop and the phone app: zip `skills/factotum-review` and upload it
+   under Settings → Capabilities → Skills; upload `skills/factotum-planner` again too (its "Review" line now
+   sends a review to the new skill). Claude Code on this machine: the `ln -sfn` line in §14, then restart any
+   running session. Ask "which skill-version is loaded" to check (`2026-11-20` for both).
+3. **A deployment that set `server.mcp_http_tools` to a list** serves only the tools it names on `/mcp`: the list
+   replaces the default, so add the seven `review_*` names to it (or set it to `all`). Absent, the route serves
+   every tool but the drafts and Plaud's, the review tools included. `factotum effective server.mcp_http_tools`
+   shows what is set.
+4. **Try it typed first**: in a new chat with the connector on, "let's do my review". The answer should be the
+   opening line ("Twenty-four to look at, about five minutes…") and the first item. Then try voice mode.
+
+**To begin**, say "let's do my review" (or "go through Review"). Say next to leave one for now (it comes round
+again at the end), back, repeat, more or why, keep, done (with a reason if you like), drop, later with a day
+("later, Friday"), yes to the suggested answer, undo, how many left, apply, that's all. A close of something
+risky (a firm date within two days, a Top task, a goal with open steps, a task another one waits on) and every
+merge are asked about first; so is a decision on an item not read out yet.
+
+**Stage or apply.** Settings → Connections → "What Claude may do with tasks" (`server.mcp_writes`): *Stage for my
+Apply* leaves every spoken decision in the tray and hides `review_apply`, so you tap Apply on the screen; *Apply
+directly* adds `review_apply`, which always reads back what it covers ("Apply fourteen decisions: …? One batch from
+Claude still waits on the screen and is not part of this.") and applies only after your yes. Reconnect after
+changing it (§16 step 4). A spoken Apply is one batch with source review, undone like any other in History.
+
+**What the screen shows.** On the Review tab: the line "Through Claude · 9 of 17 · just now" at the top of the card
+while Claude is driving (it goes ten minutes after the last turn), a "through Claude" chip on tray rows staged by
+speech, "Applied through Claude · Undo in History" after a spoken Apply. Nothing is locked: tap whatever you like.
+The Log shows the batch as "through Claude" with "· said to Claude", History as "you, through Claude".
+

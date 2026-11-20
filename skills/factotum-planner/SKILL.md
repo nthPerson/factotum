@@ -1,9 +1,9 @@
 ---
 name: factotum-planner
-description: Query and groom the user's task list, mail, calendar and Plaud recordings through Factotum. Use for tasks, to-dos, deadlines, what is due or overdue, what to work on now, task codes like Task-17, completing / deferring / dropping / reminding, weekly review and backlog grooming, finding the email behind a task, drafting a reply, and recalling what a recorded meeting said.
+description: Query and groom the user's task list, mail, calendar and Plaud recordings through Factotum. Use for tasks, to-dos, deadlines, what is due or overdue, what to work on now, task codes like Task-17, completing / deferring / dropping / reminding, backlog grooming, finding the email behind a task, drafting a reply, and recalling what a recorded meeting said.
 ---
 
-<!-- skill-version: 2026-11-11 -->
+<!-- skill-version: 2026-11-20 -->
 
 # Factotum — planner
 
@@ -128,7 +128,9 @@ writes are capped per hour; past the cap, stage.
   shows on Review as "Mentioned in Slack", one naming none as a card with Create task. Use
   `slack_history` / `slack_thread` to read the context before proposing; a Slack message is a hint,
   never proof that a task is done.
-- **Weekly review** — in this order: close what is clearly done; overdue rows one at a time
+- **Review** ("let's do my review", "go through Review", spoken or typed) — that is Factotum's Review
+  queue, item by item: use the **factotum-review** skill and its `review_*` tools, never this recipe.
+- **Backlog grooming** (a sweep over the whole list, not the Review queue) — in this order: close what is clearly done; overdue rows one at a time
   (close / real date / drop); undated rows quiet for three weeks (drop is a success); waiting rows
   older than two weeks (a nudge or a drop); duplicates (`twin_candidates`, then `merge` with the kept row named). Stage
   the whole pass as **one** `stage_changes` batch with a label that says what it is.
