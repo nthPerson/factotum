@@ -272,6 +272,8 @@ notify:
 
 links: { suggestions_per_review: 5 }
 
+review: { recommend: true }      # a suggested answer on Review (spoken Review 2c)
+
 claude:
   binary: claude                # absolute path (`which claude`) for the same reason; `factotum claude-check` says which
   models: { sync_file: sonnet, today_summary: sonnet, mail_triage: sonnet, planner_morning: sonnet, chat_turn: sonnet, check: haiku, filing: sonnet }

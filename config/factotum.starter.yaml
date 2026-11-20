@@ -74,6 +74,8 @@ notify:
 
 links: { suggestions_per_review: 5 }
 
+review: { recommend: true }
+
 claude:
   planner: { enabled: false }
   summary: { auto: false, auto_minutes: 10 }

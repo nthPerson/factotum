@@ -30,7 +30,7 @@ SPEAKING_S = 600                              # a connector's or skill's last lo
 MOVES = ("next", "back", "goto", "first", "continue", "end")
 ENDS = ("applied", "finished", "replaced", "another_day")
 DRIVERS = ("page", "connector", "skill")
-PASS_ONLY = ("rec", "keep_all")               # options only a pass offers (2c, 2d); the rule refuses every other option itself
+PASS_ONLY = ("rec", "keep_all")               # options only a pass offers (rec: 2c, keep_all: 2d); the rule refuses every other option itself
 UNDECIDED = ("waiting", "passed")
 SETTLED = ("decided", "answered")             # counted as decided for moving and counting
 EVIDENCE_REASONS = ("thread_updated", "mentioned", "planner", "ripple")
@@ -430,9 +430,10 @@ def decide(conn: sqlite3.Connection, cfg: dict, today: date, pass_id: int, key: 
     the item in front, anything else moves nothing; on an item in front that was settled before the call only a
     decision moves on (`_decision`), so Pin, Long-term or an answer pressed there after Back stays on it. A key the pass does not hold, or holds as gone, is staged as the
     rule allows (an open task outside the queue still takes a decision from its card's conversation; Gone only when
-    the rule says so). `rec` and `keep_all` are the pass's own options, offered from 2c and 2d: Refused until then.
+    the rule says so). `rec` stages every step of the item's recommendation (`_stage_steps`; Refused when the item has
+    none, or recommendations are off); `keep_all` is 2d's: Refused until then.
     Answers the stage's {keys, removed, said} and `advanced`. Raises NoPass, Ended, Refused, Gone, Stale. No commit."""
-    if from_chat is None and option in PASS_ONLY:
+    if from_chat is None and option == "keep_all":
         raise Refused(f"{option} is not offered on this item")
     begin_write(conn)
     row = _live_row(conn, pass_id, today)
@@ -443,13 +444,19 @@ def decide(conn: sqlite3.Connection, cfg: dict, today: date, pass_id: int, key: 
     w = _Write(conn, cfg, today, row, P, by)
     w.persist()
     front = P.state == "item" and P.cursor == key
-    out = review_decide.stage(conn, cfg, key, option, args, today, origin=origin, device=device, from_chat=from_chat)
+    if from_chat is None and option == "rec":
+        rec = (P.entries.get(key) or {}).get("recommendation")
+        if not rec:
+            raise Refused(f"{option} is not offered on this item")
+        out = _stage_steps(conn, cfg, today, key, rec["steps"], args, origin=origin, device=device)
+    else:
+        out = review_decide.stage(conn, cfg, key, option, args, today, origin=origin, device=device, from_chat=from_chat)
     P2 = plan(dict(row, **w.upd), _stored(conn, row["id"]), queue, tray.read(conn)["entries"], today)
     w.P = P2
     advanced = False
     if from_chat is None and option == "undecide" and key in P2.pos and P2.states[key] != "gone":
         w.arrive(key, forward=False)
-    elif front and P2.states.get(key) in SETTLED and (P.states.get(key) in UNDECIDED or _decision(P.entries.get(key), key, option)):
+    elif front and P2.states.get(key) in SETTLED and (P.states.get(key) in UNDECIDED or _decision(P.entries.get(key), key, option if option != "rec" or from_chat is not None else rec)):
         target, _ = _after(P2, key)
         if target is None:
             w.set(state="end", cursor_key=None)
@@ -463,9 +470,12 @@ def decide(conn: sqlite3.Connection, cfg: dict, today: date, pass_id: int, key: 
 
 def _decision(entry: dict | None, key: str, option) -> bool:
     """Whether an option is a decision (design §4.1): done, drop, keep, later; Create or Dismiss on a card; an accepted
-    done or drop proposal. On an item in front that was settled already (reached with Back), only a decision moves on:
-    Pin, Long-term or an answer there changes what stands beside it and leaves the cursor where the owner is
-    (review 2026-11-20). A decision changed there moves on, as the page draws at the click."""
+    done or drop proposal; a recommendation (given as its dict) whose steps hold one. On an item in front that was
+    settled already (reached with Back), only a decision moves on: Pin, Long-term or an answer there changes what stands
+    beside it and leaves the cursor where the owner is (review 2026-11-20). A decision changed there moves on, as the
+    page draws at the click."""
+    if isinstance(option, dict):
+        return any(_decision(entry, key, s) for s in option.get("steps") or [])
     if not isinstance(option, str):
         return False
     if key.startswith("s:"):
@@ -478,6 +488,45 @@ def _decision(entry: dict | None, key: str, option) -> bool:
             if e.get("id") == eid and isinstance(e.get("change"), dict):
                 return e["change"].get("op") in ("done", "drop")
     return False
+
+
+NOTE_TAKERS = ("done", "drop", "keep", "later")      # the options a Review note rides on (review_decide.plan)
+
+
+def _stage_steps(conn: sqlite3.Connection, cfg: dict, today: date, key: str, steps: list[str], args: dict, *, origin: str,
+                 device: str | None) -> dict:
+    """The option `rec`: every step of the item's recommendation planned by the rule (`review_decide.plan`) against the
+    tray as the steps before it leave it, then one `tray.write` (Trap 13): the same rows the same presses one by one
+    would stage. A note rides on the step that takes one (Refused when none does). Answers {keys, removed, said}."""
+    note = args.get("note")
+    takers = [s for s in steps if s in NOTE_TAKERS]
+    if note not in (None, "") and not takers:
+        raise Refused("a note goes with Done, Drop, Keep or Later; this answer has none")
+    item = review_decide.load_item(conn, cfg, today, key)
+    tr = tray.read(conn)
+    rows_ = [[k, e, dict(m or {})] for k, e, m in _trows(tr["entries"])]
+    ops: list[dict] = []
+    keys: list[str] = []
+    said = ""
+    for s in steps:
+        a = {"note": note} if note not in (None, "") and s == takers[-1] else {}
+        p = review_decide.plan(conn, cfg, item, s, a, {"rev": tr["rev"], "entries": rows_}, today)
+        rows_ = [r for r in rows_ if r[0] not in p.dels]
+        for k, e, d in p.puts:
+            d = tray.decides_of(k, e, d)
+            for r in rows_:
+                if r[0] == k:
+                    r[1], r[2] = e, {"decides": d}
+                    break
+            else:
+                rows_.append([k, e, {"decides": d}])
+        ops += [{"del": k} for k in p.dels] + [{"put": k, "entry": e, "decides": d} for k, e, d in p.puts]
+        keys = [k for k in keys if k not in p.dels] + [k for k, _, _ in p.puts if k not in keys]
+        said = p.said or said
+    tray.write(conn, ops, origin, device)
+    staged = {r[0] for r in rows_}
+    return {"keys": [k for k in keys if k in staged], "removed": sorted({o["del"] for o in ops if "del" in o} - staged),
+            "said": said if said == review_decide.SAID["long_note"] else ""}
 
 
 def regroup(conn: sqlite3.Connection, cfg: dict, today: date, pass_id: int, key: str, op: str, *, task_id: int | None = None,
@@ -670,7 +719,8 @@ def _entry(conn: sqlite3.Connection, cfg: dict, today: date, key: str | None, P:
     kind = P.kinds.get(key) or _kind(key)
     out = {"key": key, "kind": kind, "state": st, "item": item, "provenance": None,
            "evidence_lines": (item.get("evidence_lines") or []) if kind == "task" else [],
-           "recommendation": None, "options": options(item, None, trows, today),
+           "recommendation": None if settled else item.get("recommendation"), "rec_held": None if settled else item.get("rec_held"),
+           "options": options(item, None if settled else item.get("recommendation"), trows, today),
            "later_choices": review_decide.later_choices(today) if kind == "task" else [],
            "staged": _staged(key, trows)}
     if settled:

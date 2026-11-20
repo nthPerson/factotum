@@ -2337,6 +2337,7 @@
     const cur = reviewCurrent();
     if (cur.state !== 'item' || !cur.entry || cur.entry.settled) return;
     const key = cur.entry.key, item = cur.entry.item || {};
+    if (id === 'rec') return recRun(cur);
     if (cur.kind === 'card') return cardRun(id, +key.slice(2));
     const x = item.task || {}, tid = x.id;
     if (id === 'later') { ui.laterOpen = !ui.laterOpen; ui.datePick = false; render(); revealLaterMenu(); return; }
@@ -2388,6 +2389,41 @@
     passAhead();
     return decideOn('s:' + id, 'create', edited ? { draft: sgBody(sgDraft(card)).create } : {});
   }
+  // The suggested answer (spoken Review 2c, design 6.8): the option `rec`, which the server expands into the
+  // recommendation's steps through the rule, exactly as the same presses one by one. What those presses would draw at
+  // the click is drawn now; the note rides on the step that takes one (Done, Drop, Keep, Later), else it stays in the box.
+  // It moves on as a decision does: when the item was undecided, or when the answer holds a decision.
+  function recRun(cur) {
+    const e = cur.entry, r = e.recommendation; if (!r) return;
+    const key = e.key, item = e.item || {}, tid = (item.task || {}).id, steps = r.steps || [];
+    const args = {}, prov = [];
+    const text = (ui.rvNotes[key] || '').trim(), takes = steps.some(s => REC_NOTE_TAKERS.includes(s));
+    if (text && takes) args.note = text;
+    for (const s of steps) {
+      const m = /^(accept|follow|link):(\d+)$/.exec(s);
+      if (s === 'done' || s === 'drop' || s === 'keep') prov.push([tid, decisionProv(tid, s)]);
+      else if (s === 'dismiss' && cur.kind === 'card') prov.push(...cardProv(key, 'dismiss'));
+      else if (m) {
+        const eid = +m[2], ev = (item.evidence || []).find(x => x.id === eid), c = (ev && ev.change) || {};
+        if (m[1] === 'accept' && (c.op === 'done' || c.op === 'drop')) prov.push([tid, { task_id: tid, op: c.op, fields: c.fields || {}, label: c.op === 'done' ? 'done' : 'dropped' }]);
+        else prov.push(['e:' + eid, { task_id: tid, op: 'judge_evidence', fields: { evidence_id: eid, verdict: 'applied' }, label: 'accepted' }]);
+      }
+    }
+    ui.laterOpen = false; ui.datePick = false;
+    if (args.note) delete ui.rvNotes[key];      // only this item's note, and only when it went with the answer
+    if (r.answer !== 'link' || e.state === 'waiting' || e.state === 'passed') passAhead();
+    return decideOn(key, 'rec', args, { prov });
+  }
+  const REC_NOTE_TAKERS = ['done', 'drop', 'keep', 'later'];
+  // The suggested answer on the card: one wide button (key a) with why under it, in plain words; or, where the rules would
+  // have suggested closing a task the design calls risky, the sentence that says none is suggested and why.
+  function recHtml(entry) {
+    const r = entry && entry.recommendation;
+    if (!r) return entry && entry.rec_held ? `<div class="rvrec held"><span class="lead">No suggested answer</span><span class="basis">${esc(entry.rec_held)}</span></div>` : '';
+    return `<div class="rvrec"><span class="lead">Suggested answer</span><button class="btn rec" data-opt="rec" title="Stage the suggested answer (a); nothing is written until Apply">${esc(r.label)}<kbd>a</kbd></button><span class="basis">${esc(r.basis)}</span></div>`;
+  }
+  // The decision button the suggestion is (one step, that decision) wears a ring, so the phone's bar shows it too.
+  const recRing = (entry, id) => { const r = entry && entry.recommendation; return !!r && (r.steps || []).length === 1 && r.steps[0] === id; };
   // ---------- Review (stage 4b): link reasons in words, link suggestions ----------
   // A link reason's colour; any other reason keeps the rule it had (last call red, new / back teal, else amber).
   const REASON_CLS = { freed: 'ok', steps_done: 'ok', blocker_gone: 'warn', linked_changed: 'chg', link_suggested: 'new', ripple: 'chg' };
@@ -2520,7 +2556,7 @@
     const edit = ui.rvEdit && isOpenRow(x.id);      // the card's editor (2026-11-18): the same one an opened task has
     const opts = reviewOptions(reviewCurrent());
     const DEC = { done: 'done', later: 'later', drop: 'drop' };
-    const big = opts.filter(o => o.kind === 'decision').map(o => `<button class="${DEC[o.id] || ''}" data-opt="${esc(o.id)}">${esc(o.label)}${o.key ? ` <kbd>${esc(o.key)}</kbd>` : ''}</button>`).join('');
+    const big = opts.filter(o => o.kind === 'decision').map(o => `<button class="${DEC[o.id] || ''}${recRing(entry, o.id) ? ' recd' : ''}" data-opt="${esc(o.id)}">${esc(o.label)}${o.key ? ` <kbd>${esc(o.key)}</kbd>` : ''}</button>`).join('');
     const later = opts.filter(o => o.kind === 'later').map(o => `<button class="btn small" data-opt="${esc(o.id)}">${esc(o.label)}</button>`).join('');
     return `<div class="review">
       ${navHtml(v)}
@@ -2534,6 +2570,7 @@
         <p data-rvwhy="${x.id}">${esc(x.why_now || (x.score_reasons || []).join(' · '))}</p>${x.context && !edit ? `<p class="ctx ${ui.ctxOpen === x.id ? 'open' : ''}">${esc(x.context)}</p><button class="btn small more" data-ctx-more="${x.id}">${ui.ctxOpen === x.id ? 'Less' : 'More'}</button>` : ''}
         <div class="rvedit-bar"><button class="btn small" data-rv-edit aria-expanded="${edit}">${edit ? 'Close the editor' : '✎ Edit this task'}</button>${edit ? '' : '<span class="hint">name, text, date, project, effort, who, links</span>'}</div>
         ${edit ? rvEditHtml(x) : ''}
+        ${recHtml(entry)}
         <textarea id="rv-note" rows="2" placeholder="${PHONE() ? 'Note · Done or Drop: the outcome · Keep or Later: added to the text' : `Optional note · Done or Drop: the outcome (up to ${OUTCOME_MAX} characters) · Keep or Later: added to the text`}">${esc(note)}</textarea>
         <div class="links">${x.source_link ? `<a href="${esc(x.source_link)}" target="_blank" rel="noopener">${x.source === 'Plaud' ? 'Plaud note' : 'Source'}</a>` : ''}</div>
         <div class="rvbar">${rvnavHtml(v)}<div class="big">${big}</div></div>
@@ -2611,7 +2648,8 @@
         <div class="rvedit-bar"><button class="btn small" data-rv-edit aria-expanded="${edit}">${edit ? 'Close the editor' : '✎ Edit before creating'}</button>${edit ? '' : '<span class="hint">name, text, date, project, effort, who, links</span>'}</div>
         ${edit ? sgFormHtml(sg, d) : ''}
         <div data-sgstate="${sg.id}">${sgStateHtml(sg)}</div>
-        <div class="rvbar">${rvnavHtml(v)}<div class="big two"><button class="done" data-opt="create">Create task</button><button class="drop" data-opt="dismiss">Dismiss</button></div></div>
+        ${recHtml(entry)}
+        <div class="rvbar">${rvnavHtml(v)}<div class="big two"><button class="done${recRing(entry, 'create') ? ' recd' : ''}" data-opt="create">Create task</button><button class="drop${recRing(entry, 'dismiss') ? ' recd' : ''}" data-opt="dismiss">Dismiss</button></div></div>
         ${mail ? `<div class="extra"><button class="btn small" data-sugg-open="${sg.id}">✉ Show the message in Mailbird</button></div>` : ''}
         ${sgPlaceHtml(sg.id)}
       </div>
@@ -3530,6 +3568,7 @@
       ${f('lifecycle.last_call_days', 'Last call', 'Hard deadlines this far past due go to Review once, then lapse.', num('lifecycle.last_call_days', 1, 30) + ' days')}
       ${f('lifecycle.top_cap', 'Top cap', 'Soft limit on the Top rail.', num('lifecycle.top_cap', 3, 15))}
       ${f('lifecycle.review_cap', 'Items per sitting', 'Review stops and asks before going on after this many.', num('lifecycle.review_cap', 5, 50))}
+      ${f('review.recommend', 'Suggest an answer', 'Review offers one answer where what Factotum already knows supports it (a new task: Keep; all its steps done: Done; a suggested link: Link; what the planner proposed), with the reason under it; key a. Free: no Claude run. It stages nothing until you press it, and never suggests closing a task on Top, with a firm date within two days, with open steps, or that another task waits on.', bool('review.recommend'))}
       ${f('links.suggestions_per_review', 'Suggested links', 'At most this many suggested links a day, in Review and as dashed badges; the rest wait for another day. 0 shows none (what was suggested for a task you just added still shows as chips on it).', num('links.suggestions_per_review', 0, 20) + ' a day')}
       <h3>Notifications</h3>
       ${f('notify.provider', 'Send reminders to', 'Reminders and the evening review nudge go here. ntfy needs its app and a topic; The app needs notifications turned on below, on each device.', `<select id="s-notify.provider" data-key="notify.provider">${[['ntfy', 'ntfy'], ['app', 'The app'], ['both', 'Both']].map(([v, l]) => `<option value="${v}" ${e['notify.provider'] === v ? 'selected' : ''}>${l}</option>`).join('')}</select>`)}
@@ -4642,7 +4681,7 @@
     // the one dispatcher; nothing on Review is a closure here any more.
     // A decision tapped just after a new item came in front is dropped: the bar stays put but its buttons change (four on a
     // task, two on a card), so a second quick tap would land on a control that was not there when it began.
-    panel.querySelectorAll('[data-opt]').forEach(b => b.onclick = () => { if (b.closest('.big') && Date.now() - rp.drawnAt < RV_SETTLE_MS) return; reviewRun(b.dataset.opt); });
+    panel.querySelectorAll('[data-opt]').forEach(b => b.onclick = () => { if (b.closest('.big, .rvrec') && Date.now() - rp.drawnAt < RV_SETTLE_MS) return; reviewRun(b.dataset.opt); });
     panel.querySelectorAll('[data-ctx-more]').forEach(b => b.onclick = () => { ui.ctxOpen = ui.ctxOpen === +b.dataset.ctxMore ? null : +b.dataset.ctxMore; render(); });
     panel.querySelectorAll('[data-since-see]').forEach(b => b.onclick = () => { const id = +b.dataset.sinceSee; ui.sinceOpen = ui.sinceOpen === id ? null : id; render(); });
     panel.querySelectorAll('[data-since-undo]').forEach(b => b.onclick = async () => {
@@ -4936,13 +4975,14 @@
     if (ui.page !== null) return;      // the task page covers the tab: no key acts on what is under it
     // Before the returns below: Review has its own keys, and an empty list has no rows (and says "Press n").
     if (e.key === 'n' && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); openNew(); return; }      // a phone's hardware keyboard opens the sheet
-    // Review: → or ] Next, ← or [ Back, and on a task in front d k s x the decisions, t l Pin and Long-term (j stays free).
+    // Review: → or ] Next, ← or [ Back, and on a task in front d k s x the decisions, t l Pin and Long-term, a the suggested answer (j stays free).
     if (ui.tab === 'review') {
       const c = reviewCurrent(), map = { d: 'done', k: 'keep', s: 'later', x: 'drop', t: 'pin', l: 'longterm' };
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       if (e.key === 'ArrowRight' || e.key === ']') { e.preventDefault(); reviewRun('next'); }
       else if (e.key === 'ArrowLeft' || e.key === '[') { e.preventDefault(); reviewRun('back'); }
       else if (map[e.key] && c.state === 'item' && c.kind === 'task' && !c.entry.settled) { e.preventDefault(); reviewRun(map[e.key]); }
+      else if (e.key === 'a' && c.state === 'item' && !c.entry.settled && c.entry.recommendation) { e.preventDefault(); reviewRun('rec'); }      // the suggested answer
       return; }
     const visible = [...document.querySelectorAll('#panel .row')].map(r => +r.dataset.id); if (!visible.length) return;
     const i = visible.indexOf(ui.focus);

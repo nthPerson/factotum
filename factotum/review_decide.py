@@ -267,6 +267,7 @@ def load_item(conn: sqlite3.Connection, cfg: dict, today: date, key: str) -> dic
     card = review_cards.card(conn, cfg, n)
     if card is None:
         raise Gone("that suggestion was answered, or is not a suggestion card")
+    review_queue.recommend_all(conn, cfg, today, [card])        # as the queue ships it (spoken Review 2c)
     return card
 
 

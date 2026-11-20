@@ -794,5 +794,4 @@ def test_the_pass_holds_no_group_until_2d(conn, cfg):
     with pytest.raises(review_decide.Refused):
         P.regroup(conn, cfg, D, v["id"], "t:1", "one_by_one", by=BY)
     cur = v["current"]
-    assert cur["recommendation"] is None and "spoken" not in cur and not any(r["key"].startswith("g:") for r in v["list"])
-    assert "rec" not in [o["id"] for o in cur["options"]]
+    assert "spoken" not in cur and not any(r["key"].startswith("g:") for r in v["list"])      # recommendations came in 2c (tests/test_recommend.py)

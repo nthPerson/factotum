@@ -477,6 +477,12 @@ def test_nothing_the_user_or_the_agent_reads_says_blocked_or_dependency(conn, cf
     for key in ["t:1"] + [f"s:{F[n]}" for n in ("c_plan", "c_mail", "c_slack")]:
         item = review_decide.load_item(conn, cfg, date(2026, 11, 19), key)
         texts += [o["label"] for o in review_pass.options(item, None, [], date(2026, 11, 19))]
+    # Recommendations (spoken Review stage 2c): every fixed text, the reasons a close is risky, and a recommendation's words on the table's items.
+    from factotum import recommend, review_queue
+    texts += list(recommend.TEXTS.values()) + list(review_queue.RISKY.values())
+    for e in review_queue.items(conn, cfg, date(2026, 11, 19))["tasks"] + review_queue.items(conn, cfg, date(2026, 11, 19))["cards"]:
+        r = e.get("recommendation") or {}
+        texts += [r.get("label") or "", r.get("basis") or "", r.get("said") or "", r.get("basis_said") or "", e.get("rec_held") or ""]
     for t in texts:
         assert not re.search(r"\bblocked\b|\bdependenc", t, re.I), t[:120]
 

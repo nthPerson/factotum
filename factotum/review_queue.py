@@ -82,8 +82,8 @@ def today(cfg: dict) -> date:
 def items(conn, cfg: dict, today: date) -> dict:
     """The whole queue as GET /api/review ships it, built once for every reader: `tasks`, each
     {key: "t:<id>", task (decorated, `rel` compacted), reasons, primary, texts, link_suggestions, since
-    (only for "linked_changed"), flags, evidence, evidence_lines}, and `cards`, each with `key: "s:<id>"`
-    (review_cards), each list in Review's order (order_key; `queue` keeps the lifecycle's own order for the count,
+    (only for "linked_changed"), flags, evidence, evidence_lines, recommendation, rec_held}, and `cards`, each with
+    `key: "s:<id>"` (review_cards) and the same two, each list in Review's order (order_key; `queue` keeps the lifecycle's own order for the count,
     the nudge and the planner). No cap, no exclusion, nothing left out for being decided. Reads only: the day's link
     suggestions (suggestions.session) are the caller's to write first."""
     from . import review_cards               # lazy: review_cards imports ripple, which imports the planner
@@ -91,11 +91,24 @@ def items(conn, cfg: dict, today: date) -> dict:
     fl = flags(conn, cfg)
     full = queue(conn, cfg, today, open_tasks, fl)
     tasks = sorted(_finish(conn, full, open_tasks, fl, review_cards.evidence_by_task(conn)), key=lambda e: order_key(e, today))
-    return {"tasks": tasks, "cards": sorted(review_cards.cards(conn, cfg), key=lambda e: order_key(e, today))}
+    cards = sorted(review_cards.cards(conn, cfg), key=lambda e: order_key(e, today))
+    recommend_all(conn, cfg, today, tasks + cards)
+    return {"tasks": tasks, "cards": cards}
+
+
+def recommend_all(conn, cfg: dict, today: date, entries: list[dict]) -> None:
+    """Each entry's `recommendation` (recommend.recommend; None when `review.recommend` is off) and `rec_held` (the
+    sentence saying a close was held back as risky, or None). Data only: nothing is staged. Reads only."""
+    from . import recommend                  # lazy: recommend imports risky_close from here
+    on = bool(C.value(cfg, "review.recommend"))
+    names = recommend.names_for(conn, entries) if on else {}
+    for e in entries:
+        e["recommendation"] = recommend.recommend(e, today, names) if on else None
+        e["rec_held"] = recommend.held(e, today) if on else None
 
 
 def task_item(conn, cfg: dict, today: date, task_id: int) -> dict | None:
-    """One open task as `items` ships it, built the same way, or None when the task is not open. A task with no
+    """One open task as `items` ships it, built the same way (its recommendation too), or None when the task is not open. A task with no
     reason to be on Review today is still an item, with `reasons: []` and `primary: None` (a decision from its
     card's conversation must still work after the reason went). Reads only."""
     from . import review_cards
@@ -107,7 +120,9 @@ def task_item(conn, cfg: dict, today: date, task_id: int) -> dict | None:
     last = parse_date(get_settings(conn).get("state.last_review_at"))
     rs = lifecycle.review_reasons(t, today, cfg, last, fl.get(task_id))
     item = {"task": t, "reasons": rs, "primary": rs[0] if rs else None}
-    return _finish(conn, [item], ts, fl, review_cards.evidence_by_task(conn, {task_id}))[0]
+    out = _finish(conn, [item], ts, fl, review_cards.evidence_by_task(conn, {task_id}))[0]
+    recommend_all(conn, cfg, today, [out])
+    return out
 
 
 def _finish(conn, full: list[dict], open_tasks: list[dict], flags: dict, by_task: dict) -> list[dict]:
@@ -200,6 +215,28 @@ def order_key(entry: dict, today: date) -> tuple:
     if t.get("hard") and d is not None and d <= today + timedelta(days=URGENT_DAYS):
         return (0, (due, rank), due, score, last)
     return (1, rank, due or "9999", score, last)
+
+
+RISKY_DAYS = 2                                         # a firm date this many days away, either way, makes a close risky
+RISKY = {"hard": "its firm date is within two days", "top": "it is on Top", "steps": "it has open steps",
+         "frees": "an open task waits on it"}
+
+
+def risky_close(task: dict, today: date) -> str | None:
+    """Why closing this task deserves a question (design §6.8 rule 3), or None: a firm date within RISKY_DAYS either
+    way, on Top, open steps, or an open task waits on it. Being a step of an open goal is not a reason. Reads the task as
+    the queue ships it (`rel` compacted keeps `steps_open` and `frees_open`). Pure."""
+    d = parse_date(task.get("due")) if isinstance(task.get("due"), str) else None
+    if task.get("hard") and d is not None and abs((d - today).days) <= RISKY_DAYS:
+        return RISKY["hard"]
+    if task.get("top_rank"):
+        return RISKY["top"]
+    rel = task.get("rel") or {}
+    if (rel.get("steps_open") or 0) > 0:
+        return RISKY["steps"]
+    if rel.get("frees_open"):
+        return RISKY["frees"]
+    return None
 
 
 def _cap(v, n: int) -> str:

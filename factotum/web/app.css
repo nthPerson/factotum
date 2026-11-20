@@ -1092,6 +1092,15 @@ mark { background: var(--warn-soft); color: inherit; border-radius: 2px; padding
 .card .rvstaged .what { flex: 1 1 12em; min-width: 0; font-size: 14px; overflow-wrap: anywhere; }
 .card .rvstaged .what b { color: var(--ok); font-weight: 600; }
 .card .rvstaged .hint { margin: 0; }
+/* The suggested answer (spoken Review 2c): one wide button with why under it; the decision it is wears a ring. */
+.card .rvrec { display: flex; flex-direction: column; gap: 4px; margin: 4px 0 12px; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--accent); background: var(--accent-soft); }
+.card .rvrec .lead { font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--accent); }
+.card .rvrec .btn.rec { width: 100%; justify-content: center; min-height: 44px; font-weight: 600; background: var(--accent); border-color: var(--accent); color: var(--on-accent); gap: 8px; }
+.card .rvrec .btn.rec kbd { font-family: var(--mono); font-size: 11px; font-weight: 400; opacity: .8; }
+.card .rvrec .basis { font-size: 13px; line-height: 1.4; color: var(--fg); overflow-wrap: anywhere; }
+.card .rvrec.held { border-color: var(--line); background: var(--surface-2); }
+.card .rvrec.held .lead { color: var(--muted); }
+.card .big button.recd { box-shadow: 0 0 0 2px var(--accent); }
 .card .big.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .card .big.one { grid-template-columns: minmax(0, 1fr); }
 .review .rvacts { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
@@ -1101,5 +1110,6 @@ mark { background: var(--warn-soft); color: inherit; border-radius: 2px; padding
   .review .rvrow { grid-template-columns: 6.5em minmax(0, 1fr); min-height: 44px; }
   .review .rvacts .btn { flex: 1 1 100%; min-height: 48px; }
   .card .rvstaged .btn { min-height: 44px; }
+  .card .rvrec .btn.rec kbd { display: none; }      /* no keyboard, no key hint */
   body.rvbar-on:not(.kb-open) .toast:not(.ask) { bottom: calc(var(--rvbar, 0px) + 8px); }      /* above Review's bar, never over a decision */
 }

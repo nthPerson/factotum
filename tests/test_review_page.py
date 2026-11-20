@@ -90,7 +90,7 @@ def test_a_quick_second_tap_never_lands_on_a_decision_that_moved_under_it():
     """The bar stays put but its buttons change between a task (four) and a card (two): a decision tapped within
     RV_SETTLE_MS of a new item coming in front is dropped; moves and keys are not."""
     assert "const RV_SETTLE_MS = 400;" in JS
-    assert "if (b.closest('.big') && Date.now() - rp.drawnAt < RV_SETTLE_MS) return; reviewRun(b.dataset.opt);" in JS
+    assert "if (b.closest('.big, .rvrec') && Date.now() - rp.drawnAt < RV_SETTLE_MS) return; reviewRun(b.dataset.opt);" in JS      # the suggested answer too (2c)
     assert "rp.drawnAt = Date.now();" in JS
 
 
@@ -163,3 +163,56 @@ def test_apply_waits_for_a_decision_still_on_its_way():
     left it out, and did nothing at all when it was the only row."""
     aa = _body("applyAll")
     assert aa.index("s.local && s.deciding)) await tray.busy") < aa.index("const picked =")
+
+
+def test_the_suggested_answer_is_one_option_through_the_rule():
+    """Spoken Review 2c (design 6.8, 6.11): the card draws the recommendation as one wide button with its basis under it
+    (recHtml), the decision it is wears a ring in the bar, the key a presses it, and it goes to the server as the option
+    `rec` through decideOn, never as steps staged by the page; Settings has the switch."""
+    assert "${recHtml(entry)}" in _body("taskItemHtml") and "${recHtml(entry)}" in _body("cardItemHtml")
+    assert "recRing(entry, o.id)" in _body("taskItemHtml") and "recRing(entry, 'dismiss')" in _body("cardItemHtml")
+    rh = _body("recHtml")
+    assert 'data-opt="rec"' in rh and "esc(r.label)" in rh and "esc(r.basis)" in rh and "entry.rec_held" in rh
+    assert "if (id === 'rec') return recRun(cur);" in _body("reviewRun")
+    rr = _body("recRun")
+    assert "decideOn(key, 'rec', args, { prov })" in rr and "stage(" not in rr.replace("decideOn(", "")
+    keys = JS[JS.index("if (ui.tab === 'review') {", JS.index("document.addEventListener('keydown'")):]
+    keys = keys[:keys.index("return; }") + 9]
+    assert "e.key === 'a'" in keys and "reviewRun('rec')" in keys
+    assert "f('review.recommend', 'Suggest an answer'," in JS and "bool('review.recommend')" in JS
+    assert ".card .rvrec" in CSS and ".card .big button.recd" in CSS
+
+
+def test_rec_draws_its_steps_at_the_click_and_takes_the_note_only_when_a_step_does():
+    import json
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    if node is None:
+        return
+    assert "const REC_NOTE_TAKERS = " in _body("recRun")          # cut out with it
+    script = f"""
+const ui = {{ rvNotes: {{}} }}; const calls = []; let ahead = 0;
+const decisionProv = (id, k) => ({{ task_id: id, op: k, label: k }});
+const cardProv = (key, o) => [['e:' + key.slice(2), {{ op: 'judge_evidence', label: 'suggestion dismissed' }}]];
+const passAhead = () => {{ ahead++; }};
+const decideOn = (key, option, args, opts) => {{ calls.push([key, option, args, opts.prov.map(p => [p[0], p[1] && p[1].op])]); }};
+{_body("recRun")}
+const ev = [{{ id: 31, change: {{ op: 'follow_thread' }} }}, {{ id: 40, change: {{ op: 'set' }} }}, {{ id: 41, change: {{ op: 'done', fields: {{ outcome: 'x' }} }} }}];
+const task = (steps, answer, state) => ({{ kind: 'task', entry: {{ key: 't:7', state, item: {{ task: {{ id: 7 }}, evidence: ev }}, recommendation: {{ steps, answer }} }} }});
+ui.rvNotes['t:7'] = 'ask Sam';
+recRun(task(['link:9'], 'link', 'waiting'));
+recRun(task(['follow:31', 'accept:40', 'keep'], 'accept_keep', 'decided'));
+recRun(task(['link:9'], 'link', 'decided'));
+recRun(task(['accept:41'], 'done', 'waiting'));
+recRun({{ kind: 'card', entry: {{ key: 's:50', state: 'waiting', item: {{ id: 50 }}, recommendation: {{ steps: ['dismiss'], answer: 'dismiss' }} }} }});
+console.log(JSON.stringify({{ calls, ahead, notes: ui.rvNotes }}));"""
+    r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    c = out["calls"]
+    assert c[0] == ["t:7", "rec", {}, [["e:9", "judge_evidence"]]]                                   # a link alone takes no note: it stays in the box
+    assert c[1] == ["t:7", "rec", {"note": "ask Sam"}, [["e:31", "judge_evidence"], ["e:40", "judge_evidence"], [7, "keep"]]]
+    assert c[2][2] == {} and c[3][3] == [[7, "done"]] and c[4] == ["s:50", "rec", {}, [["e:50", "judge_evidence"]]]
+    assert out["ahead"] == 4                                                                          # not for a link alone on an item already settled
+    assert out["notes"] == {}
