@@ -83,7 +83,12 @@ urgent first, cards among tasks), who wrote behind "Thread updated" and "Mention
 "reminder missed" gone; Review as a pass held on the server (`factotum/review_pass.py`, the tables `review_passes`, `review_pass_items`;
 `GET`/`POST /api/review/pass`, `/pass/now`, `/pass/{id}/move`): Next leaves an item undecided and it comes round, Back, Go to, the
 checkpoint after "Items per sitting", the offered stamp on arrival, two devices following one cursor; every Review press through
-`reviewRun` and `decideOn`; `GET /api/review` reads only. The second half (recommendations, groups, the spoken card) is not built yet.
+`reviewRun` and `decideOn`; `GET /api/review` reads only. Stage 2, second half (2026-11-20): a suggested answer where the database
+supports one (`factotum/recommend.py`, `review_queue.risky_close`, the option `rec` carrying the steps it showed, key `a`, `review.recommend`);
+alike new tasks of one recording, course or thread as one group (`review_pass` groups, Keep all, One by one, `POST /api/review/pass/{id}/group`,
+`review.group_alike`); the spoken card (`factotum/spoken.py`, `dates.say_day` / `say_whose`, `spoken` on the View, "Show how it would be read");
+then the review's fixes: no close suggested on a proposal, a link alone beside a reason only the owner answers, the settle guard over the whole
+card, strangers' quote marks out.
 Retiring the old Notion
 pages and plaud-sync is the user's checklist (SETUP §15). Update this paragraph when something lands.
 
@@ -156,6 +161,9 @@ pages and plaud-sync is the user's checklist (SETUP §15). Update this paragraph
 | Review's order, the evidence lines, the Back reason | spoken Review design §6.7; SPEC §5 | `factotum/review_queue.py` (`order_key`, `evidence_lines`, `back_flags`, `flags`, `OWNER_SOURCES`, `items`), `lifecycle.review_reasons`, `web/app.js` (`evidenceLinesHtml`) |
 | Review as a pass: begin and resume, the plan of states, moves, the checkpoint, the offered stamp, decide on the pass, after an Apply, the View | spoken Review design §6.1-6.6; SPEC §4 "The pass", §5, §9 | `factotum/review_pass.py` (`begin_or_resume`, `plan`, `move`, `decide`, `_decision`, `after_apply`, `view`, `now`, `options`, `WORDS`), `db.SCHEMA` (`review_passes`, `review_pass_items`), `api.py` (`/api/review/pass*`, `/api/review/decide`), `tray._after_apply` |
 | Review in the page: the controller, moves, following, the screens, the phone's bar | spoken Review design §6.11; SPEC §9 "Review on the pass" | `web/app.js` (`rp`, `reviewCurrent`, `reviewOptions`, `reviewRun`, `cardRun`, `takeBack`, `loadPass`, `passMove`, `passAhead`, `passAnswer`, `passReread`, `followPass`, `followCheck`, `movedWhere`, `rvNoteNow`, `navHtml`, `listHtml`, `taskItemHtml`, `cardItemHtml`, `checkpointHtml`, `endHtml`, `finishedHtml`), `app.css` `.rvbar`, `tests/test_review_page.py`, `tests/test_tray_page.py` |
+| Review's suggested answer: the rules, risky closes, `rec`, the button and `a` | spoken Review design §6.8; SPEC §5 "A suggested answer" | `factotum/recommend.py` (`recommend`, `held`, `_rule`, `keep_all_words`, `names_for`, `TEXTS`), `review_queue.py` (`risky_close`, `RISKY`, `recommend_all`), `review_pass.py` (`decide` `rec`, `_shown`, `_stage_steps`, `_stage_many`), `web/app.js` (`recHtml`, `recRun`, `recRing`) |
+| alike new tasks as one group: what groups, the plan's members, Keep all, take out, one by one | spoken Review design §6.9; SPEC §4 "The pass", §5 | `factotum/review_pass.py` (`groupable`, `alike`, `_alike_of`, `_title`, `regroup`, `_keep_all_steps`, `_group_rec`, `_group_entry`, `_members`, `_provenance`, `_from_words`), `review_queue.order_key` (a group as New), `api.py` (`review_pass_group`, `GroupBody`), `web/app.js` (`groupItemHtml`, `groupRowHtml`, `groupRun`, `passRegroup`), `tests/test_review_groups.py` |
+| the spoken card: what is said, the cleaning, days in words, the reading line | spoken Review design §6.10; SPEC §5 "The spoken card" | `factotum/spoken.py` (`entry`, `short`, `flat`, `person`, `sender`, `subject`, `change`, `wants`, `TEMPLATES`, `_fit`, `_quoted`, `_says_others`), `dates.py` (`say_day`, `say_whose`, `say_time`, `ordinal_words`), `review_pass.py` (`_speak`), `web/app.js` (`sayHtml`), `tests/test_spoken.py` |
 | the Review count, the number on the app's icon, the shortcuts, `/new` | design §16, SPEC §9, §10 | `factotum/review_queue.py` (`queue`, `card_count`, `count`), `api.py` (`/api/review/count`, `SHORTCUT_PATHS`), `app_push.py` (`payload`, `with_badge`), `web/sw.js` (`badgeOf`, `setBadge`), `web/app.js` (`reviewShown`, `syncBadge`, `parseAddress`, `applyAddress`, `openNew`), `manifest.webmanifest` `shortcuts`, `tools/make_icons.py` (`shortcut`) |
 
 ## Commands
@@ -636,6 +644,39 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
 - **Keep does not answer a suggested link** (2026-11-20): a task on Review for a link suggestion that is kept comes back after the
   Apply, undecided, and a pass with one never ends `applied`. Judging the suggestion on Keep would drop it for good (a judged pair is
   never suggested again), so that is the owner's call, not a builder's.
+
+- **A recommendation never stages anything; only `rec` does, and `rec` names what was shown** (2026-11-20, review of the second half):
+  the page and the connector send `args.steps` (the recommendation's steps as drawn or said; on a group also `members`, the tasks
+  shown undecided), and `review_pass.decide` stages only when the recommendation worked out at the press is that one, else `Stale`
+  (409 with the pass): evidence that arrived after the View turned one `a`, or a spoken yes, into a Drop nobody saw. A `rec`
+  without steps is refused. A new fixed text of a recommendation goes in `recommend.TEXTS` (the forbidden-words test reads it).
+- **No close is suggested on a proposal, nor on a risky task** (2026-11-20): a done or drop proposal reaches Review only when nothing
+  proved it (`planner.apply` applies the proven ones; a Slack mention never proves), so `recommend` gives none and says so
+  (`rec_held`, "nothing Factotum read proves it"); `review_queue.risky_close`'s four reasons hold back every other close. A suggested
+  link beside a reason the rule answers with nothing (fading, slipped, back, Later over, mail or Slack to read) is the link alone,
+  and the item stays in front after it (`recRun` draws the next only when the link was all it was here for). The owner was not
+  asked about the close rule yet: it reverses design rule 4.
+- **`review.recommend` and `review.group_alike` are on when absent, free, and in neither `PAID_SWITCHES` nor `ON_WHEN_NEW`** (2026-11-20):
+  they send nothing and run nothing paid, so `effective --as-before` does not change; each has its `SETTINGS_KEYS`, `DEFAULTS`,
+  control, example, starter and fixture lines.
+- **A group key never reaches the tray or the rule** (2026-11-20): `review_decide.parse_item_key` refuses `g:`; Keep all is one Keep row
+  per undecided member, each deciding `t:<id>` and taken back alone; `review_pass._stage_many` is the one place several options are
+  planned against a tray that accumulates (Keep all, `rec`), in one `tray.write`. A note on a group is refused (it belongs to one task).
+- **A pass groups only when it begins and when items arrive** (2026-11-20): `review.group_alike` off stops new groups and leaves a live
+  pass's groups as they are; a member that is no longer groupable leaves by itself, right after the group; a group left with one
+  member is that task in its place (the cursor follows); `members_json` holds task ids, so a member's "decided after an Apply" is the
+  group's `done_batch_id`. An arrival from a recording already grouped makes a `…:2` group or comes alone; it never joins the first.
+- **Anything `spoken` returns passes `tests/test_spoken.py`'s checks, and a new fixed sentence goes in `spoken.TEMPLATES`** (2026-11-20):
+  `spoken` is pure and built from the View's entry only; the names it needs are read once by `review_pass._speak` (`spoken.wants`
+  lists them, task names included); `more.number` is the only place a task number is said. Text others wrote goes through `flat`,
+  `subject`, `person` (an address-only sender is "someone"), is said inside “…” with its own quote marks taken out, and is named in
+  `from_others` (`say` too when it holds some) for stage 3 to mark as data. The forbidden-word rule drops only others' sentences; the
+  owner's names and the templates are said as written (review 2026-11-20: a task named "… blocked" was said as nothing).
+- **The settle guard holds every control inside a Review card** (2026-11-20, `rvSettles`): for 400 ms after a new item comes in front a
+  press there is dropped, except the moves, the list and "Show how it would be read"; a new control in the card is held by it unless
+  its option joins `RV_FREE` (a double click on Keep landed on a group member's Drop drawn at the first click).
+- **"Show how it would be read" is per browser** (`localStorage['factotum.rvsay']`, read and written inside `try`), and the page writes no
+  words of its own there: it draws the server's `say`, basis and question.
 
 - **The service runs from the main working copy and serves `factotum/web/` from disk** (2026-11-19): a commit to `main`
   changes the page the owner has open at its next reload, under the old Python still running. Feature work that touches the

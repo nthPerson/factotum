@@ -185,8 +185,8 @@ review_passes(id, day, started_at, started_by,    -- spoken Review stage 2 (2026
      cursor_key, state, lap, looked, rev,         -- the item in front (NULL at the end); item|checkpoint|end|empty; laps; items arrived at since the
      moved_at, moved_by, drivers_json,            --   start or the checkpoint; +1 on every move; who moved last ("page · iPhone", "connector", "skill")
      ended_at, end_why)                           -- applied|finished|replaced|another_day
-review_pass_items(pass_id, key, pos, kind,        -- the pass's order: an item key (t:412, s:186), its position (an arrival between two takes a fraction)
-     members_json, added_at, arrived_at,          -- arrived_at: first time in front (the offered stamp was written then)
+review_pass_items(pass_id, key, pos, kind,        -- the pass's order: an item key (t:412, s:186, g:rec:<id>), its position (an arrival between two takes a fraction)
+     members_json, added_at, arrived_at,          -- a group's task ids in order (else NULL); arrived_at: first time in front (the offered stamp was written then)
      passed_at, passes, done_batch_id)            -- left undecided with Next; the Apply that wrote its decision
 ```
 
@@ -206,7 +206,9 @@ hold Review's order and where the owner stands, never what an item says (every r
 queue, `review_queue.items`) and never what was decided (the tray's `decides`). A partial unique index allows one
 live pass (`ended_at IS NULL`); a pass from another Review's day is over and the next begin ends it
 `another_day`. Every pass write starts with `db.begin_write` and is compare-and-set on `rev`. New empty tables,
-no `VERSIONED` migration.
+no `VERSIONED` migration. A group of alike new tasks (§5, 2026-11-20) is one item, kind `group`, whose
+`members_json` holds its task ids; the tray never sees its key (each member is decided under its own `t:<id>`),
+and a member whose decision an Apply wrote counts as decided through the group's `done_batch_id`.
 
 Stage 7 adds three `settings` rows and one batch op. `state.links.session` is `{day, ids}`: the link
 suggestions (evidence ids) offered that day, judged ones included, which `relations.annotate` reads (the daily
@@ -309,7 +311,45 @@ Finish for now, `replaced` by Start again, `another_day` when found the next Rev
 the tray or a task. Beginning a pass writes the day's link suggestions (`suggestions.session`, which a resume
 asks again so what the detectors found since still arrives) and **the offered stamp is written when an item
 comes in front** (`tasks.last_offered_at`, a task only; a card has none), which is what `expire` acts on.
-`GET /api/review` reads only. **Review's day** is
+`GET /api/review` reads only.
+**A suggested answer** (stage 2, second half, 2026-11-20; `factotum/recommend.py`, design §6.8): where what the
+database already holds supports one, an item carries `recommendation` {answer, steps (option ids), label, basis,
+said, basis_said, source}. A proposal on the task is followed with Keep (follow a mail thread, accept a date, a
+reminder, Top, long-term, a link or a note); by the first reason a suggested part-of or waits-on link is linked
+(with Keep only where the rest is answered Keep: New, free now, a linked change already written into the text;
+beside fading, slipped, Later over, back or mail to read, the link alone), New and free now are Keep, all steps done
+is Done, a card whose day passed is Dismiss, a group is Keep all. None for a merge, two proposals, a proposal beside
+a link question, mail or Slack to read, fading, slipped, last call, back, Later over and every other card. **Never a
+close on a proposal** (review 2026-11-20, for the owner to confirm): a done or drop proposal reaches Review only when
+nothing proved it (the planner applies the proven ones; a Slack mention never proves), so the card says "Not
+suggesting Done: nothing Factotum read proves it."; and none whose steps close a task `review_queue.risky_close`
+names (a firm date within two days either way, on Top, open steps, an open task waits on it), said the same way
+(`rec_held`). A basis names a task by its name, never `Task-N`. The recommendation is data: only the option `rec`
+stages it, and `rec` carries the steps it was shown (and on a group the tasks shown undecided); when the
+recommendation worked out at the press differs, nothing is staged and the item is read again (409 with the pass).
+`review.recommend` (on when absent, free) turns it off.
+**Alike new tasks together** (2026-11-20, design §6.9): a task whose only reason is New, with no firm date within
+two days, not on Top, no unjudged evidence, no suggested link and a recommendation of Keep or none, is grouped with
+the others from one recording (`g:rec:<recording id>`, from `source_key` `plaud:<id>:<n>`; its title is the
+recording's name without its date, cut at the colon), one Canvas course (`g:course:<project>`) or one mail thread
+(`g:thread:<conversation id>`), first match, 2 to 8 to a group ordered by due then id (a larger set is split,
+`…:2`). Groups are made when a pass begins and when items arrive, never otherwise; with `review.group_alike` off (on
+when absent, free) no new group is made and a pass begun before keeps its own. Keep all stages one Keep per
+undecided member, each its own tray row (taken back alone); a member can be decided alone, taken out (it is in front
+right after the group) or the group broken into its members (One by one, `POST /api/review/pass/{id}/group`); a
+member that gains another reason leaves by itself; a group left with one member is that task in its place; arriving
+at a group stamps every member. New tasks that arrive for a recording already grouped in the pass make a second
+group (`…:2`) or come alone; they do not join the first.
+**The spoken card** (2026-11-20, `factotum/spoken.py`, design §6.10): the item in front, the one ahead and each
+member of a group carry `spoken` {say, question, basis, more: {why, text, links, evidence, number}, options, members,
+from_others}, built by Python from the View's entry only: `say` at most 45 words (why it is here, its short name,
+the one fact that decides it, days said as a person says them through `dates.say_day` / `say_whose`), the question
+and basis never cut, a task number only in `more.number`; no id, address, URL, score, markdown or ISO date anywhere.
+What others wrote (a model's reason, a mail's sender and subject, Slack text) is cleaned through bounded patterns,
+said inside quotes with its own quote marks taken out, and named in `from_others` (`say` included when it holds
+some); a sentence of theirs with a word the project never shows is dropped, while the owner's own names are said as
+written. `GET /api/review`'s entries carry `recommendation` and `rec_held` but not `spoken` (only the pass's View
+does). **Review's day** is
 `review_queue.today(cfg)`, the date where the owner is (2026-11-19): every Review route, the rule, the finish
 stamp and Create on a card use it, never the machine's date. **The decision rule is Python**
 (`factotum/review_decide.py`, 2026-11-19): `plan(conn, cfg, item, option, args, tray, today)` turns one option on
@@ -1242,6 +1282,20 @@ says so, one from another day is let go. Routes: `GET /api/review/pass`, `GET /a
 device}`; `POST /api/review/decide` goes through the live pass and answers it. **`GET /api/review` reads only** and
 is the whole queue in Review's order (decided items listed; `exclude`, `cap` and `total` kept for a page loaded
 before the change). Settings labels `lifecycle.review_cap` "Items per sitting".
+
+**The suggested answer, groups and the reading line on the page (2026-11-20; §5).** A recommendation is the
+card's first, wide button ("Link both and keep it", "Make it due Fri 2:00 PM and keep it", "Keep all 3") with its
+basis under it, key `a`; where a close was held back the card says why instead; the decision button the suggestion
+is wears a ring, so the phone's bar shows it. Pressing it sends `rec` with the steps drawn (`recRun`), draws what
+those presses would at the click and moves on as a decision does; a 409 ("the suggested answer changed meanwhile")
+redraws the item with what is true now. A group's card (`groupItemHtml`) says where its tasks came from in the
+server's words ("New from a recording · Wednesday's Project Meeting"), "3 new tasks", one row per task with its chips
+and Done, Drop, Later and Open (a task decided alone shows its decision with Undo, drawn at the click), the
+suggestion, and Keep all and One by one in the bar; `k` is Keep all there. Every control inside the card, but the
+moves, the list and the reading line, is held for 400 ms after a new item comes in front (`rvSettles`). "Show how
+it would be read" at the foot of every card shows the server's `say`, basis and question in grey (per browser,
+`localStorage['factotum.rvsay']`). Settings: "Suggest an answer" (`review.recommend`) and "Group alike new tasks"
+(`review.group_alike`), both on when absent, free and sending nothing.
 
 ## 10. Reminders and push
 
