@@ -2404,7 +2404,10 @@
       if (!open.length) return;
       ui.rvMemberLater = null;
       passAhead();
-      return decideOn(gk, id, {}, { prov: open.map(m => [m.task.id, decisionProv(m.task.id, 'keep')]) });
+      // The suggested answer names what was shown (its steps, the tasks drawn undecided): the server stages it only when it
+      // is still the answer, else it answers 409 with the pass and the card is drawn again.
+      const args = id === 'rec' ? { steps: e.recommendation.steps || [], members: open.map(m => m.key) } : {};
+      return decideOn(gk, id, args, { prov: open.map(m => [m.task.id, decisionProv(m.task.id, 'keep')]) });
     }
     if (id === 'one_by_one') { ui.rvMemberLater = null; return passRegroup(gk, 'one_by_one'); }
     const m = /^member:(t:(\d+)):(done|drop|keep|later|open|until:(tomorrow|fri|nextweek))$/.exec(id); if (!m) return;
@@ -2436,14 +2439,16 @@
     tray.busy = tray.busy.then(run, run);
     return tray.busy;
   }
-  // The suggested answer (spoken Review 2c, design 6.8): the option `rec`, which the server expands into the
-  // recommendation's steps through the rule, exactly as the same presses one by one. What those presses would draw at
+  // The suggested answer (spoken Review 2c, design 6.8): the option `rec` with the steps it shows, which the server
+  // expands through the rule, exactly as the same presses one by one. What those presses would draw at
   // the click is drawn now; the note rides on the step that takes one (Done, Drop, Keep, Later), else it stays in the box.
   // It moves on as a decision does: when the item was undecided, or when the answer holds a decision.
   function recRun(cur) {
     const e = cur.entry, r = e.recommendation; if (!r) return;
     const key = e.key, item = e.item || {}, tid = (item.task || {}).id, steps = r.steps || [];
-    const args = {}, prov = [];
+    // The steps go with it: the server stages the answer only when it is still the one drawn here (else 409 and the pass,
+    // drawn again), so evidence that came after this card was drawn never turns the press into an answer nobody saw.
+    const args = { steps }, prov = [];
     const text = (ui.rvNotes[key] || '').trim(), takes = steps.some(s => REC_NOTE_TAKERS.includes(s));
     if (text && takes) args.note = text;
     for (const s of steps) {

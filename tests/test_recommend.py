@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from stage4_helpers import link, mk
 from test_polish import _card as _kind_card
+from test_review_pass import shown_rec
 
 from factotum import batches, config as C, recommend as R, relations, review_decide, review_pass as P, review_queue, tray
 from factotum.api import create_app
@@ -229,6 +230,8 @@ def begin(c, cfg, today=D):
 
 def dec(c, cfg, key, option, **kw):
     v = P.view(c, cfg, D)
+    if option == "rec":
+        kw["args"] = shown_rec(v, key, kw.get("args"))
     out = P.decide(c, cfg, D, v["id"], key, option, origin="page", by=BY, **kw)
     c.commit()
     return out, P.view(c, cfg, D)
@@ -367,7 +370,7 @@ def test_recommend_off_in_settings_shows_none(conn, cfg, tmp_path):
     assert client.post("/api/review/decide", json={"key": "t:1", "option": "rec"}).status_code == 400
     assert client.put("/api/settings", json={"values": {"review.recommend": True}}).status_code == 200
     assert client.get("/api/review/pass").json()["pass"]["current"]["recommendation"]["steps"] == ["keep"]
-    r = client.post("/api/review/decide", json={"key": "t:1", "option": "rec"})
+    r = client.post("/api/review/decide", json={"key": "t:1", "option": "rec", "args": {"steps": ["keep"]}})
     assert r.status_code == 200 and r.json()["keys"] == ["1"] and r.json()["pass"]["state"] == "end"
 
 
@@ -391,3 +394,49 @@ def test_a_card_whose_date_passed_is_recommended_dismiss_in_the_view(conn, cfg):
     out, v = dec(conn, cfg, f"s:{eid}", "rec")
     assert out["keys"] == [f"e:{eid}"] and v["state"] == "end"
     assert entries(conn)[0][1]["fields"]["verdict"] == "dismissed"
+
+
+# --- rec stages only the answer that was shown (review 2026-11-20) ---------------------------------------------------
+
+def _late_proposal(c, op, reason="Someone in Slack says so."):
+    """A proposal that reaches Task-1 after the View was drawn (the planner, a ripple)."""
+    c.execute("INSERT INTO evidence (task_id, kind, ref, label, excerpt, at) VALUES (1, 'proposal', ?, ?, ?, ?)",
+              (json.dumps({"op": op, "task_id": 1, "fields": {}}), op, reason, now_iso()))
+    c.commit()
+
+
+@pytest.mark.parametrize("op", ["drop", "pin_top"])
+def test_rec_carries_the_steps_it_was_shown_and_stages_nothing_when_the_answer_changed(conn, cfg, op):
+    mk(conn, 1)
+    mk(conn, 2)
+    v = begin(conn, cfg)
+    assert v["cursor_key"] == "t:1" and v["current"]["recommendation"]["steps"] == ["keep"]
+    _late_proposal(conn, op)
+    with pytest.raises(review_decide.Stale):                         # "Keep it" was shown: never a different answer
+        P.decide(conn, cfg, D, v["id"], "t:1", "rec", args={"steps": ["keep"]}, origin="page", by=BY)
+    conn.rollback()
+    assert entries(conn) == [] and P.view(conn, cfg, D)["cursor_key"] == "t:1"
+    with pytest.raises(review_decide.Refused):                       # and rec names what it was shown
+        P.decide(conn, cfg, D, v["id"], "t:1", "rec", origin="page", by=BY)
+    conn.rollback()
+    for bad in ("keep", ["keep", 3], [], {"a": 1}):
+        with pytest.raises(review_decide.Refused):
+            P.decide(conn, cfg, D, v["id"], "t:1", "rec", args={"steps": bad}, origin="page", by=BY)
+        conn.rollback()
+    assert entries(conn) == []
+
+
+def test_a_changed_answer_is_a_409_with_the_pass_to_draw_again(tmp_path, cfg):
+    client = TestClient(create_app(cfg, db_path=str(tmp_path / "a.db")))
+    c = client.app.state.conn
+    mk(c, 1)
+    mk(c, 2)
+    p = client.post("/api/review/pass", json={}).json()["pass"]
+    assert p["current"]["recommendation"]["steps"] == ["keep"]
+    _late_proposal(c, "pin_top")
+    r = client.post("/api/review/decide", json={"key": "t:1", "option": "rec", "args": {"steps": ["keep"]}})
+    assert r.status_code == 409 and r.json()["tray"]["entries"] == []
+    now = r.json()["pass"]["current"]
+    assert now["key"] == "t:1" and now["recommendation"]["steps"][0].startswith("accept:")
+    r = client.post("/api/review/decide", json={"key": "t:1", "option": "rec", "args": {"steps": now["recommendation"]["steps"]}})
+    assert r.status_code == 200 and r.json()["pass"]["cursor_key"] == "t:2"

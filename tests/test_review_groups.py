@@ -451,3 +451,23 @@ def test_keep_all_through_the_decide_route_and_each_member_taken_back_alone(cfg,
     assert r.json()["pass"]["cursor_key"] == "g:rec:of_aaa"
     res = client.post("/api/tray/apply", json={"source": "review", "finish": True}).json()
     assert res["applied"] == 2
+
+
+def test_rec_on_a_group_keeps_only_the_members_that_were_shown_undecided(conn, cfg):
+    _world(conn)
+    begin(conn, cfg)
+    g, v = first_on_group(conn, cfg)
+    shown = [m["key"] for m in v["current"]["item"]["members"]]
+    assert shown == ["t:1", "t:2", "t:3"] and v["current"]["recommendation"]["steps"] == ["keep_all"]
+    review_decide.stage(conn, cfg, "t:2", "drop", {}, D, origin="page", device="phone")      # another device, meanwhile
+    conn.commit()
+    with pytest.raises(review_decide.Stale):
+        P.decide(conn, cfg, D, v["id"], g, "rec", args={"steps": ["keep_all"], "members": shown}, origin="page", by=BY)
+    conn.rollback()
+    assert entries(conn) == {"2": ("drop", "t:2")}
+    with pytest.raises(review_decide.Refused):
+        P.decide(conn, cfg, D, v["id"], g, "rec", args={"steps": ["keep_all"]}, origin="page", by=BY)
+    conn.rollback()
+    P.decide(conn, cfg, D, v["id"], g, "rec", args={"steps": ["keep_all"], "members": ["t:3", "t:1"]}, origin="page", by=BY)
+    conn.commit()
+    assert entries(conn) == {"1": ("keep", "t:1"), "2": ("drop", "t:2"), "3": ("keep", "t:3")}

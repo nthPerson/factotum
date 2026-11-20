@@ -59,6 +59,8 @@ WORDS = {
     "card_mail": "From your mail", "card_slack": "Mentioned in Slack", "card_ripple": "Ripple suggests", "card_planner": "Planner suggests",
     "ended": "this review has ended", "no_item": "that item is not in this review", "no_groups": "this review has no groups to change",
     "moved_meanwhile": "the review moved meanwhile; read it again",
+    "rec_changed": "the suggested answer changed meanwhile; read it again",
+    "rec_steps": "a suggested answer names the steps it was shown", "rec_members": "Keep all names the tasks it was shown",
     "group_n": "{n} new tasks", "group_recording": "New from a recording", "group_course": "New in a course",
     "group_thread": "New from one mail thread", "keep_all": "Keep all", "one_by_one": "One by one",
     "settled_group": "Every task in it was settled elsewhere.", "not_group": "that is not a group in this review",
@@ -680,11 +682,15 @@ def decide(conn: sqlite3.Connection, cfg: dict, today: date, pass_id: int, key: 
     item = group or key
     front = P.state == "item" and P.cursor == item
     rec = None
+    shown = _shown(args) if from_chat is None and option == "rec" else None
     if from_chat is None and key in P.members:
         if option == "rec":
             rec = _group_rec(cfg, today, P, key)
-            if not rec:
-                raise Refused(f"{option} is not offered on this item")
+            und = sorted(m for m in P.members[key] if P.mstates[m] in UNDECIDED)
+            if shown[1] is None:
+                raise Refused(WORDS["rec_members"])
+            if not rec or shown[0] != rec["steps"] or sorted(shown[1]) != und:
+                raise review_decide.Stale(WORDS["rec_changed"])
         elif option != "keep_all":
             raise Refused(f"{str(option)[:20]} is not offered on a group: Keep all, or decide its tasks one by one")
         out = _stage_many(conn, cfg, today, _keep_all_steps(P, key, args), origin=origin, device=device)
@@ -692,8 +698,8 @@ def decide(conn: sqlite3.Connection, cfg: dict, today: date, pass_id: int, key: 
         raise Refused(f"{option} is not offered on this item")
     elif from_chat is None and option == "rec":
         rec = (P.entries.get(key) or {}).get("recommendation")
-        if not rec:
-            raise Refused(f"{option} is not offered on this item")
+        if not rec or shown[0] != rec["steps"]:
+            raise review_decide.Stale(WORDS["rec_changed"])
         out = _stage_steps(conn, cfg, today, key, rec["steps"], args, origin=origin, device=device)
     else:
         out = review_decide.stage(conn, cfg, key, option, args, today, origin=origin, device=device, from_chat=from_chat)
@@ -714,6 +720,21 @@ def decide(conn: sqlite3.Connection, cfg: dict, today: date, pass_id: int, key: 
     if not w.save():
         raise review_decide.Stale(WORDS["moved_meanwhile"])
     return dict(out, advanced=advanced)
+
+
+def _shown(args: dict) -> tuple[list[str], list[str] | None]:
+    """What a `rec` was shown (review 2026-11-20): `steps`, the recommendation's step list as drawn or said, and on a
+    group `members`, the member keys drawn undecided. `decide` stages `rec` only when the recommendation worked out now
+    is that one (else Stale: the item is read again), so evidence that came after the View never turns a yes into an
+    answer nobody saw. Both leave `args` here; Refused when `steps` is missing or not a list of option ids."""
+    steps = args.pop("steps", None)
+    members = args.pop("members", None)
+    if not isinstance(steps, list) or not steps or len(steps) > 20 or not all(isinstance(x, str) and 0 < len(x) <= 40 for x in steps):
+        raise Refused(WORDS["rec_steps"])
+    if members is not None and (not isinstance(members, list) or len(members) > GROUP_MAX
+                                or not all(isinstance(x, str) and len(x) <= 40 for x in members)):
+        raise Refused(WORDS["rec_members"])
+    return steps, members
 
 
 def _group_rec(cfg: dict, today: date, P: Plan, gk: str) -> dict | None:

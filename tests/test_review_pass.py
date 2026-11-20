@@ -45,8 +45,23 @@ def mv(c, cfg, to, today=D, **kw):
     return out, view(c, cfg, today)
 
 
+def shown_rec(v, key, args=None):
+    """`rec`'s args as the page sends them: the steps of the recommendation drawn for that item (in front or ahead) and,
+    on a group, the members drawn undecided (review 2026-11-20: rec stages only the answer that was shown)."""
+    a = dict(args or {})
+    e = next((x for x in (v.get("current"), v.get("ahead")) if x and x.get("key") == key), None) or {}
+    r = e.get("recommendation")
+    if r:
+        a.setdefault("steps", list(r["steps"]))
+        if key.startswith("g:"):
+            a.setdefault("members", [m["key"] for m in (e.get("item") or {}).get("members") or [] if m.get("state") in ("waiting", "passed")])
+    return a
+
+
 def dec(c, cfg, key, option, today=D, **kw):
     v = view(c, cfg, today)
+    if option == "rec":
+        kw["args"] = shown_rec(v, key, kw.get("args"))
     out = P.decide(c, cfg, today, v["id"], key, option, origin="page", by=BY, **kw)
     c.commit()
     return out, view(c, cfg, today)

@@ -175,7 +175,7 @@ def test_the_suggested_answer_is_one_option_through_the_rule():
     assert 'data-opt="rec"' in rh and "esc(r.label)" in rh and "esc(r.basis)" in rh and "entry.rec_held" in rh
     assert "if (id === 'rec') return recRun(cur);" in _body("reviewRun")
     rr = _body("recRun")
-    assert "decideOn(key, 'rec', args, { prov })" in rr and "stage(" not in rr.replace("decideOn(", "")
+    assert "decideOn(key, 'rec', args, { prov })" in rr and "const args = { steps }" in rr and "stage(" not in rr.replace("decideOn(", "")
     keys = JS[JS.index("if (ui.tab === 'review') {", JS.index("document.addEventListener('keydown'")):]
     keys = keys[:keys.index("return; }") + 9]
     assert "e.key === 'a'" in keys and "reviewRun('rec')" in keys
@@ -211,9 +211,10 @@ console.log(JSON.stringify({{ calls, ahead, notes: ui.rvNotes }}));"""
     assert r.returncode == 0, r.stderr
     out = json.loads(r.stdout)
     c = out["calls"]
-    assert c[0] == ["t:7", "rec", {}, [["e:9", "judge_evidence"]]]                                   # a link alone takes no note: it stays in the box
-    assert c[1] == ["t:7", "rec", {"note": "ask Sam"}, [["e:31", "judge_evidence"], ["e:40", "judge_evidence"], [7, "keep"]]]
-    assert c[2][2] == {} and c[3][3] == [[7, "done"]] and c[4] == ["s:50", "rec", {}, [["e:50", "judge_evidence"]]]
+    # every press names the steps it was shown (review 2026-11-20: the server stages only that answer)
+    assert c[0] == ["t:7", "rec", {"steps": ["link:9"]}, [["e:9", "judge_evidence"]]]               # a link alone takes no note: it stays in the box
+    assert c[1] == ["t:7", "rec", {"steps": ["follow:31", "accept:40", "keep"], "note": "ask Sam"}, [["e:31", "judge_evidence"], ["e:40", "judge_evidence"], [7, "keep"]]]
+    assert c[2][2] == {"steps": ["link:9"]} and c[3][3] == [[7, "done"]] and c[4] == ["s:50", "rec", {"steps": ["dismiss"]}, [["e:50", "judge_evidence"]]]
     assert out["ahead"] == 4                                                                          # not for a link alone on an item already settled
     assert out["notes"] == {}
 
@@ -235,7 +236,7 @@ def test_a_group_is_one_card_with_its_tasks_keep_all_and_one_by_one():
     assert "'/api/review/pass/' + v.id + '/group'" in pr and "tray.busy = tray.busy.then(run, run)" in pr and "passAnswer(" in pr
     assert "if (cur.kind === 'group') return groupRun(id, cur);" in _body("reviewRun")
     gr = _body("groupRun")
-    assert "decideOn(gk, id, {}, { prov:" in gr and "passRegroup(gk, 'take_out', tid); return passMove('goto', mk);" in gr
+    assert "decideOn(gk, id, args, { prov:" in gr and "members: open.map(m => m.key)" in gr and "passRegroup(gk, 'take_out', tid); return passMove('goto', mk);" in gr
     assert "passRegroup(gk, 'one_by_one')" in gr
     keys = JS[JS.index("if (ui.tab === 'review') {", JS.index("document.addEventListener('keydown'")):]
     keys = keys[:keys.index("return; }") + 9]
@@ -265,6 +266,7 @@ const m = (id, state) => ({{ key: 't:' + id, state, task: {{ id }} }});
 const cur = ms => ({{ kind: 'group', entry: {{ key: 'g:rec:x', recommendation: {{ steps: ['keep_all'] }}, item: {{ members: ms }} }} }});
 staged.set(2, {{ op: 'done' }});
 groupRun('keep_all', cur([m(1, 'waiting'), m(2, 'waiting'), m(3, 'passed'), m(4, 'decided'), m(5, 'gone')]));
+groupRun('rec', cur([m(1, 'waiting'), m(2, 'waiting'), m(3, 'passed'), m(4, 'decided')]));
 groupRun('member:t:1:later', cur([m(1, 'waiting'), m(3, 'waiting')]));
 const opened = ui.rvMemberLater;
 groupRun('member:t:1:until:fri', cur([m(1, 'waiting'), m(3, 'waiting')]));
@@ -279,11 +281,12 @@ console.log(JSON.stringify({{ calls, ahead, opened, later: ui.rvMemberLater }}))
     out = json.loads(r.stdout)
     assert out["calls"] == [
         ["decide", "g:rec:x", "keep_all", {}, [[1, "keep"], [3, "keep"]]],          # the undecided ones not already staged: one row each
+        ["decide", "g:rec:x", "rec", {"steps": ["keep_all"], "members": ["t:1", "t:3"]}, [[1, "keep"], [3, "keep"]]],      # what was shown
         ["decide", "t:1", "later", {"until": "fri"}, [[1, "fri"]]],
         ["decide", "t:3", "drop", {}, [[3, "drop"]]],
         ["regroup", "g:rec:x", "take_out", 3], ["move", "goto", "t:3"],
         ["regroup", "g:rec:x", "one_by_one", None]]
-    assert out["ahead"] == 2 and out["opened"] == "t:1" and out["later"] is None      # Keep all, and the last task decided
+    assert out["ahead"] == 3 and out["opened"] == "t:1" and out["later"] is None      # Keep all, the suggestion, and the last task decided
 
 
 def test_show_how_it_would_be_read_draws_the_servers_words_under_every_card():

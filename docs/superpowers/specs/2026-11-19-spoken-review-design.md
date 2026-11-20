@@ -119,7 +119,7 @@ One vocabulary on the wire, in `review_decide.plan`, in the pass's `options` and
 | a suggestion card | `create` | `draft`: `{fields, links}` when the card was edited |
 | | `dismiss` | |
 | any decided item | `undecide` | takes the decision back |
-| an item with a recommendation (pass only) | `rec` | stages every step of the recommendation |
+| an item with a recommendation (pass only) | `rec` | `steps`: the recommendation's step list as it was shown or said (required); on a group also `members`: the member keys shown undecided. Stages every step only when the recommendation worked out at the press is that one; otherwise nothing is staged and the answer is "changed meanwhile" (409 with the pass), so the item is read again (review 2026-11-20) |
 | a group (pass only) | `keep_all` | `except`: `[{key, option, args, note}]` for members decided otherwise |
 
 Breaking a group into its members (`one_by_one`) and taking one member out (`take_out`) are regroups of
