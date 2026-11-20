@@ -103,6 +103,14 @@ def test_a_proposal_beside_the_decision_is_accept_and_keep(op, fields):
     assert r["label"].endswith("and keep it") and r["said"].endswith("and keep it?") and r["source"] == f"proposal:{op}"
 
 
+def test_a_change_of_the_date_alone_says_the_date_on_its_button():
+    r = R.recommend(E(["planner"], evidence=[prop(40, "set", {"due": "2026-11-20T14:00"})]), D, {})
+    assert r["label"] == "Make it due Fri 2:00 PM and keep it" and r["said"] == "Make that change and keep it?"
+    assert R.recommend(E(["planner"], evidence=[prop(40, "set", {"due": "2026-11-24", "hard": 1})]), D, {})["label"] == "Make it due Tue Nov 24 and keep it"
+    assert R.recommend(E(["planner"], evidence=[prop(40, "set", {"due": None})]), D, {})["label"] == "Remove its date and keep it"
+    assert R.recommend(E(["planner"], evidence=[prop(40, "set", {"due": "2026-11-24", "project": "X"})]), D, {})["label"] == "Make the change and keep it"
+
+
 def test_a_follow_and_one_other_proposal_are_both_taken():
     r = R.recommend(E(["planner"], evidence=[prop(31, "follow_thread"), prop(40, "set", {"due": "2026-11-20"}, reason="The mail gives the day.")]), D, {})
     assert r["steps"] == ["follow:31", "accept:40", "keep"] and r["label"].startswith("Follow the thread, ") and r["basis"] == "The mail gives the day."

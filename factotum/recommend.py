@@ -50,6 +50,7 @@ TEXTS = {
     "link_1_said": "Link it?", "link_2_said": "Link both?", "link_n_said": "Link all {n}?",
     "and_keep": " and keep it", "and_keep_said": " and keep it?",
     "accept_set": "Make the change and keep it", "accept_set_said": "Make that change and keep it?",
+    "accept_due": "Make it due {when} and keep it", "accept_no_due": "Remove its date and keep it",
     "accept_add_reminder": "Add the reminder and keep it", "accept_add_reminder_said": "Add the reminder and keep it?",
     "accept_pin_top": "Pin it and keep it", "accept_pin_top_said": "Pin it to Top and keep it?",
     "accept_longterm": "Mark it long-term and keep it", "accept_longterm_said": "Mark it long-term and keep it?",
@@ -123,6 +124,23 @@ def _proposal_basis(e: dict, own, names) -> str:
     return TEXTS["ripple_basis" if e.get("by") == "ripple" else "planner_basis"]
 
 
+DATE_KEYS = {"due", "due_is_datetime", "hard"}
+
+
+def _accept_label(change: dict) -> str:
+    """The button for accepting a proposal beside the decision; a change of the date alone says the date ("Make it due
+    Fri 2:00 PM and keep it"), anything else by its kind (the card shows the change itself above)."""
+    op, f = change.get("op"), change.get("fields") or {}
+    if op == "set" and "due" in f and set(f) <= DATE_KEYS:
+        from .review_decide import day_words, when_words
+        due = f.get("due")
+        if not due:
+            return TEXTS["accept_no_due"]
+        if isinstance(due, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2})?)?", due):
+            return TEXTS["accept_due"].format(when=when_words(due) if "T" in due else day_words(due))
+    return TEXTS[f"accept_{op}"]
+
+
 def _held_close(answer: str, why: str) -> str:
     return TEXTS["held"].format(what=TEXTS[f"held_{answer}"], why=why)
 
@@ -173,7 +191,7 @@ def _rule(entry: dict, today: date, names: dict) -> tuple[dict | None, str | Non
             return _rec(op, steps + [f"accept:{e['id']}"], label, said, basis, f"proposal:{op}"), None
         if op not in ACCEPTABLE:                                   # a merge, a reopen, anything the rule would not stage beside
             return None, None
-        label, said = TEXTS[f"accept_{op}"], TEXTS[f"accept_{op}_said"]
+        label, said = _accept_label(e["change"]), TEXTS[f"accept_{op}_said"]
         if lead:
             label, said = lead + _lcfirst(label), lead + _lcfirst(said)
         return _rec("accept_keep", steps + [f"accept:{e['id']}", "keep"], label, said, basis, f"proposal:{op}"), None

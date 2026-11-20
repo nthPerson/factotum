@@ -1096,7 +1096,7 @@ mark { background: var(--warn-soft); color: inherit; border-radius: 2px; padding
 .card .rvrec { display: flex; flex-direction: column; gap: 4px; margin: 4px 0 12px; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--accent); background: var(--accent-soft); }
 .card .rvrec .lead { font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--accent); }
 .card .rvrec .btn.rec { width: 100%; justify-content: center; min-height: 44px; font-weight: 600; background: var(--accent); border-color: var(--accent); color: var(--on-accent); gap: 8px; }
-.card .rvrec .btn.rec kbd { font-family: var(--mono); font-size: 11px; font-weight: 400; opacity: .8; }
+.card .rvrec .btn.rec kbd { font-family: var(--mono); font-size: 11px; font-weight: 400; opacity: .8; margin-left: 8px; }
 .card .rvrec .basis { font-size: 13px; line-height: 1.4; color: var(--fg); overflow-wrap: anywhere; }
 .card .rvrec.held { border-color: var(--line); background: var(--surface-2); }
 .card .rvrec.held .lead { color: var(--muted); }
