@@ -131,7 +131,7 @@ tasks(id, name, project, area, status,            -- open|done|dropped|faded|lap
       context, why_now, score, priority, manual_priority, mentions, last_mention_at,
       created_at, edited_at, completed_at, closed_by,     -- user|canvas|mail-evidence|fade|lapse|voice|chat|import
       snoozed_until, last_reviewed_at, calendar_event, notion_page_id, canvas_id,
-      last_offered_at,             -- the last day a Review page showed the row; `expire` acts only on rows it has shown
+      last_offered_at,             -- the last day the row came in front in a Review pass; `expire` acts only on rows it has offered
       mirrored_at,                 -- when the Notion mirror last pushed the row (not an edit)
       close_on_sent_since, close_on_sent_to,   -- a sent-mail watch (`watch_sent`): close when mail to that address is sent after that time
       outcome,                     -- one line, what came of it (done / drop may carry it; ≤ 300; reopen clears it)
@@ -181,6 +181,13 @@ tray(key PRIMARY KEY,                             -- spoken Review stage 1 (2026
      rev, staged_at, updated_at)                  -- rev: the tray revision of the row's last write
 tray_rev(id = 1, rev)                             -- the tray's revision, moved once by every write that changed something
 tray_carried(fp PRIMARY KEY, carry_id, at)        -- fingerprints of what a browser's old local tray handed over, so nothing is carried twice
+review_passes(id, day, started_at, started_by,    -- spoken Review stage 2 (2026-11-20): one walk through the Review queue; one live at a time
+     cursor_key, state, lap, looked, rev,         -- the item in front (NULL at the end); item|checkpoint|end|empty; laps; items arrived at since the
+     moved_at, moved_by, drivers_json,            --   start or the checkpoint; +1 on every move; who moved last ("page · iPhone", "connector", "skill")
+     ended_at, end_why)                           -- applied|finished|replaced|another_day
+review_pass_items(pass_id, key, pos, kind,        -- the pass's order: an item key (t:412, s:186), its position (an arrival between two takes a fraction)
+     members_json, added_at, arrived_at,          -- arrived_at: first time in front (the offered stamp was written then)
+     passed_at, passes, done_batch_id)            -- left undecided with Next; the Apply that wrote its decision
 ```
 
 **The tray** (2026-11-19, `factotum/tray.py`; design `docs/superpowers/specs/2026-11-19-spoken-review-design.md`
@@ -193,6 +200,13 @@ Dismissal under `e:<id>` decides the card; everything else stands beside. Every 
 the connector's writer and the stdio skill server take turns. `tray.apply` applies the rows as one batch and
 deletes them in the batch's own transaction (both or neither); a row written after the revision the caller saw
 refuses the Apply (`Stale`). The three tables are new and start empty, so they need no `VERSIONED` migration.
+
+**The pass** (2026-11-20, `factotum/review_pass.py`; design §6.1-6.6). `review_passes` and `review_pass_items`
+hold Review's order and where the owner stands, never what an item says (every read builds it from the live
+queue, `review_queue.items`) and never what was decided (the tray's `decides`). A partial unique index allows one
+live pass (`ended_at IS NULL`); a pass from another Review's day is over and the next begin ends it
+`another_day`. Every pass write starts with `db.begin_write` and is compare-and-set on `rev`. New empty tables,
+no `VERSIONED` migration.
 
 Stage 7 adds three `settings` rows and one batch op. `state.links.session` is `{day, ids}`: the link
 suggestions (evidence ids) offered that day, judged ones included, which `relations.annotate` reads (the daily
@@ -268,11 +282,34 @@ goal alive. All of it reads `task["rel"]`, derived once by `relations.annotate`.
 **Review queue** (`lifecycle.build_review_queue`), ordered: last call · thread updated · mentioned in
 Slack · planner · freed (a task it waited on is closed or done and it waits on nothing open) · waited-on
 task gone (closed without being done) · all steps done · a linked task changed · link suggested · back from
-Later · new · soft slipped · fading soon · back · reminder missed. *New* means never decided on
+Later · new · soft slipped · fading soon · back. *New* means never decided on
 (`last_reviewed_at` is null), not "created since the last session": an item the user did not get to
-stays in the queue. The queue is served in pages of `review_cap` (15); tasks a tray row decides are
-excluded from the next page (and the ids an old page still sends as `exclude`), and after a page the UI
-offers "Review another 15 of the remaining N" rather than loading it unasked. **Review's day** is
+stays in the queue. *Back* (2026-11-20): a faded or lapsed task reopened by something that is not the
+owner (`review_queue.back_flags`: a recording, mail, a ripple; never `OWNER_SOURCES`), until a decision on or
+after that day; "reminder missed", which nothing set, is gone. That order is the lifecycle's (the count, the
+nudge, the brief and the planner keep it); **Review shows the queue in its own order** (`review_queue.order_key`,
+2026-11-20): first a task hard-dated today, tomorrow or past and a card due as soon (by date), then every other
+task and a card due within a week by the lifecycle's reason, date and score, last the cards dated later or not at
+all; tasks and cards are one list. Under a task's reason line Review shows who wrote behind "Thread updated" and
+"Mentioned in Slack" (`review_queue.evidence_lines`, one bounded pattern over the stored labels).
+**Review is a pass** (spoken Review stage 2, 2026-11-20; §4 "The pass"): one order and one cursor on the server
+that the page, on any device, and later the connector move alike. Next leaves the item in front undecided and
+writes nothing to the task (it is in Review next time); after the last item Next comes round to the first
+undecided one ("Back to the start · n left undecided"); Back reaches any item that is not gone, so a decision can
+be looked at and changed; Go to jumps to any. A decision on the item in front moves on (on an item reached with
+Back only a decision does; Pin, Long-term or an answer there leave the cursor where it is); `undecide` (Take
+back) puts the item in front. An item is *waiting*, *passed* (left with Next), *decided* (a tray row decides it,
+or this pass's Apply wrote its decision), *answered* (no decision, but every reason it has is answered in the tray:
+its link suggestions linked or judged, its thread, Slack, planner or ripple evidence judged) or *gone* (it left
+the queue with no decision here; skipped by every move). Keep on a task whose reason is a suggested link does not
+answer the suggestion, so after the Apply it is back, undecided. `lifecycle.review_cap` (15, minimum 5) is no
+longer a page size but **items per sitting**: after that many arrivals the pass stops at a checkpoint (Keep going ·
+Apply and stop · Finish for now). A pass ends `applied` when an Apply leaves nothing undecided, `finished` on
+Finish for now, `replaced` by Start again, `another_day` when found the next Review's day; ending never touches
+the tray or a task. Beginning a pass writes the day's link suggestions (`suggestions.session`, which a resume
+asks again so what the detectors found since still arrives) and **the offered stamp is written when an item
+comes in front** (`tasks.last_offered_at`, a task only; a card has none), which is what `expire` acts on.
+`GET /api/review` reads only. **Review's day** is
 `review_queue.today(cfg)`, the date where the owner is (2026-11-19): every Review route, the rule, the finish
 stamp and Create on a card use it, never the machine's date. **The decision rule is Python**
 (`factotum/review_decide.py`, 2026-11-19): `plan(conn, cfg, item, option, args, tray, today)` turns one option on
@@ -1103,11 +1140,10 @@ before Create. *Settings* gains "Suggested links" (the number a day, under Revie
 task you add" (a switch under Claude).
 
 **App extras (stage 8 of the linked-tasks design, 2026-11-11).** The number beside Review comes from
-`GET /api/review/count` (`review_queue.count`, read-only: `GET /api/review` records the day's suggestion
-session and stamps `last_offered_at`, so it is never called for a number) from the first load until Review is
-loaded, then from the Review page, which leaves out what the tray already decided (since 2026-11-19 the route
-answers `review_queue.undecided_count`, the count less the tasks and cards a tray row decides; the icon's number
-on a push is still `review_queue.count`); back at the front off
+`GET /api/review/count` (read-only; since 2026-11-19 `review_queue.undecided_count`, the count less the tasks and
+cards a tray row decides; the icon's number on a push and the review nudge are still `review_queue.count`) from
+the first load until Review is loaded, then from the pass's `counts.left` (the same number: `undecided_count`,
+which still counts an *answered* item as undecided while the pass counts it decided); back at the front off
 the Review tab, that page is let go and the server's count is read again. The app's icon gets exactly
 the number the tab shows (`navigator.setAppBadge`; `clearAppBadge` at 0, when the sign-in has expired and when
 the switch is off; one call per change, not one per redraw, and once more on every return to the front, so a
@@ -1180,9 +1216,32 @@ tray beside `detail`, never 401 or 403. `decideOn` is the one page function that
 (the rule, §5): a Review card conversation's done, drop, Pin, Long-term or Later about the card's own task
 (read by the server from the stored proposal, `from_chat`), and Create, Dismiss and Take back on a suggestion
 card (`e:<id>`; the card leaves at the click and the tray says "new task: …"; Apply answers "Created Task-N"
-with Open). It draws the rule's row at once and takes it back with the reason when the server refuses. The four
-buttons, the keys and the accept and link answers still stage in the page under the same keys; stage 2 moves
-them onto the rule. The Later date box and a typed date refuse today.
+with Open). It draws the rule's row at once and takes it back with the reason when the server refuses. Since
+2026-11-20 every press on Review goes through it. The Later date box and a typed date refuse today.
+
+**Review on the pass (spoken Review stage 2, 2026-11-20; §5 "Review is a pass").** The page draws the View the
+server answers (`rp`, `reviewCurrent`, `reviewOptions`) and sends every press, button or key, through one
+dispatcher (`reviewRun`) as an option id on `[data-opt]`: a move to `passMove` (`POST /api/review/pass/{id}/move`
+with `from`, the item drawn in front; when another device moved the cursor meanwhile nothing moves and the page
+says "Moved on iPhone", "in another window" or "by Claude"), a decision or an answer to `decideOn`, whose answer
+carries the pass. Moves wait their turn in the tray's queue behind the decisions pressed before them. A press
+that moves on draws the next item at once (the View's `ahead`); only the newest answer is drawn, after the press
+in progress. Keys: `d k s x t l` as before, `→` or `]` Next, `←` or `[` Back. The navigation line says "3 of 17 ·
+9 left undecided · 6 staged · ~2 min", List shows every item with its state and jumps to any, a decided item
+shows "Staged: …" with Take back (which takes back what the decision staged beside it too); the checkpoint, the
+end screen (Apply n, the decisions with Go to and Take back, Look again from the start) and the finished screen
+(Start again) close a sitting. There is no "Batch applied." pause: an Apply reads the pass again and leaves the
+item in front. On a phone the moves and the decisions are one fixed bar (`.rvbar`: `.rvnav` over `.big`), hidden
+while a box has focus except its decisions while the note has it; a tap on the decisions within 400 ms of a new
+item coming in front is not taken. A note is held per item. **Following:** every 3 s while Review is in front, the
+page visible, no task page open, nothing typed and no press waiting, the page asks `GET /api/review/pass/now`
+(two small reads, no lock, with Review's day) and, when the pass, its revision, the tray's or the day changed,
+reads the pass (never a begin) and the tray and redraws after the press in progress; a pass finished elsewhere
+says so, one from another day is let go. Routes: `GET /api/review/pass`, `GET /api/review/pass/now`,
+`POST /api/review/pass {fresh, device}` (begin or resume), `POST /api/review/pass/{id}/move {to, key?, from?,
+device}`; `POST /api/review/decide` goes through the live pass and answers it. **`GET /api/review` reads only** and
+is the whole queue in Review's order (decided items listed; `exclude`, `cap` and `total` kept for a page loaded
+before the change). Settings labels `lifecycle.review_cap` "Items per sitting".
 
 ## 10. Reminders and push
 
@@ -1203,8 +1262,10 @@ them onto the rule. The Later date box and a typed date refuse today.
   hour. Daily jobs: `expire` at `lifecycle.expire_time` (03:30), the brief, the review push; the
   calendar sweep every `sources.calendar.sweep_minutes`. Everything that did something lands in
   `runs` with cost 0, so the Log tab shows it next to the Claude runs.
-- **Nothing expires unseen.** `/api/review` stamps `last_offered_at` on the rows it serves; `expire`
-  fades or lapses a row only if it was on a Review page on or after the day its warning started.
+- **Nothing expires unseen.** A Review pass stamps `last_offered_at` on a task when it comes in front
+  (since 2026-11-20; before, `GET /api/review` stamped the page of 15 it served); `expire`
+  fades or lapses a row only if it was offered on or after the day its warning started. Next on a fading
+  item does not save it (it was offered); an item the owner never reached cannot fade.
   Until then it stays open, stays in Review, and the push keeps asking. A Review decision (Keep,
   Later) restarts the quiet clock, so a kept backlog item returns as Fading in `fade_days`.
 - Action tokens live on the reminder row; Done and Snooze are single use (a second tap says what

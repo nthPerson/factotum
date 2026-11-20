@@ -78,6 +78,12 @@ the editor, `reopen` as a chat proposal; and the Plaud trigger looking at its ma
 tray for every device on the server (`factotum/tray.py`, the tables `tray`, `tray_rev`, `tray_carried`; `GET /api/tray`, `POST /api/tray/ops`,
 `/api/tray/carry`, `/api/tray/apply`, `POST /api/review/decide`), the page's tray as its mirror with the old local tray carried once, Pin and
 Long-term beside under `<id>:top` / `<id>:lt`, and `decideOn` for a card conversation's decisions and Create / Dismiss on a suggestion card.
+Stage 2, first half (2026-11-20, plan `docs/superpowers/plans/2026-11-20-spoken-review-stage-2.md`): Review's own order (`review_queue.order_key`,
+urgent first, cards among tasks), who wrote behind "Thread updated" and "Mentioned in Slack" (`evidence_lines`), the *Back* reason wired and
+"reminder missed" gone; Review as a pass held on the server (`factotum/review_pass.py`, the tables `review_passes`, `review_pass_items`;
+`GET`/`POST /api/review/pass`, `/pass/now`, `/pass/{id}/move`): Next leaves an item undecided and it comes round, Back, Go to, the
+checkpoint after "Items per sitting", the offered stamp on arrival, two devices following one cursor; every Review press through
+`reviewRun` and `decideOn`; `GET /api/review` reads only. The second half (recommendations, groups, the spoken card) is not built yet.
 Retiring the old Notion
 pages and plaud-sync is the user's checklist (SETUP §15). Update this paragraph when something lands.
 
@@ -147,6 +153,9 @@ pages and plaud-sync is the user's checklist (SETUP §15). Update this paragraph
 | Review's decision rule: items, options, what a decision stages, from a card's conversation | spoken Review design §4, §5.2; SPEC §5 | `factotum/review_decide.py` (`OPTIONS`, `load_item`, `plan`, `stage`, `from_proposal`, `stored_proposal`, `FROM_CHAT_ARGS`), `review_queue.py` (`today`, `items`, `task_item`), `api.py` (`/api/review/decide`) |
 | the queue's suggestion cards, Create on a card as data | spoken Review design §5.1, §5.5 | `factotum/review_cards.py` (`cards`, `card`, `card_changes`, `CardPlan`, `NoCard`), `relations.decorate` / `ship` / `briefs` |
 | the tray on the server: rows, `decides`, write, carry, apply; the page's mirror | spoken Review design §5.3, §5.4, §5.6; SPEC §4 "The tray", §9 | `factotum/tray.py` (`clean_entry`, `decides_of`, `read`, `write`, `decided`, `carry`, `changes_for`, `finishes`, `apply`, `Stale`), `db.begin_write`, `api.py` (`/api/tray*`, `_tray_error`), `review_queue.undecided_count`, `web/app.js` (`tray`, `trayDiff`, `syncTray`, `sendTray`, `trayAnswer`, `trayFail`, `trayPoll`, `trayApply`, `trayBoot`, `carryOldTray`, `decideOn`, `cardProv`, `propStaged`, `sgStagedHtml`), `tests/test_tray_page.py` (the mirror run in node) |
+| Review's order, the evidence lines, the Back reason | spoken Review design §6.7; SPEC §5 | `factotum/review_queue.py` (`order_key`, `evidence_lines`, `back_flags`, `flags`, `OWNER_SOURCES`, `items`), `lifecycle.review_reasons`, `web/app.js` (`evidenceLinesHtml`) |
+| Review as a pass: begin and resume, the plan of states, moves, the checkpoint, the offered stamp, decide on the pass, after an Apply, the View | spoken Review design §6.1-6.6; SPEC §4 "The pass", §5, §9 | `factotum/review_pass.py` (`begin_or_resume`, `plan`, `move`, `decide`, `_decision`, `after_apply`, `view`, `now`, `options`, `WORDS`), `db.SCHEMA` (`review_passes`, `review_pass_items`), `api.py` (`/api/review/pass*`, `/api/review/decide`), `tray._after_apply` |
+| Review in the page: the controller, moves, following, the screens, the phone's bar | spoken Review design §6.11; SPEC §9 "Review on the pass" | `web/app.js` (`rp`, `reviewCurrent`, `reviewOptions`, `reviewRun`, `cardRun`, `takeBack`, `loadPass`, `passMove`, `passAhead`, `passAnswer`, `passReread`, `followPass`, `followCheck`, `movedWhere`, `rvNoteNow`, `navHtml`, `listHtml`, `taskItemHtml`, `cardItemHtml`, `checkpointHtml`, `endHtml`, `finishedHtml`), `app.css` `.rvbar`, `tests/test_review_page.py`, `tests/test_tray_page.py` |
 | the Review count, the number on the app's icon, the shortcuts, `/new` | design §16, SPEC §9, §10 | `factotum/review_queue.py` (`queue`, `card_count`, `count`), `api.py` (`/api/review/count`, `SHORTCUT_PATHS`), `app_push.py` (`payload`, `with_badge`), `web/sw.js` (`badgeOf`, `setBadge`), `web/app.js` (`reviewShown`, `syncBadge`, `parseAddress`, `applyAddress`, `openNew`), `manifest.webmanifest` `shortcuts`, `tools/make_icons.py` (`shortcut`) |
 
 ## Commands
@@ -438,9 +447,10 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
 - **`pickers.<slot> = …` goes after `const pickers`** (2026-11-18): the page script is one function and a `const` used above its line throws at
   load, so nothing draws at all (the first browser run of the Search tab). `node --check` does not see it; a page load does.
 - **Never pipe the dev or service start script's output through `tail` / `head` when it leaves a server
-  running** (2026-11-11): the pipe never closes and the command hangs. And `GET /api/review` is loaded once
-  per page (the in-flight flag in `app.js`) because its `last_offered_at` stamp commits on the shared
-  connection; two at once answered 500.
+  running** (2026-11-11): the pipe never closes and the command hangs. (`GET /api/review` used to stamp and commit, so
+  two loads at once answered 500; since 2026-11-20 it reads only, and the writes are the pass's begin, under `commit_lock`.)
+  And `nohup` with `&` after a `cd … &&` records the subshell's PID, not the server's: start it on its own line, or the
+  next "restart" fails to bind and you keep testing the old server (2026-11-20).
 - **Every write on the API's shared connection takes `commit_lock`** (2026-11-11, `api.create_app`, an `RLock`):
   from its first write to its commit or rollback — `batches.apply` / `undo`, every route that commits (GETs that
   stamp included), a helper that commits (`by_hand.add`, `chat.create_from_proposal`, `chat.turn`, `app_push.send_test`
@@ -451,8 +461,9 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
   `commit_lock` last. No `async def` route writes (it would run on the event loop). The scheduler has its own
   connection and never takes it; `GET /api/review/count` reads only and stays out.
   `tests/test_review_fixes.py::test_every_write_on_the_shared_connection_in_the_api_takes_commit_lock` fails a route that forgets.
-- **`expire` only touches rows Review has shown** (`last_offered_at`, stamped by `GET /api/review`).
-  A row that was never on a Review page stays open however old it is; that is by design.
+- **`expire` only touches rows Review has offered** (`last_offered_at`, stamped when the task comes in front in a Review pass,
+  `review_pass` arrival; since 2026-11-20, before by `GET /api/review`'s page of 15). A row the owner never reached stays open
+  however old it is, by design; Next on a fading item does not save it.
 - **The manifest must be requested with `crossorigin="use-credentials"`** (2026-11-10): otherwise Access
   answers it with its login page. The iPhone fetches the touch icon without the cookie, so it is inlined
   in `index.html` (a file behind Access drew a letter).
@@ -559,9 +570,10 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
   `runner.note_unavailable` keeps `state.claude.unavailable` for Settings → Claude's sentence and lets one failed
   row a day per kind into the Log; the ripple group is set aside (the scheduler backs off an hour, no second row)
   and the filing queue is emptied. The next run that succeeds clears the note.
-- **The Review count is `review_queue.count`, and it reads only** (2026-11-11): `GET /api/review` writes (the
-  day's suggestion session, the `last_offered_at` stamp `expire` acts on), so it is never called for a number; a
-  new place that shows how many items wait on Review uses `review_queue`, never its own `build_review_queue` call.
+- **The Review count is `review_queue`'s, and it reads only** (2026-11-11): a new place that shows how many items wait on
+  Review uses `review_queue` (`count` for a push, `undecided_count` for the tab), never its own `build_review_queue` call.
+  Opening Review is a write (`POST /api/review/pass`: the day's suggestion session, the pass, the offered stamp), so it is
+  never called for a number either.
 - **The tray is on the server** (2026-11-19, `factotum/tray.py`): the page's `staged` Map is a mirror; every write site ends
   in `syncTray()`, and only `carryOldTray` reads `localStorage['factotum.staged']`. Nothing caches or sends before `trayBoot`
   has read `factotum.tray` (review 2026-11-19: a return before load() overwrote the unsent changes the cache kept), and what is
@@ -571,9 +583,10 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
   routes drop a `decides` the page sends. A digit tray key is a task's decision only for done, drop, keep, reopen or a set of
   `snoozed_until`; Pin and Long-term are `<id>:top` and `<id>:lt` on every tab, and the carry moves an old bare-key one there.
 - **A decision on a Review item is `review_decide.plan`** (2026-11-19): a new button, key, conversation path or tool that
-  decides goes through it (`stage`, `POST /api/review/decide`, the page's `decideOn`) and never stages an op alone. Stage 1
-  leaves the four buttons, the keys and the accept and link answers staging in the page under the same keys (stage 2 moves them).
-  `prop` and `also` (`FROM_CHAT_ARGS`) come only from a stored proposal, never from a caller.
+  decides goes through it (`stage`, `POST /api/review/decide`, the page's `decideOn`) and never stages an op alone. Since
+  2026-11-20 every press on Review does (`reviewRun`); due and remind still stage through the page's own forms, beside the decision.
+  `prop` and `also` (`FROM_CHAT_ARGS`) come only from a stored proposal, never from a caller, and a proposal the server marked
+  applied is refused (`stored_proposal`).
 - **Every tray write starts with `db.begin_write` and reads after it** (2026-11-19): `BEGIN IMMEDIATE`, so the API's
   connection, the connector's writer and the stdio server take turns; `commit_lock` covers only the API's own requests. A
   tray route rolls back on every exception it does not answer (review 2026-11-19: a reminder's `repeat` sent as an object
@@ -586,7 +599,9 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
 - **A card's Create ref is `card<eid>`** (2026-11-19, `review_cards.card_changes`): two cards created in one batch never
   share a ref; `tray.apply` finds the new task with `res["refs"]["card<eid>"]`.
 - **The tab's number is `review_queue.undecided_count`, the icon's push number still `review_queue.count`** (2026-11-19): the
-  tab leaves out what the tray decides; until an Apply the two may differ.
+  tab leaves out what the tray decides; until an Apply the two may differ. On Review the tab reads the pass's `counts.left`,
+  which is `undecided_count` too (2026-11-20); the review nudge keeps `review_queue.count` and the lifecycle's order, so its
+  three names may not be the pass's first three. `undecided_count` still counts an *answered* item as undecided.
 - **`app_badge` is a top-level integer in the declarative payload, never inside `notification`** (2026-11-11):
   WebKit moved it out in 2025; a nested one crashed an update path. A wrong type makes Safari hand the push to
   the worker, which still shows it.
@@ -598,6 +613,29 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
   page address that is not a tab goes in `api.SHORTCUT_PATHS` and `parseAddress`.
 - **iOS ignores manifest `shortcuts`, and Chromium re-reads an installed app's manifest lazily** (2026-11-11): a
   changed shortcut may need a reinstall to show.
+- **`GET /api/review` reads only** (2026-11-20): the whole queue in Review's order (`review_queue.items`, `order_key`), decided
+  items listed; `exclude`, `cap` and `total` stay for a page loaded before the change. The day's link suggestions are written by a
+  pass's begin and asked again by every resume (`suggestions.session` tops the set up), and the offered stamp when an item comes in
+  front. Never make a read write again: the page's follow polls every 3 s.
+- **A pass holds keys and order, never what an item says or what was decided** (2026-11-20, `review_pass`): every read builds the
+  items from `review_queue.items` and the states from the tray's `decides`; a read never writes (what it finds changed, an arrival,
+  is persisted by the next write). Every pass write starts with `db.begin_write` and is compare-and-set on `rev`; a pass route rolls
+  back on every exception it does not answer, as the tray's do.
+- **Every relative move names the item it moves from** (2026-11-20): `next` and `back` carry `from`; a cursor elsewhere answers
+  `moved: false` and moves nothing. The page sends moves through the tray's queue (`tray.busy`) behind the decisions pressed
+  before them (review 2026-11-20: a Next on the item a Keep drew at the click reached the server first and was lost).
+- **Only a decision moves on from an item that was settled already** (2026-11-20, `review_pass._decision`): on an undecided item
+  in front, anything that settles it moves on; on one reached with Back, Pin, Long-term or an answer stay on it (they moved on, and
+  the next key landed on the next task). The page draws the next item at the click only for a decision (`passAhead`).
+- **After an Apply or an Undo on Review the page reads the pass with GET, never POST** (2026-11-20, `passReread`): a POST would
+  begin a new pass over one the Apply just ended `applied`. An Undo of that Apply clears the "nothing left" screen.
+- **`tray.apply` tells the pass what it applied inside a savepoint** (2026-11-20, `tray._after_apply`): the batch has committed by
+  then, so a failure there, or a write lock it cannot take, skips the follow-up and never fails the Apply.
+- **A Review note belongs to its item** (2026-11-20, `ui.rvNotes`): it counts as typed only while its item is in front with the box
+  drawn (`rvNoteNow`), and a decision takes only its own item's note.
+- **Keep does not answer a suggested link** (2026-11-20): a task on Review for a link suggestion that is kept comes back after the
+  Apply, undecided, and a pass with one never ends `applied`. Judging the suggestion on Keep would drop it for good (a judged pair is
+  never suggested again), so that is the owner's call, not a builder's.
 
 - **The service runs from the main working copy and serves `factotum/web/` from disk** (2026-11-19): a commit to `main`
   changes the page the owner has open at its next reload, under the old Python still running. Feature work that touches the
