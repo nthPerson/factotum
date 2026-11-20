@@ -12,7 +12,13 @@
   // when the accounts table changed. A save sends only these, so a value nobody touched stays the file's.
   const settingsDirty = new Map();
   let connectors = null;    // /api/connectors payload (Settings → Connections)
-  let staged = new Map();   // task id -> {op, fields, label}
+  let staged = new Map();   // tray key -> {task_id, op, fields, label, …}: a mirror of the server's tray (spoken Review stage 1), local changes laid over it
+  // The tray lives on the server, one for every device (design §5.6). `base` is the server's tray as last answered (key → the
+  // entry as canonical JSON, so an entry changed in place in `staged` is still seen as a change), `meta` its rows' meta
+  // ({decides, origin, device, rev, updated_at}); `inflight` the ops on their way (key → canonical entry, null for a delete);
+  // `busy` the chain every tray request waits on, so they reach the server one at a time and in order; `failed` why the
+  // last send did not arrive ('' when it did); `carryFailed` why this browser's old tray could not be handed over.
+  const tray = { rev: 0, base: new Map(), meta: new Map(), inflight: null, busy: Promise.resolve(), failed: '', queued: false, booted: false, carryFailed: '', unsentAt: 0, retry: null };
   let lastBatch = null;
   let chat = { threads: null, current: null, messages: [], live: null, busy: false, place: null };   // place: the key of the conversation in place whose turn runs (stage 6)
   let lastTap = { id: null, at: 0 };   // for the hand-rolled double-click on rows
@@ -60,8 +66,7 @@
   try { ui.tab = parseAddress().tab; } catch (_) {}
   try { const r = localStorage.getItem('factotum.rail'); if (r === '0' || r === '1') ui.railOpen = r === '1'; } catch (_) {}
   try { ui.rvEdit = localStorage.getItem('factotum.rvedit') === '1'; } catch (_) {}
-  try { const s = JSON.parse(localStorage.getItem('factotum.staged') || '[]'); staged = new Map(s); } catch (_) {}
-  for (const [k, v] of staged) { if (!v || typeof v !== 'object') staged.delete(k); else if (v.task_id == null && v.op !== 'create') v.task_id = typeof k === 'number' ? k : parseInt(k, 10); }  // trays saved before entries carried task_id (a new task has none)
+  // The tray is drawn from its cache in load() (trayBoot); a tray this browser kept before it moved to the server is handed over there (carryOldTray).
 
   const TODAY = () => new Date(data.today + 'T12:00:00');
   const PHONE = () => window.matchMedia('(max-width: 700px)').matches;
@@ -83,8 +88,9 @@
     noteBuild(r);
     if (expired(r)) { signedOut(); throw new Error('signed out'); }
     if (!r.ok) return r.json().catch(() => null).then(j => {
-      // The message stays the status (what every toast shows); a refusal's own words ride along as `detail`.
-      const e = new Error(r.status); e.status = r.status;
+      // The message stays the status (what every toast shows); a refusal's own words ride along as `detail`, and the
+      // whole answer as `body` (a tray route's refusal carries the tray beside its words).
+      const e = new Error(r.status); e.status = r.status; e.body = j;
       if (j && typeof j.detail === 'string') e.detail = j.detail;
       if (j && j.factotum_refused === true) e.factotumRefused = true;      // Factotum's own refusal (a push address it does not post to)
       throw e;
@@ -93,15 +99,21 @@
   });
 
   // A task as it will be after Apply: its staged decision and date, and its links with the staged link
-  // changes and suggestion verdicts drawn in (overlayRel), and the editor's staged edits (stage 6). Never mutates `data`.
+  // changes and suggestion verdicts drawn in (overlayRel), and the editor's staged edits (stage 6), and Pin and Long-term,
+  // which stand beside the decision under "<id>:top" and "<id>:lt" (spoken Review stage 1). Never mutates `data`.
   function view(t) {
     const st = staged.get(t.id), due = staged.get(t.id + ':due'), rel = overlayRel(t);
+    const top = staged.get(t.id + ':top'), lt = staged.get(t.id + ':lt');
     const edits = EDIT_FIELDS.map(f => staged.get(editKey(t.id, f))).filter(Boolean);
     const merged = [...staged.values()].some(s => s.op === 'merge' && s.task_id === t.id);
-    if (!st && !due && !rel && !merged && !edits.length) return t;
-    const v = Object.assign({}, t, due ? due.fields : {}, ...edits.map(e => e.fields), st ? st.fields : {});
+    if (!st && !due && !rel && !merged && !edits.length && !top && !lt) return t;
+    const setOf = e => e && e.op === 'set' ? e.fields : {};
+    const v = Object.assign({}, t, due ? due.fields : {}, ...edits.map(e => e.fields), setOf(top), setOf(lt), st ? st.fields : {});
     if (rel) v.rel = rel;
     if (merged) v.status = 'dropped';      // a staged merge: the duplicate leaves the lists
+    if (top && top.op === 'pin_top') v.top_rank = v.top_rank || 99;
+    if (top && top.op === 'unpin') v.top_rank = null;
+    if (lt && lt.op === 'longterm') v.longterm = 1;
     if (!st) return v;
     if (st.op === 'done') v.status = 'done';
     if (st.op === 'drop') v.status = 'dropped';
@@ -396,6 +408,7 @@
     detailGen++; detailCache.forEach(d => { d.stale = true; });      // an opened task keeps what it shows until its new answer arrives
     try { pending = (await api('/api/proposals')).proposals; } catch (_) { pending = []; }
     try { summary = await api('/api/summary'); } catch (_) { summary = null; }
+    if (!tray.booted) await trayBoot(); else if (tray.carryFailed) await carryOldTray({ quiet: true });      // the tray on the server; an old tray not handed over yet is tried again
     await loadCount();
     document.getElementById('today-label').textContent = '· ' + TODAY().toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
     render();        // what is being typed survives it (the drafts)
@@ -427,15 +440,18 @@
     return !!(a && a.matches('input, textarea, select') && a.closest('#panel') && !isDraftBox(a.id));
   }
   // The app came back to the front. A newer build on the server reloads the page, or only says
-  // "Update ready" while something is typed or staged; otherwise the lists are reloaded, unless
-  // something is typed, when only the summary is polled so the box being typed in is not redrawn.
+  // "Update ready" while something is typed or a staged change has not reached the server yet; otherwise
+  // the lists are reloaded, unless something is typed, when only the summary is polled so the box being
+  // typed in is not redrawn. The tray is read again either way (another device may have staged or applied),
+  // and a change that did not arrive is sent again.
   function onReturn() {
     if (document.hidden || !document.getElementById('signedout').hidden) return;
     if (newBuild) {
-      if (typingNow() || staged.size) document.getElementById('update').hidden = false;
+      if (typingNow() || trayUnsent()) document.getElementById('update').hidden = false;
       else location.reload();
       return;
     }
+    syncTray(); trayPoll();
     // Off Review, a Review page loaded earlier is let go, so the number beside Review and on the icon is the
     // server's fresh count again (as at Refresh's end); a Review session in progress keeps its page. The icon is
     // set again even when the number did not change: a push may have put another number there in the meantime.
@@ -452,7 +468,7 @@
     // fault. Anything else (a server error, a bug in a redraw) is logged rather than lost.
     load().then(loadPush).catch(e => { if (!(e && (e.message === 'signed out' || e.network))) console.error('Reloading on return failed:', e); });
   }
-  document.getElementById('update').onclick = () => reloadKeepingDraft();      // the tray is in localStorage: it survives
+  document.getElementById('update').onclick = () => reloadKeepingDraft();      // the tray is on the server, and what has not reached it yet is in its cache: both survive
 
   // ---------- the Today summary (SPEC §8.4) ----------
   // The planner's verdict, kept by the server with what has changed since. Python decides "stale";
@@ -533,7 +549,7 @@
       if (JSON.stringify(prev.fields) === JSON.stringify(fields)) more.fsug = prev.fsug; else chipLeft(prev, true);
     }
     staged.set(key, { task_id, op, fields, label, ...more });
-    try { localStorage.setItem('factotum.staged', JSON.stringify([...staged])); } catch (_) {}
+    syncTray();
     if (!quiet) render();
   }
   // `quiet` (the editor, stage 6): no render and no toast; the editor redraws what is around its fields itself.
@@ -552,7 +568,7 @@
     root.querySelectorAll('[data-due-cancel]').forEach(b => b.onclick = () => { ui.dueOpen = null; render(); });
     root.querySelectorAll('[data-due-set]').forEach(b => b.onclick = () => { const id = +b.dataset.dueSet; const v = root.querySelector(`[data-due-form="${id}"] input`).value; if (!v) { toast('Pick a date'); return; } ui.dueOpen = null; stageDue(id, v); });
     root.querySelectorAll('[data-due-none]').forEach(b => b.onclick = () => { ui.dueOpen = null; stageDue(+b.dataset.dueNone, null); });
-    root.querySelectorAll('[data-due-clear]').forEach(b => b.onclick = () => { staged.delete(+b.dataset.dueClear + ':due'); try { localStorage.setItem('factotum.staged', JSON.stringify([...staged])); } catch (_) {} render(); });
+    root.querySelectorAll('[data-due-clear]').forEach(b => b.onclick = () => { staged.delete(+b.dataset.dueClear + ':due'); syncTray(); render(); });
   }
   function stageReminder(id) {
     const f = document.querySelector(`[data-rem-form="${id}"]`); if (!f) return;
@@ -560,7 +576,7 @@
     if (!fire_at) { toast('Pick a date and time'); return; }
     const fields = { fire_at, label: label || null, repeat: repeat || null };
     staged.set(id + ':r', { task_id: id, op: 'add_reminder', fields, label: `remind ${fmtWhen(fire_at)}${repeat ? ' · ' + repeat : ''}${label ? ' · ' + label : ''}` });
-    try { localStorage.setItem('factotum.staged', JSON.stringify([...staged])); } catch (_) {}
+    syncTray();
     ui.remOpen = null; render();
     toast('Reminder staged · press Apply in the tray to save it');
   }
@@ -568,11 +584,225 @@
     root.querySelectorAll('[data-rem-open]').forEach(b => b.onclick = () => { ui.remOpen = +b.dataset.remOpen; render(); });
     root.querySelectorAll('[data-rem-cancel]').forEach(b => b.onclick = () => { ui.remOpen = null; render(); });
     root.querySelectorAll('[data-rem-add]').forEach(b => b.onclick = () => stageReminder(+b.dataset.remAdd));
-    root.querySelectorAll('[data-rem-clear]').forEach(b => b.onclick = () => { staged.delete(+b.dataset.remClear + ':r'); try { localStorage.setItem('factotum.staged', JSON.stringify([...staged])); } catch (_) {} render(); });
+    root.querySelectorAll('[data-rem-clear]').forEach(b => b.onclick = () => { staged.delete(+b.dataset.remClear + ':r'); syncTray(); render(); });
   }
 
+  // ---------- the tray on the server (spoken Review stage 1, design §5.6) ----------
+  // `staged` is a mirror: the server's tray (`tray.base`) with this page's changes that have not been answered yet laid
+  // over it. Every write site changes `staged` and ends in syncTray(), which keeps a cache and queues one send of the
+  // difference, worked out when the send's turn comes (so changes made while one is in flight go together in the next,
+  // once each and in order). Every answer replaces the mirror. A change that did not arrive stays "not saved yet" in the
+  // bar, is in the cache, and is sent again; one the server refuses is taken back. An entry marked `local` (drawn from an
+  // old tray that could not be handed over) is never sent.
+  const TRAY_FIELDS = ['task_id', 'op', 'fields', 'expect', 'note', 'from_chat', 'label', 'ev', 'fsug', 'prop'];      // tray.SENT + tray.META: what the server keeps
+  const TRAY_MAX_OPS = 200;              // tray.MAX_OPS: a larger difference goes in several calls
+  const TRAY_UNSENT_MS = 3600000;        // a change the cache kept unsent is sent at the next start only within the hour
+  const TRAY_CACHE = 'factotum.tray';
+  const trayKey = k => /^\d+$/.test(String(k)) ? +k : String(k);      // a task's bare id is a number in `staged`, as its readers expect
+  function stable(v) {      // JSON with sorted keys: the same entry gives the same text whatever order its keys were set in
+    if (Array.isArray(v)) return '[' + v.map(x => stable(x === undefined ? null : x)).join(',') + ']';
+    if (v && typeof v === 'object') return '{' + Object.keys(v).filter(k => v[k] !== undefined).sort().map(k => JSON.stringify(k) + ':' + stable(v[k])).join(',') + '}';
+    return JSON.stringify(v === undefined ? null : v);
+  }
+  function trayCanon(e) { const o = {}; for (const f of TRAY_FIELDS) if (e && e[f] !== undefined) o[f] = e[f]; return stable(o); }
+  // {rev, entries: [[key, entry, meta], …]} → {rev, base: key → canonical entry, meta: key → meta}, in the server's order.
+  function trayFrom(t) {
+    const base = new Map(), meta = new Map();
+    for (const r of (t && t.entries) || []) {
+      if (!Array.isArray(r) || !r[1] || typeof r[1] !== 'object') continue;
+      const k = trayKey(r[0]);
+      base.set(k, trayCanon(r[1])); meta.set(k, r[2] && typeof r[2] === 'object' ? r[2] : {});
+    }
+    return { rev: t && typeof t.rev === 'number' ? t.rev : 0, base, meta };
+  }
+  // The ops that turn `from` (key → canonical entry) into `to` (the staged Map). A local entry is never sent, and its key is not deleted.
+  function trayDiff(from, to) {
+    const ops = [], have = new Set();
+    for (const [k, e] of to) {
+      have.add(String(k));
+      if (!e || typeof e !== 'object' || e.local) continue;
+      const s = trayCanon(e);
+      if (from.get(trayKey(k)) !== s) ops.push({ put: String(k), entry: JSON.parse(s) });
+    }
+    for (const k of from.keys()) if (!have.has(String(k))) ops.push({ del: String(k) });
+    return ops;
+  }
+  function trayLay(ops) { for (const o of ops) { if (o.del != null) staged.delete(trayKey(o.del)); else staged.set(trayKey(o.put), o.entry); } }
+  const traySig = () => [...staged].map(([k, e]) => String(k) + '\u0001' + (e && e.local ? 'L' : '') + trayCanon(e)).join('\u0002');
+  const trayMetaSig = () => [...tray.meta].map(([k, m]) => `${k}:${m.origin || ''}:${m.device || ''}`).join(',');
+  // Something staged here has not reached the server: a send in flight, or a difference not sent yet.
+  function trayUnsent() { return !!tray.inflight || trayDiff(tray.base, staged).length > 0; }
+  function trayCache() {
+    const unsent = trayDiff(tray.base, staged);
+    if (!unsent.length) tray.unsentAt = 0; else if (!tray.unsentAt) tray.unsentAt = Date.now();
+    try { localStorage.setItem(TRAY_CACHE, JSON.stringify({ rev: tray.rev, entries: [...tray.base].map(([k, s]) => [String(k), JSON.parse(s), tray.meta.get(k) || {}]), unsent, unsentAt: tray.unsentAt })); } catch (_) {}
+  }
+  function syncTray() {
+    trayCache();
+    if (tray.queued) return;      // a send is waiting its turn: it takes this change too
+    tray.queued = true;
+    tray.busy = tray.busy.then(sendTray, sendTray);
+  }
+  async function sendTray() {
+    tray.queued = false;
+    try {
+      for (;;) {
+        const all = trayDiff(tray.base, staged); if (!all.length) break;
+        const ops = all.slice(0, TRAY_MAX_OPS);
+        const sent = new Map(ops.map(o => o.del != null ? [o.del, null] : [o.put, trayCanon(o.entry)]));
+        tray.inflight = sent;
+        let t;
+        try { t = await api('/api/tray/ops', { method: 'POST', body: JSON.stringify({ ops, device: deviceLabel() }) }); }
+        catch (e) { tray.inflight = null; trayFail(e, sent); break; }
+        tray.inflight = null; tray.failed = '';
+        trayAnswer(t, sent);
+        if (all.length <= TRAY_MAX_OPS) break;
+      }
+    } finally { tray.inflight = null; trayCache(); trayBar(); }
+  }
+  // The server's tray (an answer to any tray route) replaces `base`; this page's changes not covered by `sent` (the ops
+  // this answer acknowledges) are laid over it again. A read older than the one shown is ignored, unless `force` (the
+  // first read, whatever the cache held). Redrawn only when what is drawn changed, after the press in progress, and
+  // only the tray while something is typed; `quiet`: not at all (the caller draws).
+  function trayAnswer(t, sent, how) {
+    const o = how || {};
+    if (!t || typeof t !== 'object' || typeof t.rev !== 'number' || t.same || !Array.isArray(t.entries)) return;
+    if (t.rev < tray.rev && !o.force) return;
+    const pending = trayDiff(tray.base, staged).filter(op => {
+      const k = op.del != null ? op.del : op.put;
+      return !(sent && sent.has(k) && sent.get(k) === (op.del != null ? null : trayCanon(op.entry)));
+    });
+    const locals = [...staged].filter(([, e]) => e && e.local);
+    const was = traySig(), wasMeta = trayMetaSig();
+    const nt = trayFrom(t);
+    tray.rev = nt.rev; tray.base = nt.base; tray.meta = nt.meta;
+    staged = new Map([...nt.base].map(([k, s]) => [k, JSON.parse(s)]));      // own copies: an entry changed in place is still a change (stageProposal)
+    trayLay(pending);
+    for (const [k, e] of locals) if (!staged.has(k)) staged.set(k, e);
+    trayCache();
+    if (!o.quiet) trayRedraw(was, wasMeta);
+  }
+  function trayRedraw(was, wasMeta) {
+    const same = traySig() === was;
+    if (same && trayMetaSig() === wasMeta) { trayBar(); return; }
+    afterPress('tray', () => {
+      if (same || typingNow()) { renderTray(); bottomRule(); placePageBar(); placeReviewBar(); }
+      else render();
+    });
+  }
+  // A send that failed. Refused (4xx): the change it names (else every change it carried) is taken back, unless it was
+  // changed again since, and the toast says why; the rest goes again. Lost (no network, a server error, signed out): it
+  // stays, "not saved yet" in the bar, and is sent again on the next change, on return, when the network is back, or in 15 s.
+  function trayFail(e, sent) {
+    if (e && e.status >= 400 && e.status < 500) {
+      const was = traySig(), wasMeta = trayMetaSig();
+      const bad = String(e.detail || '').split(': ')[0];
+      const back = sent.has(bad) ? [bad] : [...sent.keys()];
+      for (const k of back) {
+        const cur = staged.get(trayKey(k));
+        if ((cur && !cur.local ? trayCanon(cur) : null) !== sent.get(k)) continue;      // changed again since: that change goes next
+        const b = tray.base.get(trayKey(k));
+        if (b == null) staged.delete(trayKey(k)); else staged.set(trayKey(k), JSON.parse(b));
+      }
+      tray.failed = '';
+      toast('Not staged: ' + (e.detail || e.message));
+      if (e.body && e.body.tray) trayAnswer(e.body.tray, null, { quiet: true });
+      trayRedraw(was, wasMeta);
+      if (back.length < sent.size) syncTray();
+      return;
+    }
+    tray.failed = e && e.message === 'signed out' ? 'signed out' : 'not saved yet';
+    if (!tray.retry && tray.failed !== 'signed out') tray.retry = setTimeout(() => { tray.retry = null; syncTray(); }, 15000);
+  }
+  window.addEventListener('online', () => syncTray());
+  // The server's tray now (on return, when the tray opens); `force` and `quiet` as trayAnswer's. Queued behind any send.
+  function trayPoll(how) {
+    const o = how || {};
+    const run = async () => { try { trayAnswer(await api('/api/tray' + (o.force ? '' : '?since=' + tray.rev)), null, o); } catch (_) {} };
+    tray.busy = tray.busy.then(run, run);
+    return tray.busy;
+  }
+  // Apply through the server's tray: every change staged here reaches it first, then one batch (tray.apply) of `keys` (all
+  // when none), refused with 409 when a row changed after the revision this page shows. The answer's tray replaces the
+  // mirror without a redraw (the caller reloads the lists). Never cached or retried.
+  async function trayApply(keys, opts) {
+    for (let b = null; b !== tray.busy;) { b = tray.busy; await b; }
+    if (tray.carryFailed) throw new Error('the changes this browser kept before are not in the shared tray yet');
+    if (trayUnsent()) throw new Error('some changes are not saved yet; Apply again when the connection is back');
+    const o = opts || {};
+    let res;
+    try {
+      res = await api('/api/tray/apply', { method: 'POST', body: JSON.stringify({ keys: keys ? [...keys].map(String) : null, seen_rev: tray.rev, source: o.source || 'ui', finish: !!o.finish, whole_tray: !keys }) });
+    } catch (e) { if (e.body && e.body.tray) trayAnswer(e.body.tray, null); throw e; }
+    trayAnswer(res.tray, null, { quiet: true });
+    return res;
+  }
+  // The first read (in load()): the cached tray is drawn and what it kept unsent is sent (within the hour; older is
+  // dropped and said), then the server's tray is read whatever its revision, then this browser's old tray is handed over.
+  async function trayBoot() {
+    tray.booted = true;
+    let c = null;
+    try { c = JSON.parse(localStorage.getItem(TRAY_CACHE) || 'null'); } catch (_) { c = null; }
+    if (c && typeof c === 'object' && Array.isArray(c.entries)) {
+      const t = trayFrom(c);
+      tray.rev = t.rev; tray.base = t.base; tray.meta = t.meta;
+      staged = new Map([...t.base].map(([k, s]) => [k, JSON.parse(s)]));
+      const unsent = (Array.isArray(c.unsent) ? c.unsent : []).filter(o => o && typeof o === 'object' && (typeof o.del === 'string' || (typeof o.put === 'string' && o.entry && typeof o.entry === 'object')));
+      if (unsent.length && Date.now() - (+c.unsentAt || 0) < TRAY_UNSENT_MS) { trayLay(unsent); tray.unsentAt = +c.unsentAt; }
+      else if (unsent.length) toast(`${unsent.length} change${unsent.length === 1 ? '' : 's'} staged here more than an hour ago never reached the server and ${unsent.length === 1 ? 'was' : 'were'} dropped`);
+    }
+    try { const b = JSON.parse(localStorage.getItem('factotum.staged.backup') || 'null'); if (b && Date.now() - (+b.at || 0) > 30 * 86400000) localStorage.removeItem('factotum.staged.backup'); } catch (_) {}
+    syncTray();
+    await trayPoll({ force: true, quiet: true });
+    await carryOldTray({ quiet: true });
+  }
+  // A tray this browser kept before the tray moved to the server (localStorage['factotum.staged']) is handed over once
+  // (tray.carry: what was carried before is skipped, a key another device staged is kept out) and then kept 30 days as
+  // 'factotum.staged.backup'. When it cannot be, its entries are drawn here as `local` (never sent), Apply waits, the tray
+  // says why, and the next load or return tries again.
+  function carryOldTray(how) {
+    const o = how || {};
+    const run = async () => {
+      let old = null;
+      try { old = JSON.parse(localStorage.getItem('factotum.staged') || 'null'); } catch (_) { old = []; }
+      for (const [k, e] of [...staged]) if (e && e.local && e.carried) staged.delete(k);      // an earlier try's; drawn again below if it fails again
+      if (old === null) { tray.carryFailed = ''; return; }
+      const entries = Array.isArray(old) ? old : [];
+      let r = null;
+      if (entries.length) {
+        let id = '';
+        try { id = localStorage.getItem('factotum.carryId') || ''; } catch (_) {}
+        if (!/^[A-Za-z0-9_:.-]{1,120}$/.test(id)) {
+          id = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+          try { localStorage.setItem('factotum.carryId', id); } catch (_) {}
+        }
+        try { r = await api('/api/tray/carry', { method: 'POST', body: JSON.stringify({ carry_id: id, entries, device: deviceLabel() }) }); }
+        catch (e) {
+          tray.carryFailed = e.detail || (e.network ? 'no connection' : e.message);
+          for (const p of entries) {
+            if (!Array.isArray(p) || !p[1] || typeof p[1] !== 'object') continue;
+            const k = trayKey(p[0]);
+            if (!staged.has(k)) staged.set(k, Object.assign({}, p[1], { local: true, carried: true }));
+          }
+          if (!o.quiet) { renderTray(); bottomRule(); }
+          return;
+        }
+      }
+      try { localStorage.setItem('factotum.staged.backup', JSON.stringify({ at: Date.now(), entries })); localStorage.removeItem('factotum.staged'); } catch (_) {}
+      tray.carryFailed = '';
+      if (!r) { if (!o.quiet) renderTray(); return; }
+      trayAnswer(r, null, o);
+      const n = r.carried || 0, out = r.kept_out || [];
+      const kept = out.length ? `${out.length} kept out: ${out[0].why}` : '';
+      if (n) toast(`${n} staged change${n === 1 ? '' : 's'} from this browser ${n === 1 ? 'is' : 'are'} in the tray on every device now` + (kept ? ' · ' + kept : ''), false, { holdMs: 12000 });
+      else if (out.length) toast(`${out.length} staged change${out.length === 1 ? '' : 's'} from this browser ${out.length === 1 ? 'was' : 'were'} kept out: ${out[0].why}`, false, { holdMs: 12000 });
+    };
+    tray.busy = tray.busy.then(run, run);
+    return tray.busy;
+  }
+  function persistStaged() { syncTray(); }
+
   // ---------- staging ----------
-  function persistStaged() { try { localStorage.setItem('factotum.staged', JSON.stringify([...staged])); } catch (_) {} }
   // A filing chip's staged value (`fsug`: its evidence) has left the tray: the "accepted" verdict staged with it goes
   // too, or, when another value took its place (`replaced`), becomes a dismissal, so Apply never records a
   // suggestion as accepted that was not what was chosen.
@@ -589,9 +819,10 @@
   }
   function stage(id, op, fields, label) {
     staged.set(id, { task_id: id, op, fields: fields || {}, label });
-    try { localStorage.setItem('factotum.staged', JSON.stringify([...staged])); } catch (_) {}
+    syncTray();
     render();
   }
+  function unstage(key) { staged.delete(key); syncTray(); render(); }
   function act(id, kind, extra) {
     const t = view(byId(id) || { id });
     const ops = {
@@ -602,53 +833,44 @@
       nextweek: () => stageDue(id, isoPlus(7 - ((TODAY().getDay() + 6) % 7))),
       setdue: () => stageDue(id, extra),
       cleardue: () => stageDue(id, null),
-      top: () => t.top_rank ? stage(id, 'unpin', {}, 'unpinned') : stage(id, 'pin_top', {}, 'pinned'),
-      longterm: () => stage(id, 'set', { longterm: t.longterm ? 0 : 1 }, t.longterm ? 'not long-term' : 'long-term'),
+      // Pin and Long-term stand beside the decision (spoken Review stage 1): a Review card stays where it is, and a bare
+      // id stays the task's decision alone. Pressed back to what the server holds, the staged change goes instead.
+      top: () => { const s = byId(id) || {}; if (!t.top_rank === !s.top_rank) stageExtra(id + ':top', id, t.top_rank ? 'unpin' : 'pin_top', {}, t.top_rank ? 'unpinned' : 'pinned'); else unstage(id + ':top'); },
+      longterm: () => { const s = byId(id) || {}, want = t.longterm ? 0 : 1; if (!!s.longterm !== !!want) stageExtra(id + ':lt', id, 'set', { longterm: want }, want ? 'long-term' : 'not long-term'); else unstage(id + ':lt'); },
       keep: () => stage(id, 'keep', {}, 'kept'),
       due: () => stageDue(id, extra),
       reopen: () => stage(id, 'reopen', {}, 'reopened'),
     };
     (ops[kind] || (() => {}))();
   }
-  // keys: the staged entries to apply (the tray's dropdown); undefined = every one
+  // keys: the staged entries to apply (the tray's dropdown); undefined = every one. The server's tray applies them as one
+  // batch (tray.apply: new tasks first, never the label or `ev`, a chat create made from its stored proposal).
   async function applyAll(keys) {
-    const picked = keys ? [...staged].filter(([k]) => keys.has(String(k))) : [...staged];
-    // New tasks first: the batch resolves a link's ref to a new task only after that task is made.
-    const ordered = picked.filter(([, s]) => s.op === 'create').concat(picked.filter(([, s]) => s.op !== 'create'));
-    const changes = ordered.map(([, s]) => {      // what the server takes: never the label or `ev`
-      const c = { task_id: s.task_id, op: s.op, fields: s.fields };
-      if (s.expect) c.expect = s.expect;
-      if (s.note) c.note = s.note;
-      if (s.from_chat) c.from_chat = s.from_chat;      // the server makes the stored proposal, never these fields
-      return c;
-    });
+    const picked = (keys ? [...staged].filter(([k]) => keys.has(String(k))) : [...staged]).filter(([, s]) => !s.local);
     const chatMids = [...new Set(picked.map(([, s]) => s.from_chat && s.from_chat.message_id).filter(Boolean))];
-    if (!changes.length) return;
+    if (!picked.length) return;
     // A Done or Drop on a task others hang on, with no outcome said yet: the toast offers to say one (design §8.5).
     // Read before the request, while the task is still in the open list with its links.
     const say = picked.map(([, s]) => s).filter(s => (s.op === 'done' || s.op === 'drop') && !(s.fields || {}).outcome && hangsOn(byId(s.task_id)))
       .map(s => sayInfo(byId(s.task_id)));
     try {
-      const res = await api('/api/batches/apply', { method: 'POST', body: JSON.stringify({ source: ui.tab === 'review' ? 'review' : 'ui', changes }) });
+      const res = await trayApply(keys ? picked.map(([k]) => String(k)) : null, { source: ui.tab === 'review' ? 'review' : 'ui', finish: ui.tab === 'review' });
       lastBatch = res.batch_id;
       // What came from a conversation is remembered as applied (a skipped one stays stageable; a made create is
       // marked by the server, which knows whether it was made).
       const skippedIds = new Set((res.skipped || []).map(k => k.task_id).filter(x => x != null));
       const fromProps = picked.filter(([, s]) => s.prop && s.op !== 'create' && !(s.task_id != null && skippedIds.has(s.task_id)));
       if (fromProps.length) { fromProps.forEach(([, s]) => appliedProps.set(s.prop, res.batch_id)); persistApplied(); }
-      if (keys) { picked.forEach(([k]) => staged.delete(k)); persistStaged(); } else { staged = new Map(); try { localStorage.removeItem('factotum.staged'); } catch (_) {} }
-      ui.trayOpen = false; ui.trayOff = new Set();
+      ui.trayOpen = false; ui.trayOff = new Set();      // the answer's tray is the mirror now (trayApply)
       ui.sel.clear(); logData = null;
       if (ui.tab !== 'review') review = null;   // a stale Review page would still show the old due date; re-fetch on the next visit
       await load();
-      // Only edits from a Review card's editor (its own Apply: no decision and no verdict among them): the queue is
-      // read again and the card stays to be decided.
-      const editsOnly = !!keys && !picked.some(([k, s]) => typeof k === 'number' || s.op === 'judge_evidence');
-      if (ui.tab === 'review' && editsOnly) await loadReview();
+      // Only edits from a Review card's editor (its own Apply: no decision and no verdict among them) are not a review
+      // (the server's call, tray.finishes): the queue is read again and the card stays to be decided.
+      if (ui.tab === 'review' && !res.finished) await loadReview();
       else if (ui.tab === 'review') {
-        // The decisions are in; today counts as reviewed (phase 2 skips the push), and the next
+        // The decisions are in; the server marked today reviewed (phase 2 skips the push), and the next
         // page waits for a click instead of appearing under the user's hands.
-        await api('/api/review/finish', { method: 'POST' });
         await loadReview();
         ui.reviewPaused = true; render();
       }
@@ -656,7 +878,9 @@
       // A tray ref (m<message>-<index>) is the page's own name for a new task: never shown.
       const why = String(res.skipped.length ? res.skipped[0].why : '').replace(/no task made in this batch has ref 'm\d+-\d+'/, 'the new task it links to was not in this Apply');
       // Nothing applied: the server kept no batch (batch_id null), so the toast says why and offers no Undo.
-      const msg = !res.applied && !(res.created || []).length && res.skipped.length
+      const msg = !res.applied && !(res.created || []).length && !res.skipped.length && (res.gone || []).length
+        ? 'Nothing applied · those changes were applied or taken back on another device'
+        : !res.applied && !(res.created || []).length && res.skipped.length
         ? `Nothing applied · ${res.skipped.length === 1 ? 'skipped' : res.skipped.length + ' skipped'}: ${why}`
         : `${res.applied} change${res.applied === 1 ? '' : 's'} applied` + (res.skipped.length ? ` · ${res.skipped.length} skipped: ${why}` : '');
       const closed = say.filter(x => !res.skipped.some(k => k.task_id === x.id));      // a skipped Done closed nothing
@@ -664,7 +888,10 @@
       if (closed.length) toast(msg, true, { buttons: [{ text: 'Say how it went', attrs: `data-say="${closed[0].id}"`, run: () => askOutcome(closed[0].id) }], holdMs: 20000 });
       else toast(msg, true);
       if ((res.ripple_queued || []).length) watchRipple(res.batch_id);
-    } catch (e) { toast('Apply failed: ' + e.message); }
+    } catch (e) {
+      if (e.status === 409) toast('Not applied: the tray changed on another device since it was shown. Look at it and Apply again.');
+      else toast('Apply failed: ' + (e.detail || e.message));
+    }
   }
   // opts: {buttons: [{text, attrs, run}], holdMs, batch}: buttons after Undo, how long the toast stays (8 s
   // otherwise), and the batch its Undo names (the latest Apply's otherwise).
@@ -836,7 +1063,8 @@
       { text: 'Undo', attrs: `data-ripple-undo="${batch}"`, run: () => undoAndSay(batch) }] });
   }
   // The sign-in has expired (see `expired`): a full-screen "Sign in again" over the whole app, whose
-  // button reloads at the same address. The tray is in localStorage, so it survives the reload. The rest
+  // button reloads at the same address. The tray is on the server, and a change that has not reached it is in the
+  // tray's cache (localStorage['factotum.tray']) and is sent after the reload, so it survives. The rest
   // of the app is made inert so nothing behind the screen can be reached with Tab.
   function signedOut() {
     const el = document.getElementById('signedout');
@@ -866,7 +1094,12 @@
     if (c.op === 'add_reminder') return id + ':r';
     if (c.op === 'judge_evidence') return 'e:' + f.evidence_id;
     if (c.op === 'create') return 'new:' + (suffix || Date.now());      // a task that does not exist yet has no id to key it by
-    return suffix ? `${id}:${suffix}` : id;
+    if (suffix) return `${id}:${suffix}`;
+    // Pin and Long-term stand beside the decision (spoken Review stage 1; review_decide.stage_key): only a decision keeps the bare id.
+    const only = k => Object.keys(f).length === 1 && k in f;
+    if (c.op === 'pin_top' || c.op === 'unpin' || (c.op === 'set' && only('top_rank'))) return id + ':top';
+    if (c.op === 'longterm' || (c.op === 'set' && only('longterm'))) return id + ':lt';
+    return id;
   }
   function cut60(s) { s = String(s == null ? '' : s); return s.length > 60 ? s.slice(0, 60) + '…' : s; }
   // Read with the source task in front: "Task-12 now waits on Task-14".
@@ -1751,8 +1984,8 @@
   // The task page's pinned bar sits above the tray when the tray shows (like the bulk bar on a desktop).
   function placePageBar() {
     const pb = document.querySelector('#panel .pagebar'); if (!pb) return;
-    const tray = document.getElementById('tray');
-    pb.style.bottom = tray.classList.contains('on') ? tray.offsetHeight + 'px' : '';
+    const trayEl = document.getElementById('tray');
+    pb.style.bottom = trayEl.classList.contains('on') ? trayEl.offsetHeight + 'px' : '';
   }
   const dueDays = x => x.due ? fmtDue(x.due).days : null;
   // Shown wherever a list of open tasks would be, when there are none: how to add a first task (stage 6).
@@ -1963,10 +2196,10 @@
         <div class="links">${x.source_link ? `<a href="${esc(x.source_link)}" target="_blank" rel="noopener">${x.source === 'Plaud' ? 'Plaud note' : 'Source'}</a>` : ''}</div>
         <div class="big"><button class="done" data-rv="done">Done <kbd>d</kbd></button><button data-rv="keep">Keep <kbd>k</kbd></button><button class="later" data-rv="later">Later <kbd>s</kbd></button><button class="drop" data-rv="drop">Drop <kbd>x</kbd></button></div>
         <div class="later-menu ${ui.laterOpen ? 'on' : ''}"><span class="hint">Comes back on:</span><button class="btn small" data-rv="tomorrow">Tomorrow</button><button class="btn small" data-rv="fri">Friday</button><button class="btn small" data-rv="nextweek">Next week</button><button class="btn small" data-rv="pickdate">📅 ${ui.datePick ? 'Hide date' : 'Pick a date…'}</button></div>
-        ${ui.laterOpen && ui.datePick ? `<div class="remform datepick"><label for="rv-date" class="hint">Comes back on</label><input type="date" id="rv-date" min="${data.today}" value="${isoPlus(1)}" aria-label="Pick a date"><button class="btn small primary" id="rv-date-go">Use this date</button></div>` : ''}
+        ${ui.laterOpen && ui.datePick ? `<div class="remform datepick"><label for="rv-date" class="hint">Comes back on</label><input type="date" id="rv-date" min="${isoPlus(1)}" value="${isoPlus(1)}" aria-label="Pick a date"><button class="btn small primary" id="rv-date-go">Use this date</button></div>` : ''}
         ${(items[0].evidence || []).filter(e => e.change && !staged.has('e:' + e.id)).map(e => e.by === 'ripple' ? rippleLineHtml(e, x.id) : e.change.op === 'follow_thread' ? (suggestionStaged(e.id) ? '' : mailAboutHtml(e, x.id)) : `<div class="extra"><span class="chip">Planner suggests</span><span>${esc(e.label)}${e.reason ? ` <span class="hint" style="margin:0">— ${esc(e.reason)}</span>` : ''}</span><button class="btn small primary" data-rv-accept="${e.id}">Accept</button></div>`).join('')}
         ${linkSuggestionsHtml(items[0])}
-        <div class="extra"><button class="btn small" data-rv="top">★ Pin to Top</button><button class="btn small" data-rv="longterm">Mark long-term (never fades)</button>${dueForm(x.id, x.due)}${reminderForm(x.id)}</div>
+        <div class="extra"><button class="btn small" data-rv="top" aria-pressed="${!!x.top_rank}">${x.top_rank ? '★ On Top · unpin' : '★ Pin to Top'}</button><button class="btn small" data-rv="longterm" aria-pressed="${!!x.longterm}">${x.longterm ? 'Long-term · clear' : 'Mark long-term (never fades)'}</button>${dueForm(x.id, x.due)}${reminderForm(x.id)}</div>
         ${reviewPlaceHtml(x.id)}
       </div>
       <div class="note">Keep = no change; the item will not be asked about again until something changes. Later = hidden until the date you pick, then back in Review and Today. Decisions stage into the tray; Apply writes them all at once.</div></div>`;
@@ -2255,7 +2488,7 @@
     const label = p.label || p.op;
     if (['done', 'drop'].includes(p.op)) stage(p.task_id, p.op, p.fields || {}, changeWords(p) || label);      // an outcome rides along
     else if (p.op === 'reopen') stage(p.task_id, 'reopen', {}, 'reopened');      // a closed task a search found
-    else if (['pin_top', 'longterm'].includes(p.op)) stage(p.task_id, p.op, {}, label);
+    else if (['pin_top', 'longterm'].includes(p.op)) stageExtra(propKey(p, mid, i), p.task_id, p.op, {}, label);      // "<id>:top" / "<id>:lt": beside, never the decision
     else if (p.op === 'add_reminder') stageExtra(p.task_id + ':r', p.task_id, 'add_reminder', p.fields, label);
     else if (['link', 'unlink', 'merge', 'add_note'].includes(p.op)) stageChange(p, label, {}, 'c' + mid + '-' + i);
     else if (p.op === 'set') stageExtra(propKey(p, mid, i), p.task_id, 'set', p.fields, setWords(p.fields) || label, { expect: textExpect(p.task_id, p.fields) });
@@ -2925,11 +3158,29 @@
       <p style="margin-top:16px" class="hint">Every control saves when it changes. <button class="btn small" id="settings-save">Save now</button> <span id="settings-state"></span></p>
     </div>`;
   }
+  // The tray bar's count, with "not saved yet" when a change did not reach the server, and Apply held while an old
+  // tray waits to be handed over. Changed only when its text changes (it sits inside the bar's button).
+  function trayBar() {
+    const el = document.getElementById('tray-count'); if (!el) return;
+    const n = staged.size;
+    const why = tray.carryFailed ? 'not in the shared tray yet' : tray.failed && trayUnsent() ? (tray.failed === 'signed out' ? 'not saved yet · sign in again' : 'not saved yet') : '';
+    const html = `${n} change${n === 1 ? '' : 's'}` + (why ? ` <span class="unsent">· ${esc(why)}</span>` : '');
+    if (el.innerHTML !== html) el.innerHTML = html;
+    const ap = document.getElementById('tray-apply');
+    if (ap) { ap.disabled = !!tray.carryFailed; ap.title = tray.carryFailed ? 'The changes this browser kept before could not be handed over yet: ' + tray.carryFailed : ''; }
+  }
+  // Who staged a row, when not this browser: another device, or Claude (a connector or a skill).
+  function trayFromWords(k) {
+    const s = staged.get(k), m = tray.meta.get(k) || {};
+    if (s && s.local) return ' · kept in this browser, not handed over yet';
+    if (m.origin === 'connector' || m.origin === 'skill') return ' · from Claude';
+    return m.device && m.device !== deviceLabel() ? ' · from ' + m.device : '';
+  }
   function renderTray() {
     const n = staged.size;
     document.getElementById('tray').classList.toggle('on', n > 0);
     document.body.classList.toggle('tray-on', n > 0);
-    document.getElementById('tray-count').textContent = `${n} change${n === 1 ? '' : 's'}`;
+    trayBar();
     document.getElementById('tray-list').textContent = [...staged.values()].map(s => (s.task_id ? `Task-${s.task_id} ` : '') + s.label).join(' · ');
     const open = ui.trayOpen && n > 0;
     const tg = document.getElementById('tray-toggle'); tg.setAttribute('aria-expanded', open); tg.querySelector('.caret').textContent = open ? '▾' : '▴';
@@ -2937,8 +3188,9 @@
     document.body.classList.toggle('tray-open', open);
     if (!open) { panel.innerHTML = ''; return; }
     const picked = [...staged].filter(([k]) => !ui.trayOff.has(String(k))).length;
-    panel.innerHTML = `<div class="rows">${[...staged].map(([k, s]) => `<label><input type="checkbox" data-tray-key="${esc(String(k))}" ${ui.trayOff.has(String(k)) ? '' : 'checked'}><span>${s.task_id ? `<span class="code">Task-${s.task_id}</span> ${esc((byId(s.task_id) || {}).name || '')}` : ''}</span><span class="what">${esc(s.label)}</span></label>`).join('')}</div>
-      <div class="acts"><span class="hint">${picked} of ${n} selected</span><button class="btn small" id="tray-discard-sel" ${picked ? '' : 'disabled'}>Discard selected</button><button class="btn small primary" id="tray-apply-sel" ${picked ? '' : 'disabled'}>Apply selected</button></div>`;
+    panel.innerHTML = `<div class="rows">${[...staged].map(([k, s]) => `<label><input type="checkbox" data-tray-key="${esc(String(k))}" ${ui.trayOff.has(String(k)) ? '' : 'checked'}><span>${s.task_id ? `<span class="code">Task-${s.task_id}</span> ${esc((byId(s.task_id) || {}).name || '')}` : ''}</span><span class="what">${esc(s.label)}<span class="from">${esc(trayFromWords(k))}</span></span></label>`).join('')}</div>
+      ${tray.carryFailed ? `<p class="hint bad">The changes this browser kept before the tray moved to the server could not be handed over (${esc(tray.carryFailed)}). Apply waits; they are tried again on the next return.</p>` : ''}
+      <div class="acts"><span class="hint">${picked} of ${n} selected</span><button class="btn small" id="tray-discard-sel" ${picked ? '' : 'disabled'}>Discard selected</button><button class="btn small primary" id="tray-apply-sel" ${picked && !tray.carryFailed ? '' : 'disabled'}>Apply selected</button></div>`;
     panel.querySelectorAll('[data-tray-key]').forEach(ck => ck.onchange = () => { if (ck.checked) ui.trayOff.delete(ck.dataset.trayKey); else ui.trayOff.add(ck.dataset.trayKey); renderTray(); });
     const sel = () => new Set([...staged.keys()].map(String).filter(k => !ui.trayOff.has(k)));
     document.getElementById('tray-apply-sel').onclick = () => applyAll(sel());
@@ -3901,8 +4153,8 @@
   }
   function placeReviewBar() {
     const big = document.querySelector('#panel .review .card .big'); if (!big) return;
-    const tray = document.getElementById('tray');
-    big.style.bottom = PHONE() && tray.classList.contains('on') ? tray.offsetHeight + 'px' : '';
+    const trayEl = document.getElementById('tray');
+    big.style.bottom = PHONE() && trayEl.classList.contains('on') ? trayEl.offsetHeight + 'px' : '';
   }
   // A due chip's click cycles the date: tomorrow, Friday, in a week, none (the panel's, and a row's chips redrawn in place).
   function wireDueChips(root) {
@@ -3964,7 +4216,7 @@
     if (bulk) {
       bulk.classList.toggle('on', ui.sel.size > 0); const n = document.getElementById('bulk-n'); if (n) n.textContent = ui.sel.size;
       // On a phone the tray slides away while rows are selected (app.css), so the bar sits at the bottom edge.
-      const tray = document.getElementById('tray'); bulk.style.bottom = !PHONE() && tray.classList.contains('on') ? (tray.offsetHeight + 8) + 'px' : '';
+      const trayEl = document.getElementById('tray'); bulk.style.bottom = !PHONE() && trayEl.classList.contains('on') ? (trayEl.offsetHeight + 8) + 'px' : '';
     }
     document.body.classList.toggle('bulk-on', ui.sel.size > 0 && !!bulk);      // Chat has no bulk bar: what is selected there is what a prompt carries
     panel.querySelectorAll('[data-proj]').forEach(b => b.addEventListener('click', () => { const k = 'projects:' + b.dataset.proj; setFold(k, !folded(k, true)); render(); }));
@@ -4136,7 +4388,7 @@
     if (cmd) typing(cmd, 'cmd', cmdSend);
     document.getElementById('tray-apply').onclick = () => applyAll();
     document.getElementById('tray-discard').onclick = () => discardStaged();
-    document.getElementById('tray-toggle').onclick = () => { ui.trayOpen = !ui.trayOpen; renderTray(); placePageBar(); placeReviewBar(); };
+    document.getElementById('tray-toggle').onclick = () => { ui.trayOpen = !ui.trayOpen; renderTray(); placePageBar(); placeReviewBar(); if (ui.trayOpen) trayPoll(); };
     const save = document.getElementById('settings-save'); if (save) save.onclick = saveSettings;
     const arm = document.getElementById('conn-arm'); if (arm) arm.onclick = async () => { try { await api('/api/connectors/arm', { method: 'POST' }); await loadSettings(); toast('A new connector may be approved for 10 minutes'); } catch (e) { toast('Failed: ' + e.message); } };
     panel.querySelectorAll('[data-conn-revoke]').forEach(b => b.onclick = async () => {
@@ -4193,7 +4445,7 @@
     const top = openOnes().filter(x => x.top_rank).sort((a, b) => a.top_rank - b.top_rank).map(x => x.id);
     let from = top.indexOf(fromId); if (from < 0) { top.push(fromId); from = top.length - 1; }
     const [m] = top.splice(from, 1); top.splice(top.indexOf(toId), 0, m);
-    top.forEach((id, i) => stage(id, 'set', { top_rank: i + 1 }, 'Top ' + (i + 1)));
+    top.forEach((id, i) => stageExtra(id + ':top', id, 'set', { top_rank: i + 1 }, 'Top ' + (i + 1)));
   }
   function reviewAct(kind, dateStr) {
     const items = review.items.filter(i => !staged.has(i.task.id)); if (!items.length) return;
@@ -4205,7 +4457,11 @@
     // with Done or Drop is the task's outcome (design §8.5: appended to the text as well, it would ripple
     // twice). With Keep or Later it is staged beside the decision as add_note under "<id>:note": the server
     // appends it, dated, to the context as it is at Apply, so nothing typed here writes over a newer text.
+    if (!['done', 'drop', 'keep', 'tomorrow', 'fri', 'nextweek', 'date'].includes(kind) || (kind === 'date' && !dateStr)) return;
+    if (kind === 'date' && dateStr <= data.today) { toast('Pick a day after today'); return; }      // Later is a day to come (the rule refuses today too)
     const text = ui.rvNote.id === id ? ui.rvNote.text.trim() : '';
+    // Shut before the decision is staged: its render draws the next card, which must not open with this one's Later menu.
+    ui.laterOpen = false; ui.datePick = false; ui.rvNote = { id: null, text: '' };
     const later = (day, label) => stage(id, 'set', { snoozed_until: day, last_reviewed_at: data.today }, 'later · back ' + label);
     const closes = kind === 'done' || kind === 'drop';
     // An outcome is at most OUTCOME_MAX characters (the server cuts there): a longer note is never cut, it is
@@ -4218,14 +4474,12 @@
     else if (kind === 'tomorrow') later(isoPlus(1), 'tomorrow');
     else if (kind === 'fri') later(nextFri(), 'Friday');
     else if (kind === 'nextweek') later(isoPlus(7 - ((TODAY().getDay() + 6) % 7)), 'next week');
-    else if (kind === 'date') { if (!dateStr) return; later(dateStr, dateStr); }
-    else return;
+    else later(dateStr, dateStr);
     if (text && (!closes || long)) stageChange({ task_id: id, op: 'add_note', fields: { text } }, '');
     if (long) toast(`The note is longer than an outcome (${OUTCOME_MAX} characters), so it goes to the task's text instead`);
     // The flags that brought the card here (a thread update, a planner proposal) are judged in the
     // same batch, so the card does not come back tomorrow for the same reason.
     (items[0].evidence || []).forEach(e => { if (!staged.has('e:' + e.id)) stageJudge(e.id, id, 'reviewed', (e.kind === 'proposal' ? 'suggestion seen' : 'thread seen')); });
-    ui.laterOpen = false; ui.datePick = false; ui.rvNote = { id: null, text: '' };
   }
   async function sendPrompt(text) {
     if (!text) return;

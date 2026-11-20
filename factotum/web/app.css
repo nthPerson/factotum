@@ -390,6 +390,9 @@ body.bulk-on main { padding-bottom: 190px; }
 .tray .count { font-family: var(--mono); font-weight: 500; }
 .tray .list { flex: 1; min-width: 0; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tray .caret { color: var(--muted); font-size: 12px; }
+.tray .count .unsent { color: var(--warn); font-family: var(--sans); font-weight: 500; font-size: 12px; }   /* a change that has not reached the server's tray yet */
+.tray-panel .what .from { color: var(--muted); font-style: italic; }   /* "· from <device>": a row another device or Claude staged */
+.tray-panel .hint.bad { color: var(--crit); margin: 6px 4px 0; }
 .tray-panel { flex-basis: 100%; border-top: 1px solid var(--line); margin-top: 6px; padding-top: 8px; }
 .tray-panel .rows { max-height: 38vh; overflow: auto; display: flex; flex-direction: column; gap: 2px; }
 .tray-panel label { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center; padding: 6px 4px; border-radius: 6px; font-size: 13px; cursor: pointer; }

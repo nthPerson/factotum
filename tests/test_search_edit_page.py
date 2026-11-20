@@ -60,9 +60,40 @@ def test_reviews_editor_is_the_one_editor_and_its_redraw_waits_for_the_press():
     assert "loadDetail(id, undefined, id === peek)" in JS and "peek ? '?peek=1' : ''" in JS
     press = JS[JS.index("afterPress('meta:' + id, () => {"):JS.index("document.querySelectorAll(`#panel [data-edstaged=\"${id}\"]`)")]
     assert all(w in press for w in (".review .card[data-id=\"${id}\"] > h2", "[data-rvwhy=\"${id}\"]", "[data-rvsub=\"${id}\"]"))
-    assert "const editsOnly = !!keys && !picked.some(([k, s]) => typeof k === 'number' || s.op === 'judge_evidence');" in JS
+    assert "if (ui.tab === 'review' && !res.finished) await loadReview();" in JS      # the server says whether an Apply was a review (tray.finishes)
+    assert "editsOnly" not in JS
     assert JS.index("const pickers = {}, pickOpts = {};") < JS.index("pickers.sglink = ")      # a const used above its line stops the page at load
     assert "'why_now'" in re.search(r"const EDIT_FIELDS = \[([^\]]*)\]", JS).group(1)
+
+
+def _body(name):
+    """The text of `function <name>` up to the next top-level function of the page script."""
+    i = JS.index(f"function {name}(")
+    j = JS.find("\n  function ", i + 1)
+    k = JS.find("\n  async function ", i + 1)
+    ends = [x for x in (j, k) if x > 0]
+    return JS[i:min(ends) if ends else len(JS)]
+
+
+def test_the_tray_is_the_servers():
+    """The page's staged Map mirrors the server's tray (spoken Review stage 1, design §5.6): nothing writes the old
+    local tray, only the carry reads it, the ops route is called from one place, and Pin and Long-term stand beside."""
+    assert "setItem('factotum.staged'," not in JS                      # the old local tray is never written again
+    for call in ("getItem('factotum.staged')", "removeItem('factotum.staged')"):    # read and let go once, by the carry alone
+        assert JS.count(call) == 1 and call in _body("carryOldTray"), call
+    assert JS.count("'/api/tray/ops'") == 1 and "'/api/tray/ops'" in _body("sendTray")
+    assert JS.count("'/api/tray/apply'") == 1 and "'/api/tray/apply'" in _body("trayApply")
+    assert "await trayApply(" in _body("applyAll") and "'/api/batches/apply'" not in _body("applyAll")
+    assert "'/api/review/finish'" not in _body("applyAll")
+    act = _body("act")
+    assert "id + ':top'" in act and "id + ':lt'" in act
+    assert "stageExtra(id + ':top', id, 'set', { top_rank: i + 1 }" in _body("reorderTop")
+    assert 'min="${isoPlus(1)}"' in JS
+    for f in ("persistStaged", "stage", "stageExtra", "stageReminder"):
+        assert "syncTray()" in _body(f), f
+    assert "e.body = j" in JS                                         # a 409 hands its tray to the page
+    rv = _body("reviewAct")
+    assert rv.index("ui.laterOpen = false; ui.datePick = false;") < rv.index("stage(id, 'keep'")      # the Later menu is shut before the card moves on
 
 
 def test_peek_reads_a_task_without_marking_its_neighbours_seen(cfg, tmp_path):
