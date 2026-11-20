@@ -1461,6 +1461,16 @@ def review_status(ctx: Context, args: dict) -> dict:
     return _rv.guarded(_rv.status)(ctx, args)
 
 
+@tool("review_decide", _rv.DESC["review_decide"], *_rv.PROPS["review_decide"], skill_only=True, annotations=WRITES)
+def review_decide(ctx: Context, args: dict) -> dict:
+    return _rv.guarded(_rv.decide)(ctx, args)
+
+
+@tool("review_undo", _rv.DESC["review_undo"], *_rv.PROPS["review_undo"], skill_only=True, annotations=WRITES)
+def review_undo(ctx: Context, args: dict) -> dict:
+    return _rv.guarded(_rv.undo)(ctx, args)
+
+
 def _ok(id_, result) -> dict:
     return {"jsonrpc": "2.0", "id": id_, "result": result}
 
