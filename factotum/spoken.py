@@ -118,7 +118,7 @@ _BREAKS = re.compile(r"[\r\n\x0b\x0c\x1c-\x1e\x85  ]")
 _MD_LINE = re.compile(r"^[ \t]{0,8}(?:#{1,6}|[-*+>•]|[0-9]{1,3}[.)])[ \t]{1,8}")
 _MD_LINK = re.compile(r"!?\[([^\]\n]{0,200})\]\([^)\n]{0,2000}\)")
 _UUID = re.compile(r"\b[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\b")
-_HEXISH = re.compile(r"\b[A-Za-z]{0,8}_?[0-9A-Fa-f]{12,64}\b")
+_HEXISH = re.compile(r"\b(?:0[xX])?[A-Za-z]{0,8}_?[0-9A-Fa-f]{12,64}\b")
 _LONG_DIGITS = re.compile(r"\b[0-9]{9,40}\b")
 _ISO = re.compile(r"\b([0-9]{4}-[0-9]{2}-[0-9]{2})(?:[T ]([0-9]{2}:[0-9]{2})(?::[0-9]{2}(?:\.[0-9]{1,6})?)?(?:Z|[+-][0-9]{2}:?[0-9]{2})?)?\b")
 _SLASH_WORDS = re.compile(r"(?<=[A-Za-z])/(?=[A-Za-z])")
@@ -138,6 +138,10 @@ _WORD_HYPHEN = re.compile(r"(?<=[A-Za-z])-(?=[A-Za-z])")
 _PERSON = re.compile(r'^\s{0,8}"?([^<>"]{0,120}?)"?\s{0,8}<([^<>]{0,320})>\s{0,8}$')
 _SUBJECT_PREFIX = re.compile(r"^\s{0,4}(?:re|fwd?|fw|aw|wg|sv)\s{0,2}:\s{0,4}", re.I)
 _SUBJECT_CUT = re.compile(r"\s(?:@|\||–|—|-)\s")
+# Quote marks in what a stranger wrote: they could close the “…” it is said inside (review 2026-11-20). An apostrophe
+# inside a word (O'Brien, don't) stays.
+_QUOTES = re.compile("[\"“”„‟«»‹›`´]|(?<![A-Za-z])['‘’‚‛]|['‘’‚‛](?![A-Za-z])")
+_DANGLING = re.compile(r"\b(?:on|with|for|to|of|from|about|after|before|by|under|in)\s{1,3}(?=(?:and|or)\b|[,.;:]|$)", re.I)
 _MD_DATE = re.compile(r"\b[0-9]{1,2}/[0-9]{1,2}(?:/[0-9]{2,4})?\b")
 SHOUTING = {"TOMORROW", "TODAY", "TONIGHT", "URGENT", "REMINDER", "IMPORTANT", "DEADLINE", "NOW", "FREE", "ACTION", "REQUIRED",
             "LAST", "CHANCE", "FINAL", "NEW", "WEEK", "THIS", "NEXT", "DUE", "SOON", "PLEASE", "READ", "OPEN"}
@@ -291,12 +295,17 @@ def flat(text, *, sentences: int = 1, words: int = 25, names: dict | None = None
     return _cut(" ".join(kept), words)
 
 
-def short(name, words: int = NAME_WORDS) -> str:
-    """A task's name to say: no `(…)` or `[…]`, no `Task-N`, no address; cut before a trailing clause ("per", "for",
+def short(name, words: int = NAME_WORDS, *, names: dict | None = None, own: int | None = None) -> str:
+    """A task's name to say: no `(…)` or `[…]`, no address; a `Task-N` said as that task's short name when `names` has it,
+    else left out (and a word left hanging before it, "on and", with it); cut before a trailing clause ("per", "for",
     "at", … with at least four words before it), at most `words` words (an " and " that starts a second action is a
     good place to stop), never ending on a small word."""
     s = _PARENS.sub(" ", str(name if name is not None else "")[:INPUT_CAP])
+    if names:
+        s = TASK_REF.sub(lambda m: (T["this_task"] if int(m.group(1)) == own else
+                                    short(names[int(m.group(1))], words=6) if names.get(int(m.group(1))) else m.group(0)), s)
     s = _scrub(s, refs="drop")
+    s = _DANGLING.sub("", s)
     s = _WORD_HYPHEN.sub(" ", s)
     ws = s.split()
     for i, w in enumerate(ws):
@@ -322,8 +331,9 @@ def person(value) -> str:
     if m:
         s = m.group(1)
     s = _PARENS.sub(" ", s)
-    s = _scrub(s, refs="drop").strip(" ,;:.'\"")
-    if not any(c.isalpha() for c in s):
+    s = _QUOTES.sub(" ", _scrub(s, refs="drop")).replace(":", " ").replace(";", " ")
+    s = " ".join(s.split()).strip(" ,.")
+    if not any(c.isalpha() for c in s) or FORBIDDEN.search(s):
         return ""
     return " ".join(s.split()[:PERSON_WORDS])
 
@@ -348,7 +358,9 @@ def subject(value) -> str:
         s = s[:m.start()]
     s = _MD_DATE.sub(" ", s)
     s = " ".join(w.lower() if w.strip("!?.,:;") in SHOUTING else w for w in s.split())
-    s = _scrub(s, refs="drop").rstrip(" !?.,:;")
+    s = _QUOTES.sub(" ", _scrub(s, refs="drop")).rstrip(" !?.,:;")
+    if FORBIDDEN.search(s):                          # a stranger's subject with a word the project never says: not said
+        return ""
     return " ".join(_trim_small(s.split()[:SUBJECT_WORDS]))
 
 
@@ -496,14 +508,42 @@ def _mail_line(l: dict) -> str:
     return T["wrote_about"].format(who=who, subject=subj) if subj else T["wrote"].format(who=who)
 
 
+def _quoted(s: str) -> str:
+    """Text a stranger wrote, to say inside “…”: no quote mark of its own, no forbidden word, no closing full stop."""
+    s = " ".join(_QUOTES.sub(" ", s or "").split()).rstrip(".")
+    return "" if FORBIDDEN.search(s) else s
+
+
 def _slack_line(l: dict, today: date, tmpl="slack_wrote") -> str:
     if l.get("label") is not None and not l.get("who"):
-        q = flat(l.get("label"), words=QUOTE_WORDS, today=today).rstrip(".")
+        q = _quoted(flat(l.get("label"), words=QUOTE_WORDS, today=today))
         return T["slack_label"].format(text=q) if q else ""
     who = sender(l.get("who"))
-    where = _cut(_scrub(l.get("where"), refs="drop"), 4).rstrip(".") or "Slack"
-    q = flat(l.get("text"), words=QUOTE_WORDS, today=today).rstrip(".")
+    where = _quoted(_cut(_scrub(l.get("where"), refs="drop"), 4)) or "Slack"
+    q = _quoted(flat(l.get("text"), words=QUOTE_WORDS, today=today))
     return T[tmpl].format(who=who, where=where, text=q) if q else T["wrote"].format(who=who) + "."
+
+
+def _says_others(ve: dict) -> bool:
+    """Whether `say` holds words a stranger wrote (a sender, a subject, Slack text), so stage 3 marks it as data."""
+    it = ve.get("item") or {}
+    if ve.get("settled"):
+        return False
+    if ve.get("kind") == "card":
+        return isinstance(it.get("mail"), dict) or it.get("kind") == "slack_mention"
+    if ve.get("kind") != "task":
+        return False
+    reasons = list(it.get("reasons") or [])
+    primary = it.get("primary") or (reasons[0] if reasons else None)
+    lines = it.get("evidence_lines") or []
+    if primary == "thread_updated":
+        return any(l.get("kind") == "mail" for l in lines)
+    if primary == "mentioned":
+        return any(l.get("kind") == "slack" for l in lines)
+    if primary in ("planner", "ripple"):
+        props = _proposals(it)
+        return bool(props) and all(e["change"].get("op") == "follow_thread" for e in props)
+    return False
 
 
 def _task_sentences(ve: dict, today: date, names: dict) -> list[str]:
@@ -512,7 +552,7 @@ def _task_sentences(ve: dict, today: date, names: dict) -> list[str]:
     own = t.get("id")
     reasons = list(it.get("reasons") or [])
     primary = it.get("primary") or (reasons[0] if reasons else None)
-    name = short(t.get("name")) or T["this_task"]
+    name = short(t.get("name"), names=names, own=own) or T["this_task"]
     due = _task_due(t, today)
     nd = name + due
     sugg = list(it.get("link_suggestions") or [])
@@ -622,20 +662,20 @@ def _card_sentences(ve: dict, today: date, names: dict) -> list[str]:
         from .review_queue import SLACK_LABEL
         m = SLACK_LABEL.match(one_line(str(it.get("label") or ""))[:400])
         if m:
-            where = _cut(_scrub(m.group(1), refs="drop"), 4).rstrip(".") or "Slack"
+            where = _quoted(_cut(_scrub(m.group(1), refs="drop"), 4)) or "Slack"
             out.append(T["card_slack"].format(who=sender(m.group(2)), where=where))
         else:
             out.append(T["card_slack_bare"])
-        q = flat(f.get("name"), words=QUOTE_WORDS, today=today).rstrip(".")
+        q = _quoted(flat(f.get("name"), words=QUOTE_WORDS, today=today))
         out.append(T["suggested_quote"].format(name=q, due=due) if q else T["suggested_task"].format(name=T["another_task"]))
     else:
         mail = it.get("mail") if isinstance(it.get("mail"), dict) else None
         if mail:
             subj = subject(mail.get("subject"))
             out.append(T["card_mail"].format(who=sender(mail.get("sender")), subject=subj) if subj else T["card_mail_bare"].format(who=sender(mail.get("sender"))))
-            out.append(T["suggested_task"].format(name=(short(f.get("name")) or T["another_task"]) + due))
+            out.append(T["suggested_task"].format(name=(short(f.get("name"), names=names) or T["another_task"]) + due))
         else:
-            out.append(T["card_ripple" if it.get("by") == "ripple" else "card_planner"].format(name=(short(f.get("name")) or T["another_task"]) + due))
+            out.append(T["card_ripple" if it.get("by") == "ripple" else "card_planner"].format(name=(short(f.get("name"), names=names) or T["another_task"]) + due))
     for l in (it.get("links") or [])[:1]:
         o = short(l.get("other_name")) or _name_of(l.get("other"), names)
         out.append(T["card_step" if l.get("kind") == "part_of" else "card_waits"].format(other=o))
@@ -659,7 +699,7 @@ def _group_sentences(ve: dict, today: date, names: dict) -> list[str]:
     if common:
         head += ", " + common
     out = [head + "."]
-    items = [(short(x.get("name")) or T["another_task"]) + ("" if common else _task_due(x, today)) for x in ts]
+    items = [(short(x.get("name"), names=names, own=x.get("id")) or T["another_task"]) + ("" if common else _task_due(x, today)) for x in ts]
     used = _words(out[0])
     i = 0
     while i < len(items):
@@ -679,9 +719,10 @@ def _group_sentences(ve: dict, today: date, names: dict) -> list[str]:
 
 
 def _fit(sentences: list[str], cap: int = MAX_SAY) -> str:
-    """The sentences that fit in `cap` words, in order (the first always, cut if it must be); none that holds a
-    forbidden word."""
-    ss = [s for s in sentences if s and not FORBIDDEN.search(s)]
+    """The sentences that fit in `cap` words, in order (the first always, cut if it must be). Text others wrote has been
+    through `flat`, `subject`, `person` (a forbidden word drops it there); the owner's names and the templates are said
+    as they are (review 2026-11-20: a task named "… blocked" was said as nothing)."""
+    ss = [s for s in sentences if s]
     out, n = [], 0
     for s in ss:
         w = _words(s)
@@ -813,16 +854,18 @@ def _more(ve: dict, today: date, names: dict, tz=None) -> tuple[dict, list[str]]
             "number": T["number_task"].format(n=number_words(own)) if type(own) is int else ""}, others
 
 
-def _members(ve: dict) -> list[dict]:
+def _members(ve: dict, names: dict | None = None) -> list[dict]:
     live = [m for m in (ve.get("item") or {}).get("members") or [] if m.get("state") != "gone"]
-    return [{"key": m.get("key"), "words": T["member"].format(nth=dates.ordinal_words(i + 1), name=_lcfirst(short((m.get("task") or {}).get("name")) or T["another_task"]))}
+    return [{"key": m.get("key"), "words": T["member"].format(nth=dates.ordinal_words(i + 1),
+                                                               name=_lcfirst(short((m.get("task") or {}).get("name"), names=names, own=(m.get("task") or {}).get("id")) or T["another_task"]))}
             for i, m in enumerate(live)]
 
 
 def entry(view_entry: dict, today: date, names: dict | None = None, *, tz=None) -> dict:
     """The View's entry (a task item, a suggestion card or a group, as `review_pass` builds it) as words for the ear:
     {say, question, basis, more: {why, text, links, evidence, number}, options: [{id, words}], members: [{key, words}]
-    (a group's), from_others: the parts of `more` that hold words others wrote}. `say` is at most MAX_SAY words: why it
+    (a group's), from_others: "say" when it holds a sender, a subject or Slack text, and the parts of `more` that hold
+    words others wrote}. `say` is at most MAX_SAY words: why it
     is here, its short name and the fact that decides it; `basis` (the recommendation's `basis_said`) and `question`
     (its `said`, else the usual choices) are never cut. Pure."""
     ve = view_entry or {}
@@ -858,8 +901,10 @@ def entry(view_entry: dict, today: date, names: dict | None = None, *, tz=None) 
     else:
         basis = _scrub(ve.get("rec_held") or "", names=names, today=today) if kind == "task" else ""
     more, others = _more(ve, today, names, tz)
+    if _says_others(ve):
+        others = ["say"] + others
     return {"say": _fit(ss), "question": question, "basis": basis if not FORBIDDEN.search(basis) else "", "more": more,
-            "options": _option_words(ve), "members": _members(ve) if kind == "group" else [], "from_others": others}
+            "options": _option_words(ve), "members": _members(ve, names) if kind == "group" else [], "from_others": others}
 
 
 def wants(view_entry: dict) -> set[int]:
@@ -870,7 +915,8 @@ def wants(view_entry: dict) -> set[int]:
     out: set[int] = set()
     blobs = [it.get("reason"), (it.get("fields") or {}).get("context"), ve.get("rec_held")]
     t = it.get("task") or {}
-    blobs += [t.get("context"), *(it.get("texts") or {}).values()]
+    blobs += [t.get("name"), t.get("context"), (it.get("fields") or {}).get("name"), *(it.get("texts") or {}).values()]
+    blobs += [(m.get("task") or {}).get("name") for m in it.get("members") or []]
     for e in it.get("evidence") or []:
         blobs.append(e.get("reason"))
         f = (e.get("change") or {}).get("fields") or {}
