@@ -767,9 +767,10 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
 
     @app.get("/api/review/pass/now")
     def review_pass_now():
-        """{pass_id, rev, state, cursor_key, tray_rev, speaking, day}: what a page following the pass compares. Two
-        small reads; no lock (like /api/review/count)."""
-        return review_pass.now(conn)
+        """{pass_id, rev, state, cursor_key, tray_rev, speaking, day, today}: what a page following the pass compares
+        (`today`, Review's day now: a page that follows across midnight lets yesterday's pass go; review 2026-11-20).
+        Two small reads; no lock (like /api/review/count)."""
+        return dict(review_pass.now(conn), today=review_queue.today(cfg).isoformat())
 
     @app.post("/api/review/pass")
     def review_pass_begin(body: PassBody):

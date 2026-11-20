@@ -126,8 +126,26 @@ def test_begin_records_the_days_link_suggestions_once(conn, cfg, monkeypatch):
     assert calls == [D]
     assert relations.shown_ids(conn) == {E}                       # written before the items were built
     assert [s["evidence_id"] for s in v["current"]["item"]["link_suggestions"]] == [E]
-    begin(conn, cfg)                                               # a resume rebuilds nothing
-    assert calls == [D]
+    again = begin(conn, cfg)                                       # a resume rebuilds nothing, and asks again (idempotent within the day)
+    assert calls == [D, D] and relations.shown_ids(conn) == {E} and again["id"] == v["id"]
+
+
+def test_a_resume_tops_up_the_days_link_suggestions(conn, cfg):
+    """Review note 2026-11-20: a pass stays live all day while anything is undecided, and GET /api/review, which topped
+    up the day's link suggestions on every load, no longer writes; a suggestion the detectors found after the pass began
+    must still reach Review, as an arrival."""
+    for i in range(1, 5):
+        mk(conn, i)
+    quiet(conn, 3, 4)                                              # on Review only for what is suggested about them
+    E = relations.suggest(conn, "waits_on", 1, 2, "both name the numbers", "planner")
+    conn.commit()
+    v = begin(conn, cfg)
+    assert not {"t:3", "t:4"} & {r["key"] for r in v["list"]}
+    F = relations.suggest(conn, "waits_on", 3, 4, "both name the numbers", "planner")
+    conn.commit()
+    again = begin(conn, cfg)
+    assert again["id"] == v["id"] and relations.shown_ids(conn) == {E, F}
+    assert {"t:3", "t:4"} & {r["key"] for r in again["list"] if r["state"] == "waiting"}
 
 
 def test_get_review_and_the_pass_reads_write_nothing(cfg, tmp_path):
@@ -149,7 +167,8 @@ def test_get_review_and_the_pass_reads_write_nothing(cfg, tmp_path):
     client.get("/api/review")
     assert c.total_changes == before and not c.in_transaction
     assert got["id"] == v["id"] and got["rev"] == v["rev"]
-    assert now == {"pass_id": v["id"], "rev": v["rev"], "state": "item", "cursor_key": "t:1", "tray_rev": 0, "speaking": None, "day": v["day"]}
+    assert now == {"pass_id": v["id"], "rev": v["rev"], "state": "item", "cursor_key": "t:1", "tray_rev": 0, "speaking": None, "day": v["day"],
+                   "today": review_queue.today(cfg).isoformat()}
 
 
 def test_get_review_is_whole_and_in_the_new_order(cfg, tmp_path):
@@ -319,6 +338,27 @@ def test_changing_a_decision_replaces_it_and_keeps_what_is_beside(conn, cfg):
     assert rows == {"1:top": "pin_top", "1": "done"}
     back, v = mv(conn, cfg, "back")
     assert v["current"]["staged"]["decision"]["label"] == "done" and [b["key"] for b in v["current"]["staged"]["beside"]] == ["1:top"]
+
+
+def test_a_beside_option_on_a_decided_item_in_front_does_not_move_on(conn, cfg):
+    """Back to a kept task, then Pin and Long-term on it: the cursor stays (review 2026-11-20: it moved on whenever the
+    item in front was settled after the call, so a Pin on a decided item jumped to the next one and the Long-term
+    pressed after it landed on the wrong task; on the last item a Pin jumped to the end)."""
+    tasks(conn, 3)
+    begin(conn, cfg)
+    dec(conn, cfg, "t:1", "keep")
+    _, v = mv(conn, cfg, "back")
+    assert v["cursor_key"] == "t:1"
+    out, v = dec(conn, cfg, "t:1", "pin")
+    assert v["cursor_key"] == "t:1" and out["advanced"] is False
+    out, v = dec(conn, cfg, "t:1", "longterm")
+    assert v["cursor_key"] == "t:1" and out["advanced"] is False
+    dec(conn, cfg, "t:3", "keep")
+    mv(conn, cfg, "goto", key="t:3", from_key=None)
+    out, v = dec(conn, cfg, "t:3", "pin")
+    assert v["state"] == "item" and v["cursor_key"] == "t:3" and out["advanced"] is False
+    out, v = dec(conn, cfg, "t:3", "done")              # a decision changed on the item in front still moves on
+    assert out["advanced"] is True and v["cursor_key"] == "t:2"
 
 
 def test_undecide_makes_it_undecided_and_puts_it_in_front(conn, cfg):
@@ -548,6 +588,9 @@ def test_after_apply_marks_items_and_ends_the_pass_when_nothing_is_undecided(con
     assert [tuple(r) for r in conn.execute("SELECT key FROM review_pass_items WHERE done_batch_id = ?", (res["batch_id"],))] == [("t:1",)]
     v = view(conn, cfg)
     assert v is not None and states(v) == {"t:1": "decided", "t:2": "decided", "t:3": "waiting"}
+    rows = {r["key"]: r for r in v["list"]}                 # an applied decision is said so, and cannot be taken back (review 2026-11-20)
+    assert (rows["t:1"]["staged"], rows["t:1"]["applied"]) == ("applied", True)
+    assert (rows["t:2"]["staged"], rows["t:2"]["applied"]) == ("kept", False)
     dec(conn, cfg, "t:3", "drop")
     res = tray.apply(conn, cfg, D)
     assert conn.execute("SELECT end_why FROM review_passes WHERE id = ?", (v["id"],)).fetchone()[0] == "applied"
@@ -664,6 +707,27 @@ def test_a_failing_after_apply_never_fails_the_apply(cfg, tmp_path, monkeypatch)
     res = client.post("/api/tray/apply", json={"finish": True})
     assert res.status_code == 200 and res.json()["applied"] == 1 and not c.in_transaction
     assert c.execute("SELECT looked FROM review_passes").fetchone()[0] != 99        # its half-write is let go
+    assert get_task(c, 1)["last_reviewed_at"] is not None
+
+
+def test_a_busy_lock_after_the_batch_skips_the_pass_follow_up_and_the_apply_answers(cfg, tmp_path, monkeypatch):
+    """Review note 2026-11-20: the follow-up's own begin_write ran outside the savepoint's guard, after batches.apply had
+    committed the batch: a write lock another writer held past the busy timeout failed an Apply whose batch had landed."""
+    import inspect
+    import sqlite3
+    client, c = _client(cfg, tmp_path)
+    tasks(c, 2)
+    client.post("/api/review/pass", json={})
+    client.post("/api/review/decide", json={"key": "t:1", "option": "keep"})
+    real = tray.begin_write
+
+    def busy(conn):
+        if inspect.stack()[1].function == "_after_apply":
+            raise sqlite3.OperationalError("database is locked")
+        return real(conn)
+    monkeypatch.setattr(tray, "begin_write", busy)
+    res = client.post("/api/tray/apply", json={"finish": True})
+    assert res.status_code == 200 and res.json()["applied"] == 1 and not c.in_transaction
     assert get_task(c, 1)["last_reviewed_at"] is not None
 
 

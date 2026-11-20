@@ -46,7 +46,7 @@ WORDS = {
     "link": "Link", "not_related": "Not related", "not_same": "Not the same", "merge": "Merge", "merge_into": "Merge into Task-",
     "step": "is a step of it", "waits": "waits on it", "same": "is the same task",
     "pin": "★ Pin to Top", "unpin": "★ On Top · unpin", "longterm": "Mark long-term (never fades)", "not_longterm": "Long-term · clear",
-    "create": "Create", "card_dismiss": "Dismiss", "undecide": "Take back",
+    "create": "Create", "card_dismiss": "Dismiss", "undecide": "Take back", "applied": "applied",
     "settled_done": "It is done.", "settled_dropped": "It was dropped.", "settled_faded": "It faded.", "settled_lapsed": "It lapsed.",
     "settled_later": "It is set for later.", "settled_quiet": "Nothing on it needs a decision now.",
     "settled_card": "The suggestion was answered.", "settled_applied": "Its decision was applied.", "settled_missing": "It no longer exists.",
@@ -314,7 +314,8 @@ def begin_or_resume(conn: sqlite3.Connection, cfg: dict, today: date, *, by: str
     """The live pass of Review's day, resumed (nothing rebuilt; arrivals persisted), or a new one: a live pass from
     another day ends `another_day` first, and `fresh` ends a live one `replaced`. Beginning writes, in one
     transaction, the day's link suggestions (`suggestions.session`, before the queue is read), the pass and its items
-    in Review's order, and the arrival of the first undecided item. Two begins at once make one pass: the second waits
+    in Review's order, and the arrival of the first undecided item. A resume asks `suggestions.session` again, which
+    tops up the day's set while fewer than the day's number were offered (what GET /api/review did on every load). Two begins at once make one pass: the second waits
     for the write lock and resumes (and on a connection already inside a transaction the unique index refuses the
     second row, and it resumes). Answers the View. No commit."""
     begin_write(conn)
@@ -350,7 +351,8 @@ def begin_or_resume(conn: sqlite3.Connection, cfg: dict, today: date, *, by: str
                 w.set(state="end" if P.shown() else "empty", cursor_key=None)
             w.save()
             return _view(conn, cfg, today, _row(conn, pid), queue)
-    queue, P = _read(conn, cfg, today, row)
+    suggestions.session(conn, today, suggestions.per_review(cfg))      # tops up the day's set (review 2026-11-20): what the
+    queue, P = _read(conn, cfg, today, row)                           # detectors found since the begin arrives
     w = _Write(conn, cfg, today, row, P, by)
     w.persist()
     if w.dirty:
@@ -425,7 +427,8 @@ def decide(conn: sqlite3.Connection, cfg: dict, today: date, pass_id: int, key: 
            note: str | None = None, from_chat: dict | None = None, origin: str, device: str | None = None, by: str | None) -> dict:
     """One option on one item, staged by the rule (`review_decide.stage`), then the cursor: a decision that settles
     the item in front moves on by the rule of Next (nothing marked passed; the checkpoint as Next), `undecide` puts
-    the item in front, anything else moves nothing. A key the pass does not hold, or holds as gone, is staged as the
+    the item in front, anything else moves nothing; on an item in front that was settled before the call only a
+    decision moves on (`_decision`), so Pin, Long-term or an answer pressed there after Back stays on it. A key the pass does not hold, or holds as gone, is staged as the
     rule allows (an open task outside the queue still takes a decision from its card's conversation; Gone only when
     the rule says so). `rec` and `keep_all` are the pass's own options, offered from 2c and 2d: Refused until then.
     Answers the stage's {keys, removed, said} and `advanced`. Raises NoPass, Ended, Refused, Gone, Stale. No commit."""
@@ -446,7 +449,7 @@ def decide(conn: sqlite3.Connection, cfg: dict, today: date, pass_id: int, key: 
     advanced = False
     if from_chat is None and option == "undecide" and key in P2.pos and P2.states[key] != "gone":
         w.arrive(key, forward=False)
-    elif front and P2.states.get(key) in SETTLED:
+    elif front and P2.states.get(key) in SETTLED and (P.states.get(key) in UNDECIDED or _decision(P.entries.get(key), key, option)):
         target, _ = _after(P2, key)
         if target is None:
             w.set(state="end", cursor_key=None)
@@ -456,6 +459,25 @@ def decide(conn: sqlite3.Connection, cfg: dict, today: date, pass_id: int, key: 
     if not w.save():
         raise review_decide.Stale(WORDS["moved_meanwhile"])
     return dict(out, advanced=advanced)
+
+
+def _decision(entry: dict | None, key: str, option) -> bool:
+    """Whether an option is a decision (design §4.1): done, drop, keep, later; Create or Dismiss on a card; an accepted
+    done or drop proposal. On an item in front that was settled already (reached with Back), only a decision moves on:
+    Pin, Long-term or an answer there changes what stands beside it and leaves the cursor where the owner is
+    (review 2026-11-20). A decision changed there moves on, as the page draws at the click."""
+    if not isinstance(option, str):
+        return False
+    if key.startswith("s:"):
+        return option in ("create", "dismiss")
+    if option in ("done", "drop", "keep", "later"):
+        return True
+    if option.startswith("accept:") and option[7:].isdigit():
+        eid = int(option[7:])
+        for e in (entry or {}).get("evidence") or []:
+            if e.get("id") == eid and isinstance(e.get("change"), dict):
+                return e["change"].get("op") in ("done", "drop")
+    return False
 
 
 def regroup(conn: sqlite3.Connection, cfg: dict, today: date, pass_id: int, key: str, op: str, *, task_id: int | None = None,
@@ -657,7 +679,8 @@ def _entry(conn: sqlite3.Connection, cfg: dict, today: date, key: str | None, P:
 
 
 def _line(conn: sqlite3.Connection, cfg: dict, key: str, P: Plan, trows) -> dict:
-    """One row of the View's list: {key, kind, name, why, state, staged, due}."""
+    """One row of the View's list: {key, kind, name, why, state, staged, applied, due}; `applied` when the decision
+    was applied by this pass's Apply (no tray row is left to take back; review 2026-11-20)."""
     e = P.entries.get(key)
     name = why = due = None
     if e is not None and "task" in e:
@@ -671,8 +694,10 @@ def _line(conn: sqlite3.Connection, cfg: dict, key: str, P: Plan, trows) -> dict
         r = review_cards.row(conn, int(key[2:]))
         name = review_cards.suggestion_fields(cfg, r).get("name") if r else None
     staged = _staged(key, trows)["decision"]
+    applied = staged is None and P.states[key] == "decided"      # decided by an Apply of this pass (done_batch_id): nothing to take back
     return {"key": key, "kind": P.kinds.get(key) or _kind(key), "name": name, "why": why or "", "state": P.states[key],
-            "staged": staged["label"] if staged else None, "due": review_decide.day_words(due) if isinstance(due, str) and due else None}
+            "staged": WORDS["applied"] if applied else staged["label"] if staged else None, "applied": applied,
+            "due": review_decide.day_words(due) if isinstance(due, str) and due else None}
 
 
 def _view(conn: sqlite3.Connection, cfg: dict, today: date, row: dict, queue: dict | None = None) -> dict:

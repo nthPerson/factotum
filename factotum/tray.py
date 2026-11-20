@@ -357,9 +357,13 @@ def finishes(rows: list, whole_tray: bool) -> bool:
 def _after_apply(conn: sqlite3.Connection, cfg: dict, today: date, decided: set[str], batch_id) -> None:
     """The live Review pass learns what the batch applied (review_pass.after_apply), inside a savepoint: the batch is
     committed already, so a failure here lets go of only its own writes and never fails the Apply (its items then read
-    as gone, which is harmless). review_pass imports this module, so it is imported here, lazily."""
+    as gone, which is harmless), nor does a write lock it cannot take (review 2026-11-20). review_pass imports this
+    module, so it is imported here, lazily."""
     from . import review_pass
-    begin_write(conn)                              # chat.mark_staged committed: a new write starts here
+    try:
+        begin_write(conn)                          # chat.mark_staged committed: a new write starts here
+    except sqlite3.OperationalError:               # another writer held the lock past the busy timeout: the follow-up is skipped
+        return
     conn.execute("SAVEPOINT after_apply")
     try:
         review_pass.after_apply(conn, decided, batch_id, cfg=cfg, today=today)
