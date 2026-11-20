@@ -25,6 +25,11 @@
   // `back` the View before a press drew ahead (a lost answer draws it again), `drawn` the item last drawn (a new one scrolls up).
   let rp = { view: null, loading: null, seq: 0, failed: '', finished: null, follow: null, said: '', inflight: 0, held: undefined, back: null, drawn: null, drawing: null, drawnAt: 0, checking: false };
   const RV_SETTLE_MS = 400;      // a tap on the decisions this soon after a new item came in front is not taken
+  // Which presses the settle guard holds: every control inside the card (the bar, the suggested answer, a group's task
+  // buttons, the answers in the body all sit where the last card's controls were), but the moves, the list and the reading
+  // line (review 2026-11-20: a double click on Keep landed on a group member's Drop drawn at the first click).
+  const RV_FREE = /^(?:say|list|next|back|first|continue|end|goto:)/;
+  const rvSettles = (opt, inCard) => inCard && !RV_FREE.test(String(opt || ''));
   let lastBatch = null;
   let chat = { threads: null, current: null, messages: [], live: null, busy: false, place: null };   // place: the key of the conversation in place whose turn runs (stage 6)
   let lastTap = { id: null, at: 0 };   // for the hand-rolled double-click on rows
@@ -4778,7 +4783,7 @@
     // the one dispatcher; nothing on Review is a closure here any more.
     // A decision tapped just after a new item came in front is dropped: the bar stays put but its buttons change (four on a
     // task, two on a card), so a second quick tap would land on a control that was not there when it began.
-    panel.querySelectorAll('[data-opt]').forEach(b => b.onclick = () => { if (b.closest('.big, .rvrec') && Date.now() - rp.drawnAt < RV_SETTLE_MS) return; reviewRun(b.dataset.opt); });
+    panel.querySelectorAll('[data-opt]').forEach(b => b.onclick = () => { if (rvSettles(b.dataset.opt, !!b.closest('.review .card')) && Date.now() - rp.drawnAt < RV_SETTLE_MS) return; reviewRun(b.dataset.opt); });
     panel.querySelectorAll('[data-ctx-more]').forEach(b => b.onclick = () => { ui.ctxOpen = ui.ctxOpen === +b.dataset.ctxMore ? null : +b.dataset.ctxMore; render(); });
     panel.querySelectorAll('[data-since-see]').forEach(b => b.onclick = () => { const id = +b.dataset.sinceSee; ui.sinceOpen = ui.sinceOpen === id ? null : id; render(); });
     panel.querySelectorAll('[data-since-undo]').forEach(b => b.onclick = async () => {

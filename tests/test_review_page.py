@@ -90,8 +90,32 @@ def test_a_quick_second_tap_never_lands_on_a_decision_that_moved_under_it():
     """The bar stays put but its buttons change between a task (four) and a card (two): a decision tapped within
     RV_SETTLE_MS of a new item coming in front is dropped; moves and keys are not."""
     assert "const RV_SETTLE_MS = 400;" in JS
-    assert "if (b.closest('.big, .rvrec') && Date.now() - rp.drawnAt < RV_SETTLE_MS) return; reviewRun(b.dataset.opt);" in JS      # the suggested answer too (2c)
+    assert "if (rvSettles(b.dataset.opt, !!b.closest('.review .card')) && Date.now() - rp.drawnAt < RV_SETTLE_MS) return; reviewRun(b.dataset.opt);" in JS
     assert "rp.drawnAt = Date.now();" in JS
+
+
+def test_the_settle_guard_covers_every_control_in_the_card_but_moves_and_the_reading_line():
+    """Review of the second half (2026-11-20): the guard covered the bar and the suggested answer, not a group's task
+    buttons, which sit in the card body where the last card's controls were: a double click on Keep landed on a member's
+    Drop. Every option inside the card is held for RV_SETTLE_MS now, but the moves, the list and "Show how it would be read"."""
+    import json
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    if node is None:
+        return
+    script = JS[JS.index("const RV_FREE = "):]
+    script = script[:script.index("\n", script.index("const rvSettles = "))]
+    probe = ["keep", "rec", "member:t:3:drop", "member:t:3:open", "takeback:t:3", "accept:40", "link:9", "pin", "later", "until:fri",
+             "keep_all", "one_by_one", "create", "dismiss", "say", "list", "next", "back", "goto:t:4", "continue", "end", "first"]
+    r = subprocess.run([node, "-e", script + f"\nconsole.log(JSON.stringify({json.dumps(probe)}.map(o => [o, rvSettles(o, true), rvSettles(o, false)])))"],
+                       capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr
+    got = {o: (inside, outside) for o, inside, outside in json.loads(r.stdout)}
+    for o in probe[:14]:
+        assert got[o] == (True, False), o
+    for o in probe[14:]:
+        assert got[o] == (False, False), o
 
 
 def test_a_page_on_review_follows_the_pass_and_reads_it_again_on_return():
