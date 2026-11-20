@@ -334,11 +334,16 @@ def item_out(e: dict | None, v: dict, today: date) -> dict | None:
 
 
 def _said_recs(*entries) -> dict:
-    """{item key: {steps, members}} for each entry read out that offers its suggested answer: what `rec` will mean."""
+    """{item key: {steps, members}} for each entry read out: what `rec` will mean when it offers its suggested answer, {}
+    when it offers none. Every item read out is recorded, so a decision on an item this client never read aloud (one the
+    screen brought in front) is asked first (review 2026-11-20)."""
     out = {}
     for e in entries:
-        r = (e or {}).get("recommendation")
-        if not e or not r or not r.get("steps") or not any(o.get("id") == "rec" for o in e.get("options") or []):
+        if not e or not e.get("key"):
+            continue
+        r = e.get("recommendation")
+        if not r or not r.get("steps") or not any(o.get("id") == "rec" for o in e.get("options") or []):
+            out[e["key"]] = {}
             continue
         one = {"steps": list(r["steps"])}
         if e.get("kind") == "group":
@@ -463,7 +468,7 @@ def elsewhere(w, v: dict | None, driver: str, today: date) -> str | None:
     made = []
     for k, e, m in entries:
         d = m.get("decides")
-        if not d or int(m.get("rev") or 0) <= old_rev or m.get("origin") not in ("page", "carry") or d in old_dec:
+        if not d or int(m.get("rev") or 0) <= old_rev or m.get("origin") not in ("page", "carry"):     # one said here, changed there, too
             continue
         if not ((d.startswith("t:") and k == d[2:]) or (d.startswith("s:") and k == f"e:{d[2:]}")):
             continue                                       # the deciding row only, once per item
@@ -735,9 +740,10 @@ def _state_of(loc) -> str:
     return (member or row).get("state") or "gone"
 
 
-def _arrived(w, pass_id: int, key: str) -> bool:
+def _arrived(w, pass_id: int, key: str, driver: str) -> bool:
+    """Whether the item came in front in this pass and this driver read it out (`review_pass.seen`'s `said`)."""
     r = w.execute("SELECT arrived_at FROM review_pass_items WHERE pass_id = ? AND key = ?", (pass_id, key)).fetchone()
-    return bool(r and r[0])
+    return bool(r and r[0]) and key in review_pass.said_by(review_pass.live(w) or {}, driver)
 
 
 def _choices(e: dict) -> str:
@@ -762,10 +768,13 @@ def _closes(e: dict, opt: str) -> bool:
 
 
 def _merges(e: dict, opt: str) -> bool:
-    """Whether the option merges two tasks: merge or same, or link on a suggestion of the same task."""
+    """Whether the option merges two tasks: merge or same, link on a suggestion of the same task, or an accepted merge."""
     name, _, rest = opt.partition(":")
     if name in ("merge", "same"):
         return True
+    if name == "accept" and rest.isdigit():                 # a proposal of a merge (nothing makes one today; review 2026-11-20)
+        ch = (_evidence(e, int(rest)) or {}).get("change")
+        return isinstance(ch, dict) and ch.get("op") == "merge"
     if name == "link" and rest.isdigit():
         s = next((x for x in (e.get("item") or {}).get("link_suggestions") or [] if x.get("evidence_id") == int(rest)), None)
         return bool(s and s.get("kind") == "same_as")
@@ -1005,7 +1014,7 @@ def decide(ctx, args: dict) -> dict:
             _seen(w, ctx, v2, v2.get("current"))
             return _with_data({"status": "settled", "say": _join(SAID["settled"], place["say"]), "next": place["item"], "elsewhere": els, "mode": _mode(ctx)})
         e = review_pass.entry(w, ctx.cfg, today, ref)
-        unread = not _arrived(w, v["id"], item_key)            # never in front in this pass: read back and asked first
+        unread = not _arrived(w, v["id"], item_key, ctx.source)            # never in front in this pass: read back and asked first
         offered = [o.get("id") for o in e.get("options") or [] if o.get("id") not in NOT_OFFERED]
         if decision is None and not extras:
             raise _fail(SAID["say_what"].format(choices=_choices(e)))
@@ -1037,7 +1046,7 @@ def decide(ctx, args: dict) -> dict:
         steps: list[str] | None = [decision] if decision and decision not in ("rec", "keep_all") else []
         if decision == "rec":
             said = review_pass.said_by(review_pass.live(w), ctx.source).get(item_key if member is None else ref)
-            if said:
+            if said and said.get("steps"):
                 steps = list(said.get("steps") or [])
                 dargs["steps"] = steps
                 if said.get("members") is not None:

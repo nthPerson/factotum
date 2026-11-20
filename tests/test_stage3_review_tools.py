@@ -655,9 +655,9 @@ def test_rec_stages_only_the_answer_that_was_said(cfg, db):
     at(ctx, "t:1")
     c.execute("UPDATE review_passes SET drivers_json = '{}'")                       # read out by another client only
     c.commit()
-    r = ok(ctx, "review_decide", {"ref": "t:1", "decision": "rec"})
-    assert r["status"] == "changed" and r["item"]["ref"] == "t:1"
-    assert ok(ctx, "review_decide", {"ref": "t:1", "decision": "rec"})["status"] == "staged"
+    r = ok(ctx, "review_decide", {"ref": "t:1", "decision": "rec"})                # not read out here: read back and asked (review 2026-11-20)
+    assert r["status"] == "confirm" and r["item"]["ref"] == "t:1" and entries(db)[-1][0] != "1"
+    assert ok(ctx, "review_decide", {"ref": "t:1", "decision": "rec", "confirm": r["confirm"]})["status"] == "staged"
 
 
 def test_later_resolves_the_owners_words_in_python_and_says_the_date(cfg, db):
@@ -971,6 +971,63 @@ def test_undo_after_keep_all_takes_back_the_whole_answer(cfg, db):
     u = ok(ctx, "review_undo")
     assert u["say"] == "Taken back: the three new tasks are undecided again." and u["item"]["ref"] == "g:rec:of_aaa"
     assert [k for k, _, _, _ in entries(db)] == ["9"]
+
+
+def test_an_item_that_came_in_front_on_the_screen_is_read_out_before_a_spoken_decision(cfg, db):
+    """Review of stage 3 (a note): "not looked at yet" was checked with the arrival stamp, which the screen sets too, so
+    an item the screen brought in front but this client never read aloud could be decided by a ref from
+    review_status(list=true) with no read-back. What this client read out (review_pass.seen's `said`, now every item, a
+    suggested answer or none) decides it."""
+    ctx = ctx_for(db, cfg)
+    ok(ctx, "review_start")                                                   # t:5 read out
+    c = connect(db)
+    pid = P.view(c, cfg, D)["id"]
+    P.move(c, cfg, D, pid, "next", from_key="t:5", by="page")                # the screen moves on: t:1 arrives there
+    c.commit()
+    assert page_view(db, cfg)["cursor_key"] == "t:1"
+    a = ok(ctx, "review_decide", {"ref": "t:1", "decision": "keep"})
+    assert a["status"] == "confirm" and a["ask"].startswith("That's Prepare and rehearse the funding pitch, not looked at yet.") and entries(db) == []
+    at(ctx, "t:6")
+    r = ok(ctx, "review_decide", {"ref": "t:6", "decision": "keep"})          # read out: decided at once
+    assert r["status"] == "staged"
+
+
+def test_a_screen_change_to_a_decision_said_here_is_reported(cfg, db):
+    """Review of stage 3 (a note): `elsewhere` skipped any item this client had decided, so a keep said here and changed
+    to a drop on the screen went unmentioned. A deciding row newer than what this client saw is reported."""
+    from factotum import review_decide
+    ctx = ctx_for(db, cfg)
+    ok(ctx, "review_start")
+    at(ctx, "t:9")
+    ok(ctx, "review_decide", {"ref": "t:9", "decision": "keep"})
+    c = connect(db)
+    review_decide.stage(c, cfg, "t:9", "drop", {}, D, origin="page")
+    c.commit()
+    st = ok(ctx, "review_status")
+    assert st["elsewhere"] == "On the screen: Car sounds SOPs was dropped."
+
+
+def test_the_stdio_server_reads_settings_again_on_every_call(cfg, db):
+    """Review of stage 3 (a note): the skill's stdio server worked out its configuration once, so review.recommend,
+    review.group_alike or the cap changed in Settings were not seen until Claude Code restarted. Context.refresh, when
+    set, runs before every call; serve_stdio sets it to read the effective configuration again."""
+    import io
+    calls = []
+    ctx = ctx_for(db, cfg, source="skill")
+    ctx.refresh = lambda: calls.append(1)
+    inp = io.StringIO("\n".join(json.dumps({"jsonrpc": "2.0", "id": i, "method": "tools/call", "params": {"name": "review_status", "arguments": {}}})
+                                  for i in (1, 2)) + "\n")
+    out = io.StringIO()
+    M.serve(ctx, inp, out)
+    assert calls == [1, 1] and len(out.getvalue().splitlines()) == 2
+    import inspect
+    assert "refresh" in inspect.getsource(M.serve_stdio)
+
+
+def test_accepting_a_proposed_merge_is_asked_first():
+    """Review of stage 3 (a note): accept:E whose proposed change is a merge staged without the question a merge asks."""
+    e = {"item": {"evidence": [{"id": 7, "change": {"op": "merge", "fields": {"into": 2}}}, {"id": 8, "change": {"op": "set", "fields": {}}}]}}
+    assert RM._merges(e, "accept:7") is True and RM._merges(e, "accept:8") is False and RM._merges(e, "merge:3") is True
 
 
 def test_undo_of_an_applied_decision_points_to_history(cfg, db):

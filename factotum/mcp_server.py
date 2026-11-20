@@ -55,6 +55,8 @@ class Context:
     apply_writes: object = False             # server.mcp_writes == "apply": apply_changes is offered and writes a batch at once; a bool, or a
                                              # callable read on every list / call (the stdio server outlives a change of the setting)
     source: str = "skill"                    # the batch / proposal source: "skill" (stdio from Claude Code) or "connector" (the HTTP route)
+    refresh: object = None                   # called before every message (serve_stdio: the effective configuration read again, so a
+                                             # change in Settings reaches a long-lived skill server; review 2026-11-20)
     wake: object = None                      # the scheduler's wake (the HTTP route sets it; None on stdio, where the next tick picks new tasks up):
                                              # called after a batch that created a task, so filing runs as after the page's Apply
     tool_log: list = field(default_factory=list)
@@ -1539,6 +1541,11 @@ def serve(ctx: Context, inp, out) -> None:
         except json.JSONDecodeError:
             resp = _err(None, -32700, "parse error")
         else:
+            if callable(ctx.refresh):
+                try:
+                    ctx.refresh()
+                except Exception as e:   # noqa: BLE001 — the configuration read before stays
+                    print(f"factotum mcp: settings not read again: {type(e).__name__}", file=sys.stderr, flush=True)
             resp = dispatch(ctx, msg)
         if resp is not None:
             out.write(json.dumps(resp, ensure_ascii=False) + "\n")
@@ -1559,5 +1566,7 @@ def serve_stdio() -> None:
     # one directory per skill process: "seen this run" (what a reply draft may answer) never spans sessions
     ctx = Context(conn, cfg, run_dir=run_dir or (C.ROOT / "data" / "runs" / "skill" / f"{date.today().isoformat()}-{os.getpid()}"), writer=writer,
                   apply_writes=lambda: str(C.get(C.effective(raw, get_settings(conn)), "server.mcp_writes", "stage")) == "apply", source="skill")
+    if writer is not None:                    # a skill's server lives as long as Claude Code's session: Settings read on every call
+        ctx.refresh = lambda: setattr(ctx, "cfg", C.effective(raw, get_settings(conn)))
     print(f"factotum mcp: {len(TOOLS)} tools, db {C.db_path()}, {'skill (may stage)' if writer else 'chat turn'}", file=sys.stderr, flush=True)
     serve(ctx, sys.stdin, sys.stdout)

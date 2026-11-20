@@ -946,13 +946,13 @@ def after_apply(conn: sqlite3.Connection, decided, batch_id: int | None, *, cfg:
         conn.execute("UPDATE review_passes SET rev = rev + 1 WHERE id = ?", (row["id"],))
 
 
-SAID_KEPT = 8                                        # `seen`: the items whose suggested answer a driver last said, newest kept
+SAID_KEPT = 40                                       # `seen`: the items a driver last read out (with the answer each suggested), newest kept
 
 
 def seen(conn: sqlite3.Connection, pass_id: int, driver: str, *, said: dict | None = None) -> None:
     """What a driver has now seen (stage 3 reads it to say what changed on the screen meanwhile): the tray's
-    revision, the decided items and the cursor, with the time; and `said`, {item key: {steps, members}}: the suggested
-    answer each item it just read out carried (stage 3's `rec` is the answer that was said, never the one worked out
+    revision, the decided items and the cursor, with the time; and `said`, {item key: {steps, members} or {}}: every item
+    it read out and the suggested answer each carried (stage 3's `rec` is the answer that was said, never the one worked out
     at the press), merged over what it said before, the newest SAID_KEPT kept. Not a move: `rev` stays. No commit."""
     if driver not in DRIVERS:
         raise Refused(f"unknown driver {str(driver)[:20]!r}")
