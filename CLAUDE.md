@@ -72,7 +72,13 @@ by hand; Find any task). Stage 7 (2026-11-11): suggested links (`factotum/sugges
 `docs/superpowers/specs/2026-11-18-search-and-review-editing-design.md`): the Search tab (`factotum/search.py`: words, close spellings, a date range,
 filters with counts; `GET /api/search/advanced`, the `tasks_search` tool, `python -m factotum search`; its own conversation, origin `search`), the editor and
 the link tools in a Review card, a suggestion card as an editable draft with its own conversation (origin `suggestion`, `chat_threads.card_id`), Why now in
-the editor, `reopen` as a chat proposal; and the Plaud trigger looking at its mailbox every minute, pushed or not. Retiring the old Notion
+the editor, `reopen` as a chat proposal; and the Plaud trigger looking at its mailbox every minute, pushed or not. Stage 1 of a spoken Review
+(2026-11-19, `docs/superpowers/specs/2026-11-19-spoken-review-design.md`, built on the branch `spoken-review`): Review's decision rule in Python
+(`factotum/review_decide.py`), the queue and its cards outside the API (`review_queue.items`, `review_queue.today`, `factotum/review_cards.py`), one
+tray for every device on the server (`factotum/tray.py`, the tables `tray`, `tray_rev`, `tray_carried`; `GET /api/tray`, `POST /api/tray/ops`,
+`/api/tray/carry`, `/api/tray/apply`, `POST /api/review/decide`), the page's tray as its mirror with the old local tray carried once, Pin and
+Long-term beside under `<id>:top` / `<id>:lt`, and `decideOn` for a card conversation's decisions and Create / Dismiss on a suggestion card.
+Retiring the old Notion
 pages and plaud-sync is the user's checklist (SETUP §15). Update this paragraph when something lands.
 
 ## Where things live
@@ -138,6 +144,9 @@ pages and plaud-sync is the user's checklist (SETUP §15). Update this paragraph
 | addresses, Back, the phone task page, the short bar, signed out, return and update | SPEC §9 | `web/app.js` (`parseAddress`, `setAddress`, `go`, `applyAddress`, `openTask`, `closeTask`, `taskPageHtml`, `signedOut`, `typingNow`, `onReturn`), `api.py` (`PAGE_TABS`, `STAMPED`, `build_stamp`, `BuildStamp`, `_index_html`) |
 | the starter, code defaults, absent means off, `effective` | SPEC §9 "Configuration", SETUP §18 | `factotum/config.py` (`STARTER_CONFIG`, `DEFAULTS`, `PAID_SWITCHES`, `value`, `explain`), `config/factotum.starter.yaml`, `__main__.py` (`_effective`), `web/app.js` (`starterHtml`, `settingsDirty`), `tests/test_stage3.py` (`_code_defaults`) |
 | notifications from the app: the key pair, devices, payload, sending, the worker, Settings → Notifications | design §14, SPEC §10 | `factotum/webpush.py` (`encrypt`, `vapid_header`, `send`), `factotum/app_push.py` (`keys`, `subscribe`, `payload`, `send_all`, `send_test`), `notify.py` (`providers`, `ready`), `reminders.py` (`notice`), `api.py` (`/api/push*`, `/sw.js`), `web/sw.js` (`shape`, `handlePush`, `handleClick`, `openApp`), `web/app.js` (`pushView`, `pushOn`, `followPath`, `reviewPushOn`) |
+| Review's decision rule: items, options, what a decision stages, from a card's conversation | spoken Review design §4, §5.2; SPEC §5 | `factotum/review_decide.py` (`OPTIONS`, `load_item`, `plan`, `stage`, `from_proposal`, `stored_proposal`, `FROM_CHAT_ARGS`), `review_queue.py` (`today`, `items`, `task_item`), `api.py` (`/api/review/decide`) |
+| the queue's suggestion cards, Create on a card as data | spoken Review design §5.1, §5.5 | `factotum/review_cards.py` (`cards`, `card`, `card_changes`, `CardPlan`, `NoCard`), `relations.decorate` / `ship` / `briefs` |
+| the tray on the server: rows, `decides`, write, carry, apply; the page's mirror | spoken Review design §5.3, §5.4, §5.6; SPEC §4 "The tray", §9 | `factotum/tray.py` (`clean_entry`, `decides_of`, `read`, `write`, `decided`, `carry`, `changes_for`, `finishes`, `apply`, `Stale`), `db.begin_write`, `api.py` (`/api/tray*`, `_tray_error`), `review_queue.undecided_count`, `web/app.js` (`tray`, `trayDiff`, `syncTray`, `sendTray`, `trayAnswer`, `trayFail`, `trayPoll`, `trayApply`, `trayBoot`, `carryOldTray`, `decideOn`, `cardProv`, `propStaged`, `sgStagedHtml`), `tests/test_tray_page.py` (the mirror run in node) |
 | the Review count, the number on the app's icon, the shortcuts, `/new` | design §16, SPEC §9, §10 | `factotum/review_queue.py` (`queue`, `card_count`, `count`), `api.py` (`/api/review/count`, `SHORTCUT_PATHS`), `app_push.py` (`payload`, `with_badge`), `web/sw.js` (`badgeOf`, `setBadge`), `web/app.js` (`reviewShown`, `syncBadge`, `parseAddress`, `applyAddress`, `openNew`), `manifest.webmanifest` `shortcuts`, `tools/make_icons.py` (`shortcut`) |
 
 ## Commands
@@ -423,8 +432,9 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
   "linked task changed" card out of the queue for having been edited. `ensureDetails` reads a peeked answer again when the task is really opened.
 - **What stands above the editor in a Review card is redrawn through `afterPress`** (2026-11-18): the name, the why-now line and the chips. A line
   more or less there moved the fields between the mousedown and the click that left one, and the effort tap after typing was lost.
-- **Apply on a Review card's editor line is not a decision** (2026-11-18, `applyAll` `editsOnly`): no `review/finish`, no pause; the queue is read
-  again and the card stays unless the edit removed its reason.
+- **Apply on a Review card's editor line is not a decision** (2026-11-18): no finish stamp, no pause; the queue is read
+  again and the card stays unless the edit removed its reason. Since 2026-11-19 the server says so (`tray.finishes`, the answer's
+  `finished`), not the page.
 - **`pickers.<slot> = …` goes after `const pickers`** (2026-11-18): the page script is one function and a `const` used above its line throws at
   load, so nothing draws at all (the first browser run of the Search tab). `node --check` does not see it; a page load does.
 - **Never pipe the dev or service start script's output through `tail` / `head` when it leaves a server
@@ -552,6 +562,31 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
 - **The Review count is `review_queue.count`, and it reads only** (2026-11-11): `GET /api/review` writes (the
   day's suggestion session, the `last_offered_at` stamp `expire` acts on), so it is never called for a number; a
   new place that shows how many items wait on Review uses `review_queue`, never its own `build_review_queue` call.
+- **The tray is on the server** (2026-11-19, `factotum/tray.py`): the page's `staged` Map is a mirror; every write site ends
+  in `syncTray()`, and only `carryOldTray` reads `localStorage['factotum.staged']`. Nothing caches or sends before `trayBoot`
+  has read `factotum.tray` (review 2026-11-19: a return before load() overwrote the unsent changes the cache kept), and what is
+  still to send is worked out against the base with the acknowledged ops laid over it, never the old base less what was sent
+  (a change taken back while its send was in flight came back with the answer). `tests/test_tray_page.py` runs the mirror in node.
+- **An item is decided when a tray row `decides` it, and only the server says which** (2026-11-19, `tray.decides_of`): the
+  routes drop a `decides` the page sends. A digit tray key is a task's decision only for done, drop, keep, reopen or a set of
+  `snoozed_until`; Pin and Long-term are `<id>:top` and `<id>:lt` on every tab, and the carry moves an old bare-key one there.
+- **A decision on a Review item is `review_decide.plan`** (2026-11-19): a new button, key, conversation path or tool that
+  decides goes through it (`stage`, `POST /api/review/decide`, the page's `decideOn`) and never stages an op alone. Stage 1
+  leaves the four buttons, the keys and the accept and link answers staging in the page under the same keys (stage 2 moves them).
+  `prop` and `also` (`FROM_CHAT_ARGS`) come only from a stored proposal, never from a caller.
+- **Every tray write starts with `db.begin_write` and reads after it** (2026-11-19): `BEGIN IMMEDIATE`, so the API's
+  connection, the connector's writer and the stdio server take turns; `commit_lock` covers only the API's own requests. A
+  tray route rolls back on every exception it does not answer (review 2026-11-19: a reminder's `repeat` sent as an object
+  raised TypeError after the lock was taken and left the shared connection inside the transaction, which would have made
+  every scheduler write fail with "database is locked").
+- **`tray.apply` deletes the rows in the batch's transaction** (2026-11-19): both or neither; `batches.apply` commits even
+  when every change was skipped, so the rows go then too. A row written after the revision the caller saw refuses the Apply.
+- **Review's day is `review_queue.today(cfg)`** (2026-11-19): the date where the owner is, for every Review route, the rule,
+  the finish stamp and Create on a card; never `date.today()`.
+- **A card's Create ref is `card<eid>`** (2026-11-19, `review_cards.card_changes`): two cards created in one batch never
+  share a ref; `tray.apply` finds the new task with `res["refs"]["card<eid>"]`.
+- **The tab's number is `review_queue.undecided_count`, the icon's push number still `review_queue.count`** (2026-11-19): the
+  tab leaves out what the tray decides; until an Apply the two may differ.
 - **`app_badge` is a top-level integer in the declarative payload, never inside `notification`** (2026-11-11):
   WebKit moved it out in 2025; a nested one crashed an update path. A wrong type makes Safari hand the push to
   the worker, which still shows it.
@@ -563,6 +598,10 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
   page address that is not a tab goes in `api.SHORTCUT_PATHS` and `parseAddress`.
 - **iOS ignores manifest `shortcuts`, and Chromium re-reads an installed app's manifest lazily** (2026-11-11): a
   changed shortcut may need a reinstall to show.
+
+- **The service runs from the main working copy and serves `factotum/web/` from disk** (2026-11-19): a commit to `main`
+  changes the page the owner has open at its next reload, under the old Python still running. Feature work that touches the
+  page is built in a `.worktrees/` branch and merged at a deploy, never committed to `main` while the old Python is running.
 
 ## Gotchas carried over from plaud-sync (dates are when they were learned)
 

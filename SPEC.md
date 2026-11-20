@@ -173,7 +173,26 @@ push_subscriptions(                               -- stage 2: one row per device
       last_success_at,                            -- the last push the service accepted
       last_failure_at,                            -- the last push it did not
       last_error)                                 -- why, as Settings shows it
+tray(key PRIMARY KEY,                             -- spoken Review stage 1 (2026-11-19): what is staged, one tray for every device
+     pos,                                         -- the order shown and applied; a key staged again keeps its place
+     entry_json,                                  -- {task_id, op, fields, label, expect?, note?, from_chat?, ev?, fsug?, prop?}
+     decides,                                     -- the Review item this row's decision settles (`t:412`, `s:186`), or NULL
+     origin, device,                              -- page|carry|connector|skill; the page's device label
+     rev, staged_at, updated_at)                  -- rev: the tray revision of the row's last write
+tray_rev(id = 1, rev)                             -- the tray's revision, moved once by every write that changed something
+tray_carried(fp PRIMARY KEY, carry_id, at)        -- fingerprints of what a browser's old local tray handed over, so nothing is carried twice
 ```
+
+**The tray** (2026-11-19, `factotum/tray.py`; design `docs/superpowers/specs/2026-11-19-spoken-review-design.md`
+§5.3). A row is a staged change under its tray key (the page's `stageKey` as text: `412`, `412:due`, `412:top`,
+`412:lt`, `rel:3:waits_on:9`, `e:186`, `new:c55-0`). **An item is decided when at least one row `decides` it**,
+and only the server says so (`tray.decides_of`, or the rule's own answer): a bare task id decides that task only
+for `done`, `drop`, `keep`, `reopen` or a `set` of `snoozed_until`; a card's Create (`create_suggestion`) or
+Dismissal under `e:<id>` decides the card; everything else stands beside. Every write starts with
+`db.begin_write` (`BEGIN IMMEDIATE` unless a transaction is open) and reads after it, so the API's connection,
+the connector's writer and the stdio skill server take turns. `tray.apply` applies the rows as one batch and
+deletes them in the batch's own transaction (both or neither); a row written after the revision the caller saw
+refuses the Apply (`Stale`). The three tables are new and start empty, so they need no `VERSIONED` migration.
 
 Stage 7 adds three `settings` rows and one batch op. `state.links.session` is `{day, ids}`: the link
 suggestions (evidence ids) offered that day, judged ones included, which `relations.annotate` reads (the daily
@@ -251,9 +270,16 @@ Slack · planner · freed (a task it waited on is closed or done and it waits on
 task gone (closed without being done) · all steps done · a linked task changed · link suggested · back from
 Later · new · soft slipped · fading soon · back · reminder missed. *New* means never decided on
 (`last_reviewed_at` is null), not "created since the last session": an item the user did not get to
-stays in the queue. The queue is served in pages of `review_cap` (15); ids already staged in the tray
-are excluded from the next page, and after a page the UI offers "Review another 15 of the remaining
-N" rather than loading it unasked. Decisions: **Done · Keep · Later · Drop**, plus ★ Top and
+stays in the queue. The queue is served in pages of `review_cap` (15); tasks a tray row decides are
+excluded from the next page (and the ids an old page still sends as `exclude`), and after a page the UI
+offers "Review another 15 of the remaining N" rather than loading it unasked. **Review's day** is
+`review_queue.today(cfg)`, the date where the owner is (2026-11-19): every Review route, the rule, the finish
+stamp and Create on a card use it, never the machine's date. **The decision rule is Python**
+(`factotum/review_decide.py`, 2026-11-19): `plan(conn, cfg, item, option, args, tray, today)` turns one option on
+one item (`t:<id>`, `s:<evidence id>`) into the tray rows to put and delete, exactly as the page's buttons
+staged them; re-deciding replaces the earlier decision's rows and keeps what stands beside; `stage` loads the
+item, plans against the tray and writes it. Pin and Long-term stand beside under `<id>:top` and `<id>:lt` on
+every tab, so they never settle a card. Decisions: **Done · Keep · Later · Drop**, plus ★ Top and
 Long-term. Every decision sets `last_reviewed_at`; *Keep* changes nothing else and suppresses the
 item until something changes; *Later* sets `snoozed_until` to tomorrow, Friday, next week or a
 picked date, and never touches `due`. A decision may carry a free-text note, appended dated to
@@ -1079,7 +1105,9 @@ task you add" (a switch under Claude).
 **App extras (stage 8 of the linked-tasks design, 2026-11-11).** The number beside Review comes from
 `GET /api/review/count` (`review_queue.count`, read-only: `GET /api/review` records the day's suggestion
 session and stamps `last_offered_at`, so it is never called for a number) from the first load until Review is
-loaded, then from the Review page, which leaves out what the tray already decided; back at the front off
+loaded, then from the Review page, which leaves out what the tray already decided (since 2026-11-19 the route
+answers `review_queue.undecided_count`, the count less the tasks and cards a tray row decides; the icon's number
+on a push is still `review_queue.count`); back at the front off
 the Review tab, that page is let go and the server's count is read again. The app's icon gets exactly
 the number the tab shows (`navigator.setAppBadge`; `clearAppBadge` at 0, when the sign-in has expired and when
 the switch is off; one call per change, not one per redraw, and once more on every return to the front, so a
@@ -1133,7 +1161,28 @@ no second copy of the text to maintain.
   `POST /api/review/suggestions/{id}/create` lays `fields` over the card's own through the same cleaner and
   makes `links` instead of the card's, still one `review` batch with one Undo (Create after that Undo reopens
   the task with the edits). Source, key, source link and account are never the body's. By prompt it is the
-  card's conversation (§8.3).
+  card's conversation (§8.3). Since 2026-11-19 the page stages Create instead (below); the route stays for a
+  page loaded before that deploy, and both build the batch with `review_cards.card_changes`.
+
+**The tray on the server (spoken Review stage 1, 2026-11-19).** One tray for every device: a decision staged on
+the phone is in the desktop's tray (§4 "The tray"). The page's `staged` Map is a mirror of it: every write site
+ends in `syncTray()`, which keeps a cache (`localStorage['factotum.tray']`) and queues one `POST /api/tray/ops`
+whose difference is worked out when its turn comes, so quick changes arrive once each and in order; every answer
+replaces the mirror and this page's unanswered changes are laid over it again. A change that did not arrive stays
+"not saved yet" in the tray bar and is sent again on the next change, on return, when the network is back or in
+15 s; the cache's unsent changes are sent at the next start only within the hour. A row another device or Claude
+staged says so. Apply is `POST /api/tray/apply` with the revision the page shows (409 when the tray changed on
+another device since). The first load hands the browser's old local tray (`factotum.staged`) over once
+(`POST /api/tray/carry`; an old bare-key Pin or Long-term moves to `<id>:top` / `<id>:lt`, a key another device
+staged is kept out) and keeps it 30 days as `factotum.staged.backup`. Routes: `GET /api/tray?since=`,
+`POST /api/tray/ops`, `/api/tray/carry`, `/api/tray/apply`, `POST /api/review/decide`; each error answers the
+tray beside `detail`, never 401 or 403. `decideOn` is the one page function that calls `/api/review/decide`
+(the rule, §5): a Review card conversation's done, drop, Pin, Long-term or Later about the card's own task
+(read by the server from the stored proposal, `from_chat`), and Create, Dismiss and Take back on a suggestion
+card (`e:<id>`; the card leaves at the click and the tray says "new task: …"; Apply answers "Created Task-N"
+with Open). It draws the rule's row at once and takes it back with the reason when the server refuses. The four
+buttons, the keys and the accept and link answers still stage in the page under the same keys; stage 2 moves
+them onto the rule. The Later date box and a typed date refuse today.
 
 ## 10. Reminders and push
 
