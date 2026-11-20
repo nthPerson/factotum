@@ -2230,6 +2230,24 @@
     const id = x.id;
     return `<div class="rvedit" data-rvedit="${id}">${editorHtml(x)}<div data-dlinks="${id}">${detailAsyncHtml(id)}</div>${linkByHandHtml(x)}${moreHtml(x, true)}</div>`;
   }
+  // Who wrote and about what, behind "Thread updated" and "Mentioned in Slack" (spoken Review 2b, design 6.7): the
+  // server's evidence_lines, one per mail or Slack row, under the reason line. Every value through esc; the server
+  // never sends an address alone ("someone"). A time this week reads "Fri 9:00 AM", an older one "Nov 9".
+  function evWhen(iso) {
+    if (!iso) return '';
+    const d = new Date(iso); if (isNaN(d)) return '';
+    return Math.abs(startOfDay(TODAY()) - startOfDay(d)) < 6 * 86400000 ? fmtWhen(iso) : d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  }
+  function evidenceLinesHtml(item) {
+    const ls = (item && item.evidence_lines) || [];
+    if (!ls.length) return '';
+    const when = l => evWhen(l.at) ? ` · <span class="evt">${esc(evWhen(l.at))}</span>` : '';
+    return `<div class="evl">${ls.map(l => {
+      if (l.kind === 'mail') return `<div><span class="evk" aria-label="Mail">✉</span> ${l.maybe ? 'may be from ' : ''}<b>${esc(l.who)}</b>${l.reply ? ' replied' : ''}${l.subject ? ` · “${esc(l.subject)}”` : ''}${when(l)}</div>`;
+      if (l.label != null) return `<div><span class="evk" aria-label="Slack">#</span> ${esc(l.label)}${when(l)}</div>`;
+      return `<div><span class="evk" aria-label="Slack">#</span> ${esc(l.where)} · <b>${esc(l.who)}</b>: ${esc(l.text)}${when(l)}</div>`;
+    }).join('')}</div>`;
+  }
   function renderReview() {
     if (!review) {
       if (reviewFailed) return `<div class="empty">Could not load Review: ${esc(reviewFailed)} <button class="btn small" id="review-retry">Try again</button></div>`;
@@ -2262,6 +2280,7 @@
       <div class="progress"><span>${idx + 1} of ${total}</span><div class="track"><div class="fill" style="width:${Math.round(100 * idx / total)}%"></div></div><span>~${Math.max(1, Math.ceil(items.length * 12 / 60))} min left</span></div>
       <div class="card" data-id="${x.id}">
         <div class="why ${cls}">${reasonText(items[0])}</div>
+        ${evidenceLinesHtml(items[0])}
         <h2>${esc(x.name)}</h2>
         <div class="sub" data-rvsub="${x.id}">${reviewSubHtml(x)}</div>
         ${sinceHtml(items[0])}

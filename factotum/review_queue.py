@@ -4,7 +4,8 @@ the same functions. Reads only. GET /api/review also writes (the day's link-sugg
 offered stamp `expire` acts on), so it is never called just for the number."""
 from __future__ import annotations
 
-from datetime import date, datetime
+import re
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from . import config as C, lifecycle, relations
@@ -12,6 +13,10 @@ from .dates import parse_date
 from .db import get_settings, rows
 
 SUGGESTION_KINDS = ("proposal", "slack_mention")      # evidence with no task that Review offers as a Create / Dismiss card
+URGENT_DAYS = 1                                       # a hard date this many days away, or past, puts an item first (design 6.7, tier 0)
+CARD_SOON_DAYS = 7                                    # a card due within this many days ranks among the tasks; later or undated, after them
+SLACK_LABEL = re.compile(r"^#([^ ·]{1,80}) · ([^:]{1,80}): (.{0,200})$")     # slack_sweep's label: "#<channel> · <poster>: <text>"
+MAIL_KINDS = ("thread_updated", "reply_from_waiting", "maybe_reply_from_waiting")
 OWNER_SOURCES = ("ui", "review", "command", "chat", "skill", "connector")   # batch sources that are the owner's own hand: a reopen there is not Back
 
 
@@ -77,14 +82,16 @@ def today(cfg: dict) -> date:
 def items(conn, cfg: dict, today: date) -> dict:
     """The whole queue as GET /api/review ships it, built once for every reader: `tasks`, each
     {key: "t:<id>", task (decorated, `rel` compacted), reasons, primary, texts, link_suggestions, since
-    (only for "linked_changed"), flags, evidence}, in Review's order; and `cards`, each with `key: "s:<id>"`
-    (review_cards). No cap, no exclusion, nothing left out for being decided. Reads only: the day's link
+    (only for "linked_changed"), flags, evidence, evidence_lines}, and `cards`, each with `key: "s:<id>"`
+    (review_cards), each list in Review's order (order_key; `queue` keeps the lifecycle's own order for the count,
+    the nudge and the planner). No cap, no exclusion, nothing left out for being decided. Reads only: the day's link
     suggestions (suggestions.session) are the caller's to write first."""
     from . import review_cards               # lazy: review_cards imports ripple, which imports the planner
     open_tasks = relations.decorate(conn, rows(conn, "SELECT * FROM tasks WHERE status = 'open'"), today, cfg)
     fl = flags(conn, cfg)
     full = queue(conn, cfg, today, open_tasks, fl)
-    return {"tasks": _finish(conn, full, open_tasks, fl, review_cards.evidence_by_task(conn)), "cards": review_cards.cards(conn, cfg)}
+    tasks = sorted(_finish(conn, full, open_tasks, fl, review_cards.evidence_by_task(conn)), key=lambda e: order_key(e, today))
+    return {"tasks": tasks, "cards": sorted(review_cards.cards(conn, cfg), key=lambda e: order_key(e, today))}
 
 
 def task_item(conn, cfg: dict, today: date, task_id: int) -> dict | None:
@@ -121,6 +128,7 @@ def _finish(conn, full: list[dict], open_tasks: list[dict], flags: dict, by_task
     for i in full:
         i["flags"] = flags.get(i["task"]["id"], {})
         i["evidence"] = by_task.get(i["task"]["id"], [])      # judged in the same batch as the decision; a proposal's change can be accepted
+        i["evidence_lines"] = evidence_lines(i)
         out.append({"key": f"t:{i['task']['id']}", **i})
     return out
 
@@ -152,3 +160,93 @@ def count(conn, cfg: dict, today: date, exclude=frozenset()) -> int:
     """len(queue(...)) over the open rows not in `exclude` (the page's tray), plus card_count(conn)."""
     open_tasks = relations.annotate(conn, [t for t in rows(conn, "SELECT * FROM tasks WHERE status = 'open'") if t["id"] not in exclude])
     return len(queue(conn, cfg, today, open_tasks)) + card_count(conn)
+
+
+def _card_reason(entry: dict) -> str:
+    """The REVIEW_ORDER reason a suggestion card ranks as: a Slack mention as Mentioned, a ripple's create as Ripple,
+    everything else (the planner's, mail's) as Planner."""
+    if entry.get("kind") == "slack_mention":
+        return "mentioned"
+    return "ripple" if entry.get("by") == "ripple" else "planner"
+
+
+def _rank(reason) -> int:
+    return lifecycle.REVIEW_ORDER.index(reason) if reason in lifecycle.REVIEW_ORDER else len(lifecycle.REVIEW_ORDER)
+
+
+def order_key(entry: dict, today: date) -> tuple:
+    """Review's order (design 6.7): (tier, inner, due or "9999", -score, (kind, id)). Tier 0: a task with a hard date
+    today, tomorrow or past, or a card whose date is that near; inner = (due, the reason's rank). Tier 1: every other
+    task (a group as `new`) and a card due within CARD_SOON_DAYS; inner = the reason's rank. Tier 2: any other card, by
+    its date then its id. Dates are ISO text, which compares as dates do; within a tier the types never mix."""
+    key = str(entry.get("key") or "")
+    if key.startswith("s:"):
+        f = entry.get("fields") or {}
+        due = f.get("due") if isinstance(f.get("due"), str) and parse_date(f.get("due")) else None
+        d = parse_date(due)
+        rank = _rank(_card_reason(entry))
+        last = (1, int(entry.get("id") or 0))
+        if d is not None and d <= today + timedelta(days=URGENT_DAYS):
+            return (0, (due, rank), due, 0, last)
+        if d is not None and d <= today + timedelta(days=CARD_SOON_DAYS):
+            return (1, rank, due, 0, last)
+        return (2, 0, due or "9999", 0, last)
+    if key.startswith("g:"):                                          # a group of alike new tasks (2d) ranks as new
+        return (1, _rank("new"), "9999", 0, (2, 0))
+    t = entry.get("task") or {}
+    due = t.get("due") if isinstance(t.get("due"), str) and parse_date(t.get("due")) else None
+    d = parse_date(due)
+    rank, score, last = _rank(entry.get("primary")), -float(t.get("score") or 0), (0, int(t.get("id") or 0))
+    if t.get("hard") and d is not None and d <= today + timedelta(days=URGENT_DAYS):
+        return (0, (due, rank), due, score, last)
+    return (1, rank, due or "9999", score, last)
+
+
+def _cap(v, n: int) -> str:
+    return str(v or "").strip()[:n]
+
+
+def _who(v) -> str:
+    """A sender as a person's name: "Name <address>" gives the name; an address alone, or nothing, is "someone"."""
+    s = _cap(v, 200)
+    if "<" in s:
+        s = s.split("<", 1)[0]
+    s = s.strip().strip('"\'').strip()[:80]
+    return "someone" if not s or "@" in s else s
+
+
+def _at(v):
+    """An evidence time as ISO with its offset: Mailbird's times are UTC written without one."""
+    if not v:
+        return None
+    try:
+        d = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return (d if d.tzinfo else d.replace(tzinfo=ZoneInfo("UTC"))).isoformat()
+
+
+def evidence_lines(item: dict) -> list[dict]:
+    """Who wrote and about what, behind "Thread updated" and "Mentioned in Slack" (design 6.7): one line per unjudged
+    mail or Slack row on the item (`item["evidence"]`). Mail: {kind: "mail", who, subject, at, reply?, maybe?} from the
+    subject (the row's label) and the last sender (its excerpt). Slack: {kind: "slack", who, where, text, at} parsed
+    from the label with one bounded pattern; a label that does not parse is shown as it is ({kind, label, at}). Every
+    value is capped and an address is never shown alone. Pure."""
+    out: list[dict] = []
+    for e in item.get("evidence") or []:
+        k = e.get("kind")
+        if k in MAIL_KINDS:
+            line = {"kind": "mail", "who": _who(e.get("reason")), "subject": _cap(e.get("label"), 200), "at": _at(e.get("at"))}
+            if k == "reply_from_waiting":
+                line["reply"] = True
+            elif k == "maybe_reply_from_waiting":
+                line["maybe"] = True
+            out.append(line)
+        elif k == "slack_mention":
+            label = _cap(e.get("label"), 400)
+            m = SLACK_LABEL.match(label)
+            if m:
+                out.append({"kind": "slack", "who": _who(m.group(2)), "where": m.group(1), "text": m.group(3).strip(), "at": _at(e.get("at"))})
+            else:
+                out.append({"kind": "slack", "label": label[:200], "at": _at(e.get("at"))})
+    return out

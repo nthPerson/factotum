@@ -454,6 +454,11 @@ body.tray-open .toast.ask { bottom: calc(38vh + 110px + env(safe-area-inset-bott
 .card .why.crit { color: var(--crit); } .card .why.warn { color: var(--warn); } .card .why.new { color: var(--accent); }
 .card .why.ok { color: var(--ok); } .card .why.chg { color: var(--top); }
 .card .why a { color: inherit; }
+.card .evl { display: flex; flex-direction: column; gap: 2px; margin: -2px 0 10px; font-size: 13px; line-height: 1.4; color: var(--muted); }   /* who wrote, behind Thread updated / Mentioned in Slack */
+.card .evl > div { overflow-wrap: anywhere; }
+.card .evl b { color: var(--fg); font-weight: 500; }
+.card .evl .evk { display: inline-block; min-width: 1.1em; color: var(--muted); }
+.card .evl .evt { white-space: nowrap; }
 .card h2 { margin: 0 0 6px; font-size: 20px; text-wrap: balance; font-weight: 600; }
 .card .sub { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
 .card p { margin: 0 0 8px; color: var(--muted); max-width: 62ch; }
