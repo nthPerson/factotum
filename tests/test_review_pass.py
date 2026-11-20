@@ -130,10 +130,15 @@ def test_begin_records_the_days_link_suggestions_once(conn, cfg, monkeypatch):
     assert calls == [D]
 
 
-def test_the_pass_reads_write_nothing(cfg, tmp_path):
+def test_get_review_and_the_pass_reads_write_nothing(cfg, tmp_path):
     client = TestClient(create_app(cfg, db_path=str(tmp_path / "a.db")))
     c = client.app.state.conn
     tasks(c, 3)
+    before = c.total_changes
+    assert client.get("/api/review").json()["total"] == 3                  # spoken Review 2a-3: GET /api/review reads only
+    assert c.total_changes == before and not c.in_transaction
+    assert [offered(c, i) for i in (1, 2, 3)] == [None, None, None]
+    assert c.execute("SELECT value_json FROM settings WHERE key = ?", (suggestions.SESSION_KEY,)).fetchone() is None   # the begin writes it
     assert client.get("/api/review/pass").json() == {"pass": None}
     assert client.get("/api/review/pass/now").json()["pass_id"] is None
     v = client.post("/api/review/pass", json={"device": "Desk"}).json()["pass"]
@@ -141,9 +146,32 @@ def test_the_pass_reads_write_nothing(cfg, tmp_path):
     before = c.total_changes
     got = client.get("/api/review/pass").json()["pass"]
     now = client.get("/api/review/pass/now").json()
+    client.get("/api/review")
     assert c.total_changes == before and not c.in_transaction
     assert got["id"] == v["id"] and got["rev"] == v["rev"]
     assert now == {"pass_id": v["id"], "rev": v["rev"], "state": "item", "cursor_key": "t:1", "tray_rev": 0, "speaking": None, "day": v["day"]}
+
+
+def test_get_review_is_whole_and_in_the_new_order(cfg, tmp_path):
+    """GET /api/review is the whole queue in Review's order (order_key): no page of `lifecycle.review_cap`, nothing left
+    out for being decided in the tray, an old page's `exclude` accepted and ignored, and no stamp."""
+    client = TestClient(create_app(cfg, db_path=str(tmp_path / "a.db")))
+    c = client.app.state.conn
+    tasks(c, 20)
+    hard = (review_queue.today(cfg) + timedelta(days=1)).isoformat()
+    c.execute("UPDATE tasks SET due = ?, hard = 1 WHERE id = 17", (hard,))   # urgent: tier 0, first
+    c.commit()
+    card = _kind_card(c, "planner")
+    client.post("/api/review/decide", json={"key": "t:3", "option": "keep"})   # decided in the tray: still listed
+    rv = client.get("/api/review", params={"exclude": "1,2"}).json()
+    ids = [i["task"]["id"] for i in rv["items"]]
+    assert sorted(ids) == list(range(1, 21)) and rv["total"] == 20 == len(rv["items"])
+    assert ids[0] == 17
+    want = [i["key"] for i in review_queue.items(c, cfg, review_queue.today(cfg))["tasks"]]
+    assert [i["key"] for i in rv["items"]] == want
+    assert [s["key"] for s in rv["suggestions"]] == [f"s:{card}"]
+    assert rv["cap"] == 15 and set(rv) >= {"today", "last_review_at", "labels", "cap", "total", "items", "suggestions"}
+    assert c.execute("SELECT COUNT(*) FROM tasks WHERE last_offered_at IS NOT NULL").fetchone()[0] == 0
 
 
 # --- the offered stamp ------------------------------------------------------------------------------------
@@ -164,6 +192,21 @@ def test_arriving_stamps_last_offered_at_on_that_item_only(conn, cfg):
     conn.commit()
     mv(conn, cfg, "goto", key="t:3", from_key=None)
     assert offered(conn, 3) == "2026-11-25"
+
+
+def test_the_offered_stamp_is_the_pass_s_not_get_review_s(cfg, tmp_path):
+    """Through the routes: GET /api/review stamps nothing however many items it lists (it stamped its first fifteen
+    until 2a-3); beginning a pass stamps the one item in front, Next the one it brings."""
+    client = TestClient(create_app(cfg, db_path=str(tmp_path / "a.db")))
+    c = client.app.state.conn
+    tasks(c, 20)
+    client.get("/api/review")
+    assert c.execute("SELECT COUNT(*) FROM tasks WHERE last_offered_at IS NOT NULL").fetchone()[0] == 0
+    v = client.post("/api/review/pass", json={}).json()["pass"]
+    day = review_queue.today(cfg).isoformat()
+    assert {r[0] for r in c.execute("SELECT id FROM tasks WHERE last_offered_at = ?", (day,))} == {int(v["cursor_key"][2:])}
+    m = client.post(f"/api/review/pass/{v['id']}/move", json={"to": "next", "from": v["cursor_key"]}).json()
+    assert {r[0] for r in c.execute("SELECT id FROM tasks WHERE last_offered_at IS NOT NULL")} == {int(v["cursor_key"][2:]), int(m["pass"]["cursor_key"][2:])}
 
 
 # --- moves ------------------------------------------------------------------------------------------------

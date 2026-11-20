@@ -23,7 +23,7 @@
   // to say once the pass ended here ({why, left}), `follow` (following another device, 2a-3), `said` a line the next draw
   // shows once (coming round), `inflight` the presses whose answers are awaited, `held` the newest answer kept until then,
   // `back` the View before a press drew ahead (a lost answer draws it again), `drawn` the item last drawn (a new one scrolls up).
-  let rp = { view: null, loading: null, seq: 0, failed: '', finished: null, follow: null, said: '', inflight: 0, held: undefined, back: null, drawn: null, drawing: null, drawnAt: 0 };
+  let rp = { view: null, loading: null, seq: 0, failed: '', finished: null, follow: null, said: '', inflight: 0, held: undefined, back: null, drawn: null, drawing: null, drawnAt: 0, checking: false };
   const RV_SETTLE_MS = 400;      // a tap on the decisions this soon after a new item came in front is not taken
   let lastBatch = null;
   let chat = { threads: null, current: null, messages: [], live: null, busy: false, place: null };   // place: the key of the conversation in place whose turn runs (stage 6)
@@ -464,6 +464,7 @@
     if (ui.tab !== 'review') reviewStale();
     badgeShown = undefined;
     if (typingNow()) { if (ui.tab === 'today') { clearTimeout(sumTimer); pollSummary(); } loadCount().then(showCount); return; }
+    if (ui.tab === 'review') followCheck();      // on Review: the pass read again (another device may have moved it), never begun
     if (ui.tab === 'log') logData = null;
     // The Today box's conversation is asked for again, so one gone quiet for 12 hours is let go in an app that
     // stays open (the server's rule, chat.place_thread). A closed one stays closed; one with a turn running stays.
@@ -1776,6 +1777,7 @@
     const fns = { today: renderToday, timeline: renderTimeline, projects: renderProjects, review: renderReview, search: renderSearch, chat: renderChat, log: renderLog, settings: renderSettings };
     const held = heldDraftBox(p);
     taskPlacesDrawn.clear(); editorsDrawn.clear();
+    if (ui.tab !== 'review' || ui.page !== null) stopFollow();      // renderReview starts it again
     p.innerHTML = ui.page !== null ? taskPageHtml() : starterHtml() + pendingHtml() + fns[ui.tab]();
     // The focus mark on the copy j / k reached, not on every copy of a task drawn twice
     const rowsNow = [...p.querySelectorAll('.row')];
@@ -2218,6 +2220,47 @@
     if (r.pass) { rp.view = r.pass; rp.finished = null; }
     else { rp.view = null; if (applied) rp.finished = { why: 'applied', left: 0 }; }
   }
+  // Following the pass (design 6.5): another device, or Claude, moves the one cursor and stages decisions. Every 3 s, only
+  // while Review is in front, the document visible, no task page open, nothing typed and no press of this page waiting on
+  // an answer, the page asks what the pass and the tray are now (two small reads, no lock) and, when either differs from
+  // what is drawn, reads them and redraws after the press in progress. Started by renderReview, stopped off Review and
+  // while hidden (a return starts it again through load's render).
+  const FOLLOW_MS = 3000;
+  function followPass() { if (!rp.follow) rp.follow = setTimeout(followTick, FOLLOW_MS); }
+  function stopFollow() { clearTimeout(rp.follow); rp.follow = null; }
+  async function followTick() {
+    rp.follow = null;
+    if (ui.tab !== 'review' || document.hidden) return;
+    if (!(ui.page !== null || typingNow() || rp.inflight || rp.loading || pressing)) await followCheck();
+    if (ui.tab === 'review' && !document.hidden) followPass();
+  }
+  // One look: what the pass and the tray are now, and when they moved, the pass read again (GET: never a begin) and the
+  // tray asked for what changed. A pass ended elsewhere shows the finished screen (Start again begins one); one from another
+  // day is let go, so the next draw begins today's. "Moved on <device>" when the cursor moved under this page.
+  async function followCheck() {
+    const v = rp.view; if (!v || !v.id || rp.checking) return;
+    rp.checking = true;
+    try {
+      let n; try { n = await api('/api/review/pass/now'); } catch (_) { return; }
+      if (!(n.pass_id !== v.id || n.rev !== v.rev || n.tray_rev !== v.tray_rev)) return;
+      let r; try { r = await api('/api/review/pass'); } catch (_) { return; }
+      if (rp.view !== v || rp.inflight || rp.loading) return;      // a press or a load meanwhile: its answer is the newer
+      if (typeof n.tray_rev === 'number' && n.tray_rev > tray.rev) trayPoll();
+      const p = r.pass;
+      if (!p && n.pass_id === v.id) reviewStale();                  // still live, but from another day
+      else if (!p) { rp.view = null; rp.held = undefined; rp.finished = { why: 'elsewhere', left: (v.counts || {}).left || 0 }; }
+      else {
+        rp.view = p; rp.held = undefined; rp.finished = null;
+        if (p.cursor_key !== v.cursor_key) { rp.said = ''; ui.laterOpen = false; ui.datePick = false; }
+      }
+      const who = p && p.id === v.id && p.cursor_key !== v.cursor_key && p.moved_by ? p.moved_by : '';
+      afterPress('review', () => {
+        if (ui.tab !== 'review' || ui.page !== null || typingNow()) { showCount(); return; }
+        render();
+        if (who) toast(who === 'page · ' + deviceLabel() ? 'Moved in another window' : 'Moved on ' + who.replace(/^page · /, ''));
+      });
+    } finally { rp.checking = false; }
+  }
   // One move of the shared cursor. Next and Back name the item drawn in front (`from`): when another device moved it
   // meanwhile, nothing moves and the answer's pass is drawn. Next draws what comes at once.
   async function passMove(to, key) {
@@ -2405,6 +2448,7 @@
   function renderReview() {
     const c = reviewCurrent();
     rp.drawing = c.key || c.state;
+    followPass();
     if (c.state === 'failed') return `<div class="empty">Could not load Review: ${esc(rp.failed)} <button class="btn small" data-opt="resume">Try again</button></div>`;
     if (c.state === 'loading') { if (!rp.loading) loadPass().catch(() => {}); return '<div class="empty">Loading review queue…</div>'; }      // a failure is drawn above, from rp.failed
     if (c.state === 'finished') return finishedHtml();
@@ -2505,7 +2549,7 @@
   // The pass ended here: applied with nothing left, or Finish for now. What is left stays in Review; the tray keeps what is staged.
   function finishedHtml() {
     const f = rp.finished || {}, n = staged.size;
-    const head = f.why === 'applied' ? 'Applied. Nothing is left to decide.' : 'Review finished for now.';
+    const head = f.why === 'applied' ? 'Applied. Nothing is left to decide.' : f.why === 'elsewhere' ? 'This review was finished on another device.' : 'Review finished for now.';
     const left = f.why !== 'applied' && f.left ? `${f.left} left undecided: they stay in Review for next time. ` : '';
     return `<div class="review"><div class="finish"><h2>${head}</h2><p>${left}${n ? `${n} staged change${n === 1 ? '' : 's'} wait in the tray.` : ''}</p><p class="rvacts"><button class="btn" data-opt="restart">Start again</button></p></div></div>`;
   }
@@ -3459,7 +3503,7 @@
       ${f('lifecycle.fade_warn_days', 'Fade warning', 'Shown in Review this many days before fading.', num('lifecycle.fade_warn_days', 1, 14) + ' days')}
       ${f('lifecycle.last_call_days', 'Last call', 'Hard deadlines this far past due go to Review once, then lapse.', num('lifecycle.last_call_days', 1, 30) + ' days')}
       ${f('lifecycle.top_cap', 'Top cap', 'Soft limit on the Top rail.', num('lifecycle.top_cap', 3, 15))}
-      ${f('lifecycle.review_cap', 'Review cap', 'Max items per Review session.', num('lifecycle.review_cap', 5, 50))}
+      ${f('lifecycle.review_cap', 'Items per sitting', 'Review stops and asks before going on after this many.', num('lifecycle.review_cap', 5, 50))}
       ${f('links.suggestions_per_review', 'Suggested links', 'At most this many suggested links a day, in Review and as dashed badges; the rest wait for another day. 0 shows none (what was suggested for a task you just added still shows as chips on it).', num('links.suggestions_per_review', 0, 20) + ' a day')}
       <h3>Notifications</h3>
       ${f('notify.provider', 'Send reminders to', 'Reminders and the evening review nudge go here. ntfy needs its app and a topic; The app needs notifications turned on below, on each device.', `<select id="s-notify.provider" data-key="notify.provider">${[['ntfy', 'ntfy'], ['app', 'The app'], ['both', 'Both']].map(([v, l]) => `<option value="${v}" ${e['notify.provider'] === v ? 'selected' : ''}>${l}</option>`).join('')}</select>`)}

@@ -253,6 +253,7 @@ def test_review_the_badges_and_the_agent_see_the_same_days_suggestions(cfg, tmp_
     mk(conn, 300); mk(conn, 301)
     fe = relations.suggest(conn, "part_of", 300, 301, "a piece of it", "filing"); conn.commit()
     client = TestClient(api.create_app(cfg, db_path=str(path)))
+    client.post("/api/review/pass", json={})                     # 2a-3: beginning a pass writes the day's suggestions, not GET /api/review
     items = client.get("/api/review").json()["items"]
     shown = {s["evidence_id"] for i in items for s in i["link_suggestions"]}
     assert shown == set(ids[:5]) | {fe}                                                      # five a day, filing ones besides

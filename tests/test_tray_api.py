@@ -188,9 +188,9 @@ def test_the_count_leaves_out_what_the_tray_decides(cfg, tmp_path):
     assert review_queue.undecided_count(c, ecfg, review_queue.today(ecfg)) == 3
     assert client.get("/api/review/count?exclude=2").json()["count"] == 2                    # an old page's exclude still counts
     assert review_queue.count(c, ecfg, review_queue.today(ecfg)) == 5                        # the icon's count is unchanged in stage 1
-    rv = client.get("/api/review").json()
-    assert sorted(i["task"]["id"] for i in rv["items"]) == [2, 3] and rv["total"] == 2
-    assert sorted(i["task"]["id"] for i in client.get("/api/review?exclude=3").json()["items"]) == [2]
+    rv = client.get("/api/review").json()                 # 2a-3: whole, decided items listed, `exclude` ignored
+    assert sorted(i["task"]["id"] for i in rv["items"]) == [1, 2, 3] and rv["total"] == 3
+    assert sorted(i["task"]["id"] for i in client.get("/api/review?exclude=3").json()["items"]) == [1, 2, 3]
     client.post("/api/review/decide", json={"key": f"s:{e2}", "option": "dismiss"})
     assert client.get("/api/review/count").json()["count"] == 2
 

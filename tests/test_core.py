@@ -348,7 +348,9 @@ def test_parse_notion_page():
 
 # --- api -------------------------------------------------------------------------------------
 
-def test_review_endpoint_pages_and_excludes_staged_ids(conn, cfg, tmp_path):
+def test_review_endpoint_is_whole_and_ignores_exclude(conn, cfg, tmp_path):
+    """Spoken Review 2a-3: GET /api/review is the whole queue (no page of `lifecycle.review_cap`); an old page's `exclude`
+    is accepted and ignored (until 2a-3 it paged 15 of 20 and left the excluded ids out)."""
     from fastapi.testclient import TestClient
     from factotum.api import create_app
     db = tmp_path / "api.db"
@@ -359,9 +361,9 @@ def test_review_endpoint_pages_and_excludes_staged_ids(conn, cfg, tmp_path):
     c.commit()
     client = TestClient(app)
     page = client.get("/api/review").json()
-    assert len(page["items"]) == 15 and page["total"] == 20
+    assert len(page["items"]) == 20 and page["total"] == 20 and page["cap"] == 15
     page2 = client.get("/api/review", params={"exclude": "1,2,3"}).json()
-    assert page2["total"] == 17 and not {1, 2, 3} & {i["task"]["id"] for i in page2["items"]}
+    assert page2["total"] == 20 and {1, 2, 3} <= {i["task"]["id"] for i in page2["items"]}
 
 
 def test_review_carries_pending_evidence_and_planner_suggestions(cfg, tmp_path):
@@ -464,7 +466,9 @@ def test_a_review_decision_resets_the_quiet_clock(cfg):
     assert lifecycle.review_reasons(t, TODAY, cfg, None) == []
 
 
-def test_review_page_stamps_the_items_it_shows(cfg, tmp_path):
+def test_the_offered_stamp_is_the_pass_s_not_the_page_s(cfg, tmp_path):
+    """Spoken Review 2a-3: GET /api/review stamps nothing (it stamped the fifteen it showed until 2a-3); beginning a pass
+    stamps the one item in front, the record `expire` acts on."""
     from fastapi.testclient import TestClient
     from factotum.api import create_app
     app = create_app(cfg, db_path=str(tmp_path / "api.db"))
@@ -472,9 +476,12 @@ def test_review_page_stamps_the_items_it_shows(cfg, tmp_path):
     for i in range(1, 21):
         upsert_task(c, task(id=i, due=None, created_at="2026-10-30T00:00:00+00:00", last_mention_at="2026-10-30"))
     c.commit()
-    shown = {i["task"]["id"] for i in TestClient(app).get("/api/review").json()["items"]}
+    client = TestClient(app)
+    assert len(client.get("/api/review").json()["items"]) == 20
+    assert not c.execute("SELECT id FROM tasks WHERE last_offered_at IS NOT NULL").fetchall()
+    front = client.post("/api/review/pass", json={}).json()["pass"]["cursor_key"]
     stamped = {r[0] for r in c.execute("SELECT id FROM tasks WHERE last_offered_at IS NOT NULL")}
-    assert stamped == shown and len(stamped) == 15
+    assert stamped == {int(front[2:])}
 
 
 def test_init_db_adds_phase2_columns_to_old_tables(tmp_path):

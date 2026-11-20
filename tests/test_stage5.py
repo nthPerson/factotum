@@ -498,7 +498,9 @@ def test_a_suggestion_card_says_who_made_it(cfg, tmp_path):
 
 def test_overlapping_review_loads_take_turns_and_all_answer(cfg, tmp_path, monkeypatch):
     """One page load once sent several GET /api/review at once; each stamps and commits on the shared
-    connection, and two overlapping answered 500 ("cannot commit - no transaction is active")."""
+    connection, and two overlapping answered 500 ("cannot commit - no transaction is active"). Since spoken Review
+    2a-3 GET /api/review reads only and the writes (the day's suggestions, the stamp) are the pass's begin: several
+    begins and reads at once take turns, all answer, and one pass is live."""
     import threading
     import time
     from concurrent.futures import ThreadPoolExecutor
@@ -521,6 +523,11 @@ def test_overlapping_review_loads_take_turns_and_all_answer(cfg, tmp_path, monke
             with guard:
                 inside[0] -= 1
     monkeypatch.setattr(suggestions, "session", slow)
+    def load(i):
+        if i % 2:
+            return client.get("/api/review").status_code
+        return client.post("/api/review/pass", json={}).status_code
     with ThreadPoolExecutor(6) as ex:
-        codes = list(ex.map(lambda _: client.get("/api/review").status_code, range(6)))
+        codes = list(ex.map(load, range(6)))
     assert codes == [200] * 6 and most[0] == 1
+    assert c.execute("SELECT COUNT(*) FROM review_passes WHERE ended_at IS NULL").fetchone()[0] == 1 and not c.in_transaction

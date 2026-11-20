@@ -118,7 +118,7 @@ lifecycle:
   fade_warn_days: 3      # shows in Review this many days before fading
   last_call_days: 7      # hard deadlines this far past due get one Last call, then lapse
   top_cap: 7             # soft cap on the Top rail
-  review_cap: 15         # max items per Review session
+  review_cap: 15         # items per sitting: Review stops and asks before going on after this many
   expire_time: "03:30"   # when the daily fade / lapse pass runs (local time); only rows Review has shown
   resurrect_on_mention: true
 

@@ -50,16 +50,17 @@ def test_items_reads_only_and_holds_the_whole_queue(cfg, tmp_path):
     assert [x["key"] for x in q["cards"]] == [f"s:{eid}"] and q["cards"][0]["fields"]["name"] == "Order the reagent"
 
 
-def test_get_review_is_items_with_its_cap_its_exclude_and_its_stamp(cfg, tmp_path):
+def test_get_review_is_items_whole_with_its_cap_and_no_stamp(cfg, tmp_path):
+    """Spoken Review 2a-3: GET /api/review is `items` whole (its `cap` still answered for old pages, `exclude` ignored)
+    and stamps nothing; until 2a-3 it was the first fifteen after `exclude`, stamped."""
     client, c = _app(cfg, tmp_path)
     eid = _queue_fixture(c)
     ecfg = C.effective(cfg, get_settings(c))
-    want = [i["task"]["id"] for i in review_queue.items(c, ecfg, date.today())["tasks"] if i["task"]["id"] not in (1, 2)][:15]
+    want = [i["task"]["id"] for i in review_queue.items(c, ecfg, review_queue.today(ecfg))["tasks"]]
     rv = client.get("/api/review?exclude=1,2").json()
-    assert [i["task"]["id"] for i in rv["items"]] == want and rv["total"] == 19 and rv["cap"] == 15
+    assert [i["task"]["id"] for i in rv["items"]] == want and rv["total"] == 21 == len(want) and rv["cap"] == 15
     assert [s["id"] for s in rv["suggestions"]] == [eid]
-    offered = {r[0] for r in c.execute("SELECT id FROM tasks WHERE last_offered_at IS NOT NULL")}
-    assert offered == set(want)
+    assert not c.execute("SELECT id FROM tasks WHERE last_offered_at IS NOT NULL").fetchall()
 
 
 def test_reviews_day_is_the_owners_not_the_machines(cfg, tmp_path):

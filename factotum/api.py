@@ -8,7 +8,7 @@
   GET  /api/add/preview?text=&verb=   how an add line will be filed, the tasks it names checked (writes nothing)
   POST /api/batches/apply {source, changes}   the one write path
   POST /api/batches/{id}/undo
-  GET  /api/review?exclude=1,2           one page of the review queue + total, each card's pending evidence, planner suggestions
+  GET  /api/review                      the whole review queue in Review's order, read only (exclude= accepted, ignored), each card's pending evidence, planner suggestions
   GET  /api/review/pass · /api/review/pass/now · POST /api/review/pass {fresh, device} · POST /api/review/pass/{id}/move {to, key?, from?, device}   Review as a pass: one order, one cursor
   POST /api/review/suggestions/{id}/create   the task a suggestion card describes, as one undoable review batch (evidence judged applied)
   GET  /api/settings · PUT /api/settings  Settings-tab overrides (whitelisted keys), accounts
@@ -46,7 +46,7 @@ from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, ConfigDict, Field
 
 from .claude import runner as claude_runner
-from . import app_push, batches, by_hand, commands, config as C, filing, lifecycle, oauth, relations, reminders, review_cards, review_decide, review_pass, review_queue, ripple, search, suggestions, summary, tray
+from . import app_push, batches, by_hand, commands, config as C, filing, lifecycle, oauth, relations, reminders, review_cards, review_decide, review_pass, review_queue, ripple, search, summary, tray
 from .db import connect, get_settings, get_task, init_db, now_iso, rows, seed_accounts, set_setting
 
 WEB = Path(__file__).resolve().parent / "web"
@@ -540,14 +540,13 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
 
     @app.get("/api/review")
     def review(exclude: str | None = None):
-        """One page of the review queue. The tasks the server's tray decides are left out, and so are
-        `exclude`'s, a comma-separated list of task ids a page loaded before the tray moved to the server
-        has decided on in its own tray, so the next page skips them. `total` is the whole eligible set
-        after exclusion; `items` is the first `cap` of it.
-        Two at once take turns: each writes (the day's suggestions, the offered stamp) and commits on
-        the shared connection, and two commits interleaved there answered 500."""
+        """The whole review queue in Review's order (review_queue.items: tasks and cards each by order_key), decided
+        items included. Reads only (spoken Review 2a-3): the day's link suggestions are written when a pass begins
+        and the offered stamp when an item comes in front (review_pass), never here. `exclude` (an old page's list of
+        ids it decided) is accepted and ignored; `cap` and `total` (== len(items)) are still answered for a page
+        loaded before the pass. Under commit_lock only for one consistent snapshot."""
         with commit_lock:
-            return _review(exclude)
+            return _review()
 
     @app.get("/api/review/count")
     def review_count(exclude: str | None = None):
@@ -556,31 +555,16 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
         ecfg = eff_cfg()
         return {"count": review_queue.undecided_count(conn, ecfg, review_queue.today(ecfg), exclude=exclude_ids(exclude))}
 
-    def _tray_decided_tasks() -> set[int]:
-        return {int(d[2:]) for d in tray.decided(conn) if d.startswith("t:") and d[2:].isdigit()}
-
-    def _review(exclude: str | None):
+    def _review():
         ecfg = eff_cfg()
         today = review_queue.today(ecfg)
         st = get_settings(conn)
-        skip = exclude_ids(exclude) | _tray_decided_tasks()
-        suggestions.session(conn, today, suggestions.per_review(ecfg))   # today's few link suggestions, written before the queue reads them
-        conn.commit()
         q = review_queue.items(conn, ecfg, today)
-        full = [i for i in q["tasks"] if i["task"]["id"] not in skip]
-        cap = int(C.get(ecfg, "lifecycle.review_cap", 15))
-        page = full[:cap]
-        if page:
-            # The automations only expire rows Review has shown (lifecycle.expire); this is the record.
-            ids = [i["task"]["id"] for i in page]
-            conn.execute(f"UPDATE tasks SET last_offered_at = ? WHERE id IN ({','.join('?' * len(ids))})", (today.isoformat(), *ids))
-            conn.commit()
-            for i in page:
-                i["task"]["last_offered_at"] = today.isoformat()
         # `suggestions`: planner creates with no task (an announcement, a hunch), Slack mentions naming no
         # task, mail and ripple creates: cards with Create / Dismiss (review_cards).
         return {"today": today.isoformat(), "last_review_at": st.get("state.last_review_at"),
-                "cap": cap, "total": len(full), "labels": lifecycle.REVIEW_LABELS, "items": page, "suggestions": q["cards"]}
+                "cap": review_pass._cap(ecfg), "total": len(q["tasks"]), "labels": lifecycle.REVIEW_LABELS,
+                "items": q["tasks"], "suggestions": q["cards"]}
 
     @app.post("/api/review/suggestions/{evidence_id}/create")
     def create_suggestion(evidence_id: int, body: SuggestionCreateBody | None = None):

@@ -87,7 +87,7 @@ lifecycle:                      # Settings → Review and lifecycle has a contro
   fade_warn_days: 3             # taste: a task shows in Review this many days before it fades
   last_call_days: 7             # taste: hard deadlines this far past due get one Last call in Review, then lapse
   top_cap: 7                    # taste: soft cap on the Top rail
-  review_cap: 15                # taste: max items per Review session
+  review_cap: 15                # taste: items per sitting: Review stops and asks before going on after this many
   expire_time: "03:30"          # when the daily fade / lapse pass runs (local time); it touches only rows Review has shown
   resurrect_on_mention: true    # documents today's behaviour: a new mention brings a faded task back (the code does not read this yet)
 

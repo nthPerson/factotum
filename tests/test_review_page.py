@@ -49,7 +49,7 @@ def test_every_decision_and_answer_goes_through_decideOn_and_every_move_through_
     assert "'/api/review/pass'" in _body("loadPass") and "'/api/review/pass'" in _body("passReread")
     for f in re.findall(r"\n  (?:async )?function (\w+)\(", JS):
         if "'/api/review/pass" in _body(f):
-            assert f in ("loadPass", "passMove", "passReread"), f
+            assert f in ("loadPass", "passMove", "passReread", "followCheck"), f      # followCheck: 2a-3
 
 
 def test_the_keys_move_and_decide():
@@ -92,3 +92,25 @@ def test_a_quick_second_tap_never_lands_on_a_decision_that_moved_under_it():
     assert "const RV_SETTLE_MS = 400;" in JS
     assert "if (b.closest('.big') && Date.now() - rp.drawnAt < RV_SETTLE_MS) return; reviewRun(b.dataset.opt);" in JS
     assert "rp.drawnAt = Date.now();" in JS
+
+
+def test_a_page_on_review_follows_the_pass_and_reads_it_again_on_return():
+    """Spoken Review 2a-3 (design 6.5, 6.11): every 3 s, only while Review is in front, the document visible, no task page
+    open, nothing typed and no press waiting on an answer, the page asks GET /api/review/pass/now and, when the pass, its
+    revision or the tray's differ from what is drawn, reads the pass (never a begin) and the tray and redraws after the
+    press in progress. A return to the app on Review reads them again unless something is typed."""
+    assert "const FOLLOW_MS = 3000;" in JS
+    fp, tick, chk = _body("followPass"), _body("followTick"), _body("followCheck")
+    assert "setTimeout(followTick, FOLLOW_MS)" in fp and "clearTimeout(rp.follow)" in _body("stopFollow")
+    for cond in ("ui.tab !== 'review'", "document.hidden", "ui.page !== null", "typingNow()", "rp.inflight", "rp.loading"):
+        assert cond in tick, cond
+    assert "'/api/review/pass/now'" in chk and "api('/api/review/pass')" in chk and "method: 'POST'" not in chk
+    assert "n.pass_id !== v.id || n.rev !== v.rev || n.tray_rev !== v.tray_rev" in chk
+    assert "trayPoll(" in chk and "afterPress('review'," in chk
+    assert "followPass();" in _body("renderReview") and "stopFollow();" in _body("render")
+    ret = _body("onReturn")
+    assert "followCheck(" in ret and ret.index("if (typingNow())") < ret.index("followCheck(")      # nothing typed: read the pass again
+
+def test_review_cap_is_items_per_sitting_in_settings():
+    """A pass has no pages: `lifecycle.review_cap` is now where Review stops and asks (design 6.3, 6.12)."""
+    assert "f('lifecycle.review_cap', 'Items per sitting', 'Review stops and asks before going on after this many.', num('lifecycle.review_cap', 5, 50))" in JS
