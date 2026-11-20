@@ -375,8 +375,8 @@
   // null: not known yet (no Review page and no count has arrived), and the icon is then left as it is.
   function reviewShown() {
     if (!review) return reviewCount === null ? null : (reviewCount || 0);
-    const cards = review.suggestions || [];
-    return review.total || cards.length ? review.total + cards.filter(x => !x.created).length : 0;
+    const cards = review.suggestions || [];      // a card whose Create or Dismiss is staged waits on nothing
+    return review.total || cards.length ? review.total + cards.filter(x => !x.created && !staged.has('e:' + x.id)).length : 0;
   }
   // Off (notify.app.badge), signed out, or 0: cleared. Before Settings has loaded, or while the count is not known: nothing.
   function syncBadge() {
@@ -672,7 +672,7 @@
       const k = op.del != null ? op.del : op.put;
       return !(sent && sent.has(k) && sent.get(k) === (op.del != null ? null : trayCanon(op.entry)));
     });
-    const locals = [...staged].filter(([, e]) => e && e.local);
+    const locals = [...staged].filter(([, e]) => e && e.local && !(o.drop && o.drop.has(e)));      // `drop`: a decision's provisional rows, answered now
     const was = traySig(), wasMeta = trayMetaSig();
     const nt = trayFrom(t);
     tray.rev = nt.rev; tray.base = nt.base; tray.meta = nt.meta;
@@ -736,6 +736,60 @@
     } catch (e) { if (e.body && e.body.tray) trayAnswer(e.body.tray, null); throw e; }
     trayAnswer(res.tray, null, { quiet: true });
     return res;
+  }
+  // What a suggestion card's decision draws at the click (the rule's row, review_decide.plan): Create and Dismiss share
+  // the card's key "e:<id>", so the later replaces the earlier; Take back (undecide) takes it out.
+  function cardProv(key, option) {
+    const m = /^s:(\d+)$/.exec(String(key)); if (!m) return [];
+    const id = +m[1], k = 'e:' + id, sg = sgCard(id);
+    if (option === 'undecide') return [[k, null]];
+    if (option === 'dismiss') return [[k, { task_id: null, op: 'judge_evidence', fields: { evidence_id: id, verdict: 'dismissed' }, label: 'suggestion dismissed' }]];
+    if (option === 'create') return [[k, { task_id: null, op: 'create_suggestion', fields: { evidence_id: id }, label: 'new task: ' + cut60(sg ? sgDraft(sg).name.trim() : '') }]];
+    return [];
+  }
+  // One option on one Review item, staged by the server's rule (POST /api/review/decide, review_decide.stage): the one
+  // page function that calls it. `key` is the item's ("t:412", "s:186"); `opts.from_chat` ({message_id, index}) lets the
+  // server read the option from the stored proposal; `opts.prov` is what to draw at once ([[tray key, entry], …], drawn
+  // `local`, never sent; null for a key taken out; a suggestion card's own row when not given), so the card moves at the click; `opts.fallback` runs instead when the
+  // server refuses (a proposal it does not take as a decision is staged the page's way). Queued on `tray.busy`, so it
+  // never overtakes a change staged before it. The answer's tray replaces the mirror; a refusal takes the provisional
+  // rows back and says why.
+  function decideOn(key, option, args, opts) {
+    const o = opts || {}, prov = new Map();
+    for (const [k0, e] of o.prov || cardProv(key, option)) {
+      const k = trayKey(k0);
+      prov.set(k, e ? Object.assign({}, e, { local: true, deciding: true }) : null);
+      if (e) staged.set(k, prov.get(k)); else staged.delete(k);
+    }
+    const mine = new Set([...prov.values()].filter(Boolean));
+    const undo = () => {      // a provisional row still as drawn goes back to the server's; one changed since stays
+      for (const [k, e] of prov) {
+        if (e ? staged.get(k) !== e : staged.has(k)) continue;
+        const b = tray.base.get(k);
+        if (b == null) staged.delete(k); else staged.set(k, JSON.parse(b));
+      }
+    };
+    const run = async () => {
+      const body = { key, option: option || null, args: args || {}, device: deviceLabel() };
+      if (o.from_chat) body.from_chat = o.from_chat;
+      let r;
+      try { r = await api('/api/review/decide', { method: 'POST', body: JSON.stringify(body) }); }
+      catch (e) {
+        const was = traySig(), wasMeta = trayMetaSig();
+        undo();
+        if (e && e.body && e.body.tray) trayAnswer(e.body.tray, null, { quiet: true, drop: mine });
+        if (e && e.status === 400 && o.fallback) { o.fallback(); return; }
+        if (e && e.message !== 'signed out') toast('Not staged: ' + (e.detail || (e.network ? 'no connection; press it again when it is back' : e.message)));
+        trayRedraw(was, wasMeta);
+        return;
+      }
+      trayAnswer(r.tray, null, { drop: mine });
+      if ([...staged.values()].some(e => mine.has(e))) { undo(); trayPoll({ force: true }); }      // an answer older than the tray shown: read it again
+      if (r.said) toast(r.said);
+    };
+    tray.busy = tray.busy.then(run, run);
+    if (!o.quiet) render();
+    return tray.busy;
   }
   // The first read (in load()): the cached tray is drawn and what it kept unsent is sent (within the hour; older is
   // dropped and said), then the server's tray is read whatever its revision, then this browser's old tray is handed over.
@@ -861,6 +915,10 @@
       const skippedIds = new Set((res.skipped || []).map(k => k.task_id).filter(x => x != null));
       const fromProps = picked.filter(([, s]) => s.prop && s.op !== 'create' && !(s.task_id != null && skippedIds.has(s.task_id)));
       if (fromProps.length) { fromProps.forEach(([, s]) => appliedProps.set(s.prop, res.batch_id)); persistApplied(); }
+      // A suggestion card's Create made (or reopened) its task: its draft is done with, and the batch's Undo brings the card back.
+      const cards = (res.cards || []).filter(c => c.task_id != null);
+      cards.forEach(c => { delete draft.sg[c.evidence_id]; });
+      if (cards.length && res.batch_id != null) cardMade.set(res.batch_id, cards[0].task_id);
       ui.trayOpen = false; ui.trayOff = new Set();      // the answer's tray is the mirror now (trayApply)
       ui.sel.clear(); logData = null;
       if (ui.tab !== 'review') review = null;   // a stale Review page would still show the old due date; re-fetch on the next visit
@@ -885,8 +943,18 @@
         : `${res.applied} change${res.applied === 1 ? '' : 's'} applied` + (res.skipped.length ? ` · ${res.skipped.length} skipped: ${why}` : '');
       const closed = say.filter(x => !res.skipped.some(k => k.task_id === x.id));      // a skipped Done closed nothing
       closed.forEach(x => sayable.set(x.id, x));
-      if (closed.length) toast(msg, true, { buttons: [{ text: 'Say how it went', attrs: `data-say="${closed[0].id}"`, run: () => askOutcome(closed[0].id) }], holdMs: 20000 });
-      else toast(msg, true);
+      const buttons = [];
+      if (closed.length) buttons.push({ text: 'Say how it went', attrs: `data-say="${closed[0].id}"`, run: () => askOutcome(closed[0].id) });
+      let said = msg;
+      if (cards.length) {      // "Created Task-N" first, with Open; the count of every change after it when the Apply held more than the cards
+        const c = cards[0], made = c.reopened ? `Reopened Task-${c.task_id}` : c.already ? `Task-${c.task_id} was already created` : `Created Task-${c.task_id} · it shows as New in Review`;
+        const more = cards.length > 1 ? ` · ${cards.length - 1} more new task${cards.length === 2 ? '' : 's'}` : '';
+        const rest = picked.length > cards.length ? ` · ${res.applied} change${res.applied === 1 ? '' : 's'} applied in all` : '';
+        said = made + more + rest + (res.skipped.length ? ` · ${res.skipped.length} skipped: ${why}` : '');
+        buttons.push({ text: 'Open', run: () => goTask(c.task_id) });
+      }
+      if (buttons.length) toast(said, true, { buttons, holdMs: closed.length ? 20000 : undefined });
+      else toast(said, true);
       if ((res.ripple_queued || []).length) watchRipple(res.batch_id);
     } catch (e) {
       if (e.status === 409) toast('Not applied: the tray changed on another device since it was shown. Look at it and Apply again.');
@@ -2167,13 +2235,16 @@
     const total = review.items.length;
     const remaining = ui.reviewPaused ? review.total : review.total - total;
     const sugg = (review.suggestions || []).filter(x => !staged.has('e:' + x.id) && !x.created);
-    if (!items.length && sugg.length && !(ui.reviewPaused && remaining > 0)) return suggestionCard(sugg[0], sugg.length);
+    // Cards whose Create or Dismiss is staged: drawn after the undecided ones, each with Take back.
+    const done = (review.suggestions || []).filter(x => staged.has('e:' + x.id) && !x.created);
+    const decidedCards = done.length ? `<div class="sgstaged-list"><div class="hint">Staged on suggestion cards · Apply in the tray</div>${done.map(x => sgStagedHtml(x, staged.get('e:' + x.id))).join('')}</div>` : '';
+    if (!items.length && sugg.length && !(ui.reviewPaused && remaining > 0)) return suggestionCard(sugg[0], sugg.length, decidedCards);
     if (ui.reviewPaused || !items.length) {
       const more = remaining > 0 ? `<p><button class="btn" id="review-more">Review another ${Math.min(review.cap, remaining)} of the remaining ${remaining}</button></p>` : '';
-      const head = ui.reviewPaused ? (remaining ? 'Batch applied.' : 'Batch applied. Nothing left to review.') : total ? `${staged.size} decision${staged.size === 1 ? '' : 's'} staged.` : 'Nothing to review.';
-      const body = ui.reviewPaused ? '' : total ? '<p>Apply them in the tray, or keep going.</p>' : '';
-      const what = !ui.reviewPaused && !total ? '<p class="hint">Review gathers what needs a decision: soft dates that slipped, new tasks, backlog about to fade, and suggestions from the inputs you switch on.</p>' : '';
-      return `<div class="review"><div class="finish"><h2>${head}</h2>${what}${body}${more}${review.last_review_at ? `<p class="hint">Last review: ${review.last_review_at}</p>` : ''}</div></div>`;
+      const head = ui.reviewPaused ? (remaining ? 'Batch applied.' : 'Batch applied. Nothing left to review.') : total || done.length ? `${staged.size} decision${staged.size === 1 ? '' : 's'} staged.` : 'Nothing to review.';
+      const body = ui.reviewPaused ? '' : total || done.length ? '<p>Apply them in the tray, or keep going.</p>' : '';
+      const what = !ui.reviewPaused && !total && !done.length ? '<p class="hint">Review gathers what needs a decision: soft dates that slipped, new tasks, backlog about to fade, and suggestions from the inputs you switch on.</p>' : '';
+      return `<div class="review"><div class="finish"><h2>${head}</h2>${what}${body}${more}${review.last_review_at ? `<p class="hint">Last review: ${review.last_review_at}</p>` : ''}</div>${decidedCards}</div>`;
     }
     const { task: raw, primary } = items[0];
     const x = view(raw);   // staged edits (a due date set on this card) show at once, not only after Apply
@@ -2206,7 +2277,15 @@
   }
   // A planner create with no task behind it: one card, Create or Dismiss (the dismissal is a batch
   // change like any other, so the Log tab undoes it).
-  function suggestionCard(sg, n) {
+  // A suggestion card whose Create or Dismiss is staged (the tray's row `entry`): its name, what is staged, and Take back.
+  function sgStagedHtml(card, entry) {
+    const e = entry || {}, create = e.op === 'create_suggestion', name = (draft.sg[card.id] || sgBase(card)).name;
+    const what = create ? 'Create staged' : 'Dismissal staged';
+    return `<div class="sgstaged" data-sgstaged="${card.id}"><span class="chip ${create ? 'new' : ''}">${what}</span><span class="nm">${esc(create ? String(e.label || '').replace(/^new task: /, '') || name : name)}</span>`
+      + `${e.local ? '<span class="hint">staging…</span>' : `<span class="hint">${esc(trayFromWords('e:' + card.id).replace(/^ · /, ''))}</span>`}`
+      + `<button class="btn small" data-sg-takeback="${card.id}" ${e.local ? 'disabled' : ''}>Take back</button></div>`;
+  }
+  function suggestionCard(sg, n, after) {
     const slack = sg.kind === 'slack_mention', mail = sg.mail, f = sg.fields || {}, rip = !slack && !mail && sg.by === 'ripple';
     const link = slack && f.source_link;
     const d = sgDraft(sg), edit = ui.rvEdit;
@@ -2230,7 +2309,8 @@
         ${mail ? `<div class="extra"><button class="btn small" data-sugg-open="${sg.id}">✉ Show the message in Mailbird</button></div>` : ''}
         ${sgPlaceHtml(sg.id)}
       </div>
-      <div class="note">${mail ? 'Create makes an open task (source Mail) linked to this thread, so a reply or a message you send is noticed from then on. ' : `Create makes an open task (source ${slack ? 'Slack, the message linked' : rip ? 'Ripple: suggested after a linked task changed' : 'Planner'}) that shows as New in Review; `}Dismiss stages a change you can undo from the Log tab.</div></div>`;
+      ${after || ''}
+      <div class="note">${mail ? 'Create makes an open task (source Mail) linked to this thread, so a reply or a message you send is noticed from then on. ' : `Create makes an open task (source ${slack ? 'Slack, the message linked' : rip ? 'Ripple: suggested after a linked task changed' : 'Planner'}) that shows as New in Review; `}Create and Dismiss stage into the tray; Apply writes them, and the Log tab undoes them.</div></div>`;
   }
   // ---------- Review: a suggestion card is a draft (2026-11-18) ----------
   // No task exists until Create, so nothing here stages: the card holds a draft (draft.sg[<evidence id>]) that starts
@@ -2766,8 +2846,23 @@
     if (p.op === 'link' && typeof f.other === 'string') { const s = siblingOf(proposalsOf(mid), f.other); return relKey(p.task_id, f.kind, 'm' + mid + '-' + (s ? s.j : f.other)); }
     return propKey(p, mid, i);
   }
+  // A proposal is staged when its tray key is, or when a row staged from it carries its `prop` (a Review card's decision
+  // staged by the rule sits under the task's own key: a Later under "<id>", not "<id>:c<message>-<index>").
+  const propStaged = (p, mid, i) => staged.has(placeKey(p, mid, i)) || [...staged.values()].some(e => e && e.prop === mid + '-' + i);
+  // A decision a reply on a Review card proposes about the card's own task, which the rule stages (review_decide.from_proposal):
+  // done, drop, pin_top, longterm, or a set that sends it away until a later day. What is drawn at the click, under the
+  // rule's key, until the server's rows arrive.
+  const cardDecision = p => ['done', 'drop', 'pin_top', 'longterm'].includes(p.op) || (p.op === 'set' && String((p.fields || {}).snoozed_until || '').slice(0, 10) > data.today);
+  const cardDecisionKey = p => p.op === 'pin_top' ? p.task_id + ':top' : p.op === 'longterm' ? p.task_id + ':lt' : p.task_id;
+  function cardDecisionEntry(p, mid, i) {
+    const f = p.fields || {}, prop = mid + '-' + i, id = p.task_id;
+    if (p.op === 'pin_top') return { task_id: id, op: 'pin_top', fields: {}, label: 'pinned', prop };
+    if (p.op === 'longterm') return { task_id: id, op: 'set', fields: { longterm: 1 }, label: 'long-term', prop };
+    if (p.op === 'set') return { task_id: id, op: 'set', fields: { snoozed_until: String(f.snoozed_until).slice(0, 10) }, label: 'later · back ' + String(f.snoozed_until).slice(0, 10), prop };
+    return { task_id: id, op: p.op, fields: f.outcome ? { outcome: f.outcome } : {}, label: changeWords(p) || (p.op === 'done' ? 'done' : 'dropped'), prop };
+  }
   // Not staged, not made or applied yet: what the stage button stages (when ticked).
-  const placeOpen = (p, mid, i) => PLACE_OPS.has(p.op) && !p.applied && !propApplied(mid, i) && !staged.has(placeKey(p, mid, i));
+  const placeOpen = (p, mid, i) => PLACE_OPS.has(p.op) && !p.applied && !propApplied(mid, i) && !propStaged(p, mid, i);
   // On a suggestion card a proposed `create` is the card's revised draft: "Use on this card" takes it over.
   const cardDraft = (pl, p) => pl.origin === 'suggestion' && p.op === 'create';
   const andList = a => a.length < 2 ? a.join('') : a.slice(0, -1).join(', ') + ' and ' + a[a.length - 1];
@@ -2785,7 +2880,7 @@
         const words = `<span class="pw"><span class="pm">${linkTasks(t.main)}</span>${t.sub ? ` <span class="ps">${linkTasks(t.sub)}</span>` : ''}</span>`;
         if (p.applied) return `<div class="pprop"><span></span>${words}<span class="chip staged">${p.op === 'create' && p.task_id ? 'created ' + tref(p.task_id) : 'linked'}</span></div>`;
         if (propApplied(m.id, i)) return `<div class="pprop"><span></span>${words}<span class="chip staged">applied</span></div>`;
-        if (staged.has(placeKey(p, m.id, i))) return `<div class="pprop"><span></span>${words}<span class="chip staged">staged</span></div>`;
+        if (propStaged(p, m.id, i)) return `<div class="pprop"><span></span>${words}<span class="chip staged">staged</span></div>`;
         if (!PLACE_OPS.has(p.op)) return `<div class="pprop"><span></span>${words}<span></span></div>`;
         if (cardDraft(pl, p)) return `<div class="pprop"><span></span>${words}<span class="pbtns"><button class="btn small primary" data-sg-use="${esc(k)}">Use on this card</button></span></div>`;
         return `<label class="pprop"><input type="checkbox" data-pprop="${esc(k)}" ${pl.off.has(k) ? '' : 'checked'} aria-label="Stage this">${words}${p.op === 'create' ? `<span class="pbtns"><button class="btn small" data-place-create="${esc(k)}">Create</button><button class="btn small" data-edit-first="${esc(k)}">Edit first</button></span>` : '<span></span>'}</label>`;
@@ -2829,19 +2924,26 @@
     const f = p.fields || {};
     if (p.op !== 'link' || typeof f.other !== 'string') return null;
     const s = siblingOf(props, f.other), q = s && props[s.j];
-    return q && !q.applied && !propApplied(mid, s.j) && !staged.has(placeKey(q, mid, s.j)) && !placeTicked(pl, q, mid, s.j) ? s.name : null;
+    return q && !q.applied && !propApplied(mid, s.j) && !propStaged(q, mid, s.j) && !placeTicked(pl, q, mid, s.j) ? s.name : null;
   }
   function stagePlace(pl, mid, decision) {
     const props = proposalsOf(mid);
-    let n = 0; const left = [];
+    let n = 0, decided = false; const left = [];
     props.forEach((p, i) => {
       if (!placeTicked(pl, p, mid, i)) return;
       const out = placeLeftOut(pl, props, p, mid);
       if (out !== null) { left.push(out); return; }
+      // A decision about the card's own task goes through the rule (the verdicts on its evidence and the review stamp
+      // come with it); the server reads the proposal it stored, and one it does not take as a decision is staged here.
+      if (pl.origin === 'review' && p.task_id === pl.task_id && cardDecision(p)) {
+        decideOn('t:' + pl.task_id, null, null, { from_chat: { message_id: mid, index: i }, prov: [[cardDecisionKey(p), cardDecisionEntry(p, mid, i)]], quiet: true,
+          fallback: () => stageProposal(p, mid, i) });
+        n++; if (cardDecisionKey(p) === pl.task_id) decided = true; return;
+      }
       if (stageProposal(p, mid, i)) n++;
     });
     const why = left.length ? ` · ${left.length} left out: ${left.length === 1 ? 'it links to' : 'they link to'} ${andList(left.map(x => `“${cut40(x)}”`))}, not ticked` : '';
-    toast((decision ? `${n} staged with this decision · decide on the card, then Apply` : `${n} staged · press Apply in the tray`) + why);
+    toast((decided ? `${n} staged · that decides this card · Apply in the tray` : decision ? `${n} staged with this decision · decide on the card, then Apply` : `${n} staged · press Apply in the tray`) + why);
     render();
   }
   async function placeCreate(mid, i) {
@@ -3172,7 +3274,7 @@
   // Who staged a row, when not this browser: another device, or Claude (a connector or a skill).
   function trayFromWords(k) {
     const s = staged.get(k), m = tray.meta.get(k) || {};
-    if (s && s.local) return ' · kept in this browser, not handed over yet';
+    if (s && s.local) return s.deciding ? ' · staging…' : ' · kept in this browser, not handed over yet';      // a decision on its way, or an old tray not carried
     if (m.origin === 'connector' || m.origin === 'skill') return ' · from Claude';
     return m.device && m.device !== deviceLabel() ? ' · from ' + m.device : '';
   }
@@ -4265,24 +4367,20 @@
     panel.querySelectorAll('[data-pending-dismiss]').forEach(b => b.onclick = async () => {
       try { await api(`/api/proposals/${b.dataset.pendingDismiss}/dismiss`, { method: 'POST' }); await load(); toast('Dismissed'); } catch (e) { toast('Dismiss failed: ' + e.message); }
     });
-    panel.querySelectorAll('[data-sugg-dismiss]').forEach(b => b.onclick = () => { stageJudge(+b.dataset.suggDismiss, null, 'dismissed', 'suggestion dismissed'); });
-    panel.querySelectorAll('[data-sugg-create]').forEach(b => b.onclick = async () => {
-      const id = +b.dataset.suggCreate;
-      // One review batch (the task, its links, the card's verdict): the toast's Undo drops the task and brings the card back;
-      // Create on a card whose task that Undo dropped reopens it. The queue is re-read, so the new row's card is next.
-      try {
-        const card = sgCard(id), edited = !!card && sgDirty(card);      // an untouched card is created exactly as suggested
-        const r = await api(`/api/review/suggestions/${id}/create`, { method: 'POST', body: JSON.stringify(edited ? sgBody(sgDraft(card)).create : {}) });
-        delete draft.sg[id];
-        const sg = (review.suggestions || []).find(x => x.id === id); if (sg) sg.created = r.task_id;
-        lastBatch = r.batch_id;
-        if (r.batch_id != null) cardMade.set(r.batch_id, r.task_id);
-        const said = r.reopened ? `Reopened Task-${r.task_id}` : r.already ? `Task-${r.task_id} was already created` : `Created Task-${r.task_id} · it shows as New in Review`;
-        toast(said + ((r.skipped || []).length ? ' · ' + r.skipped[0] : ''), r.batch_id != null, { batch: r.batch_id, buttons: [{ text: 'Open', run: () => goTask(r.task_id) }] });
-        await load(); await loadReview();
-      }
-      catch (e) { toast('Create failed: ' + (e.detail || e.message)); }
+    // A suggestion card's Create and Dismiss are decisions staged by the rule (review_decide, item s:<id>): the card leaves
+    // at the click and the tray lists it; Apply makes the task (one batch with its links and the card's verdict), and the
+    // batch's Undo brings the card back (Create again then reopens the same task). Take back unstages it.
+    panel.querySelectorAll('[data-sugg-dismiss]').forEach(b => b.onclick = () => {
+      const id = +b.dataset.suggDismiss;
+      decideOn('s:' + id, 'dismiss');
     });
+    panel.querySelectorAll('[data-sugg-create]').forEach(b => b.onclick = () => {
+      const id = +b.dataset.suggCreate;
+      const card = sgCard(id), edited = !!card && sgDirty(card);      // an untouched card is created exactly as suggested
+      if (card && !sgDraft(card).name.trim()) { toast('Not staged: a task needs a name'); return; }
+      decideOn('s:' + id, 'create', edited ? { draft: sgBody(sgDraft(card)).create } : {});
+    });
+    panel.querySelectorAll('[data-sg-takeback]').forEach(b => b.onclick = () => { const id = +b.dataset.sgTakeback; decideOn('s:' + id, 'undecide'); });
     // The date is used only on the button: a date input's own change event fires while the phone's
     // wheel is still moving, which once staged a date nobody chose.
     const rg = document.getElementById('rv-date-go'); if (rg) rg.onclick = () => { const rd = document.getElementById('rv-date'); if (!rd || !rd.value) { toast('Pick a date first'); return; } reviewAct('date', rd.value); };

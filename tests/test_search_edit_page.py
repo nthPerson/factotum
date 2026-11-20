@@ -52,7 +52,7 @@ def test_a_cards_revised_draft_is_never_staged_or_created_from_its_conversation(
     assert "placeOpen(p, mid, i) && !cardDraft(pl, p) && !pl.off.has" in JS and "data-sg-use=" in JS
     row = JS[JS.index("if (cardDraft(pl, p)) return"):JS.index("return `<label class=\"pprop\">")]
     assert "data-place-create" not in row and "data-pprop" not in row
-    assert "JSON.stringify(edited ? sgBody(sgDraft(card)).create : {})" in JS      # an untouched card is created as suggested
+    assert "decideOn('s:' + id, 'create', edited ? { draft: sgBody(sgDraft(card)).create } : {})" in JS      # an untouched card is created as suggested
 
 
 def test_reviews_editor_is_the_one_editor_and_its_redraw_waits_for_the_press():
@@ -94,6 +94,19 @@ def test_the_tray_is_the_servers():
     assert "e.body = j" in JS                                         # a 409 hands its tray to the page
     rv = _body("reviewAct")
     assert rv.index("ui.laterOpen = false; ui.datePick = false;") < rv.index("stage(id, 'keep'")      # the Later menu is shut before the card moves on
+
+
+def test_review_decisions_go_through_the_rule():
+    """decideOn is the one page function that calls POST /api/review/decide (spoken Review stage 1, design §5.6): a
+    Review card conversation's decision about its own task, and Create and Dismiss on a suggestion card, go through
+    it; a staged card is drawn with Take back, and the number beside Review leaves it out."""
+    assert JS.count("'/api/review/decide'") == 1 and "'/api/review/decide'" in _body("decideOn")
+    assert "decideOn('t:' + pl.task_id" in _body("stagePlace")
+    assert "decideOn('s:' + id, 'dismiss')" in JS
+    assert "decideOn('s:' + id, 'undecide')" in JS and "function sgStagedHtml(card, entry)" in JS
+    assert "`/api/review/suggestions/${id}/create`" not in JS          # the old route stays for pages loaded before the deploy
+    assert "!staged.has('e:' + x.id)" in _body("reviewShown")
+    assert "res.cards" in _body("applyAll") and "cardMade.set(res.batch_id" in _body("applyAll")
 
 
 def test_peek_reads_a_task_without_marking_its_neighbours_seen(cfg, tmp_path):

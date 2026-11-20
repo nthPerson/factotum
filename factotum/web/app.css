@@ -1040,3 +1040,14 @@ mark { background: var(--warn-soft); color: inherit; border-radius: 2px; padding
   .card .rvedit, .card .sgform { padding: 12px 10px; }
   .card .rvedit-bar .btn { min-height: 40px; }
 }
+/* ---------- Review: suggestion cards whose Create or Dismiss is staged (spoken Review stage 1, 2026-11-19) ---------- */
+.sgstaged-list { margin: 14px 0 4px; display: flex; flex-direction: column; gap: 6px; }
+.sgstaged-list > .hint { margin: 0 0 2px; font-size: 12px; }
+.sgstaged { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+.sgstaged .chip.new { background: var(--accent-soft); color: var(--accent); }
+.sgstaged .nm { flex: 1; min-width: 10em; font-size: 14px; overflow-wrap: anywhere; }
+.sgstaged .hint { margin: 0; font-size: 12px; }
+.review .finish + .sgstaged-list { margin-top: 0; }
+@media (max-width: 700px) {
+  .sgstaged .btn { min-height: 44px; }
+}
