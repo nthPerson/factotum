@@ -1048,6 +1048,8 @@ mark { background: var(--warn-soft); color: inherit; border-radius: 2px; padding
 .sgstaged .nm { flex: 1; min-width: 10em; font-size: 14px; overflow-wrap: anywhere; }
 .sgstaged .hint { margin: 0; font-size: 12px; }
 .review .finish + .sgstaged-list { margin-top: 0; }
-@media (max-width: 700px) {
-  .sgstaged .btn { min-height: 44px; }
+@media (max-width: 700px) {      /* what is staged and the name on the left, one above the other; Take back on the right */
+  .sgstaged { display: grid; grid-template-columns: 1fr auto; column-gap: 10px; row-gap: 4px; }
+  .sgstaged > :not(.btn) { grid-column: 1; justify-self: start; min-width: 0; }
+  .sgstaged .btn { grid-column: 2; grid-row: 1 / span 3; align-self: center; min-height: 44px; }
 }

@@ -2279,10 +2279,10 @@
   // change like any other, so the Log tab undoes it).
   // A suggestion card whose Create or Dismiss is staged (the tray's row `entry`): its name, what is staged, and Take back.
   function sgStagedHtml(card, entry) {
-    const e = entry || {}, create = e.op === 'create_suggestion', name = (draft.sg[card.id] || sgBase(card)).name;
-    const what = create ? 'Create staged' : 'Dismissal staged';
-    return `<div class="sgstaged" data-sgstaged="${card.id}"><span class="chip ${create ? 'new' : ''}">${what}</span><span class="nm">${esc(create ? String(e.label || '').replace(/^new task: /, '') || name : name)}</span>`
-      + `${e.local ? '<span class="hint">staging…</span>' : `<span class="hint">${esc(trayFromWords('e:' + card.id).replace(/^ · /, ''))}</span>`}`
+    const e = entry || {}, create = e.op === 'create_suggestion', over = ((((e.fields || {}).draft || {}).fields) || {}).name;      // a name the staged draft changed
+    const name = over || (draft.sg[card.id] || sgBase(card)).name, what = create ? 'Create staged' : 'Dismissal staged';
+    return `<div class="sgstaged" data-sgstaged="${card.id}"><span class="chip ${create ? 'new' : ''}">${what}</span><span class="nm">${esc(name)}</span>`
+      + `${e.local ? '<span class="hint">staging…</span>' : trayFromWords('e:' + card.id) ? `<span class="hint">${esc(trayFromWords('e:' + card.id).replace(/^ · /, ''))}</span>` : ''}`
       + `<button class="btn small" data-sg-takeback="${card.id}" ${e.local ? 'disabled' : ''}>Take back</button></div>`;
   }
   function suggestionCard(sg, n, after) {
