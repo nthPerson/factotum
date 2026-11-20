@@ -68,7 +68,7 @@ def clean_entry(key, entry) -> dict:
     if entry.get("local"):
         raise bad("a provisional entry is never stored")
     op = entry.get("op")
-    if op not in OPS:
+    if not isinstance(op, str) or op not in OPS:
         raise bad(f"unknown op {str(op)[:40]!r}")
     tid = entry.get("task_id")
     if not (tid is None or type(tid) is int or (isinstance(tid, str) and REF_RE.fullmatch(tid))):

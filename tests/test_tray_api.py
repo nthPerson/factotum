@@ -63,11 +63,42 @@ def test_no_failure_answers_401_403_or_a_redirect(cfg, tmp_path):
              ("post", "/api/review/decide", {"key": "t:1", "option": "due", "args": {"due": "zz"}}),
              ("post", "/api/tray/ops", {"ops": [{"put": "x", "entry": None}]}),
              ("post", "/api/tray/carry", {"carry_id": "a", "entries": [["1", "x"], 5]}),
-             ("get", "/api/tray?since=abc", None)]
+             ("get", "/api/tray?since=abc", None),
+             # values of the wrong type (review 2026-11-19: an object as a reminder's repeat raised TypeError after the write
+             # lock was taken, answered 500 and left the shared connection inside BEGIN IMMEDIATE)
+             ("post", "/api/review/decide", {"key": "t:1", "option": "remind", "args": {"fire_at": "2026-11-25T09:00", "repeat": {"a": 1}}}),
+             ("post", "/api/review/decide", {"key": "t:1", "option": "remind", "args": {"fire_at": "2026-11-25T09:00", "repeat": [1]}}),
+             ("post", "/api/tray/ops", {"ops": [{"put": "1", "entry": {"task_id": 1, "op": {"a": 1}}}]}),
+             ("post", "/api/tray/ops", {"ops": [{"put": "1", "entry": {"task_id": [1], "op": [1]}}]})]
     for method, path, body in calls:
         r = client.post(path, json=body) if method == "post" else client.get(path)
         assert r.status_code not in (301, 302, 303, 307, 308, 401, 403), (path, body, r.status_code)
         assert r.status_code < 500, (path, body, r.status_code, r.text[:200])
+        assert not c.in_transaction, (path, body)                   # the shared connection never keeps the write lock
+
+
+def test_an_unexpected_error_in_a_tray_route_lets_the_write_lock_go(cfg, tmp_path, monkeypatch):
+    """Whatever goes wrong after a tray route took SQLite's write lock, the shared connection is rolled back (review
+    2026-11-19): an open BEGIN IMMEDIATE would make every scheduler write wait out the busy timeout and fail."""
+    from factotum import review_decide
+    app = create_app(cfg, db_path=str(tmp_path / "a.db"))
+    client = TestClient(app, raise_server_exceptions=False)
+    c = app.state.conn
+    mk(c, 1)
+    client.post("/api/tray/ops", json={"ops": [{"put": "1", "entry": keep(1)}]})
+
+    def boom(*a, **k):
+        raise RuntimeError("boom")
+    for target, path, body in ((review_decide, "plan", None), (tray, "_bump", None), (tray, "changes_for", None)):
+        monkeypatch.setattr(target, path, boom)
+    calls = (("/api/review/decide", {"key": "t:1", "option": "keep"}),
+             ("/api/tray/ops", {"ops": [{"put": "1:due", "entry": {"task_id": 1, "op": "set", "fields": {"due": "2026-12-01"}, "label": "due"}}]}),
+             ("/api/tray/carry", {"carry_id": "c1", "entries": [["1:lt", {"task_id": 1, "op": "set", "fields": {"longterm": 1}, "label": "lt"}]]}),
+             ("/api/tray/apply", {"source": "ui"}))
+    for path, body in calls:
+        r = client.post(path, json=body)
+        assert r.status_code == 500, (path, r.status_code, r.text[:200])
+        assert not c.in_transaction, path
 
 
 def test_tray_ops_read_and_refuse(cfg, tmp_path):

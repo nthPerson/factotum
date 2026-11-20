@@ -668,6 +668,9 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
                 changed = tray.write(conn, ops, "page", _device(body.device))
             except ValueError as e:
                 return _tray_error(400, str(e))
+            except Exception:
+                conn.rollback()                      # never leave the write lock held on the shared connection
+                raise
             conn.commit()
             return dict(tray.read(conn), changed=changed)
 
@@ -679,6 +682,9 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
                 out = tray.carry(conn, body.carry_id, body.entries, _device(body.device))
             except ValueError as e:
                 return _tray_error(400, str(e))
+            except Exception:
+                conn.rollback()
+                raise
             conn.commit()
             return dict(tray.read(conn), **out)
 
@@ -697,6 +703,9 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
                 return _tray_error(409, str(e), changed=e.changed)
             except ValueError as e:
                 return _tray_error(400, str(e))
+            except Exception:
+                conn.rollback()                      # tray.apply rolls back its own part; a follow-up's write is let go too
+                raise
         if res.get("created"):                       # a new task is one filing may place (stage 7)
             sch = getattr(app.state, "scheduler", None)
             if sch is not None:
@@ -721,6 +730,9 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
                 return _tray_error(409, str(e))
             except ValueError as e:                  # review_decide.Refused, or a row the tray refuses
                 return _tray_error(400, str(e))
+            except Exception:
+                conn.rollback()
+                raise
             conn.commit()
             return dict(out, tray=tray.read(conn))
 

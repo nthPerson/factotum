@@ -570,8 +570,8 @@ def plan(conn: sqlite3.Connection, cfg: dict, item: dict, option: str, args: dic
     label = label.strip() if isinstance(label, str) else ""
     try:
         f = batches._reminder_fields({"fields": {"fire_at": args.get("fire_at"), "label": label or None, "repeat": args.get("repeat") or None}})
-    except ValueError as e:
-        raise Refused(str(e)) from None
+    except (ValueError, TypeError) as e:                    # TypeError: a repeat that is an object or a list (review 2026-11-19)
+        raise Refused(str(e) if isinstance(e, ValueError) else "repeat must be one of " + ", ".join(sorted(batches.REPEATS))) from None
     put(f"{tid}:r", {"task_id": tid, "op": "add_reminder", "fields": f,
                      "label": f"remind {when_words(f['fire_at'])}{' · ' + f['repeat'] if f['repeat'] else ''}{' · ' + label if label else ''}"})
     p.said = SAID["remind"]
