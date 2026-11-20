@@ -107,6 +107,8 @@ def test_a_page_on_review_follows_the_pass_and_reads_it_again_on_return():
     assert "'/api/review/pass/now'" in chk and "api('/api/review/pass')" in chk and "method: 'POST'" not in chk
     assert "n.pass_id !== v.id || n.rev !== v.rev || n.tray_rev !== v.tray_rev" in chk
     assert "trayPoll(" in chk and "afterPress('review'," in chk
+    assert "toast('Moved ' + movedWhere(who))" in chk and "movedWhere(r.by)" in _body("passMove")      # "Moved on iPhone", never "page · iPhone"
+    assert "if (rp.view) reviewCount = rp.view.counts.left;" in _body("reviewShown")      # the tab keeps the pass's number when the view is let go
     assert "followPass();" in _body("renderReview") and "stopFollow();" in _body("render")
     ret = _body("onReturn")
     assert "followCheck(" in ret and ret.index("if (typingNow())") < ret.index("followCheck(")      # nothing typed: read the pass again

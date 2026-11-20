@@ -381,6 +381,7 @@
   let badgeShown;            // what the icon was last given (undefined: nothing yet), so a redraw calls nothing
   // null: not known yet (no Review page and no count has arrived), and the icon is then left as it is.
   function reviewShown() {
+    if (rp.view) reviewCount = rp.view.counts.left;      // kept for when the view is let go (Finish for now, an Apply that ended it)
     return rp.view ? rp.view.counts.left : reviewCount === null ? null : (reviewCount || 0);
   }
   // Off (notify.app.badge), signed out, or 0: cleared. Before Settings has loaded, or while the count is not known: nothing.
@@ -2237,6 +2238,13 @@
   // One look: what the pass and the tray are now, and when they moved, the pass read again (GET: never a begin) and the
   // tray asked for what changed. A pass ended elsewhere shows the finished screen (Start again begins one); one from another
   // day is let go, so the next draw begins today's. "Moved on <device>" when the cursor moved under this page.
+  // Where a move the page did not make came from, in words: the pass names its driver "page · <device>", "connector", "skill".
+  function movedWhere(by) {
+    const b = String(by || '');
+    if (/^(connector|skill)/.test(b)) return 'by Claude';
+    const d = b.replace(/^page( · )?/, '');
+    return !d ? 'on another device' : d === deviceLabel() ? 'in another window' : 'on ' + d;
+  }
   async function followCheck() {
     const v = rp.view; if (!v || !v.id || rp.checking) return;
     rp.checking = true;
@@ -2257,7 +2265,7 @@
       afterPress('review', () => {
         if (ui.tab !== 'review' || ui.page !== null || typingNow()) { showCount(); return; }
         render();
-        if (who) toast(who === 'page · ' + deviceLabel() ? 'Moved in another window' : 'Moved on ' + who.replace(/^page · /, ''));
+        if (who) toast('Moved ' + movedWhere(who));
       });
     } finally { rp.checking = false; }
   }
@@ -2282,7 +2290,7 @@
       passAnswer(e && e.body && 'pass' in e.body ? e.body.pass : was, true);
       return;
     }
-    if (r.moved === false) toast(r.why === 'first' ? 'This is the first item' : `Moved on ${r.by || 'another device'} meanwhile · this is where the review is now`);
+    if (r.moved === false) toast(r.why === 'first' ? 'This is the first item' : `Moved ${movedWhere(r.by)} meanwhile · this is where the review is now`);
     if (r.came_round) rp.said = `Back to the start · ${r.left} left undecided`;
     if (r.ended) rp.finished = { why: 'finished', left: (v.counts || {}).left || 0 };
     passAnswer('pass' in r ? r.pass : undefined, true);
@@ -2551,7 +2559,7 @@
     const f = rp.finished || {}, n = staged.size;
     const head = f.why === 'applied' ? 'Applied. Nothing is left to decide.' : f.why === 'elsewhere' ? 'This review was finished on another device.' : 'Review finished for now.';
     const left = f.why !== 'applied' && f.left ? `${f.left} left undecided: they stay in Review for next time. ` : '';
-    return `<div class="review"><div class="finish"><h2>${head}</h2><p>${left}${n ? `${n} staged change${n === 1 ? '' : 's'} wait in the tray.` : ''}</p><p class="rvacts"><button class="btn" data-opt="restart">Start again</button></p></div></div>`;
+    return `<div class="review"><div class="finish"><h2>${head}</h2><p>${left}${n ? `${n} staged change${n === 1 ? ' waits' : 's wait'} in the tray.` : ''}</p><p class="rvacts"><button class="btn" data-opt="restart">Start again</button></p></div></div>`;
   }
   // A planner create with no task behind it: one card, Create or Dismiss (the dismissal is a batch
   // change like any other, so the Log tab undoes it).
