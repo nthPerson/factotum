@@ -12,7 +12,7 @@ import pytest
 from stage4_helpers import mk, link
 from test_review_groups import new
 
-from factotum import chat, dates, mcp_server as M, relations, review_mcp as RM, review_pass as P, review_queue, tray
+from factotum import batches, chat, dates, mcp_server as M, relations, review_mcp as RM, review_pass as P, review_queue, tray
 from factotum.db import connect, get_task, init_db, now_iso
 
 D = date(2026, 11, 19)                   # Review's day: a Thursday
@@ -1262,16 +1262,29 @@ def test_a_spoken_apply_counts_toward_the_hourly_cap_of_direct_changes(cfg, db):
     staged = len(entries(db))
     cfg["server"]["mcp_apply_hourly_cap"] = staged - 1
     assert refused(ctx, "review_apply") == RM.SAID["apply_capped"] and len(entries(db)) == staged
+    # every staged row writes at least one change, so one row short is refused before the question; the yes is held to
+    # the rows the batch really writes (a link writes two), counted before its commit
     cfg["server"]["mcp_apply_hourly_cap"] = staged
     tok = ok(ctx, "review_apply")["confirm"]
-    cfg["server"]["mcp_apply_hourly_cap"] = staged - 1                           # the cap is checked again at the yes
     assert refused(ctx, "review_apply", {"confirm": tok}) == RM.SAID["apply_capped"] and len(entries(db)) == staged
-    cfg["server"]["mcp_apply_hourly_cap"] = staged
+    c = connect(db)
+    assert c.execute("SELECT COUNT(*) FROM batches WHERE source = 'review'").fetchone()[0] == 0     # nothing half-written
+    c.close()
+    cfg["server"]["mcp_apply_hourly_cap"] = 1000
     assert ok(ctx, "review_apply", {"confirm": ok(ctx, "review_apply")["confirm"]})["status"] == "applied"
     c = connect(db)
     wrote = c.execute("SELECT COUNT(*) FROM changes ch JOIN batches b ON b.id = ch.batch_id WHERE b.source = 'review'").fetchone()[0]
     c.close()
-    assert wrote >= 1
+    assert wrote > staged
+    c = connect(db)                                                              # the limit is exact: one row more is too many
+    two = [{"task_id": 9, "op": "set", "fields": {"context": "x", "effort": "S"}}]
+    had = c.execute("SELECT COUNT(*) FROM batches").fetchone()[0]
+    with pytest.raises(batches.TooMany):
+        batches.apply(c, two, "review", D, max_rows=1)
+    assert c.execute("SELECT COUNT(*) FROM batches").fetchone()[0] == had and not c.in_transaction
+    assert get_task(c, 9)["context"] != "x"
+    assert batches.apply(c, two, "review", D, max_rows=2)["applied"] == 1
+    c.close()
     # the same budget as a direct write: apply_changes sees those rows as used
     cfg["server"]["mcp_apply_hourly_cap"] = wrote
     note = {"changes": [{"task_id": 9, "op": "set", "fields": {"context": "a note"}}]}

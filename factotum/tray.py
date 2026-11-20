@@ -377,7 +377,8 @@ def _after_apply(conn: sqlite3.Connection, cfg: dict, today: date, decided: set[
 
 
 def apply(conn: sqlite3.Connection, cfg: dict, today: date, *, keys: list[str] | None = None, seen_rev: int | None = None,
-          source: str = "review", finish: bool = False, whole_tray: bool = True, cause: dict | None = None) -> dict:
+          source: str = "review", finish: bool = False, whole_tray: bool = True, cause: dict | None = None,
+          max_rows: int | None = None) -> dict:
     """Apply the tray (or `keys` of it) as one batch, then the follow-up writes; commits (design §5.3).
     1. Take the write lock, then read the rows; keys not there are `gone`. With `seen_rev`, a row written after it
        raises Stale and nothing is written. 2. The changes (`changes_for`; chat creates resolved inside the lock, so
@@ -387,7 +388,8 @@ def apply(conn: sqlite3.Connection, cfg: dict, today: date, *, keys: list[str] |
        Slack card's message link, the live Review pass told (`review_pass.after_apply`: the items it decided get the
        batch, and a pass left with nothing undecided ends `applied`), the day marked reviewed when `finish` and `finishes`. 7. The answer:
        batches.apply's, with `skipped` holding every reason, plus `gone`, `cards`, `finished` and `tray`.
-    Raises Stale, and ValueError for a row that names no stored chat create."""
+    Raises Stale, and ValueError for a row that names no stored chat create; with `max_rows` (a spoken Apply under the
+    hourly cap) `batches.TooMany` when the batch would write more rows, and then the tray is as it was."""
     from . import chat                             # lazy: chat pulls in the MCP server and the runner
     from .db import add_link
     begin_write(conn)
@@ -414,7 +416,7 @@ def apply(conn: sqlite3.Connection, cfg: dict, today: date, *, keys: list[str] |
             conn.commit()
             return {"batch_id": None, "applied": 0, "skipped": left_out + gone2, "created": [], "refs": {}, "ripple_queued": [],
                     "gone": gone, "cards": [], "finished": False, "tray": read(conn)}
-        res = batches.apply(conn, changes, source, today, cause=dict(cause or {}, staged_by=staged_by))
+        res = batches.apply(conn, changes, source, today, cause=dict(cause or {}, staged_by=staged_by), max_rows=max_rows)
     except Exception:
         conn.rollback()
         raise

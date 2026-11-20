@@ -211,8 +211,18 @@ def _same_value(cur_v, want) -> bool:
     return cur_v == want
 
 
-def apply(conn: sqlite3.Connection, changes: list[dict], source: str, today: date | None = None, closed_by: str | None = None, cause: dict | None = None) -> dict:
-    """Apply a list of changes atomically; `cause` (what set the batch off) is stored as cause_json. Returns {"batch_id", "applied": n, "skipped": [...],
+class TooMany(Exception):
+    """A batch wrote more `changes` rows than its caller allowed (`max_rows`); everything was rolled back."""
+    def __init__(self, wrote: int, allowed: int):
+        super().__init__(f"the batch would write {wrote} changes; {allowed} are allowed")
+        self.wrote, self.allowed = wrote, allowed
+
+
+def apply(conn: sqlite3.Connection, changes: list[dict], source: str, today: date | None = None, closed_by: str | None = None, cause: dict | None = None,
+          max_rows: int | None = None) -> dict:
+    """Apply a list of changes atomically; `cause` (what set the batch off) is stored as cause_json. With `max_rows`
+    (a spoken Apply under the hourly cap of direct writes) the `changes` rows the batch really wrote are counted before
+    the commit, and one row more raises TooMany with nothing written. Returns {"batch_id", "applied": n, "skipped": [...],
     (`batch_id` is None when every change was skipped: no batch row is kept for nothing)
     "created": [task ids a `create` made], "refs": {ref: task id}, "ripple_queued": [task ids this batch queued for a ripple
     (`ripple.enqueue`, sorted; never any for a ripple's own batch)]}."""
@@ -248,6 +258,10 @@ def apply(conn: sqlite3.Connection, changes: list[dict], source: str, today: dat
                 cur.execute("UPDATE changes SET note = ? WHERE batch_id = ? AND id > ?", (note, batch_id, before))
         from . import ripple                                 # here, not at the top: ripple imports batches
         queued = ripple.enqueue(cur, batch_id, source)       # in this transaction, so a failure rolls it back with the batch
+        if max_rows is not None:
+            wrote = cur.execute("SELECT COUNT(*) FROM changes WHERE batch_id = ?", (batch_id,)).fetchone()[0]
+            if wrote > max_rows:
+                raise TooMany(wrote, max(0, max_rows))
     except Exception:
         conn.rollback()   # one shared connection serves every request; never leave it mid-transaction
         raise

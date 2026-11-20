@@ -1277,19 +1277,22 @@ def _skipped(w, res: dict, today: date) -> list[str]:
     return [x for x in out if x]
 
 
-def _under_cap(w, ctx) -> None:
+def _under_cap(w, ctx) -> int:
     """A spoken Apply is Claude writing with nobody tapping Apply, so its rows count toward the hourly cap of direct
-    changes with apply_changes' (security review 2026-11-20; the design had left it out). The unit here is a staged
-    row, taken inside the write transaction; over the cap nothing is asked or applied and the tray stays as it is."""
+    changes with apply_changes' (security review 2026-11-20; the design had left it out). Answers how many `changes`
+    rows are left this hour, counted inside the write transaction; `tray.apply(max_rows=…)` holds the batch to exactly
+    that (a staged row may write several: a Done writes four). Here only what is certain already is refused, before
+    the question is asked: every staged row writes at least one. Over the cap nothing is asked or applied and the tray
+    stays as it is."""
     from . import config as C
     from .mcp_server import direct_used                          # lazy: mcp_server imports this module at its end
-    need = w.execute("SELECT COUNT(*) FROM tray").fetchone()[0]
-    if not need:
-        return
     cap = int(C.get(ctx.cfg, "server.mcp_apply_hourly_cap", 100))
     since = (datetime.now(timezone.utc) - timedelta(hours=1)).replace(microsecond=0).isoformat()
-    if direct_used(w, since) + need > cap:
+    left = cap - direct_used(w, since)
+    need = w.execute("SELECT COUNT(*) FROM tray").fetchone()[0]
+    if need and need > left:
         raise _fail(SAID["apply_capped"])
+    return left
 
 
 def apply(ctx, args: dict) -> dict:
@@ -1306,13 +1309,15 @@ def apply(ctx, args: dict) -> dict:
     try:
         begin_write(w)
         rev = tray.rev(w)
-        _under_cap(w, ctx)                                         # at the question and again at the yes
+        left = _under_cap(w, ctx)                                  # at the question and again at the yes
         if token is not None and _confirm_take(w, token, "apply", rev=rev):
             row = review_pass.live(w)
             pid = row["id"] if row and row["day"] == today.isoformat() else None
             try:
-                res = tray.apply(w, ctx.cfg, today, seen_rev=rev, source="review", finish=True,
+                res = tray.apply(w, ctx.cfg, today, seen_rev=rev, source="review", finish=True, max_rows=left,
                                  cause={"kind": "review", "pass": pid, "applied_by": ctx.source})       # commits, then its follow-ups
+            except batches.TooMany:                                # rolled back: the tray and the token are as they were
+                raise _fail(SAID["apply_capped"]) from None
             except tray.Stale:
                 begin_write(w)                                     # tray.apply rolled back: read back again
             else:

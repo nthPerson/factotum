@@ -1668,8 +1668,8 @@ revision; the second applies exactly that tray through `tray.apply` as one `revi
 pass, applied_by, staged_by}`, undoable in History, and reads back again when anything changed. It never applies
 `stage_changes` proposals, and wakes the scheduler when a card's Create made a task. Nobody taps Apply on it, so the two
 bounds on a direct write hold for it too (security review 2026-11-20): its rows count toward
-`server.mcp_apply_hourly_cap` together with `apply_changes`' (checked at the read-back and at the yes; over the cap it
-answers "apply these on the screen" and the tray is kept), and an address it put on a task is not a contact
+`server.mcp_apply_hourly_cap` together with `apply_changes`' (refused at the read-back when already certain; at the yes the batch is held to the `changes` rows it
+really writes, counted before its commit; over the cap it answers "apply these on the screen" and the tray is kept), and an address it put on a task is not a contact
 `mail_draft_new` may write to when the tray held a row a skill or connector staged (a card made from a stranger's mail
 carries the stranger's address). A tray applied on the screen, or staged wholly by hand and applied by speech, is the
 owner's. Every connector session shares

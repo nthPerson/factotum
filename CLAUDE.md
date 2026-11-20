@@ -708,8 +708,10 @@ The service runs `.venv/bin/python`, never system Python (`deploy/factotum.servi
   servers. The page knows a spoken Apply from `/api/review/pass/now`'s `last_apply`.
 - **A spoken Apply is a direct write for the two bounds on direct writes** (security review 2026-11-20, the owner agreed; the design
   had it outside both): nobody taps Apply on it either. Its rows count toward `server.mcp_apply_hourly_cap` with `apply_changes`'
-  (`mcp_server.direct_used`, one count for both; `review_mcp._under_cap` checks at the question and again at the yes, the unit a
-  staged row, and over the cap says "apply these on the screen" with the tray kept). And an address it put on a task is not in
+  (`mcp_server.direct_used`, one count for both, in `changes` rows; `review_mcp._under_cap` refuses before the question what is
+  certain already, and the yes is held to the rows the batch really writes: `tray.apply(max_rows=…)` → `batches.apply` counts them
+  before its commit and raises `batches.TooMany` with nothing written, since a staged row may write several, a Done four; over the
+  cap the answer is "apply these on the screen" and the tray is kept). And an address it put on a task is not in
   `known_recipients` when the tray held a row a skill or connector staged (`mcp_server._spoken_applies`: a card from a stranger's
   mail carries the stranger's address, and "create it" then "apply" are two tool calls). A tray the owner applied on the screen, or
   staged wholly by hand and applied by speech, is the owner's. Both read `cause.applied_by` / `staged_by`: a new way to apply
