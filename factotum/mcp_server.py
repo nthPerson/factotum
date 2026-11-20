@@ -1471,6 +1471,11 @@ def review_undo(ctx: Context, args: dict) -> dict:
     return _rv.guarded(_rv.undo)(ctx, args)
 
 
+@tool("review_apply", _rv.DESC["review_apply"], *_rv.PROPS["review_apply"], skill_only=True, apply_only=True, annotations=WRITES_NOW)
+def review_apply(ctx: Context, args: dict) -> dict:
+    return _rv.guarded(_rv.apply)(ctx, args)
+
+
 def _ok(id_, result) -> dict:
     return {"jsonrpc": "2.0", "id": id_, "result": result}
 

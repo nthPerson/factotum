@@ -201,10 +201,11 @@ def decided(conn: sqlite3.Connection) -> dict[str, list[str]]:
 
 def summary(conn: sqlite3.Connection) -> dict:
     """Counts for a read-back: {"entries", "decisions": {keep, done, drop, later, create, dismiss}, "beside": rows
-    that decide nothing, "by": {origin: rows}}. A decision is counted once per item, by its deciding row."""
+    that decide nothing, "by": {origin: rows}, "decided_by": {origin: decisions}}. A decision is counted once per item, by its deciding row."""
     rows = _rows(conn)
     dec = dict.fromkeys(("keep", "done", "drop", "later", "create", "dismiss"), 0)
     by: dict[str, int] = {}
+    decided_by: dict[str, int] = {}
     beside = 0
     for k, e, m in rows:
         by[m["origin"]] = by.get(m["origin"], 0) + 1
@@ -212,15 +213,18 @@ def summary(conn: sqlite3.Connection) -> dict:
         if not d:
             beside += 1
             continue
-        op, f = e.get("op"), e.get("fields") or {}
+        op, f, one = e.get("op"), e.get("fields") or {}, None
         if d.startswith("t:") and k == d[2:]:
             if op in ("keep", "done", "drop"):
-                dec[op] += 1
+                one = op
             elif op == "set" and "snoozed_until" in f:
-                dec["later"] += 1
+                one = "later"
         elif d.startswith("s:") and k == f"e:{d[2:]}":
-            dec["create" if op == "create_suggestion" else "dismiss"] += 1
-    return {"entries": len(rows), "decisions": dec, "beside": beside, "by": by}
+            one = "create" if op == "create_suggestion" else "dismiss"
+        if one:
+            dec[one] += 1
+            decided_by[m["origin"]] = decided_by.get(m["origin"], 0) + 1
+    return {"entries": len(rows), "decisions": dec, "beside": beside, "by": by, "decided_by": decided_by}
 
 
 def _old_key(k: str, e: dict) -> str:

@@ -166,7 +166,7 @@ def test_summary_counts_decisions_beside_and_who(conn):
                       put("e:9", {"task_id": None, "op": "judge_evidence", "fields": {"evidence_id": 9, "verdict": "dismissed"}})], "page")
     tray.write(conn, [put("4:due", {"task_id": 4, "op": "set", "fields": {"due": "2026-12-01"}})], "connector")
     assert tray.summary(conn) == {"entries": 7, "decisions": {"keep": 1, "done": 1, "drop": 0, "later": 1, "create": 1, "dismiss": 1},
-                                  "beside": 1, "by": {"page": 6, "connector": 1}}
+                                  "beside": 1, "by": {"page": 6, "connector": 1}, "decided_by": {"page": 5}}
 
 
 # --- the carry ---------------------------------------------------------------------------------------------

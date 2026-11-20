@@ -112,6 +112,19 @@ SAID = {
     "undo": "Taken back: {name} is undecided again.", "undo_many": "Taken back: {name} are undecided again.",
     "undo_screen": "Taken back the {what} you made on the screen, for {name}.",
     "undo_nothing": "Nothing to take back.", "undo_applied": "That's already applied; undo it in Factotum's History.",
+    # review_apply
+    "stage_only": "Factotum is set to stage only; apply on the screen.",
+    "tray_changed": "The tray changed since I asked, so here it is again.",
+    "apply_decisions_one": "Apply one decision: {parts}?", "apply_decisions_n": "Apply {n} decisions: {parts}?",
+    "apply_changes_one": "Apply one staged change?", "apply_changes_n": "Apply {n} staged changes?",
+    "on_screen_one": "One of them was made on the screen.", "on_screen_n": "{N} of them were made on the screen.",
+    "on_screen_all": "All of them were made on the screen.",
+    "others_one": "One other staged change goes with them.", "others_n": "{N} other staged changes go with them.",
+    "props_one": "One batch from Claude still waits on the screen and is not part of this.",
+    "props_n": "{N} batches from Claude still wait on the screen and are not part of this.",
+    "applied": "Applied. You can undo it in Factotum's History.",
+    "applied_none": "Nothing was applied: everything staged was skipped.",
+    "skipped_one": "One change was skipped.", "skipped_n": "{N} changes were skipped.",
     "n_keep": "keep", "n_done": "done", "n_drop": "drop", "n_later": "later", "n_create": "create", "n_dismiss": "dismiss", "n_other": "decision",
 }
 
@@ -1042,6 +1055,108 @@ def undo(ctx, args: dict) -> dict:
     return _with_data({"status": "undone", "say": say, "item": place["item"], "elsewhere": None})
 
 
+# --- review_apply ---------------------------------------------------------------------------------------------
+
+def _read_back(w, ctx) -> tuple[str | None, dict]:
+    """What a spoken Apply would cover, said before it (design §7.4): the decisions by kind, how many were made on the
+    screen, the other staged changes that go with them, and the batches from Claude that wait on the screen and are not
+    part of it. (None, counts) when nothing is staged."""
+    summ = tray.summary(w)
+    d = summ.get("decisions") or {}
+    total = sum(d.values())
+    screen = sum(n for o, n in (summ.get("decided_by") or {}).items() if o in ("page", "carry"))
+    others = int(summ.get("beside") or 0)
+    props = w.execute("SELECT COUNT(*) FROM proposals WHERE applied_at IS NULL AND dismissed_at IS NULL").fetchone()[0]
+    counts = {"decisions": total, "on_screen": screen, "others": others, "proposals": props}
+    if not summ.get("entries"):
+        return None, counts
+    says = []
+    if total:
+        parts = _decisions(summ).split(": ", 1)[1].rstrip(".")
+        says.append(SAID["apply_decisions_one" if total == 1 else "apply_decisions_n"].format(n=_n(total), parts=parts))
+        if screen:
+            says.append(SAID["on_screen_all"] if screen == total and total > 1 else SAID["on_screen_one"] if screen == 1 else SAID["on_screen_n"].format(N=_N(screen)))
+        if others:
+            says.append(SAID["others_one"] if others == 1 else SAID["others_n"].format(N=_N(others)))
+    else:
+        says.append(SAID["apply_changes_one"] if others == 1 else SAID["apply_changes_n"].format(n=_n(others)))
+    if props:
+        says.append(SAID["props_one"] if props == 1 else SAID["props_n"].format(N=_N(props)))
+    return " ".join(says), counts
+
+
+def _skipped(w, res: dict, today: date) -> list[str]:
+    out = []
+    for x in (res.get("skipped") or [])[:5]:
+        why = str((x or {}).get("why") or "") if isinstance(x, dict) else str(x)
+        tid = x.get("task_id") if isinstance(x, dict) else None
+        nm = None
+        if isinstance(tid, int):
+            r = w.execute("SELECT name FROM tasks WHERE id = ?", (tid,)).fetchone()
+            nm = speakable(spoken.short(r[0]), 120) if r else None
+        out.append(speakable(f"{nm}: {why}" if nm else why, 200, today))
+    return [x for x in out if x]
+
+
+def apply(ctx, args: dict) -> dict:
+    """review_apply: the whole tray as one undoable `review` batch, always in two calls (design §7.4): the first reads
+    back what it covers and asks, with a token bound to the tray's revision; the second, with the token, applies
+    exactly that tray (`tray.apply` with `seen_rev`), or reads back again when anything changed. Never the batches
+    from Claude (`proposals`): those stay the owner's to apply on the screen. Apply mode only."""
+    if not ctx.may_apply():
+        raise _fail(SAID["stage_only"])
+    _need_writer(ctx)
+    today = _today(ctx)
+    token = args.get("confirm")
+    w = ctx.writer()
+    try:
+        begin_write(w)
+        rev = tray.rev(w)
+        if token is not None and _confirm_take(w, token, "apply", rev=rev):
+            row = review_pass.live(w)
+            pid = row["id"] if row and row["day"] == today.isoformat() else None
+            try:
+                res = tray.apply(w, ctx.cfg, today, seen_rev=rev, source="review", finish=True,
+                                 cause={"kind": "review", "pass": pid, "applied_by": ctx.source})       # commits, then its follow-ups
+            except tray.Stale:
+                begin_write(w)                                     # tray.apply rolled back: read back again
+            else:
+                if res.get("created"):
+                    ctx.woke()
+                try:
+                    if pid is not None:
+                        begin_write(w)
+                        review_pass.seen(w, pid, ctx.source)
+                        w.commit()
+                except Exception:   # noqa: BLE001 — the batch is applied; what this driver saw is a nicety
+                    w.rollback()
+                skipped = _skipped(w, res, today)
+                say = SAID["applied"] if res.get("batch_id") is not None else SAID["applied_none"]
+                if skipped and res.get("batch_id") is not None:
+                    say = f"{say} {SAID['skipped_one'] if len(skipped) == 1 else SAID['skipped_n'].format(N=_N(len(skipped)))}"
+                return {"status": "applied", "say": say, "batch_id": res.get("batch_id"), "applied": res.get("applied", 0), "skipped": skipped,
+                        "created": len(res.get("created") or []), "mode": "apply"}
+        ask, counts = _read_back(w, ctx)
+        lapsed = SAID["tray_changed"] if token is not None else None
+        if ask is None:
+            w.commit()
+            return {"status": "nothing", "say": _join(lapsed, SAID["nothing_staged"]), "staged": counts, "mode": "apply"}
+        tok = _confirm_ask(w, "apply", rev=tray.rev(w))
+        w.commit()
+        return {"status": "confirm", "say": lapsed, "ask": ask, "confirm": tok, "staged": counts, "mode": "apply"}
+    except BaseException:
+        try:
+            w.rollback()
+        except Exception:   # noqa: BLE001
+            pass
+        raise
+    finally:
+        try:
+            w.close()
+        except Exception:   # noqa: BLE001
+            pass
+
+
 # --- what mcp_server registers (one-line wrappers there) ------------------------------------------------------------
 
 DESC = {
@@ -1067,6 +1182,11 @@ DESC = {
                      "same arguments and `confirm` set to its token (never on silence, never on your own). " + DATA,
     "review_undo": "Take back a staged decision: the item `ref` names, or without ref the newest decision in this review, whoever made "
                    "it. The item comes back in front, undecided. An applied decision is undone in Factotum's History, not here. " + DATA,
+    "review_apply": "Apply everything staged in Factotum's tray as one batch the owner can undo in Factotum's History. Only when the owner "
+                    "says apply. Always two calls: first without `confirm`, which applies nothing and answers status confirm with `ask`, "
+                    "a read-back of what the Apply covers; say it as written and wait. Only on a clear yes call again with `confirm` "
+                    "set to its token. If the answer is confirm again, the tray changed: ask again. Batches from Claude waiting on the "
+                    "screen are never part of it. " + DATA,
     "review_status": "How the review stands: how many are left and about how long, how many were passed over, what is staged. With "
                      "list=true, up to 30 items with their ref, a short name and their state, to find one the owner names and go to "
                      "it with review_next to. Never read the refs. " + DATA,
@@ -1096,7 +1216,9 @@ PROPS = {
                        "due": {"type": "string", "description": "also move its due date: a day as for `day`, or 'none'"},
                        "remind_at": {"type": "string", "description": "also a reminder: YYYY-MM-DDTHH:MM in the owner's time"},
                        "confirm": {"type": "string", "description": "only the token a 'confirm' answer gave, after the owner said yes to its `ask`"}}, ["ref"]),
+    "review_apply": ({"confirm": {"type": "string", "description": "only the token the first call gave, after the owner said yes to its `ask`"}}, []),
     "review_undo": ({"ref": {"type": "string", "description": "the item whose decision to take back; leave it out for the newest"}}, []),
 }
 
-TOOL_FNS = {"review_start": start, "review_next": next_, "review_more": more, "review_status": status, "review_decide": decide, "review_undo": undo}
+TOOL_FNS = {"review_start": start, "review_next": next_, "review_more": more, "review_status": status, "review_decide": decide, "review_undo": undo,
+            "review_apply": apply}
