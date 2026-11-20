@@ -451,7 +451,7 @@
       else location.reload();
       return;
     }
-    syncTray(); trayPoll();
+    if (tray.booted) { syncTray(); trayPoll(); }      // before that, load() starts the tray from its cache (review 2026-11-19)
     // Off Review, a Review page loaded earlier is let go, so the number beside Review and on the icon is the
     // server's fresh count again (as at Refresh's end); a Review session in progress keeps its page. The icon is
     // set again even when the number did not change: a push may have put another number there in the meantime.
@@ -633,11 +633,13 @@
   // Something staged here has not reached the server: a send in flight, or a difference not sent yet.
   function trayUnsent() { return !!tray.inflight || trayDiff(tray.base, staged).length > 0; }
   function trayCache() {
+    if (!tray.booted) return;      // before trayBoot has read the cache, the empty start state would overwrite what it kept unsent
     const unsent = trayDiff(tray.base, staged);
     if (!unsent.length) tray.unsentAt = 0; else if (!tray.unsentAt) tray.unsentAt = Date.now();
     try { localStorage.setItem(TRAY_CACHE, JSON.stringify({ rev: tray.rev, entries: [...tray.base].map(([k, s]) => [String(k), JSON.parse(s), tray.meta.get(k) || {}]), unsent, unsentAt: tray.unsentAt })); } catch (_) {}
   }
   function syncTray() {
+    if (!tray.booted) return;      // load() starts the tray (trayBoot), which sends what the cache kept
     trayCache();
     if (tray.queued) return;      // a send is waiting its turn: it takes this change too
     tray.queued = true;
@@ -668,10 +670,11 @@
     const o = how || {};
     if (!t || typeof t !== 'object' || typeof t.rev !== 'number' || t.same || !Array.isArray(t.entries)) return;
     if (t.rev < tray.rev && !o.force) return;
-    const pending = trayDiff(tray.base, staged).filter(op => {
-      const k = op.del != null ? op.del : op.put;
-      return !(sent && sent.has(k) && sent.get(k) === (op.del != null ? null : trayCanon(op.entry)));
-    });
+    // What this page still has to send: its tray against the base the server holds once `sent` landed, so a change taken
+    // back (or made again) while its send was in flight is a change too (review 2026-11-19).
+    const assumed = new Map(tray.base);
+    if (sent) for (const [k, s] of sent) { const kk = trayKey(k); if (s === null) assumed.delete(kk); else assumed.set(kk, s); }
+    const pending = trayDiff(assumed, staged);
     const locals = [...staged].filter(([, e]) => e && e.local && !(o.drop && o.drop.has(e)));      // `drop`: a decision's provisional rows, answered now
     const was = traySig(), wasMeta = trayMetaSig();
     const nt = trayFrom(t);
