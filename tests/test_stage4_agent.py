@@ -497,6 +497,9 @@ def test_nothing_the_user_or_the_agent_reads_says_blocked_or_dependency(conn, cf
                 texts += [s["say"], s["basis"], s["question"], *s["more"].values(), *(o["words"] for o in s["options"]), *(m["words"] for m in s["members"])]
     conn.rollback()
     assert said >= 4
+    # The review tools (spoken Review stage 3): their guide, every fixed sentence and every description.
+    from factotum import review_mcp
+    texts += [review_mcp.GUIDE, review_mcp.DATA] + list(review_mcp.SAID.values()) + list(review_mcp.DESC.values())
     for t in texts:
         assert not re.search(r"\bblocked\b|\bdependenc", t, re.I), t[:120]
 

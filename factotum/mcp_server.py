@@ -1436,6 +1436,31 @@ def _err(id_, code: int, message: str) -> dict:
     return {"jsonrpc": "2.0", "id": id_, "error": {"code": code, "message": message}}
 
 
+# ---- a spoken Review (stage 3, design §7): thin wrappers over factotum/review_mcp.py -------------------------------
+
+from . import review_mcp as _rv  # noqa: E402  (review_mcp imports this module's ToolError lazily)
+
+
+@tool("review_start", _rv.DESC["review_start"], *_rv.PROPS["review_start"], skill_only=True, annotations=WRITES)
+def review_start(ctx: Context, args: dict) -> dict:
+    return _rv.guarded(_rv.start)(ctx, args)
+
+
+@tool("review_next", _rv.DESC["review_next"], *_rv.PROPS["review_next"], skill_only=True, annotations=WRITES)
+def review_next(ctx: Context, args: dict) -> dict:
+    return _rv.guarded(_rv.next_)(ctx, args)
+
+
+@tool("review_more", _rv.DESC["review_more"], *_rv.PROPS["review_more"], skill_only=True, annotations=READ_ONLY)
+def review_more(ctx: Context, args: dict) -> dict:
+    return _rv.guarded(_rv.more)(ctx, args)
+
+
+@tool("review_status", _rv.DESC["review_status"], *_rv.PROPS["review_status"], skill_only=True, annotations=READ_ONLY)
+def review_status(ctx: Context, args: dict) -> dict:
+    return _rv.guarded(_rv.status)(ctx, args)
+
+
 def _ok(id_, result) -> dict:
     return {"jsonrpc": "2.0", "id": id_, "result": result}
 

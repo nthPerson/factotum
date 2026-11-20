@@ -926,16 +926,33 @@ def after_apply(conn: sqlite3.Connection, decided, batch_id: int | None, *, cfg:
         conn.execute("UPDATE review_passes SET rev = rev + 1 WHERE id = ?", (row["id"],))
 
 
-def seen(conn: sqlite3.Connection, pass_id: int, driver: str) -> None:
+SAID_KEPT = 8                                        # `seen`: the items whose suggested answer a driver last said, newest kept
+
+
+def seen(conn: sqlite3.Connection, pass_id: int, driver: str, *, said: dict | None = None) -> None:
     """What a driver has now seen (stage 3 reads it to say what changed on the screen meanwhile): the tray's
-    revision, the decided items and the cursor, with the time. Not a move: `rev` stays. No commit."""
+    revision, the decided items and the cursor, with the time; and `said`, {item key: {steps, members}}: the suggested
+    answer each item it just read out carried (stage 3's `rec` is the answer that was said, never the one worked out
+    at the press), merged over what it said before, the newest SAID_KEPT kept. Not a move: `rev` stays. No commit."""
     if driver not in DRIVERS:
         raise Refused(f"unknown driver {str(driver)[:20]!r}")
     begin_write(conn)
     row = _row(conn, pass_id)
     d = _drivers(row)
-    d[driver] = {"tray_rev": tray.rev(conn), "decided": sorted(tray.decided(conn)), "cursor": row["cursor_key"], "at": now_iso()}
+    old = (d.get(driver) or {}).get("said")
+    old = dict(old) if isinstance(old, dict) else {}
+    for k, v in (said or {}).items():
+        old.pop(k, None)
+        old[k] = v
+    d[driver] = {"tray_rev": tray.rev(conn), "decided": sorted(tray.decided(conn)), "cursor": row["cursor_key"], "at": now_iso(),
+                 "said": dict(list(old.items())[-SAID_KEPT:])}
     conn.execute("UPDATE review_passes SET drivers_json = ? WHERE id = ?", (json.dumps(d), pass_id))
+
+
+def said_by(row: dict, driver: str) -> dict:
+    """What `seen` kept as said by this driver: {item key: {steps, members}}. Reads only."""
+    s = (_drivers(row).get(driver) or {}).get("said")
+    return s if isinstance(s, dict) else {}
 
 
 # --- reads -------------------------------------------------------------------------------------------------
@@ -957,6 +974,27 @@ def view(conn: sqlite3.Connection, cfg: dict, today: date, *, spoken: bool = Tru
     if row is None or row["day"] != today.isoformat():
         return None
     return _view(conn, cfg, today, row, spoken=spoken)
+
+
+def entry(conn: sqlite3.Connection, cfg: dict, today: date, key: str, *, spoken: bool = True) -> dict | None:
+    """One item of the live pass of Review's day as the View carries it (with `spoken` unless asked not to), whether it
+    is in front or not: a task, a card, a group, or a group's member (its own task entry, with the member's state). None
+    when there is no live pass of that day or the pass does not hold the key. Reads only (stage 3's `review_more`)."""
+    row = live(conn)
+    if row is None or row["day"] != today.isoformat() or not isinstance(key, str):
+        return None
+    queue = review_queue.items(conn, cfg, today)
+    tr = tray.read(conn)
+    trows = _trows(tr["entries"])
+    P = _plan(conn, cfg, today, row, queue, tr["entries"])
+    if key not in P.pos and key not in P.member_of:
+        return None
+    e = _entry(conn, cfg, today, key, P, trows)
+    if key in P.member_of:
+        e["state"] = P.mstates[key]
+    if spoken:
+        _speak(conn, cfg, today, [e])
+    return e
 
 
 def _now_on(task: dict, trows) -> tuple[bool, bool]:
@@ -1156,16 +1194,17 @@ def _group_entry(conn: sqlite3.Connection, cfg: dict, today: date, gk: str, P: P
     return out
 
 
-def _line(conn: sqlite3.Connection, cfg: dict, key: str, P: Plan, trows) -> dict:
+def _line(conn: sqlite3.Connection, cfg: dict, key: str, P: Plan, trows, today: date) -> dict:
     """One row of the View's list: {key, kind, name, why, state, staged, applied, due}; `applied` when the decision
-    was applied by this pass's Apply (no tray row is left to take back; review 2026-11-20)."""
+    was applied by this pass's Apply (no tray row is left to take back; review 2026-11-20). A group's row also has its
+    members and `from_words` (where its tasks came from, in the server's words)."""
     if key in P.members:                                  # a group: its title, where it came from, and each member's state
         prov = _provenance(conn, cfg, P, key)
         ms = _members(conn, cfg, None, key, P, trows, False)
         n = sum(1 for m in ms if m["state"] != "gone")
         name = WORDS["group_n"].format(n=n) + (f" · {prov['title']}" if prov.get("title") else "")
         return {"key": key, "kind": "group", "name": name, "why": WORDS.get(f"group_{prov['kind']}", ""), "state": P.states[key],
-                "staged": None, "applied": False, "due": None, "members": ms}
+                "staged": None, "applied": False, "due": None, "members": ms, "from_words": _from_words(prov, today)}
     e = P.entries.get(key)
     name = why = due = None
     if e is not None and "task" in e:
@@ -1238,4 +1277,4 @@ def _view(conn: sqlite3.Connection, cfg: dict, today: date, row: dict, queue: di
     return {"id": row["id"], "rev": row["rev"], "day": row["day"], "today": today.isoformat(), "state": P.state, "cursor_key": cur,
             "lap": row["lap"], "started_by": row["started_by"], "moved_by": row["moved_by"], "moved_at": row["moved_at"],
             "tray_rev": tr["rev"], "speaking": _speaking(row), "counts": counts, "checkpoint": {"looked": row["looked"], "cap": _cap(cfg)},
-            "labels": lifecycle.REVIEW_LABELS, "current": current, "ahead": ahead_entry, "list": [_line(conn, cfg, k, P, trows) for k in P.order]}
+            "labels": lifecycle.REVIEW_LABELS, "current": current, "ahead": ahead_entry, "list": [_line(conn, cfg, k, P, trows, today) for k in P.order]}
