@@ -116,3 +116,50 @@ def test_a_page_on_review_follows_the_pass_and_reads_it_again_on_return():
 def test_review_cap_is_items_per_sitting_in_settings():
     """A pass has no pages: `lifecycle.review_cap` is now where Review stops and asks (design 6.3, 6.12)."""
     assert "f('lifecycle.review_cap', 'Items per sitting', 'Review stops and asks before going on after this many.', num('lifecycle.review_cap', 5, 50))" in JS
+
+
+def test_a_note_belongs_to_its_item_and_counts_as_typed_only_in_front():
+    """Review finding 2026-11-20: a note typed on one item and left with Next stayed the page's one note, so typingNow kept
+    the page from following another device and from reloading while other items were in front, and the next decision on
+    any item cleared it. Notes are held per item; only the note of the item in front, with its box drawn, counts; a
+    decision takes only its own item's note."""
+    import json
+    import shutil
+    import subprocess
+    line = re.search(r"\n  const rvNoteNow = .*\n", JS).group(0)
+    assert "rvNoteNow()" in _body("typingNow") and "ui.rvNote." not in JS and "ui.rvNote =" not in JS
+    run = _body("reviewRun")
+    assert run.count("delete ui.rvNotes[key]") == 2 and "ui.rvNotes = " not in run
+    assert "const text = (ui.rvNotes[key] || '').trim();" in run
+    assert "const note = ui.rvNotes[entry.key] || '';" in _body("taskItemHtml")
+    node = shutil.which("node")
+    if node is None:
+        return
+    script = f"""
+const ui = {{ rvNotes: {{ 't:477': 'ask Sam first' }} }}; let rp = {{ view: {{ cursor_key: 't:424' }} }}; let box = true;
+const drawn = () => box;
+{line}
+const out = [rvNoteNow()];
+rp.view.cursor_key = 't:477'; out.push(rvNoteNow());
+box = false; out.push(rvNoteNow());
+rp.view = null; box = true; out.push(rvNoteNow());
+console.log(JSON.stringify(out));"""
+    r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout) == ["", "ask Sam first", "", ""]
+
+
+def test_following_notices_a_new_day_and_an_applied_row_offers_no_take_back():
+    """Review notes 2026-11-20: a page following across midnight compared only the pass, its revision and the tray's,
+    so it kept yesterday's pass; and after a partial Apply the end screen offered Take back on a decision already
+    applied, which no tray row holds any more."""
+    chk = _body("followCheck")
+    assert "n.today !== v.today" in chk and "newDay" in chk
+    assert "r.state === 'decided' && !r.applied" in _body("stagedRowHtml")
+
+
+def test_apply_waits_for_a_decision_still_on_its_way():
+    """Review note 2026-11-20: a Keep drawn at the click is a local row until its answer comes; Apply pressed meanwhile
+    left it out, and did nothing at all when it was the only row."""
+    aa = _body("applyAll")
+    assert aa.index("s.local && s.deciding)) await tray.busy") < aa.index("const picked =")

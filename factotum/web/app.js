@@ -54,7 +54,7 @@
   if (!folds || typeof folds !== 'object' || Array.isArray(folds)) folds = {};
   const folded = (key, dflt) => Object.prototype.hasOwnProperty.call(folds, key) ? !!folds[key] : !!dflt;
   function setFold(key, shut) { folds[key] = !!shut; try { localStorage.setItem('factotum.folds', JSON.stringify(folds)); } catch (_) {} }
-  let ui = { tab: 'today', focus: null, focusAt: null, sel: new Set(), open: new Set(), laterOpen: false, datePick: false, trayOpen: false, trayOff: new Set(), rvNote: { key: null, text: '' }, rvList: false, remOpen: null, dueOpen: null, sinceOpen: null,
+  let ui = { tab: 'today', focus: null, focusAt: null, sel: new Set(), open: new Set(), laterOpen: false, datePick: false, trayOpen: false, trayOff: new Set(), rvNotes: {}, rvList: false, remOpen: null, dueOpen: null, sinceOpen: null,
              railOpen: !window.matchMedia('(max-width: 860px)').matches, chatDrawer: false,
              page: null, pageScroll: 0, pageMore: false, pageLater: false,      // the task page: its id, the list's scroll, a phone's More and Later open
              bulkMore: false,      // the phone's short bar shows its second line (back to false when nothing is selected)
@@ -435,10 +435,14 @@
   // A box that can be closed with its text kept (the New task line, the phone sheet, an opened task's conversation,
   // Find) counts only while it is drawn: text kept out of sight must not keep the lists stale on every return.
   const drawn = id => !!document.getElementById(id);
+  // A Review note is held per item (ui.rvNotes, by item key) and counts as typed only while its own item is in front with
+  // the box drawn (review 2026-11-20): a note left behind with Next kept the page from following and from reloading, and the
+  // next decision on another item cleared it.
+  const rvNoteNow = () => { const k = rp.view && rp.view.cursor_key; return k && drawn('rv-note') ? ui.rvNotes[k] || '' : ''; };
   function typingNow() {
     const shown = [drawn('new-line') ? draft.newLine : '', drawn('new-name') ? draft.newName : '', drawn('task-ask') ? draft.askTask : '', ui.findOpen ? draft.findQ : ''];
     // The Search box's words are the search, not something half typed: they never count. Its question does, and a card's.
-    if ([draft.cmd, draft.ask, draft.pick, draft.outcome, draft.askToday, draft.askSearch, draft.askSg, ...shown, ...Object.values(draft.picks), ui.rvNote.text].some(s => (s || '').trim())) return true;
+    if ([draft.cmd, draft.ask, draft.pick, draft.outcome, draft.askToday, draft.askSearch, draft.askSg, ...shown, ...Object.values(draft.picks), rvNoteNow()].some(s => (s || '').trim())) return true;
     if (Object.keys(draft.edit).some(id => edTyped(+id))) return true;      // an editor field typed in and not staged yet
     if (Object.values(draft.step).some(s => (s || '').trim())) return true;      // an Add a step line
     if (ui.remOpen !== null || ui.dueOpen !== null || chat.busy) return true;
@@ -927,6 +931,9 @@
   // keys: the staged entries to apply (the tray's dropdown); undefined = every one. The server's tray applies them as one
   // batch (tray.apply: new tasks first, never the label or `ev`, a chat create made from its stored proposal).
   async function applyAll(keys) {
+    // A decision drawn at the click and still on its way is not in the server's tray yet: Apply waits for it, instead of
+    // leaving it out (or, when it is all that is staged, doing nothing and saying nothing; review 2026-11-20).
+    if ([...staged.values()].some(s => s && s.local && s.deciding)) await tray.busy.catch(() => {});
     const picked = (keys ? [...staged].filter(([k]) => keys.has(String(k))) : [...staged]).filter(([, s]) => !s.local);
     const chatMids = [...new Set(picked.map(([, s]) => s.from_chat && s.from_chat.message_id).filter(Boolean))];
     if (!picked.length) return;
@@ -2214,12 +2221,14 @@
     render();
   }
   // The pass as it stands, read without beginning one (after an Apply: an Apply that left nothing undecided ended it, and
-  // the page then says so instead of beginning another). No live pass and no such Apply: the next draw begins one.
+  // the page then says so instead of beginning another). No live pass and no such Apply: the next draw begins one, and a
+  // screen saying an Apply left nothing to decide goes (an Undo of that batch put its items back: review 2026-11-20); the
+  // owner's own Finish for now stays.
   async function passReread(applied) {
     let r; try { r = await api('/api/review/pass'); } catch (_) { return; }
     rp.held = undefined; rp.said = '';
     if (r.pass) { rp.view = r.pass; rp.finished = null; }
-    else { rp.view = null; if (applied) rp.finished = { why: 'applied', left: 0 }; }
+    else { rp.view = null; if (applied) rp.finished = { why: 'applied', left: 0 }; else if (rp.finished && rp.finished.why === 'applied') rp.finished = null; }
   }
   // Following the pass (design 6.5): another device, or Claude, moves the one cursor and stages decisions. Every 3 s, only
   // while Review is in front, the document visible, no task page open, nothing typed and no press of this page waiting on
@@ -2250,7 +2259,10 @@
     rp.checking = true;
     try {
       let n; try { n = await api('/api/review/pass/now'); } catch (_) { return; }
-      if (!(n.pass_id !== v.id || n.rev !== v.rev || n.tray_rev !== v.tray_rev)) return;
+      // A new Review's day under a pass begun yesterday (midnight while following; review 2026-11-20): read it, and the GET
+      // finds no pass of today, so this one is let go and the next draw begins today's.
+      const newDay = !!n.today && !!v.today && n.today !== v.today;
+      if (!(n.pass_id !== v.id || n.rev !== v.rev || n.tray_rev !== v.tray_rev || newDay)) return;
       let r; try { r = await api('/api/review/pass'); } catch (_) { return; }
       if (rp.view !== v || rp.inflight || rp.loading) return;      // a press or a load meanwhile: its answer is the newer
       if (typeof n.tray_rev === 'number' && n.tray_rev > tray.rev) trayPoll();
@@ -2270,8 +2282,10 @@
     } finally { rp.checking = false; }
   }
   // One move of the shared cursor. Next and Back name the item drawn in front (`from`): when another device moved it
-  // meanwhile, nothing moves and the answer's pass is drawn. Next draws what comes at once.
-  async function passMove(to, key) {
+  // meanwhile, nothing moves and the answer's pass is drawn. Next draws what comes at once. The request waits its turn in
+  // the tray's queue behind every decision pressed before it (review 2026-11-20): a Next on the item a Keep drew at the
+  // click names that item, which the server's cursor reaches only once the Keep has landed.
+  function passMove(to, key) {
     const v = rp.view; if (!v || !v.id) return;
     const body = { to, device: deviceLabel() };
     if (to === 'next' || to === 'back') body.from = v.cursor_key || null;
@@ -2282,18 +2296,22 @@
     const was = rp.view !== v ? v : undefined; rp.back = null;
     rp.inflight++;
     if (was) render();
-    let r;
-    try { r = await api('/api/review/pass/' + v.id + '/move', { method: 'POST', body: JSON.stringify(body) }); }
-    catch (e) {
-      if (e && e.status === 409) toast('This review has ended · ' + (e.body && e.body.pass ? 'here is today’s' : 'a new one begins'));
-      else if (e && e.message !== 'signed out') toast('Not moved: ' + (e.detail || (e.network ? 'no connection' : e.message)));
-      passAnswer(e && e.body && 'pass' in e.body ? e.body.pass : was, true);
-      return;
-    }
-    if (r.moved === false) toast(r.why === 'first' ? 'This is the first item' : `Moved ${movedWhere(r.by)} meanwhile · this is where the review is now`);
-    if (r.came_round) rp.said = `Back to the start · ${r.left} left undecided`;
-    if (r.ended) rp.finished = { why: 'finished', left: (v.counts || {}).left || 0 };
-    passAnswer('pass' in r ? r.pass : undefined, true);
+    const run = async () => {
+      let r;
+      try { r = await api('/api/review/pass/' + v.id + '/move', { method: 'POST', body: JSON.stringify(body) }); }
+      catch (e) {
+        if (e && e.status === 409) toast('This review has ended · ' + (e.body && e.body.pass ? 'here is today’s' : 'a new one begins'));
+        else if (e && e.message !== 'signed out') toast('Not moved: ' + (e.detail || (e.network ? 'no connection' : e.message)));
+        passAnswer(e && e.body && 'pass' in e.body ? e.body.pass : was, true);
+        return;
+      }
+      if (r.moved === false) toast(r.why === 'first' ? 'This is the first item' : `Moved ${movedWhere(r.by)} meanwhile · this is where the review is now`);
+      if (r.came_round) rp.said = `Back to the start · ${r.left} left undecided`;
+      if (r.ended) rp.finished = { why: 'finished', left: (v.counts || {}).left || 0 };
+      passAnswer('pass' in r ? r.pass : undefined, true);
+    };
+    tray.busy = tray.busy.then(run, run);
+    return tray.busy;
   }
   // Take back what decides an item: the rows that decide it go at the click and the rule takes them out on the server
   // (with a pass, the item comes in front).
@@ -2331,7 +2349,7 @@
     if (ans) {      // an answer on the card: a proposal, a mail about it, a suggested link (its line goes at the click)
       const eid = +ans[2], ev = (item.evidence || []).find(e => e.id === eid), c = (ev && ev.change) || {};
       if (ans[1] === 'accept' && (c.op === 'done' || c.op === 'drop')) {      // this IS the decision: the card moves on
-        ui.laterOpen = false; ui.datePick = false; ui.rvNote = { key: null, text: '' };
+        ui.laterOpen = false; ui.datePick = false; delete ui.rvNotes[key];
         passAhead();
         return decideOn(key, id, {}, { prov: [[tid, { task_id: tid, op: c.op, fields: c.fields || {}, label: c.op === 'done' ? 'done' : 'dropped' }]] });
       }
@@ -2350,10 +2368,10 @@
       if (!named && u <= ((rp.view || {}).today || data.today)) { toast('Pick a day after today'); return; }      // the rule refuses today too
       opt = 'later'; args.until = u; kind = named ? u : 'date';
     } else if (!['done', 'drop', 'keep'].includes(id)) return;
-    const text = ui.rvNote.key === key ? ui.rvNote.text.trim() : '';
+    const text = (ui.rvNotes[key] || '').trim();
     if (text) args.note = text;
     // Shut before the decision is staged: what is drawn next must not open with this one's Later menu.
-    ui.laterOpen = false; ui.datePick = false; ui.rvNote = { key: null, text: '' };
+    ui.laterOpen = false; ui.datePick = false; delete ui.rvNotes[key];      // only this item's note: one typed on another stays with it
     passAhead();
     return decideOn(key, opt, args, { prov: [[tid, decisionProv(tid, kind, args.until)]] });
   }
@@ -2498,7 +2516,7 @@
     const it = entry.item, primary = it.primary;
     const x = view(it.task);   // staged edits (a due date set on this card) show at once, not only after Apply
     const cls = REASON_CLS[primary] || (primary === 'last_call' ? 'crit' : primary === 'new' || primary === 'back' ? 'new' : 'warn');
-    const note = ui.rvNote.key === entry.key ? ui.rvNote.text : '';
+    const note = ui.rvNotes[entry.key] || '';
     const edit = ui.rvEdit && isOpenRow(x.id);      // the card's editor (2026-11-18): the same one an opened task has
     const opts = reviewOptions(reviewCurrent());
     const DEC = { done: 'done', later: 'later', drop: 'drop' };
@@ -2552,7 +2570,7 @@
   }
   function stagedRowHtml(r) {
     return `<div class="sgstaged"><span class="chip ${r.state === 'decided' ? 'new' : ''}">${esc(r.staged || (r.state === 'answered' ? 'answered' : 'staged'))}</span><span class="nm">${esc(r.name || '')}</span>`
-      + `<button class="btn small" data-opt="goto:${esc(r.key)}">Go to</button>${r.state === 'decided' ? `<button class="btn small" data-opt="takeback:${esc(r.key)}">Take back</button>` : ''}</div>`;
+      + `<button class="btn small" data-opt="goto:${esc(r.key)}">Go to</button>${r.state === 'decided' && !r.applied ? `<button class="btn small" data-opt="takeback:${esc(r.key)}">Take back</button>` : ''}</div>`;
   }
   // The pass ended here: applied with nothing left, or Finish for now. What is left stays in Review; the tray keeps what is staged.
   function finishedHtml() {
@@ -4642,7 +4660,7 @@
     // The date is used only on its button (or Enter): a date input's own change event fires while the phone's
     // wheel is still moving, which once staged a date nobody chose.
     const rd = document.getElementById('rv-date'); if (rd) rd.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); if (rd.value) reviewRun('until-date'); } e.stopPropagation(); });
-    const rn = document.getElementById('rv-note'); if (rn) rn.oninput = () => { ui.rvNote = { key: rn.closest('.card').dataset.key, text: rn.value }; };
+    const rn = document.getElementById('rv-note'); if (rn) rn.oninput = () => { ui.rvNotes[rn.closest('.card').dataset.key] = rn.value; };
     // A new item in front is shown from its top (a press near the bottom would otherwise leave the next card scrolled down).
     if (ui.tab === 'review' && ui.page === null && rp.drawing !== rp.drawn) { const first = rp.drawn === null; rp.drawn = rp.drawing; rp.drawnAt = Date.now(); if (!first) window.scrollTo(0, 0); }
     wireReminders(panel); wireDue(panel);

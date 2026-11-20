@@ -30,7 +30,7 @@ def _tray_script(scenario):
     state = re.search(r"\n  const tray = \{.*?\};\n", JS).group(0)
     block = JS[JS.index("  const TRAY_FIELDS"):JS.index("  function syncTray()")]
     fns = "\n".join(_fn(n) for n in ("syncTray", "sendTray", "trayAnswer", "trayRedraw", "trayFail", "trayPoll", "trayApply",
-                                       "cardProv", "decideOn", "chipLeft", "discardStaged"))
+                                       "cardProv", "decideOn", "chipLeft", "discardStaged", "passAhead", "passMove", "passReread"))
     return f"""
 let staged = new Map();
 {state}
@@ -39,7 +39,8 @@ const localStorage = {{ getItem: k => (k in store ? store[k] : null), setItem: (
 const presses = [], toasts = [], renders = [], ui = {{ trayOpen: false, trayOff: new Set() }}; let inPress = false;
 const afterPress = (k, f) => {{ presses.push(k); const w = inPress; inPress = true; try {{ f(); }} finally {{ inPress = w; }} }}, render = () => {{ renders.push(inPress); }}, renderTray = () => {{}}, bottomRule = () => {{}}, placePageBar = () => {{}};
 const placeReviewBar = () => {{}}, typingNow = () => false, trayBar = () => {{}}, deviceLabel = () => 'test', toast = m => {{ toasts.push(m); }};
-let rp = {{ back: null, inflight: 0 }}; const passAnswer = () => {{}};      // the pass (spoken Review 2a) is not this test's
+let rp = {{ back: null, inflight: 0, view: null }}; const passAnswer = (p, counted) => {{ if (counted) rp.inflight = Math.max(0, rp.inflight - 1); }};      // drawing the pass (spoken Review 2a) is not this test's
+const movedWhere = b => 'elsewhere';
 const persistStaged = () => syncTray(), sgCard = () => null, sgDraft = () => ({{ name: '' }}), cut60 = s => String(s).slice(0, 60);
 // The fake server: a tray it changes by the ops it is sent, answering once `held` lets the first held call through.
 // /api/tray/ops: the ops; /api/review/decide: `decideRows` (key, entry, decides), or `decideFail` thrown;
@@ -180,3 +181,37 @@ decideOn('t:412', null, null, {{ from_chat: {{ message_id: 3, index: 0 }}, prov:
 await settle();
 console.log(JSON.stringify({{ presses, renders, server: [...server.keys()], staged: [...staged.keys()].map(String), toasts }}));""")
     assert r["renders"] and all(r["renders"]) and r["server"] == ["412:c3-0"] and r["staged"] == ["412:c3-0"] and r["toasts"] == []
+
+
+def test_a_move_waits_for_a_decision_still_on_its_way():
+    """Review finding 2026-11-20: Keep draws the next item at the click and its request waits its turn in the tray's
+    queue; Next pressed on that next item must reach the server after the Keep, or the server's cursor is still on the
+    kept item, the move answers "moved meanwhile" and the Next is lost. Moves go through the same queue."""
+    r = _run(f"""
+tray.booted = true;
+rp.view = {{ id: 1, rev: 1, state: 'item', cursor_key: 't:412', current: {{ key: 't:412' }}, ahead: {{ key: 't:413' }}, list: [{{ key: 't:412', state: 'waiting' }}, {{ key: 't:413', state: 'waiting' }}], counts: {{}} }};
+holdPath = '/api/review/decide';
+decideRows = [['412', {DECISION}, 't:412']];
+passAhead(); decideOn('t:412', 'keep', {{}}, {{ prov: [[412, {DECISION}]] }}); await tick();
+const p = passMove('next'); await tick(); await tick();
+const before = paths.slice();
+held(); await p; await settle();
+console.log(JSON.stringify({{ before, paths }}));""")
+    assert "/api/review/pass/1/move" not in r["before"]
+    assert r["paths"] == ["/api/review/decide", "/api/review/pass/1/move"]
+
+
+def test_an_undo_after_the_apply_that_ended_the_pass_lets_review_begin_again():
+    """Review finding 2026-11-20: an Apply that left nothing undecided ended the pass and the page said "Applied. Nothing is
+    left to decide."; an Undo of that batch read the pass again, found none, and kept saying so, though the undo had put
+    the items back. A finished screen of the owner's own (Finish for now) stays."""
+    r = _run("""
+rp.finished = { why: 'applied', left: 0 }; rp.view = null;
+await passReread(false);
+const afterUndo = rp.finished;
+await passReread(true);
+const afterApply = rp.finished && rp.finished.why;
+rp.finished = { why: 'finished', left: 2 };
+await passReread(false);
+console.log(JSON.stringify({ afterUndo, afterApply, finishedForNow: rp.finished && rp.finished.why }));""")
+    assert r == {"afterUndo": None, "afterApply": "applied", "finishedForNow": "finished"}
