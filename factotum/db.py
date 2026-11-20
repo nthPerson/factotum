@@ -151,6 +151,22 @@ CREATE TABLE IF NOT EXISTS push_subscriptions (    -- one row per device that tu
   created_at TEXT NOT NULL,
   last_success_at TEXT, last_failure_at TEXT, last_error TEXT
 );
+CREATE TABLE IF NOT EXISTS tray (                  -- what is staged, one tray for every device (spoken Review stage 1, factotum/tray.py)
+  key TEXT PRIMARY KEY,                            -- the page's stageKey as text
+  pos INTEGER NOT NULL,                            -- the order shown and applied; a key staged again keeps its place
+  entry_json TEXT NOT NULL,                        -- {task_id, op, fields, label, expect?, note?, from_chat?, ev?, fsug?, prop?}
+  decides TEXT,                                    -- the item key this row's decision settles (t:412, s:186), or NULL
+  origin TEXT NOT NULL,                            -- page | carry | connector | skill
+  device TEXT,                                     -- the page's deviceLabel(), NULL for a connector
+  rev INTEGER NOT NULL,                            -- the tray revision of this row's last write
+  staged_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tray_decides ON tray(decides) WHERE decides IS NOT NULL;
+CREATE TABLE IF NOT EXISTS tray_rev (id INTEGER PRIMARY KEY CHECK (id = 1), rev INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS tray_carried (          -- what a browser's old tray handed over, so nothing is carried twice
+  fp TEXT PRIMARY KEY,                             -- sha256 of key + canonical entry JSON
+  carry_id TEXT NOT NULL, at TEXT NOT NULL
+);
 """
 
 TASK_FIELDS = [
@@ -180,6 +196,16 @@ def connect(path: str | Path, shared: bool = False) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA busy_timeout = 5000")   # the API and the scheduler each hold a connection
     return conn
+
+
+def begin_write(conn: sqlite3.Connection) -> None:
+    """Take SQLite's write lock before reading what a write depends on (spoken Review, design §4.4): `BEGIN
+    IMMEDIATE`, so two writers on two connections (the API's, the connector's writer, the stdio skill server)
+    take turns and the second reads what the first committed. A transaction already open is left alone (on the
+    API's shared connection under `commit_lock` that means a writer before forgot to commit; it is not repaired
+    here). Python's sqlite3 here uses legacy transaction control: the caller commits or rolls back."""
+    if not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
 
 
 # Columns added after a table first shipped. CREATE TABLE IF NOT EXISTS leaves an existing table

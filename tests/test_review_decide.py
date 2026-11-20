@@ -491,3 +491,53 @@ def test_from_proposal_never_decides_another_task_or_a_card():
     assert R.from_proposal(item, {"op": "done", "task_id": 1, "fields": {"outcome": "  "}}, 7, 2, TODAY) == [("done", {"prop": "7-2"})]
     assert R.from_proposal(item, {"op": "set", "task_id": 1, "fields": {"snoozed_until": "bad"}}, 7, 2, TODAY) is None
     assert R.from_proposal(item, {"op": "unpin", "task_id": 1}, 7, 2, TODAY) is None
+
+
+# --- stage: load, plan, write the tray (commit 4) -------------------------------------------------------
+
+def test_stage_writes_the_plan_and_does_not_commit(conn, cfg, world, tmp_path):
+    from factotum import tray
+    from factotum.db import connect
+    F = world
+    other = connect(tmp_path / "t.db")
+    out = R.stage(conn, cfg, "t:1", "done", {"note": "Sent it"}, TODAY, origin="page", device="Phone")
+    assert out["keys"] == ["1"] + [f"e:{F[n]}" for n in TASK_EV] and out["removed"] == [] and out["said"] == ""
+    assert conn.in_transaction
+    assert other.execute("SELECT COUNT(*) FROM tray").fetchone()[0] == 0           # nothing seen before the caller commits
+    conn.commit()
+    assert other.execute("SELECT COUNT(*) FROM tray").fetchone()[0] == 1 + len(TASK_EV)
+    t = tray.read(conn)
+    assert t["entries"][0][:2] == ["1", {"task_id": 1, "op": "done", "fields": {"outcome": "Sent it"}, "label": "done · “Sent it”"}]
+    assert {m["decides"] for _, _, m in t["entries"]} == {"t:1"} and {m["device"] for _, _, m in t["entries"]} == {"Phone"}
+    out = R.stage(conn, cfg, "t:1", "keep", None, TODAY, origin="connector")       # a second decision replaces the first
+    conn.commit()
+    assert out["keys"][0] == "1" and out["removed"] == []
+    assert tray.read(conn)["entries"][0][1]["op"] == "keep"
+    out = R.stage(conn, cfg, "t:1", "undecide", None, TODAY, origin="page")
+    conn.commit()
+    assert tray.read(conn)["entries"] == [] and len(out["removed"]) == 1 + len(TASK_EV)
+
+
+def test_stage_from_chat_reads_the_stored_proposal_not_the_page(conn, cfg, world):
+    from factotum import tray
+    props = [{"op": "done", "task_id": 1, "fields": {"outcome": "Sent it"}, "label": "done", "evidence": [], "applied": False},
+             {"op": "add_note", "task_id": 1, "fields": {"text": "x"}, "label": "note", "evidence": [], "applied": False}]
+    mid = _reply(conn, "review", 1, props)
+    # the page's option and args are ignored, and so are prop / also it might send
+    R.stage(conn, cfg, "t:1", "keep", {"note": "not this", "prop": "forged", "also": {"name": "x"}}, TODAY, origin="page",
+            from_chat={"message_id": mid, "index": 0})
+    conn.commit()
+    first = tray.read(conn)["entries"][0]
+    assert first[:2] == ["1", {"task_id": 1, "op": "done", "fields": {"outcome": "Sent it"}, "label": "done · “Sent it”", "prop": f"{mid}-0"}]
+    with pytest.raises(R.Refused):                                                  # a note is not a decision: the page stages it as any proposal
+        R.stage(conn, cfg, "t:1", None, None, TODAY, origin="page", from_chat={"message_id": mid, "index": 1})
+    with pytest.raises(R.Refused):                                                  # a reply about Task-1 never decides Task-2
+        R.stage(conn, cfg, "t:2", None, None, TODAY, origin="page", from_chat={"message_id": mid, "index": 0})
+    with pytest.raises(R.Refused):                                                  # a card's conversation is not this
+        R.stage(conn, cfg, f"s:{world['c_plan']}", None, None, TODAY, origin="page", from_chat={"message_id": mid, "index": 0})
+    conn.rollback()
+    # prop and also from a caller are dropped: a client cannot mark a proposal applied through stage
+    R.stage(conn, cfg, "t:2", "keep", {"prop": "forged"}, TODAY, origin="page")
+    conn.commit()
+    two = next(e for k, e, _ in tray.read(conn)["entries"] if k == "2")
+    assert "prop" not in two

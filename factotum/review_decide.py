@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
 from . import batches, relations, review_cards, review_queue
+from .db import begin_write
 
 OPTIONS = {"t": ("done", "drop", "keep", "later", "accept", "dismiss", "follow", "not_about", "link", "step",
                  "waits", "same", "merge", "not_related", "pin", "longterm", "due", "remind", "undecide"),
@@ -598,3 +599,30 @@ def _draft(conn: sqlite3.Connection, cfg: dict, card: dict, draft) -> tuple[dict
         out["links"] = over.get("links") or []
     name = (out.get("fields") or {}).get("name") or (card.get("fields") or {}).get("name") or ""
     return out or None, name
+
+
+def stage(conn: sqlite3.Connection, cfg: dict, key: str, option, args: dict | None, today: date, *, origin: str,
+          device: str | None = None, from_chat: dict | None = None) -> dict:
+    """One decision (or a change beside it) on one Review item into the tray: take the write lock, load the item,
+    read the tray, plan, write. With `from_chat` ({message_id, index}) the option is the stored proposal's
+    (`stored_proposal`, `from_proposal`): the option and arguments sent with it are ignored, and a proposal that is
+    not a decision on this card's own task is Refused (the page stages it as any proposal). FROM_CHAT_ARGS sent by
+    a caller are dropped. Answers {"keys": the keys put, "removed": the keys deleted, "said"}. Raises Gone, Refused,
+    Stale and tray's ValueError. No commit."""
+    from . import tray                                      # tray imports chat lazily; review_decide stays light
+    begin_write(conn)
+    item = load_item(conn, cfg, today, key)
+    if from_chat is not None:
+        if "task" not in item or not isinstance(from_chat, dict):
+            raise Refused("a reply decides only the task its card is about")
+        mid, idx = from_chat.get("message_id"), from_chat.get("index")
+        opts = from_proposal(item, stored_proposal(conn, item["task"]["id"], mid, idx), mid, idx, today)
+        if not opts:
+            raise Refused("that proposal is not a decision on this card")
+        (option, args), = opts
+    else:
+        args = {k: v for k, v in (args or {}).items() if k not in FROM_CHAT_ARGS}
+    p = plan(conn, cfg, item, option, args, tray.read(conn), today)
+    ops = [{"del": k} for k in p.dels] + [{"put": k, "entry": e, "decides": d} for k, e, d in p.puts]
+    tray.write(conn, ops, origin, device)
+    return {"keys": [k for k, _, _ in p.puts], "removed": list(p.dels), "said": p.said}
