@@ -506,7 +506,7 @@ body.tray-open .toast.ask { bottom: calc(38vh + 110px + env(safe-area-inset-bott
 }
 .card .later-menu input[type=date] { font: inherit; font-size: 13px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-2); color: var(--fg); }
 .card textarea { width: 100%; box-sizing: border-box; font: inherit; font-size: 14px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); color: var(--fg); resize: vertical; margin: 4px 0 8px; }
-.card p.ctx { white-space: pre-wrap; }
+.card p.ctx { white-space: pre-wrap; overflow-wrap: anywhere; }
 .card .more { display: none; margin: -4px 0 10px; }
 @media (max-width: 700px) {
   .card p.ctx:not(.open) { max-height: 9.5em; overflow: hidden; -webkit-mask-image: linear-gradient(#000 70%, transparent); mask-image: linear-gradient(#000 70%, transparent); }
