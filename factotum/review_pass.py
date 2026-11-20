@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from . import config as C, lifecycle, recommend, review_cards, review_decide, review_queue, spoken as spoken_words, suggestions, tray
+from . import config as C, dates, lifecycle, recommend, review_cards, review_decide, review_queue, spoken as spoken_words, suggestions, tray
 from .dates import parse_date
 from .db import begin_write, get_task, now_iso, rows
 from .prompts import one_line
@@ -1127,6 +1127,14 @@ def _provenance(conn: sqlite3.Connection, cfg: dict, P: Plan, gk: str) -> dict:
     return {"kind": kind, "title": None, "day": None}
 
 
+def _from_words(prov: dict, today: date) -> str:
+    """Where a group's tasks came from, after its why line (design 6.9): "yesterday's Project Meeting" for a recording,
+    the course or the thread by its name; the day in the server's words (dates.say_whose), never the browser's."""
+    title = one_line(str(prov.get("title") or ""))[:120].strip()
+    whose = dates.say_whose(prov.get("day"), today) if prov.get("kind") == "recording" and prov.get("day") else ""
+    return f"{whose} {title}".strip() if title else (f"{whose[:1].upper()}{whose[1:]} recording" if whose else "")
+
+
 def _group_entry(conn: sqlite3.Connection, cfg: dict, today: date, gk: str, P: Plan, trows) -> dict:
     """A group as the View carries it (2d): `item` {label, provenance, members: [task item with key, state, staged,
     applied]}, its recommendation (Keep all), the options Keep all (key k) and, first, `rec`; Later's days for a
@@ -1140,7 +1148,7 @@ def _group_entry(conn: sqlite3.Connection, cfg: dict, today: date, gk: str, P: P
     opts = ([_opt("rec", rec["label"], "rec", "a")] if rec else []) + \
         ([_opt("keep_all", recommend.keep_all_words(len(und), len(live))[0], "group", "k")] if und else [])
     out = {"key": gk, "kind": "group", "state": st, "item": {"key": gk, "label": WORDS["group_n"].format(n=len(live)), "why": WORDS.get(f"group_{prov['kind']}", ""),
-                                                   "provenance": prov, "members": ms},
+                                                   "from_words": _from_words(prov, today), "provenance": prov, "members": ms},
            "provenance": prov, "evidence_lines": [], "recommendation": rec, "rec_held": None, "options": opts,
            "later_choices": review_decide.later_choices(today), "staged": {"decision": None, "beside": []}}
     if st == "gone" or gk not in P.members:

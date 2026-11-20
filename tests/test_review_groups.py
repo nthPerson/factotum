@@ -471,3 +471,40 @@ def test_rec_on_a_group_keeps_only_the_members_that_were_shown_undecided(conn, c
     P.decide(conn, cfg, D, v["id"], g, "rec", args={"steps": ["keep_all"], "members": ["t:3", "t:1"]}, origin="page", by=BY)
     conn.commit()
     assert entries(conn) == {"1": ("keep", "t:1"), "2": ("drop", "t:2"), "3": ("keep", "t:3")}
+
+
+def test_a_groups_line_says_where_its_tasks_came_from_in_words(conn, cfg):
+    """Design 6.9 (review 2026-11-20): "New from a recording · yesterday's Project Meeting", the day as the server says it
+    (dates.say_whose), never the browser's own date; a course or a thread by its name alone."""
+    _world(conn)
+    begin(conn, cfg)
+    g, v = first_on_group(conn, cfg)
+    it = v["current"]["item"]
+    assert it["why"] == "New from a recording" and it["from_words"] == "yesterday's Project Meeting"
+    for i in (11, 12):
+        new(conn, i, course="GEOG 582")
+    v = P.begin_or_resume(conn, cfg, D, by=BY, fresh=True)
+    conn.commit()
+    gc = next(r["key"] for r in v["list"] if r["key"].startswith("g:course:"))
+    _, v = mv(conn, cfg, "goto", key=gc, from_key=None)
+    assert v["current"]["item"]["from_words"] == "GEOG 582"
+
+
+def test_undoing_the_batch_a_keep_all_made_brings_the_group_back(conn, cfg):
+    """Review of the second half (2026-11-20; checked by hand then, pinned here): Apply after Keep all ends the pass
+    `applied`; History's Undo of that batch puts the tasks back in the queue, and the next pass groups them again."""
+    from factotum import batches
+    for i in (1, 2, 3):
+        new(conn, i, rec="of_aaa")
+    v = begin(conn, cfg)
+    g = v["cursor_key"]
+    assert g == "g:rec:of_aaa"
+    dec(conn, cfg, g, "keep_all")
+    res = tray.apply(conn, cfg, D)
+    assert conn.execute("SELECT end_why FROM review_passes WHERE id = ?", (v["id"],)).fetchone()[0] == "applied"
+    assert view(conn, cfg) is None and review_queue.items(conn, cfg, D)["tasks"] == []
+    batches.undo(conn, res["batch_id"])
+    assert sorted(e["task"]["id"] for e in review_queue.items(conn, cfg, D)["tasks"]) == [1, 2, 3]
+    v = begin(conn, cfg)
+    assert v["cursor_key"] == g and [m["key"] for m in v["current"]["item"]["members"]] == ["t:1", "t:2", "t:3"]
+    assert all(m["state"] == "waiting" for m in v["current"]["item"]["members"])

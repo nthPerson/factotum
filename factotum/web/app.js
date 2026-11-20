@@ -2656,15 +2656,14 @@
   // decided by itself shows its decision with Undo), the suggested answer, and in the bar Keep all (or Keep the other n)
   // and One by one. No note box: a note belongs to one task (Open it).
   function groupItemHtml(entry, v) {
-    const it = entry.item || {}, pv = it.provenance || {}, ms = it.members || [];
+    const it = entry.item || {}, ms = it.members || [];
     const opts = reviewOptions(reviewCurrent()), ka = opts.find(o => o.id === 'keep_all');
-    const day = pv.day ? new Date(pv.day + 'T12:00:00').toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' }) : '';
     const big = (ka ? `<button class="done${recRing(entry, 'keep_all') ? ' recd' : ''}" data-opt="keep_all">${esc(ka.label)} <kbd>k</kbd></button>` : '')
       + `<button data-opt="one_by_one">One by one</button>`;
     return `<div class="review">
       ${navHtml(v)}
       <div class="card group" data-key="${esc(entry.key)}">
-        <div class="why new">${esc(it.why || '')}${pv.title ? ` · <b>${esc(pv.title)}</b>` : ''}${day ? ' · ' + esc(day) : ''}</div>
+        <div class="why new">${esc(it.why || '')}${it.from_words ? ` · <b>${esc(it.from_words)}</b>` : ''}</div>
         <h2>${esc(it.label || '')}</h2>
         <div class="gmembers">${ms.map(m => groupRowHtml(m, entry)).join('')}</div>
         ${recHtml(entry)}

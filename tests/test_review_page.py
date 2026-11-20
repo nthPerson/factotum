@@ -254,6 +254,7 @@ def test_a_group_is_one_card_with_its_tasks_keep_all_and_one_by_one():
     g = _body("groupItemHtml")
     assert 'data-opt="keep_all"' in g and 'data-opt="one_by_one"' in g and '<div class="rvbar">${rvnavHtml(v)}<div class="big ' in g
     assert "recHtml(entry)" in g and "recRing(entry, 'keep_all')" in g and "rv-note" not in g      # no note box on a group
+    assert "it.from_words" in g and "toLocaleDateString" not in g      # where they came from in the server's words (design 6.9)
     row = _body("groupRowHtml")
     for w in ("done", "drop", "later", "open"):
         assert f"b('{w}'" in row, w
