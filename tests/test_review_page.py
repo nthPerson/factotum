@@ -49,7 +49,7 @@ def test_every_decision_and_answer_goes_through_decideOn_and_every_move_through_
     assert "'/api/review/pass'" in _body("loadPass") and "'/api/review/pass'" in _body("passReread")
     for f in re.findall(r"\n  (?:async )?function (\w+)\(", JS):
         if "'/api/review/pass" in _body(f):
-            assert f in ("loadPass", "passMove", "passReread", "followCheck"), f      # followCheck: 2a-3
+            assert f in ("loadPass", "passMove", "passReread", "followCheck", "passRegroup"), f      # followCheck: 2a-3; passRegroup: 2d
 
 
 def test_the_keys_move_and_decide():
@@ -216,3 +216,71 @@ console.log(JSON.stringify({{ calls, ahead, notes: ui.rvNotes }}));"""
     assert c[2][2] == {} and c[3][3] == [[7, "done"]] and c[4] == ["s:50", "rec", {}, [["e:50", "judge_evidence"]]]
     assert out["ahead"] == 4                                                                          # not for a link alone on an item already settled
     assert out["notes"] == {}
+
+
+def test_a_group_is_one_card_with_its_tasks_keep_all_and_one_by_one():
+    """Spoken Review 2d (design 6.9, 6.11): a group of alike new tasks is drawn by groupItemHtml (where they came from,
+    one row per task with Done, Drop, Later and Open, a task decided by itself with Undo), with Keep all and One by one in
+    the bar; k is Keep all on a group; Keep all and a task's decision go through decideOn, Open and One by one through
+    passRegroup (POST …/group), queued behind the presses before them; Settings has the switch."""
+    assert "c.kind === 'group' ? groupItemHtml(c.entry, c.pass)" in _body("renderReview")
+    g = _body("groupItemHtml")
+    assert 'data-opt="keep_all"' in g and 'data-opt="one_by_one"' in g and '<div class="rvbar">${rvnavHtml(v)}<div class="big ' in g
+    assert "recHtml(entry)" in g and "recRing(entry, 'keep_all')" in g and "rv-note" not in g      # no note box on a group
+    row = _body("groupRowHtml")
+    for w in ("done", "drop", "later", "open"):
+        assert f"b('{w}'" in row, w
+    assert 'data-opt="takeback:${esc(m.key)}"' in row and "staged.get(id)" in row      # drawn at the click from the tray
+    pr = _body("passRegroup")
+    assert "'/api/review/pass/' + v.id + '/group'" in pr and "tray.busy = tray.busy.then(run, run)" in pr and "passAnswer(" in pr
+    assert "if (cur.kind === 'group') return groupRun(id, cur);" in _body("reviewRun")
+    gr = _body("groupRun")
+    assert "decideOn(gk, id, {}, { prov:" in gr and "passRegroup(gk, 'take_out', tid); return passMove('goto', mk);" in gr
+    assert "passRegroup(gk, 'one_by_one')" in gr
+    keys = JS[JS.index("if (ui.tab === 'review') {", JS.index("document.addEventListener('keydown'")):]
+    keys = keys[:keys.index("return; }") + 9]
+    assert "c.kind === 'group'" in keys and "reviewRun('keep_all')" in keys
+    assert "f('review.group_alike', 'Group alike new tasks'," in JS and "bool('review.group_alike')" in JS
+    assert "r.members" in _body("listHtml") and "r.kind !== 'group'" in _body("stagedRowHtml")
+    assert ".card .gmembers" in CSS and ".review .rvrow .rvmems" in CSS
+
+
+def test_group_presses_draw_at_the_click_and_send_one_option_each():
+    import json
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    if node is None:
+        return
+    script = f"""
+const ui = {{ rvMemberLater: null }}; const calls = []; let ahead = 0, renders = 0; const staged = new Map();
+const decisionProv = (id, k) => ({{ task_id: id, op: k, label: k }});
+const passAhead = () => {{ ahead++; }};
+const render = () => {{ renders++; }};
+const decideOn = (key, option, args, opts) => {{ calls.push(['decide', key, option, args, opts.prov.map(p => [p[0], p[1].op])]); }};
+const passRegroup = (key, op, tid) => {{ calls.push(['regroup', key, op, tid === undefined ? null : tid]); }};
+const passMove = (to, key) => {{ calls.push(['move', to, key]); }};
+{_body("groupRun")}
+const m = (id, state) => ({{ key: 't:' + id, state, task: {{ id }} }});
+const cur = ms => ({{ kind: 'group', entry: {{ key: 'g:rec:x', recommendation: {{ steps: ['keep_all'] }}, item: {{ members: ms }} }} }});
+staged.set(2, {{ op: 'done' }});
+groupRun('keep_all', cur([m(1, 'waiting'), m(2, 'waiting'), m(3, 'passed'), m(4, 'decided'), m(5, 'gone')]));
+groupRun('member:t:1:later', cur([m(1, 'waiting'), m(3, 'waiting')]));
+const opened = ui.rvMemberLater;
+groupRun('member:t:1:until:fri', cur([m(1, 'waiting'), m(3, 'waiting')]));
+groupRun('member:t:3:drop', cur([m(3, 'waiting')]));
+groupRun('member:t:3:open', cur([m(1, 'waiting'), m(3, 'waiting')]));
+groupRun('one_by_one', cur([m(1, 'waiting'), m(3, 'waiting')]));
+groupRun('member:t:3:explode', cur([m(3, 'waiting')]));
+groupRun('done', cur([m(3, 'waiting')]));
+console.log(JSON.stringify({{ calls, ahead, opened, later: ui.rvMemberLater }}));"""
+    r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert out["calls"] == [
+        ["decide", "g:rec:x", "keep_all", {}, [[1, "keep"], [3, "keep"]]],          # the undecided ones not already staged: one row each
+        ["decide", "t:1", "later", {"until": "fri"}, [[1, "fri"]]],
+        ["decide", "t:3", "drop", {}, [[3, "drop"]]],
+        ["regroup", "g:rec:x", "take_out", 3], ["move", "goto", "t:3"],
+        ["regroup", "g:rec:x", "one_by_one", None]]
+    assert out["ahead"] == 2 and out["opened"] == "t:1" and out["later"] is None      # Keep all, and the last task decided

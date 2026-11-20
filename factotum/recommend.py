@@ -7,7 +7,8 @@ The rules, in the order tried: none for a merge or for two proposals that are no
 `review_queue.risky_close` gives a reason (then `held` says so); a proposal on the task (already paid for, its own
 reason as the basis); then by the item's first reason: a suggested link, new, all steps done, free now, a linked change
 already written into the text, a card whose day has passed. Everything else (mail and Slack to read, fading, slipped,
-last call, back, Later over, any other card) gets none: the owner's answer there is not known.
+last call, back, Later over, any other card) gets none: the owner's answer there is not known. A group of alike new tasks
+(the pass's, 2d) is Keep all: Keep on each task not yet decided.
 
 The basis is the reason in one sentence and never quotes task text; a `Task-N` in a proposal's reason or a suggestion's
 why becomes that task's name (`names`). Every fixed sentence is in TEXTS (the forbidden-words test reads them). Pure."""
@@ -56,6 +57,9 @@ TEXTS = {
     "accept_longterm": "Mark it long-term and keep it", "accept_longterm_said": "Mark it long-term and keep it?",
     "accept_link": "Link it and keep it", "accept_link_said": "Link it and keep it?",
     "accept_add_note": "Add the note and keep it", "accept_add_note_said": "Add the note and keep it?",
+    "keep_both": "Keep both", "keep_all_n": "Keep all {n}", "keep_other_1": "Keep the other one", "keep_other_n": "Keep the other {n}",
+    "keep_both_said": "Keep both?", "keep_all_said": "Keep them all?", "keep_other_1_said": "Keep the other one?", "keep_other_n_said": "Keep the other {n}?",
+    "group_basis": "New ones are usually kept.", "group_short": "New ones are usually kept.",
 }
 
 
@@ -141,6 +145,16 @@ def _accept_label(change: dict) -> str:
     return TEXTS[f"accept_{op}"]
 
 
+def keep_all_words(n: int, total: int) -> tuple[str, str]:
+    """(the button, the question) for keeping a group's `n` undecided tasks of `total`: "Keep all 3" / "Keep them all?"
+    when none is decided yet ("Keep both" for two), else "Keep the other 2" / "Keep the other 2?"."""
+    if n >= total:
+        return (TEXTS["keep_both"], TEXTS["keep_both_said"]) if n == 2 else (TEXTS["keep_all_n"].format(n=n), TEXTS["keep_all_said"])
+    if n == 1:
+        return TEXTS["keep_other_1"], TEXTS["keep_other_1_said"]
+    return TEXTS["keep_other_n"].format(n=n), TEXTS["keep_other_n_said"].format(n=n)
+
+
 def _held_close(answer: str, why: str) -> str:
     return TEXTS["held"].format(what=TEXTS[f"held_{answer}"], why=why)
 
@@ -155,6 +169,13 @@ def _rule(entry: dict, today: date, names: dict) -> tuple[dict | None, str | Non
             return _rec("dismiss", ["dismiss"], TEXTS["dismiss_label"], TEXTS["dismiss_said"], TEXTS["card_basis"], "rule:card_past",
                         TEXTS["card_short"]), None
         return None, None
+    if key.startswith("g:"):                                       # a group of alike new tasks (2d): keep the ones undecided
+        und = list(entry.get("undecided") or [])
+        total = sum(1 for m in entry.get("members") or [] if m.get("state") != "gone")
+        if not und:
+            return None, None
+        label, said = keep_all_words(len(und), total)
+        return _rec("keep_all", ["keep_all"], label, said, TEXTS["group_basis"], "rule:group", TEXTS["group_short"]), None
     if "task" not in entry:
         return None, None
     t = entry["task"] or {}

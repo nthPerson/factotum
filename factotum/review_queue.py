@@ -206,8 +206,11 @@ def order_key(entry: dict, today: date) -> tuple:
         if d is not None and d <= today + timedelta(days=CARD_SOON_DAYS):
             return (1, rank, due, 0, last)
         return (2, 0, due or "9999", 0, last)
-    if key.startswith("g:"):                                          # a group of alike new tasks (2d) ranks as new
-        return (1, _rank("new"), "9999", 0, (2, 0))
+    if key.startswith("g:"):                                          # a group of alike new tasks (2d) ranks as new, by its members
+        ts = [m.get("task") or {} for m in entry.get("members") or []]
+        dues = [t["due"] for t in ts if isinstance(t.get("due"), str) and parse_date(t.get("due"))]
+        return (1, _rank("new"), min(dues, default="9999"), -max((float(t.get("score") or 0) for t in ts), default=0.0),
+                (2, min((int(t.get("id") or 0) for t in ts), default=0)))
     t = entry.get("task") or {}
     due = t.get("due") if isinstance(t.get("due"), str) and parse_date(t.get("due")) else None
     d = parse_date(due)

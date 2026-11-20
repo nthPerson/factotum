@@ -74,7 +74,7 @@ notify:
 
 links: { suggestions_per_review: 5 }
 
-review: { recommend: true }
+review: { recommend: true, group_alike: true }
 
 claude:
   planner: { enabled: false }

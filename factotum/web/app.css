@@ -1104,6 +1104,27 @@ mark { background: var(--warn-soft); color: inherit; border-radius: 2px; padding
 .card .big.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .card .big.one { grid-template-columns: minmax(0, 1fr); }
 .review .rvacts { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+/* A group of alike new tasks (spoken Review 2d): one row per task, its small decisions on the right; the list shows each task's state. */
+.card.group .why b { font-weight: 600; }
+.card .gmembers { display: flex; flex-direction: column; margin: 4px 0 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.card .gm { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 10px; row-gap: 4px; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+.card .gm:last-child { border-bottom: 0; }
+.card .gm .gm-name { grid-column: 1; font-size: 14px; overflow-wrap: anywhere; }
+.card .gm .gm-name .code { margin-right: 4px; }
+.card .gm .sub { grid-column: 1; margin: 0; }
+.card .gm .gm-acts, .card .gm .gm-st { grid-column: 2; grid-row: 1 / span 2; align-self: center; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+.card .gm .gm-st .hint { margin: 0; font-size: 12px; }
+.card .gm .gm-later { grid-column: 1 / -1; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.card .gm .gm-later .hint { margin: 0; font-size: 12px; }
+.card .gm .btn.on { border-color: var(--accent); color: var(--accent); }
+.card .gm.decided { background: var(--ok-soft); }
+.card .gm.decided .chip.new { background: var(--accent-soft); color: var(--accent); }
+.card .gm.gone .gm-name { text-decoration: line-through; color: var(--muted); }
+.review .rvrow .rvmems { grid-column: 2; display: flex; flex-direction: column; gap: 2px; margin-top: 4px; font-size: 12px; color: var(--muted); }
+.review .rvrow .rvmem { display: flex; gap: 6px; }
+.review .rvrow .rvmem .rvst { flex: 0 0 auto; min-width: 4.5em; padding: 0; }
+.review .rvrow .rvmem.st-decided .rvst { color: var(--ok); }
+.review .rvrow .rvmem.st-gone span:last-child { text-decoration: line-through; }
 @media (max-width: 700px) {
   .review .rvtop .rvb, .review .rvtop .rvn { display: none; }      /* Back and Next are in the bar at the bottom */
   .review .rvtop .btn { min-height: 40px; }
@@ -1111,5 +1132,10 @@ mark { background: var(--warn-soft); color: inherit; border-radius: 2px; padding
   .review .rvacts .btn { flex: 1 1 100%; min-height: 48px; }
   .card .rvstaged .btn { min-height: 44px; }
   .card .rvrec .btn.rec kbd { display: none; }      /* no keyboard, no key hint */
+  .card .gm { grid-template-columns: minmax(0, 1fr); }      /* a task's small decisions under its name, four across */
+  .card .gm .gm-acts, .card .gm .gm-st { grid-column: 1; grid-row: auto; justify-content: stretch; }
+  .card .gm .gm-acts .btn { flex: 1 1 0; min-height: 40px; }
+  .card .gm .gm-st { justify-content: space-between; }
+  .card .gm .gm-st .btn, .card .gm .gm-later .btn { min-height: 40px; }
   body.rvbar-on:not(.kb-open) .toast:not(.ask) { bottom: calc(var(--rvbar, 0px) + 8px); }      /* above Review's bar, never over a decision */
 }

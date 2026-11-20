@@ -272,7 +272,7 @@ notify:
 
 links: { suggestions_per_review: 5 }
 
-review: { recommend: true }      # a suggested answer on Review (spoken Review 2c)
+review: { recommend: true, group_alike: true }      # a suggested answer on Review (2c); alike new tasks together (2d)
 
 claude:
   binary: claude                # absolute path (`which claude`) for the same reason; `factotum claude-check` says which

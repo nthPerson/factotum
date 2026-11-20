@@ -48,6 +48,7 @@ SETTINGS_KEYS = [
     "links.suggestions_per_review",                                       # stage 7
     "claude.filing.enabled",                                              # stage 7
     "review.recommend",                                                   # spoken Review 2c
+    "review.group_alike",                                                 # spoken Review 2d
 ]
 
 # One default for every Settings key. Absent means off for the scheduled paid runs and anything that sends
@@ -78,6 +79,7 @@ DEFAULTS: dict[str, Any] = {
     "links.suggestions_per_review": 5,                                    # stage 7
     "claude.filing.enabled": True,                                        # stage 7
     "review.recommend": True,       # spoken Review 2c: Python's reading of the database, free, sends nothing, stages nothing by itself
+    "review.group_alike": True,     # spoken Review 2d: alike new tasks as one item in a pass; free, sends nothing
 }
 PAID_SWITCHES = ("notify.morning_brief.enabled", "claude.planner.enabled", "claude.summary.auto", "sinks.notion_notes.enabled")
 # On when absent, and new in this release (2026-11-11): before it nothing of the kind ran.

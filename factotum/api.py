@@ -194,6 +194,13 @@ class MoveBody(BaseModel):
     device: str | None = None
 
 
+class GroupBody(BaseModel):
+    key: str                             # the group (g:…), or one of its members (t:<id>)
+    op: str                              # take_out | one_by_one
+    task_id: int | None = None           # take_out: the member
+    device: str | None = None
+
+
 SUGGESTION_KINDS = review_queue.SUGGESTION_KINDS
 
 
@@ -809,6 +816,29 @@ def create_app(cfg: dict | None = None, db_path: str | None = None, chat_runner=
                 conn.rollback()                      # a move from a stale item writes nothing
             else:
                 conn.commit()
+            return dict(out, **{"pass": review_pass.view(conn, ecfg, today)})
+
+    @app.post("/api/review/pass/{pass_id}/group")
+    def review_pass_group(pass_id: int, body: GroupBody):
+        """Change a group of alike new tasks (review_pass.regroup, 2d): take one member out (it comes right after the
+        group) or take the group one by one (its members in its place). {regrouped, key, pass}. 404 an unknown pass,
+        409 a pass that has ended or moved meanwhile, 400 not a group of this review or a bad change, each with the pass."""
+        ecfg = eff_cfg()
+        today = review_queue.today(ecfg)
+        with commit_lock:
+            try:
+                out = review_pass.regroup(conn, ecfg, today, pass_id, body.key, body.op, task_id=body.task_id, by=_by(_device(body.device)))
+            except review_pass.NoPass as e:
+                conn.rollback()
+                return JSONResponse({"detail": str(e)}, status_code=404)
+            except (review_pass.Ended, review_decide.Stale, ValueError) as e:     # ValueError: review_decide.Refused
+                conn.rollback()
+                return JSONResponse({"detail": str(e), "pass": review_pass.view(conn, ecfg, today)},
+                                    status_code=400 if isinstance(e, ValueError) else 409)
+            except Exception:
+                conn.rollback()
+                raise
+            conn.commit()
             return dict(out, **{"pass": review_pass.view(conn, ecfg, today)})
 
     @app.get("/api/settings")

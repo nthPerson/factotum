@@ -54,7 +54,7 @@
   if (!folds || typeof folds !== 'object' || Array.isArray(folds)) folds = {};
   const folded = (key, dflt) => Object.prototype.hasOwnProperty.call(folds, key) ? !!folds[key] : !!dflt;
   function setFold(key, shut) { folds[key] = !!shut; try { localStorage.setItem('factotum.folds', JSON.stringify(folds)); } catch (_) {} }
-  let ui = { tab: 'today', focus: null, focusAt: null, sel: new Set(), open: new Set(), laterOpen: false, datePick: false, trayOpen: false, trayOff: new Set(), rvNotes: {}, rvList: false, remOpen: null, dueOpen: null, sinceOpen: null,
+  let ui = { tab: 'today', focus: null, focusAt: null, sel: new Set(), open: new Set(), laterOpen: false, datePick: false, trayOpen: false, trayOff: new Set(), rvNotes: {}, rvList: false, rvMemberLater: null, remOpen: null, dueOpen: null, sinceOpen: null,
              railOpen: !window.matchMedia('(max-width: 860px)').matches, chatDrawer: false,
              page: null, pageScroll: 0, pageMore: false, pageLater: false,      // the task page: its id, the list's scroll, a phone's More and Later open
              bulkMore: false,      // the phone's short bar shows its second line (back to false when nothing is selected)
@@ -2179,6 +2179,7 @@
     const own = [{ id: 'list', kind: 'page' }, { id: 'back', kind: 'move', key: '←' }, { id: 'next', kind: 'move', key: '→' }, { id: 'end', kind: 'move' }];
     if (!cur || !cur.entry || cur.entry.settled) return own;
     const e = cur.entry;
+    if (e.kind === 'group') return (e.options || []).concat([{ id: 'one_by_one', kind: 'regroup' }], own);      // a regroup, not an option of the rule
     return (e.options || []).concat(e.kind === 'task' ? (e.later_choices || []).map(c => ({ id: 'until:' + c.id, label: c.label, kind: 'later' })).concat([{ id: 'pickdate', kind: 'page' }]) : [], own);
   }
   // A pass the server answered (a begin, a move, a decision): kept when it is the newest of its pass, and drawn once no
@@ -2337,6 +2338,7 @@
     const cur = reviewCurrent();
     if (cur.state !== 'item' || !cur.entry || cur.entry.settled) return;
     const key = cur.entry.key, item = cur.entry.item || {};
+    if (cur.kind === 'group') return groupRun(id, cur);
     if (id === 'rec') return recRun(cur);
     if (cur.kind === 'card') return cardRun(id, +key.slice(2));
     const x = item.task || {}, tid = x.id;
@@ -2388,6 +2390,49 @@
     if (card && !sgDraft(card).name.trim()) { toast('Not staged: a task needs a name'); return; }
     passAhead();
     return decideOn('s:' + id, 'create', edited ? { draft: sgBody(sgDraft(card)).create } : {});
+  }
+  // A group of alike new tasks (spoken Review 2d, design 6.9). Keep all (and the suggested answer, which is Keep all there)
+  // stages one Keep per task not yet decided, each its own row in the tray (Undo on one takes back that one); a task is
+  // decided by itself with its own key, and the group stays in front until the last one is; Open takes the task out of the
+  // group and brings it in front; One by one puts the tasks in the group's place. What each press stages is drawn at the click.
+  function groupRun(id, cur) {
+    const e = cur.entry, gk = e.key, ms = (e.item || {}).members || [];
+    const open = ms.filter(m => (m.state === 'waiting' || m.state === 'passed') && m.task && !staged.has(m.task.id));
+    if (id === 'keep_all' || (id === 'rec' && e.recommendation)) {
+      if (!open.length) return;
+      ui.rvMemberLater = null;
+      passAhead();
+      return decideOn(gk, id, {}, { prov: open.map(m => [m.task.id, decisionProv(m.task.id, 'keep')]) });
+    }
+    if (id === 'one_by_one') { ui.rvMemberLater = null; return passRegroup(gk, 'one_by_one'); }
+    const m = /^member:(t:(\d+)):(done|drop|keep|later|open|until:(tomorrow|fri|nextweek))$/.exec(id); if (!m) return;
+    const mk = m[1], tid = +m[2], what = m[3];
+    if (what === 'later') { ui.rvMemberLater = ui.rvMemberLater === mk ? null : mk; render(); return; }
+    ui.rvMemberLater = null;
+    if (what === 'open') { passRegroup(gk, 'take_out', tid); return passMove('goto', mk); }
+    if (open.length === 1 && open[0].key === mk) passAhead();      // the last one decided: the group is, and the next item comes
+    if (what.startsWith('until:')) return decideOn(mk, 'later', { until: m[4] }, { prov: [[tid, decisionProv(tid, m[4])]] });
+    return decideOn(mk, what, {}, { prov: [[tid, decisionProv(tid, what)]] });
+  }
+  // One change of a group in the pass (POST …/group: take one out, or one by one), queued like a move behind the presses
+  // before it; the answer's pass is drawn.
+  function passRegroup(key, op, taskId) {
+    const v = rp.view; if (!v || !v.id) return;
+    const body = { key, op, device: deviceLabel() };
+    if (taskId != null) body.task_id = taskId;
+    rp.said = ''; rp.inflight++;
+    const run = async () => {
+      let r;
+      try { r = await api('/api/review/pass/' + v.id + '/group', { method: 'POST', body: JSON.stringify(body) }); }
+      catch (e) {
+        if (e && e.message !== 'signed out') toast('Not changed: ' + (e.detail || (e.network ? 'no connection' : e.message)));
+        passAnswer(e && e.body && 'pass' in e.body ? e.body.pass : undefined, true);
+        return;
+      }
+      passAnswer('pass' in r ? r.pass : undefined, true);
+    };
+    tray.busy = tray.busy.then(run, run);
+    return tray.busy;
   }
   // The suggested answer (spoken Review 2c, design 6.8): the option `rec`, which the server expands into the
   // recommendation's steps through the rule, exactly as the same presses one by one. What those presses would draw at
@@ -2517,7 +2562,7 @@
     if (c.state === 'empty' || c.state === 'end') return endHtml(c.pass);
     if (c.state === 'checkpoint') return checkpointHtml(c.pass);
     if (c.entry.settled) return settledHtml(c.entry, c.pass);
-    return c.kind === 'card' ? cardItemHtml(c.entry, c.pass) : taskItemHtml(c.entry, c.pass);
+    return c.kind === 'card' ? cardItemHtml(c.entry, c.pass) : c.kind === 'group' ? groupItemHtml(c.entry, c.pass) : taskItemHtml(c.entry, c.pass);
   }
   // Above the card: Back, where the review stands, the list, Next. On a phone Back and Next are in the bar at the bottom.
   function navHtml(v) {
@@ -2537,7 +2582,8 @@
     const rows = (v.list || []).map(r => {
       const front = r.key === v.cursor_key && v.state === 'item', gone = r.state === 'gone';
       const st = front ? 'in front' : r.state === 'decided' && r.staged ? r.staged : RV_STATE[r.state] || '';
-      return `<button class="rvrow st-${esc(r.state)}${front ? ' front' : ''}" data-opt="goto:${esc(r.key)}" ${gone || front ? 'disabled' : ''}><span class="rvst">${esc(st)}</span><span class="nm">${esc(r.name || '')}</span><span class="rvwhy">${esc(r.why || '')}${r.due ? ' · ' + esc(r.due) : ''}</span></button>`;
+      const mem = (r.members || []).map(m => `<span class="rvmem st-${esc(m.state)}"><span class="rvst">${esc(m.staged || RV_STATE[m.state] || '')}</span><span>${esc(m.name || '')}</span></span>`).join('');      // a group: each task's state
+      return `<button class="rvrow st-${esc(r.state)}${front ? ' front' : ''}" data-opt="goto:${esc(r.key)}" ${gone || front ? 'disabled' : ''}><span class="rvst">${esc(st)}</span><span class="nm">${esc(r.name || '')}</span><span class="rvwhy">${esc(r.why || '')}${r.due ? ' · ' + esc(r.due) : ''}</span>${mem ? `<span class="rvmems">${mem}</span>` : ''}</button>`;
     }).join('');
     return `<div class="rvlist">${rows}<div class="rvlfoot"><span class="hint">Skipped items come round again, and stay in Review next time. Nothing is written until Apply.</span><button class="btn small" data-opt="end">Finish for now</button></div></div>`;
   }
@@ -2583,6 +2629,38 @@
       </div>
       <div class="note">Next leaves an item undecided: it comes round again after the last, and is in Review next time. Keep = no change; the item will not be asked about again until something changes. Later = hidden until the date you pick, then back in Review and Today. Decisions stage into the tray; Apply writes them all at once.</div></div>`;
   }
+  // A group of alike new tasks (2d): where they came from, one row per task (its chips; Done, Drop, Later, Open; a task
+  // decided by itself shows its decision with Undo), the suggested answer, and in the bar Keep all (or Keep the other n)
+  // and One by one. No note box: a note belongs to one task (Open it).
+  function groupItemHtml(entry, v) {
+    const it = entry.item || {}, pv = it.provenance || {}, ms = it.members || [];
+    const opts = reviewOptions(reviewCurrent()), ka = opts.find(o => o.id === 'keep_all');
+    const day = pv.day ? new Date(pv.day + 'T12:00:00').toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' }) : '';
+    const big = (ka ? `<button class="done${recRing(entry, 'keep_all') ? ' recd' : ''}" data-opt="keep_all">${esc(ka.label)} <kbd>k</kbd></button>` : '')
+      + `<button data-opt="one_by_one">One by one</button>`;
+    return `<div class="review">
+      ${navHtml(v)}
+      <div class="card group" data-key="${esc(entry.key)}">
+        <div class="why new">${esc(it.why || '')}${pv.title ? ` · <b>${esc(pv.title)}</b>` : ''}${day ? ' · ' + esc(day) : ''}</div>
+        <h2>${esc(it.label || '')}</h2>
+        <div class="gmembers">${ms.map(m => groupRowHtml(m, entry)).join('')}</div>
+        ${recHtml(entry)}
+        <div class="rvbar">${rvnavHtml(v)}<div class="big ${ka ? 'two' : 'one'}">${big}</div></div>
+      </div>
+      <div class="note">Keep all keeps every task here not yet decided, each as its own staged change (Undo takes back one). Done, Drop and Later decide one task; Open takes it out of the group to look at it alone; One by one puts every task in the group's place.</div></div>`;
+  }
+  // One task of a group: its name and chips, then what is staged for it (drawn at the click from the tray) with Undo, or
+  // its small decisions. Later opens the server's three days for that task.
+  function groupRowHtml(m, entry) {
+    const t = m.task || {}, id = t.id, d = fmtDue(t.due), sd = id != null ? staged.get(id) : null;
+    const chips = `<span class="chip proj">${esc(t.project || '—')}</span>${d ? `<span class="chip due ${d.days < 0 ? 'crit' : ''} ${t.hard ? 'hard' : ''}">${d.label}</span>` : '<span class="chip">no date</span>'}<span class="chip eff">${esc(t.effort || '?')}</span>`;
+    const head = `<div class="gm-name"><a class="code" href="/t/${id}" data-open-task="${id}">Task-${id}</a> ${esc(t.name || '')}</div><div class="sub">${chips}</div>`;
+    if (m.state === 'gone') return `<div class="gm gone">${head}<div class="gm-st"><span class="hint">settled elsewhere</span></div></div>`;
+    if (m.applied || sd) return `<div class="gm decided">${head}<div class="gm-st"><span class="chip new">${esc(m.applied ? m.staged || 'applied' : sd.label || sd.op || 'staged')}</span>${m.applied ? '' : `<button class="btn small" data-opt="takeback:${esc(m.key)}" ${sd.local ? 'disabled' : ''}>Undo</button>`}</div></div>`;
+    const later = ui.rvMemberLater === m.key ? `<div class="gm-later"><span class="hint">Comes back on:</span>${(entry.later_choices || []).map(c => `<button class="btn small" data-opt="member:${esc(m.key)}:until:${esc(c.id)}">${esc(c.label)}</button>`).join('')}</div>` : '';
+    const b = (w, words) => `<button class="btn small${w === 'later' && ui.rvMemberLater === m.key ? ' on' : ''}" data-opt="member:${esc(m.key)}:${w}">${words}</button>`;
+    return `<div class="gm">${head}<div class="gm-acts">${b('done', 'Done')}${b('drop', 'Drop')}${b('later', 'Later')}${b('open', 'Open')}</div>${later}</div>`;
+  }
   // An item that left the queue while it was in front (applied, closed or answered elsewhere): why, and Next.
   function settledHtml(entry, v) {
     const it = entry.item || {}, name = (it.task && it.task.name) || it.name || it.label || '';
@@ -2607,7 +2685,7 @@
   }
   function stagedRowHtml(r) {
     return `<div class="sgstaged"><span class="chip ${r.state === 'decided' ? 'new' : ''}">${esc(r.staged || (r.state === 'answered' ? 'answered' : 'staged'))}</span><span class="nm">${esc(r.name || '')}</span>`
-      + `<button class="btn small" data-opt="goto:${esc(r.key)}">Go to</button>${r.state === 'decided' && !r.applied ? `<button class="btn small" data-opt="takeback:${esc(r.key)}">Take back</button>` : ''}</div>`;
+      + `<button class="btn small" data-opt="goto:${esc(r.key)}">Go to</button>${r.state === 'decided' && !r.applied && r.kind !== 'group' ? `<button class="btn small" data-opt="takeback:${esc(r.key)}">Take back</button>` : ''}</div>`;
   }
   // The pass ended here: applied with nothing left, or Finish for now. What is left stays in Review; the tray keeps what is staged.
   function finishedHtml() {
@@ -3569,6 +3647,7 @@
       ${f('lifecycle.top_cap', 'Top cap', 'Soft limit on the Top rail.', num('lifecycle.top_cap', 3, 15))}
       ${f('lifecycle.review_cap', 'Items per sitting', 'Review stops and asks before going on after this many.', num('lifecycle.review_cap', 5, 50))}
       ${f('review.recommend', 'Suggest an answer', 'Review offers one answer where what Factotum already knows supports it, with the reason under it (key a). Free: no Claude run. It stages nothing until you press it, and never suggests closing a task that is on Top, due firmly within two days, or linked to open work.', bool('review.recommend'))}
+      ${f('review.group_alike', 'Group alike new tasks', 'The new tasks of one recording, one course or one mail thread come as one item: Keep all, or decide each, or One by one. Free. A review already begun keeps its groups when this changes.', bool('review.group_alike'))}
       ${f('links.suggestions_per_review', 'Suggested links', 'At most this many suggested links a day, in Review and as dashed badges; the rest wait for another day. 0 shows none (what was suggested for a task you just added still shows as chips on it).', num('links.suggestions_per_review', 0, 20) + ' a day')}
       <h3>Notifications</h3>
       ${f('notify.provider', 'Send reminders to', 'Reminders and the evening review nudge go here. ntfy needs its app and a topic; The app needs notifications turned on below, on each device.', `<select id="s-notify.provider" data-key="notify.provider">${[['ntfy', 'ntfy'], ['app', 'The app'], ['both', 'Both']].map(([v, l]) => `<option value="${v}" ${e['notify.provider'] === v ? 'selected' : ''}>${l}</option>`).join('')}</select>`)}
@@ -4982,6 +5061,7 @@
       if (e.key === 'ArrowRight' || e.key === ']') { e.preventDefault(); reviewRun('next'); }
       else if (e.key === 'ArrowLeft' || e.key === '[') { e.preventDefault(); reviewRun('back'); }
       else if (map[e.key] && c.state === 'item' && c.kind === 'task' && !c.entry.settled) { e.preventDefault(); reviewRun(map[e.key]); }
+      else if (e.key === 'k' && c.state === 'item' && c.kind === 'group' && !c.entry.settled) { e.preventDefault(); reviewRun('keep_all'); }      // on a group k is Keep all; d x s do nothing
       else if (e.key === 'a' && c.state === 'item' && !c.entry.settled && c.entry.recommendation) { e.preventDefault(); reviewRun('rec'); }      // the suggested answer
       return; }
     const visible = [...document.querySelectorAll('#panel .row')].map(r => +r.dataset.id); if (!visible.length) return;

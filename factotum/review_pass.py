@@ -16,15 +16,21 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import sqlite3
-from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
-from . import config as C, lifecycle, review_cards, review_decide, review_queue, suggestions, tray
+from . import config as C, lifecycle, recommend, review_cards, review_decide, review_queue, suggestions, tray
+from .dates import parse_date
 from .db import begin_write, get_task, now_iso, rows
+from .prompts import one_line
 
 URGENT_DAYS = review_queue.URGENT_DAYS        # an arrival this urgent (order_key's tier 0) goes right after the item in front
 GROUP_MIN, GROUP_MAX = 2, 8                   # alike new tasks together (2d)
+GROUP_NEAR_DAYS = 2                           # a firm date this near (or past) keeps a new task out of a group
+REGROUPS = ("take_out", "one_by_one")         # what the group route does: regroups of the pass, not options (design §4.2)
 SECONDS_PER_ITEM = 12                         # for "~n min" left
 SPEAKING_S = 600                              # a connector's or skill's last look this recent: it is speaking
 MOVES = ("next", "back", "goto", "first", "continue", "end")
@@ -53,6 +59,11 @@ WORDS = {
     "card_mail": "From your mail", "card_slack": "Mentioned in Slack", "card_ripple": "Ripple suggests", "card_planner": "Planner suggests",
     "ended": "this review has ended", "no_item": "that item is not in this review", "no_groups": "this review has no groups to change",
     "moved_meanwhile": "the review moved meanwhile; read it again",
+    "group_n": "{n} new tasks", "group_recording": "New from a recording", "group_course": "New in a course",
+    "group_thread": "New from one mail thread", "keep_all": "Keep all", "one_by_one": "One by one",
+    "settled_group": "Every task in it was settled elsewhere.", "not_group": "that is not a group in this review",
+    "not_member": "that task is not in this group", "group_done": "every task in this group is decided already",
+    "group_note": "a note belongs to one task: decide it by itself", "bad_except": "each exception names a task of this group and one option",
 }
 
 
@@ -76,6 +87,13 @@ class Plan:
     entries: dict[str, dict]                 # the queue's entries by key
     state: str                               # the pass's state as it reads now (an end with something undecided is back on an item)
     cursor: str | None
+    members: dict[str, list[str]] = field(default_factory=dict)     # a group's members (t:<id>) in order (2d)
+    member_of: dict[str, str] = field(default_factory=dict)         # a member's group
+    mstates: dict[str, str] = field(default_factory=dict)           # a member's state: waiting | decided | gone
+    regrouped: dict[str, list[int]] = field(default_factory=dict)   # a stored group whose members changed: its ids now
+    dissolved: dict[str, str | None] = field(default_factory=dict)  # a stored group left with one member (that one), or none
+    batch: dict[str, int] = field(default_factory=dict)             # an arrival out of a group that carries its done_batch_id
+    alike: dict[str, dict] = field(default_factory=dict)            # alike(): the groupable queue tasks' group and provenance
 
     def undecided(self) -> list[str]:
         return [k for k in self.order if self.states[k] in UNDECIDED]
@@ -124,11 +142,56 @@ def _state(key: str, stored: dict | None, entry: dict | None, deciding: dict, ke
     return "passed" if stored and stored.get("passes") else "waiting"
 
 
-def plan(pass_row: dict, stored_items: list[dict], queue: dict, tray_entries, today: date) -> Plan:
+def _member_ids(row: dict) -> list[int]:
+    try:
+        ids = json.loads(row.get("members_json") or "[]")
+    except ValueError:
+        return []
+    return [i for i in ids if type(i) is int] if isinstance(ids, list) else []
+
+
+def _mstate(m: str, grow: dict | None, entries: dict, deciding: dict) -> str:
+    """A group member's state: decided (a tray row decides it, or it left the queue after this group's Apply), waiting
+    (in the queue), else gone."""
+    if m in deciding:
+        return "decided"
+    if m in entries:
+        return "waiting"
+    return "decided" if grow and grow.get("done_batch_id") else "gone"
+
+
+def _gstate(ms: list[str], mst: dict, grow: dict | None) -> str:
+    """A group's state from its members': gone when every one is, decided when every one left is, else waiting or
+    passed (Next left the group, `passes`)."""
+    live = [m for m in ms if mst[m] != "gone"]
+    if not live:
+        return "gone"
+    if all(mst[m] in SETTLED for m in live):
+        return "decided"
+    return "passed" if grow and grow.get("passes") else "waiting"
+
+
+def _by_due(entries: dict):
+    def k(m):
+        t = (entries.get(m) or {}).get("task") or {}
+        d = t.get("due") if isinstance(t.get("due"), str) and parse_date(t.get("due")) else None
+        return (d or "9999", int(m[2:]))
+    return k
+
+
+def plan(pass_row: dict, stored_items: list[dict], queue: dict, tray_entries, today: date, alike: dict | None = None,
+         form: bool = False) -> Plan:
     """Every stored item's state (§6.2) and the arrivals: queue items the pass does not hold, each placed at the end
     (in Review's order among themselves) or, when urgent (order_key's tier 0) while an item is in front, right after
     it. A pass in the state `end` or `empty` with something undecided reads as back on its first undecided item, and a
-    checkpoint with nothing undecided as the end. Pure."""
+    checkpoint with nothing undecided as the end. Pure.
+
+    Groups (2d, design §6.9): a stored group holds its members; a member in the queue that is no longer groupable
+    (`alike` has no entry for it: it gained a reason, Top, a near firm date) leaves it and arrives as itself right after
+    the group; a group left with one member is that task, in its place (and the cursor with it); a group's state is its
+    members'. With `form` (review.group_alike), arrivals alike in `alike` (2 to GROUP_MAX of one recording, course or
+    thread, more split) arrive as a new group; without it nothing new is grouped and the groups the pass holds stay."""
+    alike = alike or {}
     entries = {e["key"]: e for e in list(queue.get("tasks") or []) + list(queue.get("cards") or [])}
     trows = _trows(tray_entries)
     deciding: dict[str, list[str]] = {}
@@ -138,29 +201,182 @@ def plan(pass_row: dict, stored_items: list[dict], queue: dict, tray_entries, to
     keys = {k for k, _, _ in trows}
     evs = {e.get("ev") for _, e, _ in trows if type(e.get("ev")) is int}
     stored = {r["key"]: r for r in stored_items}
-    pos = {k: float(r["pos"]) for k, r in stored.items()}
-    kinds = {k: r["kind"] for k, r in stored.items()}
-    states = {k: _state(k, stored[k], entries.get(k), deciding, keys, evs) for k in stored}
-    st, cursor = pass_row.get("state") or "item", pass_row.get("cursor_key")
-    new = sorted((k for k in entries if k not in stored), key=lambda k: review_queue.order_key(entries[k], today))
-    urgent = [k for k in new if review_queue.order_key(entries[k], today)[0] == 0] if cursor in pos and st in ("item", "checkpoint") else []
-    arrivals: list[tuple[str, float, str]] = []
+    P = Plan([], {}, {}, {}, [], entries, pass_row.get("state") or "item", pass_row.get("cursor_key"), alike=alike)
+    spos = sorted(float(r["pos"]) for r in stored.values())
+    placed: list[tuple[str, float, str]] = []
+    old_pos: dict[str, float] = {}
+    for k in sorted(stored, key=lambda k: (float(stored[k]["pos"]), k)):
+        r, p = stored[k], float(stored[k]["pos"])
+        if r["kind"] != "group":
+            P.pos[k], P.kinds[k] = p, r["kind"]
+            P.states[k] = _state(k, r, entries.get(k), deciding, keys, evs)
+            continue
+        mkeys = [f"t:{i}" for i in _member_ids(r)]
+        outs = [m for m in mkeys if m in entries and m not in alike and m not in stored]
+        kept = [m for m in mkeys if m not in outs and m not in stored]
+        mst = {m: _mstate(m, r, entries, deciding) for m in kept}
+        live = [m for m in kept if mst[m] != "gone"]
+        nxt = min((q for q in spos if q > p), default=p + 1)
+        if len(live) == 1 or not kept:
+            P.dissolved[k] = live[0] if live else None
+            old_pos[k] = p
+            if live:
+                placed.append((live[0], p, "task"))
+                if r.get("done_batch_id"):
+                    P.batch[live[0]] = r["done_batch_id"]
+        else:
+            P.pos[k], P.kinds[k], P.members[k] = p, "group", kept
+            for m in kept:
+                P.member_of[m], P.mstates[m] = k, mst[m]
+            if kept != mkeys:
+                P.regrouped[k] = [int(m[2:]) for m in kept]
+            P.states[k] = _gstate(kept, mst, r)
+        placed += [(m, p + (nxt - p) * (i + 1) / (len(outs) + 1), "task") for i, m in enumerate(outs)]
+    for k, p, kind in placed:
+        P.pos[k], P.kinds[k] = p, kind
+        P.states[k] = _state(k, {"done_batch_id": P.batch.get(k)}, entries.get(k), deciding, keys, evs)
+    P.arrivals += placed
+    covered = set(P.pos) | set(P.member_of) | set(stored)
+    new = [k for k in entries if k not in covered]
+    units: list[tuple[str, dict]] = []                      # (key, the entry order_key reads)
+    grouped: set[str] = set()
+    if form:
+        by_base: dict[str, list[str]] = {}
+        for k in new:
+            if k in alike:
+                by_base.setdefault(alike[k]["base"], []).append(k)
+        used = set(stored) | set(P.pos)
+        for base, ks in by_base.items():
+            if len(ks) < GROUP_MIN:
+                continue
+            ks = sorted(ks, key=_by_due(entries))
+            n = math.ceil(len(ks) / GROUP_MAX)
+            size = math.ceil(len(ks) / n)
+            for j in range(0, len(ks), size):
+                ch = ks[j:j + size]
+                gk, i = base, 2
+                while gk in used:
+                    gk, i = f"{base}:{i}", i + 1
+                used.add(gk)
+                P.members[gk] = ch
+                for m in ch:
+                    P.member_of[m], P.mstates[m] = gk, _mstate(m, None, entries, deciding)
+                P.states[gk] = _gstate(ch, P.mstates, None)
+                units.append((gk, {"key": gk, "members": [entries[m] for m in ch]}))
+                grouped |= set(ch)
+    units += [(k, entries[k]) for k in new if k not in grouped]
+    units.sort(key=lambda u: review_queue.order_key(u[1], today))
+    st, cursor = P.state, P.cursor
+    if cursor in P.dissolved:                                # the group in front became its one task, or nothing
+        cursor = P.dissolved[cursor]
+        if cursor is None:
+            after = [k for k in sorted(P.pos, key=lambda k: (P.pos[k], k)) if P.pos[k] > old_pos[pass_row.get("cursor_key")] and P.states[k] in UNDECIDED]
+            cursor = after[0] if after else None
+            if cursor is None:
+                st = "end"
+    urgent = [k for k, e in units if review_queue.order_key(e, today)[0] == 0] if cursor in P.pos and st in ("item", "checkpoint") else []
     if urgent:
-        c = pos[cursor]
-        nxt = min((p for p in pos.values() if p > c), default=c + 1)
-        arrivals += [(k, c + (nxt - c) * (i + 1) / (len(urgent) + 1), _kind(k)) for i, k in enumerate(urgent)]
-    last = math.floor(max(pos.values(), default=0.0))
-    arrivals += [(k, last + i + 1.0, _kind(k)) for i, k in enumerate(k for k in new if k not in urgent)]
-    for k, p, kind in arrivals:
-        pos[k], kinds[k] = p, kind
-        states[k] = _state(k, None, entries[k], deciding, keys, evs)
-    order = sorted(pos, key=lambda k: (pos[k], k))
-    undecided = [k for k in order if states[k] in UNDECIDED]
+        c = P.pos[cursor]
+        nxt = min((p for p in P.pos.values() if p > c), default=c + 1)
+        P.arrivals += [(k, c + (nxt - c) * (i + 1) / (len(urgent) + 1), _kind(k)) for i, k in enumerate(urgent)]
+    last = math.floor(max(P.pos.values(), default=0.0))
+    P.arrivals += [(k, last + i + 1.0, _kind(k)) for i, k in enumerate(k for k, _ in units if k not in urgent)]
+    for k, p, kind in P.arrivals:
+        P.pos[k], P.kinds[k] = p, kind
+        if k not in P.states:
+            P.states[k] = _state(k, None, entries[k], deciding, keys, evs)
+    P.order = sorted(P.pos, key=lambda k: (P.pos[k], k))
+    undecided = [k for k in P.order if P.states[k] in UNDECIDED]
     if st in ("end", "empty") and undecided:
         st, cursor = "item", undecided[0]
     elif st == "checkpoint" and not undecided:              # decided meanwhile elsewhere: nothing to keep going over
         st, cursor = "end", None
-    return Plan(order, pos, kinds, states, arrivals, entries, st, cursor)
+    P.state, P.cursor = st, cursor
+    return P
+
+
+# --- alike new tasks (2d, design §6.9) ---------------------------------------------------------------------
+
+REC_KEY = re.compile(r"^plaud:([A-Za-z0-9_.\-]{1,120}):[0-9]{1,6}$")                 # sync_file's source_key
+LEAD_DATE = re.compile(r"^\s{0,4}[0-9]{1,4}[-/.][0-9]{1,2}(?:[-/.][0-9]{1,4})?[\s,·:\u2013\u2014-]{0,6}")
+
+
+def groupable(entry: dict, today: date) -> bool:
+    """A task item that may stand in a group (design §6.9): its reasons are exactly New, it is not firm-dated within
+    GROUP_NEAR_DAYS (or past), not on Top, has no unjudged evidence and no shown link suggestion, and its
+    recommendation, if any, is Keep. So a group never holds a last call, a suggested close or a merge. Pure."""
+    t = entry.get("task")
+    if not isinstance(t, dict) or list(entry.get("reasons") or []) != ["new"] or t.get("status", "open") != "open":
+        return False
+    d = parse_date(t.get("due")) if isinstance(t.get("due"), str) else None
+    if t.get("hard") and d is not None and d <= today + timedelta(days=GROUP_NEAR_DAYS):
+        return False
+    if t.get("top_rank") or entry.get("evidence") or entry.get("link_suggestions"):
+        return False
+    rec = entry.get("recommendation")
+    return rec is None or rec.get("answer") == "keep"
+
+
+def _title(label) -> str | None:
+    """A recording's name as a group's title: its leading date dropped, cut at the first colon; when what is before the
+    colon is one word ("Meeting"), the first part of what follows it is kept too ("Meeting: Vehicle-Sound AI Development")."""
+    s = LEAD_DATE.sub("", one_line(str(label or ""))[:300].strip(), count=1)
+    head, _, rest = s.partition(":")
+    head, rest = head.strip(), re.split(r",|;| and ", rest, maxsplit=1)[0].strip()
+    t = f"{head}: {rest}" if len(head.split()) == 1 and rest else head or rest
+    return t[:80] or None
+
+
+def _day(cfg: dict, at) -> str | None:
+    try:
+        d = datetime.fromisoformat(str(at).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if d.tzinfo is not None:
+        try:
+            d = d.astimezone(ZoneInfo(str(C.get(cfg, "owner.timezone", "UTC"))))
+        except (KeyError, ValueError):
+            pass
+    return d.date().isoformat()
+
+
+def _alike_of(conn: sqlite3.Connection, cfg: dict, tasks: list[dict]) -> dict[int, dict]:
+    """{task id: {base, prov}} for the tasks that say where they came from: a recording (`source_key` plaud:<id>:<n>;
+    the title from its plaud_note link), else a Canvas course (`source` Canvas, by project), else the first mail
+    thread it follows. Reads only."""
+    ids = [t["id"] for t in tasks if isinstance(t.get("id"), int)]
+    if not ids:
+        return {}
+    links: dict[int, list[dict]] = {}
+    for r in rows(conn, "SELECT task_id, kind, ref, label FROM links WHERE kind IN ('plaud_note', 'mail_thread')"
+                        " AND task_id IN (SELECT value FROM json_each(?)) ORDER BY id", (json.dumps(ids),)):
+        links.setdefault(r["task_id"], []).append(r)
+    out: dict[int, dict] = {}
+    for t in tasks:
+        ls = links.get(t.get("id"), [])
+        m = REC_KEY.match(str(t.get("source_key") or ""))
+        threads = [x for x in ls if x["kind"] == "mail_thread"]
+        if m:
+            rid = m.group(1)
+            note = next((x for x in ls if x["kind"] == "plaud_note" and x["ref"] == rid), None) or next((x for x in ls if x["kind"] == "plaud_note"), None)
+            out[t["id"]] = {"base": f"g:rec:{rid}", "prov": {"kind": "recording", "title": _title(note["label"]) if note else None,
+                                                             "day": _day(cfg, t.get("created_at"))}}
+        elif t.get("source") == "Canvas" and str(t.get("project") or "").strip():
+            pr = str(t["project"]).strip()[:80]
+            out[t["id"]] = {"base": f"g:course:{pr}", "prov": {"kind": "course", "title": pr, "day": None}}
+        elif threads:
+            out[t["id"]] = {"base": f"g:thread:{str(threads[0]['ref'])[:120]}",
+                            "prov": {"kind": "thread", "title": one_line(str(threads[0]["label"] or ""))[:120].strip() or None, "day": None}}
+    return out
+
+
+def alike(conn: sqlite3.Connection, cfg: dict, queue: dict, today: date) -> dict[str, dict]:
+    """{task key: {base, prov}} for every groupable task item of the queue that came from a recording, a course or a
+    thread: what `plan` groups arrivals by, and how it tells a member that may stay in its group. Asked whatever
+    `review.group_alike` says (a pass begun with groups keeps them). Reads only."""
+    es = [e for e in queue.get("tasks") or [] if groupable(e, today)]
+    got = _alike_of(conn, cfg, [e["task"] for e in es])
+    return {e["key"]: got[e["task"]["id"]] for e in es if e["task"]["id"] in got}
 
 
 def _after(P: Plan, cur: str | None, skip_cur: bool = False) -> tuple[str | None, bool]:
@@ -213,9 +429,14 @@ def _stored(conn: sqlite3.Connection, pass_id: int) -> list[dict]:
     return rows(conn, "SELECT * FROM review_pass_items WHERE pass_id = ? ORDER BY pos", (pass_id,))
 
 
+def _plan(conn: sqlite3.Connection, cfg: dict, today: date, row: dict, queue: dict, tray_entries=None) -> Plan:
+    return plan(row, _stored(conn, row["id"]), queue, tray.read(conn)["entries"] if tray_entries is None else tray_entries, today,
+                alike=alike(conn, cfg, queue, today), form=bool(C.value(cfg, "review.group_alike")))
+
+
 def _read(conn: sqlite3.Connection, cfg: dict, today: date, row: dict, queue: dict | None = None) -> tuple[dict, Plan]:
     queue = review_queue.items(conn, cfg, today) if queue is None else queue
-    return queue, plan(row, _stored(conn, row["id"]), queue, tray.read(conn)["entries"], today)
+    return queue, _plan(conn, cfg, today, row, queue)
 
 
 def _drivers(row: dict) -> dict:
@@ -261,15 +482,26 @@ class _Write:
         self.dirty = True
 
     def persist(self):
-        """The plan as it reads: the arrivals inserted, and an end with something undecided back on an item."""
+        """The plan as it reads: groups left with one member removed, members that left a group written, the arrivals
+        inserted (a new group with its members), and an end with something undecided back on an item."""
         now = now_iso()
-        for k, p, kind in self.P.arrivals:
-            self.conn.execute("INSERT OR IGNORE INTO review_pass_items (pass_id, key, pos, kind, added_at) VALUES (?, ?, ?, ?, ?)",
-                              (self.row["id"], k, p, kind, now))
+        pid = self.row["id"]
+        for g in self.P.dissolved:
+            self.conn.execute("DELETE FROM review_pass_items WHERE pass_id = ? AND key = ?", (pid, g))
             self.dirty = True
-        if self.P.state != self.row["state"] or self.P.cursor != self.row["cursor_key"]:
+        for g, ids in self.P.regrouped.items():
+            self.conn.execute("UPDATE review_pass_items SET members_json = ? WHERE pass_id = ? AND key = ?", (json.dumps(ids), pid, g))
+            self.dirty = True
+        for k, p, kind in self.P.arrivals:
+            mem = json.dumps([int(m[2:]) for m in self.P.members[k]]) if kind == "group" else None
+            self.conn.execute("INSERT OR IGNORE INTO review_pass_items (pass_id, key, pos, kind, members_json, done_batch_id, added_at)"
+                              " VALUES (?, ?, ?, ?, ?, ?, ?)", (pid, k, p, kind, mem, self.P.batch.get(k), now))
+            self.dirty = True
+        replaced = self.get("cursor_key") in self.P.dissolved           # the group in front became its one task: not a step forward
+        self.P.dissolved, self.P.regrouped, self.P.arrivals = {}, {}, []      # written: a second persist writes only what is new
+        if self.P.state != self.get("state") or self.P.cursor != self.get("cursor_key"):
             if self.P.cursor and self.P.state == "item":
-                self.arrive(self.P.cursor, forward=True)
+                self.arrive(self.P.cursor, forward=not replaced)
             else:
                 self.set(state=self.P.state, cursor_key=self.P.cursor)
 
@@ -282,13 +514,15 @@ class _Write:
         day = self.today.isoformat()
         self.conn.execute("UPDATE review_pass_items SET arrived_at = COALESCE(arrived_at, ?) WHERE pass_id = ? AND key = ?",
                           (now_iso(), self.row["id"], key))
-        ids = [int(key[2:])] if key.startswith("t:") and key[2:].isdigit() else []
+        mem = self.P.members.get(key, [key] if key.startswith("t:") else [])     # a group: every member
+        ids = [int(m[2:]) for m in mem if m[2:].isdigit()]
         if ids:
             self.conn.execute(f"UPDATE tasks SET last_offered_at = ? WHERE id IN ({','.join('?' * len(ids))})"
                               " AND (last_offered_at IS NULL OR last_offered_at < ?)", (day, *ids, day))
-            e = self.P.entries.get(key)
-            if e and (e["task"].get("last_offered_at") or "") < day:
-                e["task"]["last_offered_at"] = day
+            for m in mem:
+                e = self.P.entries.get(m)
+                if e and (e["task"].get("last_offered_at") or "") < day:
+                    e["task"]["last_offered_at"] = day
 
     def forward(self, target: str):
         """A forward move to `target`: the checkpoint (the cursor already on it, not yet in front) once `looked`
@@ -338,16 +572,11 @@ def begin_or_resume(conn: sqlite3.Connection, cfg: dict, today: date, *, by: str
             if row is None:
                 raise
         else:
-            order = sorted(queue["tasks"] + queue["cards"], key=lambda e: review_queue.order_key(e, today))
-            conn.executemany("INSERT INTO review_pass_items (pass_id, key, pos, kind, added_at) VALUES (?, ?, ?, ?, ?)",
-                             [(pid, e["key"], float(i + 1), _kind(e["key"]), now) for i, e in enumerate(order)])
             row = _row(conn, pid)
-            _, P = _read(conn, cfg, today, row, queue)
+            _, P = _read(conn, cfg, today, row, queue)       # every item arrives, in Review's order, alike new tasks grouped
             w = _Write(conn, cfg, today, row, P, by)
-            und = P.undecided()
-            if und:
-                w.arrive(und[0], forward=True)
-            else:
+            w.persist()                                      # and the first undecided comes in front
+            if not P.undecided():
                 w.set(state="end" if P.shown() else "empty", cursor_key=None)
             w.save()
             return _view(conn, cfg, today, _row(conn, pid), queue)
@@ -409,6 +638,7 @@ def move(conn: sqlite3.Connection, cfg: dict, today: date, pass_id: int, to: str
             return {"moved": False, "why": "first"}
         w.arrive(target, forward=False)
     elif to == "goto":
+        key = P.member_of.get(key, key) if isinstance(key, str) else key       # a group's member: the group
         if not isinstance(key, str) or key not in P.pos or P.states[key] == "gone":
             raise Refused(WORDS["no_item"])
         w.arrive(key, forward=False)
@@ -431,10 +661,13 @@ def decide(conn: sqlite3.Connection, cfg: dict, today: date, pass_id: int, key: 
     decision moves on (`_decision`), so Pin, Long-term or an answer pressed there after Back stays on it. A key the pass does not hold, or holds as gone, is staged as the
     rule allows (an open task outside the queue still takes a decision from its card's conversation; Gone only when
     the rule says so). `rec` stages every step of the item's recommendation (`_stage_steps`; Refused when the item has
-    none, or recommendations are off); `keep_all` is 2d's: Refused until then.
+    none, or recommendations are off).
+
+    A group (2d): the tray never sees its key. `keep_all` (and `rec`, which is Keep all there) stages one Keep per
+    undecided member, and each `except` member ({key, option, args?, note?}) as given, every one its own row through
+    the rule, in one write; no note on the group itself. A member is decided by its own key (`t:<id>`): the group stays
+    in front until the last undecided member is decided, and `undecide` on a member puts the group in front.
     Answers the stage's {keys, removed, said} and `advanced`. Raises NoPass, Ended, Refused, Gone, Stale. No commit."""
-    if from_chat is None and option == "keep_all":
-        raise Refused(f"{option} is not offered on this item")
     begin_write(conn)
     row = _live_row(conn, pass_id, today)
     args = dict(args or {})
@@ -443,21 +676,36 @@ def decide(conn: sqlite3.Connection, cfg: dict, today: date, pass_id: int, key: 
     queue, P = _read(conn, cfg, today, row)
     w = _Write(conn, cfg, today, row, P, by)
     w.persist()
-    front = P.state == "item" and P.cursor == key
-    if from_chat is None and option == "rec":
+    group = P.member_of.get(key)                         # a member decided by itself: its group is the item
+    item = group or key
+    front = P.state == "item" and P.cursor == item
+    rec = None
+    if from_chat is None and key in P.members:
+        if option == "rec":
+            rec = _group_rec(cfg, today, P, key)
+            if not rec:
+                raise Refused(f"{option} is not offered on this item")
+        elif option != "keep_all":
+            raise Refused(f"{str(option)[:20]} is not offered on a group: Keep all, or decide its tasks one by one")
+        out = _stage_many(conn, cfg, today, _keep_all_steps(P, key, args), origin=origin, device=device)
+    elif from_chat is None and option == "keep_all":
+        raise Refused(f"{option} is not offered on this item")
+    elif from_chat is None and option == "rec":
         rec = (P.entries.get(key) or {}).get("recommendation")
         if not rec:
             raise Refused(f"{option} is not offered on this item")
         out = _stage_steps(conn, cfg, today, key, rec["steps"], args, origin=origin, device=device)
     else:
         out = review_decide.stage(conn, cfg, key, option, args, today, origin=origin, device=device, from_chat=from_chat)
-    P2 = plan(dict(row, **w.upd), _stored(conn, row["id"]), queue, tray.read(conn)["entries"], today)
+    P2 = _plan(conn, cfg, today, dict(row, **w.upd), queue)
     w.P = P2
     advanced = False
-    if from_chat is None and option == "undecide" and key in P2.pos and P2.states[key] != "gone":
-        w.arrive(key, forward=False)
-    elif front and P2.states.get(key) in SETTLED and (P.states.get(key) in UNDECIDED or _decision(P.entries.get(key), key, option if option != "rec" or from_chat is not None else rec)):
-        target, _ = _after(P2, key)
+    back_to = P2.member_of.get(key, key)
+    if from_chat is None and option == "undecide" and back_to in P2.pos and P2.states[back_to] != "gone":
+        w.arrive(back_to, forward=False)
+    elif front and P2.states.get(item) in SETTLED and (P.states.get(item) in UNDECIDED or
+                                                        (group is None and _decision(P.entries.get(key), key, option if option != "rec" or from_chat is not None else rec))):
+        target, _ = _after(P2, item)
         if target is None:
             w.set(state="end", cursor_key=None)
         else:
@@ -466,6 +714,41 @@ def decide(conn: sqlite3.Connection, cfg: dict, today: date, pass_id: int, key: 
     if not w.save():
         raise review_decide.Stale(WORDS["moved_meanwhile"])
     return dict(out, advanced=advanced)
+
+
+def _group_rec(cfg: dict, today: date, P: Plan, gk: str) -> dict | None:
+    """A group's recommendation (Keep all; recommend.recommend), or None when recommendations are off or nothing is undecided."""
+    if not C.value(cfg, "review.recommend") or P.states.get(gk) == "gone":
+        return None
+    ms = P.members.get(gk, [])
+    return recommend.recommend({"key": gk, "members": [{"key": m, "state": P.mstates[m]} for m in ms],
+                                "undecided": [m for m in ms if P.mstates[m] in UNDECIDED]}, today)
+
+
+def _keep_all_steps(P: Plan, gk: str, args: dict) -> list[tuple[str, str, dict]]:
+    """Keep all on a group, as (member key, option, args) steps: Keep on each undecided member, the `except` members as
+    given (their own option, args and note: the rule checks them). A note on the group is refused (it belongs to one
+    task), so is an exception that names no member or a pass-only option; nothing left to decide is refused too."""
+    if args.get("note") not in (None, ""):
+        raise Refused(WORDS["group_note"])
+    ms = P.members[gk]
+    ex = args.get("except")
+    ex = [] if ex is None else ex
+    if not isinstance(ex, list) or len(ex) > GROUP_MAX:
+        raise Refused(WORDS["bad_except"])
+    spec: dict[str, tuple[str, dict]] = {}
+    for x in ex:
+        if not isinstance(x, dict) or x.get("key") not in ms or not isinstance(x.get("option"), str) \
+                or x["option"] in PASS_ONLY or x["option"] == "undecide" or not isinstance(x.get("args") or {}, dict):
+            raise Refused(WORDS["bad_except"])
+        a = {k: v for k, v in (x.get("args") or {}).items() if k not in review_decide.FROM_CHAT_ARGS}
+        if x.get("note") not in (None, ""):
+            a["note"] = x["note"]
+        spec[x["key"]] = (x["option"], a)
+    steps = [(m, *spec[m]) if m in spec else (m, "keep", {}) for m in ms if m in spec or P.mstates[m] in UNDECIDED]
+    if not steps:
+        raise Refused(WORDS["group_done"])
+    return steps
 
 
 def _decision(entry: dict | None, key: str, option) -> bool:
@@ -478,6 +761,8 @@ def _decision(entry: dict | None, key: str, option) -> bool:
         return any(_decision(entry, key, s) for s in option.get("steps") or [])
     if not isinstance(option, str):
         return False
+    if option == "keep_all":
+        return True
     if key.startswith("s:"):
         return option in ("create", "dismiss")
     if option in ("done", "drop", "keep", "later"):
@@ -495,22 +780,32 @@ NOTE_TAKERS = ("done", "drop", "keep", "later")      # the options a Review note
 
 def _stage_steps(conn: sqlite3.Connection, cfg: dict, today: date, key: str, steps: list[str], args: dict, *, origin: str,
                  device: str | None) -> dict:
-    """The option `rec`: every step of the item's recommendation planned by the rule (`review_decide.plan`) against the
-    tray as the steps before it leave it, then one `tray.write` (Trap 13): the same rows the same presses one by one
-    would stage. A note rides on the step that takes one (Refused when none does). Answers {keys, removed, said}."""
+    """The option `rec`: every step of the item's recommendation planned by the rule against the tray as the steps
+    before it leave it, then one write (`_stage_many`): the same rows the same presses one by one would stage. A note
+    rides on the last step that takes one (Refused when none does)."""
     note = args.get("note")
     takers = [s for s in steps if s in NOTE_TAKERS]
     if note not in (None, "") and not takers:
         raise Refused("a note goes with Done, Drop, Keep or Later; this answer has none")
-    item = review_decide.load_item(conn, cfg, today, key)
+    return _stage_many(conn, cfg, today, [(key, s, {"note": note} if note not in (None, "") and s == takers[-1] else {}) for s in steps],
+                       origin=origin, device=device)
+
+
+def _stage_many(conn: sqlite3.Connection, cfg: dict, today: date, steps: list[tuple[str, str, dict]], *, origin: str,
+                device: str | None) -> dict:
+    """Several options on one or more items, each planned by the rule (`review_decide.plan`) against the tray as the
+    steps before it leave it, then one `tray.write` (Trap 13): the same rows the same presses one by one would stage.
+    Answers {keys, removed, said}."""
+    items: dict[str, dict] = {}
     tr = tray.read(conn)
     rows_ = [[k, e, dict(m or {})] for k, e, m in _trows(tr["entries"])]
     ops: list[dict] = []
     keys: list[str] = []
     said = ""
-    for s in steps:
-        a = {"note": note} if note not in (None, "") and s == takers[-1] else {}
-        p = review_decide.plan(conn, cfg, item, s, a, {"rev": tr["rev"], "entries": rows_}, today)
+    for key, s, a in steps:
+        if key not in items:
+            items[key] = review_decide.load_item(conn, cfg, today, key)
+        p = review_decide.plan(conn, cfg, items[key], s, a, {"rev": tr["rev"], "entries": rows_}, today)
         rows_ = [r for r in rows_ if r[0] not in p.dels]
         for k, e, d in p.puts:
             d = tray.decides_of(k, e, d)
@@ -531,8 +826,50 @@ def _stage_steps(conn: sqlite3.Connection, cfg: dict, today: date, key: str, ste
 
 def regroup(conn: sqlite3.Connection, cfg: dict, today: date, pass_id: int, key: str, op: str, *, task_id: int | None = None,
             by: str | None) -> dict:
-    """Take a member out of a group or break a group into its members (2d). This pass holds no groups yet: Refused."""
-    raise Refused(WORDS["no_groups"])
+    """Change a group of the pass (2d): `take_out` one member (`task_id`, or `key` naming the member): it becomes its
+    own item right after the group; `one_by_one`: the group becomes its members in its place, and when it was in front
+    the first undecided of them comes in front. `key` is the group or one of its members. A group left with one member
+    is that task (the plan's rule, written here too). Nothing is staged and the tray is untouched. Answers {regrouped,
+    key}: the member taken out, or the item now in its place. Raises NoPass, Ended, Refused, Stale. No commit."""
+    if op not in REGROUPS:
+        raise Refused(f"unknown change {str(op)[:20]!r}")
+    begin_write(conn)
+    row = _live_row(conn, pass_id, today)
+    queue, P = _read(conn, cfg, today, row)
+    w = _Write(conn, cfg, today, row, P, by)
+    w.persist()
+    gk = key if isinstance(key, str) and key in P.members else P.member_of.get(key) if isinstance(key, str) else None
+    if gk is None or P.states.get(gk) == "gone":
+        raise Refused(WORDS["not_group"])
+    ms = P.members[gk]
+    p = P.pos[gk]
+    nxt = min((q for q in P.pos.values() if q > p), default=p + 1)
+    grow = next((r for r in _stored(conn, row["id"]) if r["key"] == gk), {})
+    carry = lambda m: grow.get("done_batch_id") if m not in P.entries else None       # an applied member keeps its Apply
+    if op == "take_out":
+        m = f"t:{task_id}" if type(task_id) is int else key if key in P.member_of else None
+        if m not in ms:
+            raise Refused(WORDS["not_member"])
+        conn.execute("UPDATE review_pass_items SET members_json = ? WHERE pass_id = ? AND key = ?",
+                     (json.dumps([int(x[2:]) for x in ms if x != m]), row["id"], gk))
+        conn.execute("INSERT OR IGNORE INTO review_pass_items (pass_id, key, pos, kind, done_batch_id, added_at) VALUES (?, ?, ?, 'task', ?, ?)",
+                     (row["id"], m, p + (nxt - p) / 2, carry(m), now_iso()))
+        out = {"regrouped": op, "key": m}
+    else:
+        live = [m for m in ms if P.mstates[m] != "gone"]
+        conn.execute("DELETE FROM review_pass_items WHERE pass_id = ? AND key = ?", (row["id"], gk))
+        conn.executemany("INSERT OR IGNORE INTO review_pass_items (pass_id, key, pos, kind, done_batch_id, added_at) VALUES (?, ?, ?, 'task', ?, ?)",
+                         [(row["id"], m, p + (nxt - p) * i / (len(live) + 1), carry(m), now_iso()) for i, m in enumerate(live)])
+        first = next((m for m in live if P.mstates[m] in UNDECIDED), live[0] if live else None)
+        out = {"regrouped": op, "key": first}
+        if P.cursor == gk and first is not None:
+            w.P = _plan(conn, cfg, today, dict(row, **w.upd), queue)
+            w.arrive(first, forward=False)
+    w.P = _plan(conn, cfg, today, dict(row, **w.upd), queue)
+    w.persist()
+    if not w.save():
+        raise review_decide.Stale(WORDS["moved_meanwhile"])
+    return out
 
 
 def end(conn: sqlite3.Connection, pass_id: int, why: str) -> None:
@@ -555,6 +892,8 @@ def after_apply(conn: sqlite3.Connection, decided, batch_id: int | None, *, cfg:
     keys = sorted(k for k in (decided or ()) if isinstance(k, str))
     changed = False
     if keys and batch_id is not None:
+        groups = [r["key"] for r in _stored(conn, row["id"]) if r["kind"] == "group" and any(f"t:{i}" in keys for i in _member_ids(r))]
+        keys = sorted(set(keys) | set(groups))                 # a group whose member's decision it applied: the member stays decided
         changed = conn.execute(f"UPDATE review_pass_items SET done_batch_id = ? WHERE pass_id = ? AND key IN ({','.join('?' * len(keys))})",
                                (batch_id, row["id"], *keys)).rowcount > 0
     if cfg is not None and today is not None and row["day"] == today.isoformat():
@@ -712,6 +1051,8 @@ def _entry(conn: sqlite3.Connection, cfg: dict, today: date, key: str | None, P:
     holds for it."""
     if key is None:
         return None
+    if key.startswith("g:"):
+        return _group_entry(conn, cfg, today, key, P, trows)
     st = P.states.get(key, "gone")
     item, settled = P.entries.get(key), None
     if item is None:
@@ -728,9 +1069,71 @@ def _entry(conn: sqlite3.Connection, cfg: dict, today: date, key: str | None, P:
     return out
 
 
+def _members(conn: sqlite3.Connection, cfg: dict, today: date, gk: str, P: Plan, trows, full: bool) -> list[dict]:
+    """A group's members as the View carries them: each task item as the queue ships it (or what is left of it, for one
+    that left the queue) with its key, state, what the tray decides for it (`staged`) and `applied`; `full` False keeps
+    {key, name, due, state, staged, applied} only (the list)."""
+    out = []
+    for m in P.members.get(gk, []):
+        st, it = P.mstates[m], P.entries.get(m)
+        if it is None and full:
+            it = _settled(conn, cfg, today, m, st)[0]
+        d = _staged(m, trows)["decision"]
+        applied = d is None and st == "decided"
+        mine = {"key": m, "state": st, "staged": WORDS["applied"] if applied else d["label"] if d else None, "applied": applied}
+        if full:
+            out.append(dict(it or {}, **mine))
+        else:
+            t = (it or {}).get("task") or get_task(conn, int(m[2:])) or {}
+            out.append(dict(mine, name=t.get("name"), due=review_decide.day_words(t["due"]) if isinstance(t.get("due"), str) and t["due"] else None))
+    return out
+
+
+def _provenance(conn: sqlite3.Connection, cfg: dict, P: Plan, gk: str) -> dict:
+    """Where a group's tasks came from: {kind: recording | course | thread, title, day}, from its first member that says."""
+    for m in P.members.get(gk, []):
+        if m in P.alike:
+            return dict(P.alike[m]["prov"])
+    ts = [t for t in (get_task(conn, int(m[2:])) for m in P.members.get(gk, [])) if t]
+    got = _alike_of(conn, cfg, ts)
+    for t in ts:
+        if t["id"] in got:
+            return dict(got[t["id"]]["prov"])
+    kind = {"rec": "recording", "course": "course", "thread": "thread"}.get(gk.split(":")[1] if gk.count(":") else "", "recording")
+    return {"kind": kind, "title": None, "day": None}
+
+
+def _group_entry(conn: sqlite3.Connection, cfg: dict, today: date, gk: str, P: Plan, trows) -> dict:
+    """A group as the View carries it (2d): `item` {label, provenance, members: [task item with key, state, staged,
+    applied]}, its recommendation (Keep all), the options Keep all (key k) and, first, `rec`; Later's days for a
+    member's Later. A group the pass no longer holds, or whose members all went, is settled."""
+    st = P.states.get(gk, "gone")
+    ms = _members(conn, cfg, today, gk, P, trows, True) if gk in P.members else []
+    und = [m["key"] for m in ms if m["state"] in UNDECIDED]
+    live = [m for m in ms if m["state"] != "gone"]
+    prov = _provenance(conn, cfg, P, gk)
+    rec = _group_rec(cfg, today, P, gk) if gk in P.members else None
+    opts = ([_opt("rec", rec["label"], "rec", "a")] if rec else []) + \
+        ([_opt("keep_all", recommend.keep_all_words(len(und), len(live))[0], "group", "k")] if und else [])
+    out = {"key": gk, "kind": "group", "state": st, "item": {"key": gk, "label": WORDS["group_n"].format(n=len(live)), "why": WORDS.get(f"group_{prov['kind']}", ""),
+                                                   "provenance": prov, "members": ms},
+           "provenance": prov, "evidence_lines": [], "recommendation": rec, "rec_held": None, "options": opts,
+           "later_choices": review_decide.later_choices(today), "staged": {"decision": None, "beside": []}}
+    if st == "gone" or gk not in P.members:
+        out["settled"] = WORDS["settled_group"]
+    return out
+
+
 def _line(conn: sqlite3.Connection, cfg: dict, key: str, P: Plan, trows) -> dict:
     """One row of the View's list: {key, kind, name, why, state, staged, applied, due}; `applied` when the decision
     was applied by this pass's Apply (no tray row is left to take back; review 2026-11-20)."""
+    if key in P.members:                                  # a group: its title, where it came from, and each member's state
+        prov = _provenance(conn, cfg, P, key)
+        ms = _members(conn, cfg, None, key, P, trows, False)
+        n = sum(1 for m in ms if m["state"] != "gone")
+        name = WORDS["group_n"].format(n=n) + (f" · {prov['title']}" if prov.get("title") else "")
+        return {"key": key, "kind": "group", "name": name, "why": WORDS.get(f"group_{prov['kind']}", ""), "state": P.states[key],
+                "staged": None, "applied": False, "due": None, "members": ms}
     e = P.entries.get(key)
     name = why = due = None
     if e is not None and "task" in e:
@@ -754,7 +1157,7 @@ def _view(conn: sqlite3.Connection, cfg: dict, today: date, row: dict, queue: di
     queue = review_queue.items(conn, cfg, today) if queue is None else queue
     tr = tray.read(conn)
     trows = _trows(tr["entries"])
-    P = plan(row, _stored(conn, row["id"]), queue, tr["entries"], today)
+    P = _plan(conn, cfg, today, row, queue, tr["entries"])
     shown, und = P.shown(), P.undecided()
     cur = P.cursor if P.state in ("item", "checkpoint") else None
     counts = {"items": len(shown), "position": shown.index(cur) + 1 if cur in shown else None, "undecided": len(und),

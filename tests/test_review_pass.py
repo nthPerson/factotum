@@ -788,10 +788,10 @@ def test_every_pass_route_lets_the_lock_go_on_an_unexpected_error(cfg, tmp_path,
         assert not c.in_transaction, path
 
 
-def test_the_pass_holds_no_group_until_2d(conn, cfg):
+def test_tasks_from_nowhere_in_common_make_no_group_and_regroup_refuses_them(conn, cfg):
     tasks(conn, 2)
     v = begin(conn, cfg)
-    with pytest.raises(review_decide.Refused):
+    with pytest.raises(review_decide.Refused):                      # groups came in 2d (tests/test_review_groups.py)
         P.regroup(conn, cfg, D, v["id"], "t:1", "one_by_one", by=BY)
     cur = v["current"]
     assert "spoken" not in cur and not any(r["key"].startswith("g:") for r in v["list"])      # recommendations came in 2c (tests/test_recommend.py)

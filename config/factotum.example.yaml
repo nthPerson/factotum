@@ -240,6 +240,7 @@ links:                          # stage 7: suggested links between tasks (design
 
 review:                         # spoken Review (design §6.12). Settings → Review and lifecycle
   recommend: true               # taste: Review suggests one answer where what Factotum knows supports it (new: Keep; all steps done: Done; a suggested link: Link), with the reason under it. Free (no Claude run); it stages nothing until you press it
+  group_alike: true             # taste: a review offers the new tasks of one recording, one Canvas course or one mail thread together (2 to 8 at a time: Keep all, or one by one). Free; a review already begun keeps its groups when this changes
 
 claude:                         # headless `claude -p` runs (§2 for the CLI; `factotum claude-check` tests the login)
   binary: claude                # absolute path (`which claude`): the service has systemd's minimal PATH
